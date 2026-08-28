@@ -1,10 +1,14 @@
 use std::fmt::Write as _;
+use std::fs::OpenOptions;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use rohditor_raw::{ImageRect, PhotometricInterpretation, RawDecoder, RawFileInfo, RawlerDecoder};
+use rohditor_raw::{
+    EncodedPreviewFormat, ImageRect, PhotometricInterpretation, RawDecoder, RawFileInfo,
+    RawlerDecoder,
+};
 use serde::Serialize;
 use tracing_subscriber::EnvFilter;
 
@@ -35,6 +39,21 @@ enum Command {
         #[arg(long)]
         metadata_only: bool,
     },
+
+    /// Extract the embedded loading preview without developing the RAW mosaic.
+    ExtractPreview {
+        /// RAW file containing the preview.
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+
+        /// JPEG destination (`.jpg` or `.jpeg`).
+        #[arg(value_name = "OUTPUT")]
+        output: PathBuf,
+
+        /// Replace an existing output file.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -55,6 +74,11 @@ fn main() -> Result<()> {
             json,
             metadata_only,
         } => inspect(&file, json, metadata_only),
+        Command::ExtractPreview {
+            file,
+            output,
+            force,
+        } => extract_preview(&file, &output, force),
     }
 }
 
@@ -97,6 +121,69 @@ fn inspect(file: &Path, json: bool, metadata_only: bool) -> Result<()> {
         write_stdout(&human_readable(&output))?;
     }
     Ok(())
+}
+
+fn extract_preview(file: &Path, output: &Path, force: bool) -> Result<()> {
+    let decoder = RawlerDecoder::default();
+    let preview = decoder
+        .embedded_preview(file)
+        .with_context(|| format!("could not extract a preview from {}", file.display()))?;
+    let Some(preview) = preview else {
+        bail!("{} does not contain an embedded preview", file.display());
+    };
+    validate_preview_extension(output, preview.format)?;
+
+    let mut options = OpenOptions::new();
+    options.write(true);
+    if force {
+        options.create(true).truncate(true);
+    } else {
+        options.create_new(true);
+    }
+    let mut destination = match options.open(output) {
+        Ok(destination) => destination,
+        Err(error) if !force && error.kind() == io::ErrorKind::AlreadyExists => {
+            bail!(
+                "output {} already exists; pass --force to replace it",
+                output.display()
+            );
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("could not create preview output {}", output.display()));
+        }
+    };
+    destination
+        .write_all(&preview.bytes)
+        .with_context(|| format!("could not write preview output {}", output.display()))?;
+
+    let representation = if preview.is_original_encoding {
+        "original embedded"
+    } else {
+        "normalized"
+    };
+    write_stdout(&format!(
+        "Extracted {representation} {} preview ({}x{}, {} bytes) to {}",
+        preview.format,
+        preview.width,
+        preview.height,
+        preview.bytes.len(),
+        output.display()
+    ))
+}
+
+fn validate_preview_extension(output: &Path, format: EncodedPreviewFormat) -> Result<()> {
+    let extension = output.extension().and_then(|value| value.to_str());
+    if extension.is_some_and(|extension| format.accepts_extension(extension)) {
+        return Ok(());
+    }
+
+    bail!(
+        "preview output {} must use a .{} extension for {} data",
+        output.display(),
+        format.extension(),
+        format.media_type()
+    )
 }
 
 fn write_stdout(value: &str) -> Result<()> {
@@ -264,9 +351,11 @@ fn format_option<T: ToString>(value: Option<T>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use rohditor_raw::{CfaPattern, PhotometricInterpretation};
+    use std::path::Path;
 
-    use super::format_photometric;
+    use rohditor_raw::{CfaPattern, EncodedPreviewFormat, PhotometricInterpretation};
+
+    use super::{format_photometric, validate_preview_extension};
 
     #[test]
     fn cfa_format_includes_pattern_and_dimensions() {
@@ -279,5 +368,17 @@ mod tests {
         };
 
         assert_eq!(format_photometric(&value), "CFA RGGB (2x2 repeat)");
+    }
+
+    #[test]
+    fn preview_extension_must_match_its_encoding() {
+        assert!(
+            validate_preview_extension(Path::new("preview.JPEG"), EncodedPreviewFormat::Jpeg)
+                .is_ok()
+        );
+        assert!(
+            validate_preview_extension(Path::new("preview.png"), EncodedPreviewFormat::Jpeg)
+                .is_err()
+        );
     }
 }

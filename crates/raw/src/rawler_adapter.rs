@@ -8,14 +8,14 @@ use rawler::formats::tiff::reader::{GenericTiffReader, TiffReader};
 use rawler::imgop::Rect;
 use rawler::rawimage::{RawImage, RawImageData, RawPhotometricInterpretation};
 use rawler::rawsource::RawSource;
-use rawler::tags::TiffCommonTag;
+use rawler::tags::{ExifTag, TiffCommonTag};
 use rawler::{Orientation, RawlerError};
 use tracing::info_span;
 
 use crate::{
-    CameraColorMatrix, CaptureMetadata, CfaPattern, DecoderLimits, EmbeddedPreviewInfo, ImageRect,
-    LevelPattern, PhotometricInterpretation, PreviewImage, RationalValue, RawDecoder, RawError,
-    RawFileInfo, RawFrame, RawOrientation,
+    CameraColorMatrix, CaptureMetadata, CfaPattern, DecoderLimits, EmbeddedPreviewInfo,
+    EncodedPreview, EncodedPreviewFormat, ImageRect, LevelPattern, PhotometricInterpretation,
+    RationalValue, RawDecoder, RawError, RawFileInfo, RawFrame, RawOrientation,
 };
 
 /// `rawler` implementation of Rohditor's private decoder boundary.
@@ -119,30 +119,18 @@ impl RawlerDecoder {
         })
     }
 
-    fn embedded_preview_impl(&self, path: &Path) -> Result<Option<PreviewImage>, RawError> {
+    fn embedded_preview_impl(&self, path: &Path) -> Result<Option<EncodedPreview>, RawError> {
         let source = open_source(path)?;
         let decoder =
             rawler::get_decoder(&source).map_err(|error| map_rawler_error(path, error))?;
         let params = RawDecodeParams::default();
-        let Some(preview) = decoded_preview(
+        encoded_preview(
             decoder.as_ref(),
             &source,
             &params,
             decoder.format_hint(),
             path,
-        )?
-        else {
-            return Ok(None);
-        };
-        let width = preview.width();
-        let height = preview.height();
-        let rgb8 = Arc::from(preview.into_rgb8().into_raw());
-
-        Ok(Some(PreviewImage {
-            width,
-            height,
-            rgb8,
-        }))
+        )
     }
 
     fn validate_dimensions(&self, path: &Path, image: &RawImage) -> Result<usize, RawError> {
@@ -179,7 +167,7 @@ impl RawDecoder for RawlerDecoder {
         catch_decoder_panic(path, "decoding", || self.decode_impl(path))
     }
 
-    fn embedded_preview(&self, path: &Path) -> Result<Option<PreviewImage>, RawError> {
+    fn embedded_preview(&self, path: &Path) -> Result<Option<EncodedPreview>, RawError> {
         let span = info_span!("raw.embedded_preview", file = %file_name(path));
         let _guard = span.enter();
         catch_decoder_panic(path, "extracting the preview from", || {
@@ -225,11 +213,119 @@ fn map_rawler_error(path: &Path, error: RawlerError) -> RawError {
             path: path.to_path_buf(),
             reason: format!("{what}; make={make}, model={model}, mode={mode}"),
         },
-        RawlerError::DecoderFailed(reason) => RawError::Decode {
+        RawlerError::DecoderFailed(reason) => RawError::Corrupt {
             path: path.to_path_buf(),
             reason,
         },
     }
+}
+
+fn encoded_preview(
+    decoder: &dyn Decoder,
+    source: &RawSource,
+    params: &RawDecodeParams,
+    format_hint: FormatHint,
+    path: &Path,
+) -> Result<Option<EncodedPreview>, RawError> {
+    if format_hint == FormatHint::ARW {
+        let Some(bytes) = sony_embedded_jpeg(source, path)? else {
+            return Ok(None);
+        };
+        let image = image::load_from_memory_with_format(bytes, image::ImageFormat::Jpeg).map_err(
+            |error| RawError::Corrupt {
+                path: path.to_path_buf(),
+                reason: format!("embedded JPEG cannot be decoded: {error}"),
+            },
+        )?;
+
+        return Ok(Some(EncodedPreview {
+            width: image.width(),
+            height: image.height(),
+            color_type: format!("{:?}", image.color()),
+            format: EncodedPreviewFormat::Jpeg,
+            bytes: Arc::from(bytes),
+            is_original_encoding: true,
+        }));
+    }
+
+    let Some(image) = decoded_preview(decoder, source, params, format_hint, path)? else {
+        return Ok(None);
+    };
+    let width = image.width();
+    let height = image.height();
+    let color_type = format!("{:?}", image.color());
+    let mut bytes = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 90)
+        .encode_image(&image)
+        .map_err(|error| RawError::Decode {
+            path: path.to_path_buf(),
+            reason: format!("could not normalize the embedded preview as JPEG: {error}"),
+        })?;
+
+    Ok(Some(EncodedPreview {
+        width,
+        height,
+        color_type,
+        format: EncodedPreviewFormat::Jpeg,
+        bytes: Arc::from(bytes),
+        is_original_encoding: false,
+    }))
+}
+
+fn sony_embedded_jpeg<'a>(
+    source: &'a RawSource,
+    path: &Path,
+) -> Result<Option<&'a [u8]>, RawError> {
+    let tiff = GenericTiffReader::new_with_buffer(source.buf(), 0, 0, None).map_err(|error| {
+        RawError::Corrupt {
+            path: path.to_path_buf(),
+            reason: format!("could not inspect the embedded-preview TIFF tags: {error}"),
+        }
+    })?;
+    let root = tiff.root_ifd();
+    let offset = root.get_entry(ExifTag::JPEGInterchangeFormat);
+    let length = root.get_entry(ExifTag::JPEGInterchangeFormatLength);
+    let (Some(offset), Some(length)) = (offset, length) else {
+        if offset.is_some() || length.is_some() {
+            return Err(RawError::Corrupt {
+                path: path.to_path_buf(),
+                reason: "embedded JPEG has an offset or length tag, but not both".to_owned(),
+            });
+        }
+        return Ok(None);
+    };
+
+    let offset = usize::try_from(offset.force_u64(0)).map_err(|_| RawError::Corrupt {
+        path: path.to_path_buf(),
+        reason: "embedded JPEG offset cannot be represented on this system".to_owned(),
+    })?;
+    let length = usize::try_from(length.force_u64(0)).map_err(|_| RawError::Corrupt {
+        path: path.to_path_buf(),
+        reason: "embedded JPEG length cannot be represented on this system".to_owned(),
+    })?;
+    let end = offset
+        .checked_add(length)
+        .ok_or_else(|| RawError::Corrupt {
+            path: path.to_path_buf(),
+            reason: "embedded JPEG byte range overflows".to_owned(),
+        })?;
+    if length == 0 {
+        return Err(RawError::Corrupt {
+            path: path.to_path_buf(),
+            reason: "embedded JPEG has zero length".to_owned(),
+        });
+    }
+    source
+        .buf()
+        .get(offset..end)
+        .map(Some)
+        .ok_or_else(|| RawError::Corrupt {
+            path: path.to_path_buf(),
+            reason: format!(
+                "embedded JPEG range {offset}..{end} exceeds the {}-byte file",
+                source.buf().len()
+            ),
+        })
 }
 
 fn decoded_preview(
@@ -265,11 +361,11 @@ fn preview_info(
     path: &Path,
 ) -> Result<Option<EmbeddedPreviewInfo>, RawError> {
     Ok(
-        decoded_preview(decoder, source, params, format_hint, path)?.map(|preview| {
+        encoded_preview(decoder, source, params, format_hint, path)?.map(|preview| {
             EmbeddedPreviewInfo {
-                width: preview.width(),
-                height: preview.height(),
-                color_type: format!("{:?}", preview.color()),
+                width: preview.width,
+                height: preview.height,
+                color_type: preview.color_type,
             }
         }),
     )
@@ -295,7 +391,7 @@ fn source_encoding(
     // source-encoding tags through rawler's TIFF parser while keeping every
     // rawler type private to this adapter.
     let tiff = GenericTiffReader::new_with_buffer(source.buf(), 0, 0, None).map_err(|error| {
-        RawError::Decode {
+        RawError::Corrupt {
             path: path.to_path_buf(),
             reason: format!("could not inspect source TIFF encoding: {error}"),
         }

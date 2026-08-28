@@ -34,7 +34,7 @@ belong to Phase 5.
 | `DSC00851.ARW` | 14-bit | 100 | Daylight detail and shallow depth of field |
 | `DSC01166.ARW` | 12-bit | 2000 | Low-light and shadow detail |
 | `DSC02382.ARW` | 14-bit | 100 | Bright highlight and cool white balance |
-| `DSC03270.ARW` | 14-bit | 200 | Portrait orientation |
+| `DSC03270.ARW` | 14-bit | 250 | Portrait orientation |
 | `DSC03687.ARW` | 12-bit | 1000 | Bright subject against dark foliage |
 | `DSC03821.ARW` | 14-bit | 200 | Warm backlight and highlight circles |
 
@@ -46,4 +46,3 @@ in-camera JPEGs remain optional references.
 - Whether Wayland, X11, or both need first-class testing.
 - The eventual Rohditor project license.
 - Live `wgpu` format/limit validation, deferred until the GPU phase.
-
