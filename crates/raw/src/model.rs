@@ -117,6 +117,44 @@ pub struct EmbeddedPreviewInfo {
     pub color_type: String,
 }
 
+/// File encoding used for an extracted embedded preview.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EncodedPreviewFormat {
+    Jpeg,
+}
+
+impl EncodedPreviewFormat {
+    #[must_use]
+    pub const fn media_type(self) -> &'static str {
+        match self {
+            Self::Jpeg => "image/jpeg",
+        }
+    }
+
+    #[must_use]
+    pub const fn extension(self) -> &'static str {
+        match self {
+            Self::Jpeg => "jpg",
+        }
+    }
+
+    #[must_use]
+    pub fn accepts_extension(self, extension: &str) -> bool {
+        match self {
+            Self::Jpeg => {
+                extension.eq_ignore_ascii_case("jpg") || extension.eq_ignore_ascii_case("jpeg")
+            }
+        }
+    }
+}
+
+impl fmt::Display for EncodedPreviewFormat {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.media_type())
+    }
+}
+
 /// Decoder-independent facts about one RAW image.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RawFileInfo {
@@ -147,12 +185,16 @@ pub struct RawFileInfo {
     pub embedded_preview: Option<EmbeddedPreviewInfo>,
 }
 
-/// A decoded, 8-bit RGB loading preview.
+/// An encoded loading preview, normally preserving the bytes stored in the RAW.
 #[derive(Debug, Clone)]
-pub struct PreviewImage {
+pub struct EncodedPreview {
     pub width: u32,
     pub height: u32,
-    pub rgb8: Arc<[u8]>,
+    pub color_type: String,
+    pub format: EncodedPreviewFormat,
+    pub bytes: Arc<[u8]>,
+    /// Whether `bytes` retain the exact encoding found in the source RAW.
+    pub is_original_encoding: bool,
 }
 
 /// A decoded integer sensor frame.

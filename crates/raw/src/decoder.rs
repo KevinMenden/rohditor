@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-use crate::{PreviewImage, RawFileInfo, RawFrame};
+use crate::{EncodedPreview, RawFileInfo, RawFrame};
 
 /// Hard limits checked before allocating a decoded sensor buffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +37,9 @@ pub enum RawError {
 
     #[error("failed to decode RAW file {path}: {reason}")]
     Decode { path: PathBuf, reason: String },
+
+    #[error("corrupt or incomplete RAW file {path}: {reason}")]
+    Corrupt { path: PathBuf, reason: String },
 
     #[error(
         "refusing RAW dimensions {width}x{height} with {components} component(s) in {path}; configured maximum is {max_width}x{max_height} and {max_samples} samples"
@@ -79,6 +82,6 @@ pub trait RawDecoder: Send + Sync {
     /// Decode and validate the complete sensor buffer.
     fn decode(&self, path: &Path) -> Result<RawFrame, RawError>;
 
-    /// Decode the embedded loading preview when the file contains one.
-    fn embedded_preview(&self, path: &Path) -> Result<Option<PreviewImage>, RawError>;
+    /// Extract the embedded loading preview when the file contains one.
+    fn embedded_preview(&self, path: &Path) -> Result<Option<EncodedPreview>, RawError>;
 }

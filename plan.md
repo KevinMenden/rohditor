@@ -438,6 +438,16 @@ Each phase is a vertical checkpoint. Do not begin a later phase when the previou
 - Unsupported or corrupt files produce errors rather than UI/CLI hangs.
 - No code outside the adapter imports a `rawler` type.
 
+**Phase 1 status (2026-08-28): complete.** All six private Sony samples pass
+full mosaic decode and scrubbed metadata checks, including source precision,
+sensor geometry, levels, white balance, color matrices, capture settings,
+preview dimensions, and orientation. `extract-preview` preserves each original
+embedded JPEG and refuses mismatched extensions or accidental overwrites.
+Tracked synthetic malformed-input tests plus a runtime-truncated private
+derivative return bounded errors, and an opt-in CLI integration test verifies
+content-based probing with a deliberately incorrect extension. Gate A remains
+approved.
+
 ### Phase 2: CPU reference pipeline
 
 #### Tasks
@@ -708,4 +718,4 @@ These must be answered through input samples or implementation measurements rath
 
 ## 16. Immediate next action
 
-Phase 0 and the initial Phase 1 decoder slice are complete, and Gate A is approved for the current corpus. The next implementation session should finish Phase 1 by adding `rohditor-cli extract-preview`, scrubbed metadata expectations, and corrupt/truncated input checks. After those pass, begin the typed CPU reference pipeline in Phase 2; do not add GPU adjustment code before the CPU specification exists.
+Phases 0 and 1 are complete, and Gate A is approved for the current corpus. The next implementation session should begin Phase 2 with Rohditor-owned typed mosaic, linear RGB, and display RGB buffers, followed by active-area cropping and black/white normalization over small synthetic RGGB fixtures. Do not add GPU adjustment code before the CPU reference behavior and tests exist.

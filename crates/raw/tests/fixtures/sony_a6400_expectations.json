@@ -1,0 +1,111 @@
+{
+  "common": {
+    "format": "ARW",
+    "make": "SONY",
+    "model": "ILCE-6400",
+    "clean_make": "Sony",
+    "clean_model": "ILCE-6400",
+    "width": 6048,
+    "height": 4024,
+    "components_per_pixel": 1,
+    "decoded_bits_per_sample": 16,
+    "compression": "Sony compressed ARW (32767)",
+    "active_area": { "x": 0, "y": 0, "width": 6048, "height": 4024 },
+    "crop_area": { "x": 12, "y": 12, "width": 6000, "height": 4000 },
+    "cfa_name": "RGGB",
+    "cfa_width": 2,
+    "cfa_height": 2,
+    "black_levels": {
+      "values": [512.0, 512.0, 512.0, 512.0],
+      "repeat_width": 2,
+      "repeat_height": 2,
+      "components_per_pixel": 1
+    },
+    "white_levels": [15360.0],
+    "embedded_preview": { "width": 1616, "height": 1080, "color_type": "Rgb8" },
+    "color_matrices": [
+      {
+        "illuminant": "A",
+        "values": [0.921, -0.4777, 0.0345, -0.4492, 1.3117, 0.1471, -0.0345, 0.0879, 0.6708]
+      },
+      {
+        "illuminant": "D65",
+        "values": [0.7657, -0.2847, -0.0607, -0.4083, 1.1966, 0.2389, -0.0684, 0.1418, 0.5844]
+      }
+    ]
+  },
+  "samples": [
+    {
+      "file_name": "DSC00851.ARW",
+      "source_bits_per_sample": 14,
+      "as_shot_white_balance": [2.5117188, 1.0, 1.8515625, null],
+      "orientation": "normal",
+      "iso": 100,
+      "exposure_time": { "numerator": 1, "denominator": 160 },
+      "aperture": { "numerator": 50, "denominator": 10 },
+      "focal_length": { "numerator": 680, "denominator": 10 },
+      "lens_make": "Tamron",
+      "lens_model": "17-70mm F2.8 Di III-A VC RXD"
+    },
+    {
+      "file_name": "DSC01166.ARW",
+      "source_bits_per_sample": 12,
+      "as_shot_white_balance": [2.8242188, 1.0, 1.96875, null],
+      "orientation": "normal",
+      "iso": 2000,
+      "exposure_time": { "numerator": 1, "denominator": 125 },
+      "aperture": { "numerator": 28, "denominator": 10 },
+      "focal_length": { "numerator": 700, "denominator": 10 },
+      "lens_make": "Tamron",
+      "lens_model": "17-70mm F2.8 Di III-A VC RXD"
+    },
+    {
+      "file_name": "DSC02382.ARW",
+      "source_bits_per_sample": 14,
+      "as_shot_white_balance": [2.7773438, 1.0, 1.6484375, null],
+      "orientation": "normal",
+      "iso": 100,
+      "exposure_time": { "numerator": 1, "denominator": 400 },
+      "aperture": { "numerator": 28, "denominator": 10 },
+      "focal_length": { "numerator": 700, "denominator": 10 },
+      "lens_make": "Tamron",
+      "lens_model": "17-70mm F2.8 Di III-A VC RXD"
+    },
+    {
+      "file_name": "DSC03270.ARW",
+      "source_bits_per_sample": 14,
+      "as_shot_white_balance": [2.5820312, 1.0, 1.7460938, null],
+      "orientation": "rotate270",
+      "iso": 250,
+      "exposure_time": { "numerator": 1, "denominator": 1000 },
+      "aperture": { "numerator": 63, "denominator": 10 },
+      "focal_length": { "numerator": 3500, "denominator": 10 },
+      "lens_make": null,
+      "lens_model": null
+    },
+    {
+      "file_name": "DSC03687.ARW",
+      "source_bits_per_sample": 12,
+      "as_shot_white_balance": [2.453125, 1.0, 1.8476562, null],
+      "orientation": "normal",
+      "iso": 1000,
+      "exposure_time": { "numerator": 1, "denominator": 500 },
+      "aperture": { "numerator": 63, "denominator": 10 },
+      "focal_length": { "numerator": 3500, "denominator": 10 },
+      "lens_make": null,
+      "lens_model": null
+    },
+    {
+      "file_name": "DSC03821.ARW",
+      "source_bits_per_sample": 14,
+      "as_shot_white_balance": [2.4765625, 1.0, 1.828125, null],
+      "orientation": "normal",
+      "iso": 200,
+      "exposure_time": { "numerator": 1, "denominator": 250 },
+      "aperture": { "numerator": 63, "denominator": 10 },
+      "focal_length": { "numerator": 3500, "denominator": 10 },
+      "lens_make": null,
+      "lens_model": null
+    }
+  ]
+}
