@@ -8,7 +8,7 @@ use serde_json::Value;
 
 #[test]
 #[ignore = "requires the ignored Sony ARW corpus in testdata/private"]
-fn inspect_and_extract_preview_cover_the_private_corpus() -> Result<(), Box<dyn Error>> {
+fn inspect_extract_and_develop_cover_the_private_corpus() -> Result<(), Box<dyn Error>> {
     let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/private");
     let mut samples = raw_files(&corpus)?;
     samples.sort();
@@ -76,6 +76,92 @@ fn inspect_and_extract_preview_cover_the_private_corpus() -> Result<(), Box<dyn 
     assert_success(&content_probe, "content probe with a non-RAW extension");
     let json: Value = serde_json::from_slice(&content_probe.stdout)?;
     assert_eq!(json["metadata"]["format"], "ARW");
+
+    let source_alias = outputs.path().join("source-alias.png");
+    fs::hard_link(first, &source_alias)?;
+    let source_overwrite = run_cli(
+        &["develop", "--force"],
+        &[first.as_path(), source_alias.as_path()],
+    )?;
+    assert!(
+        !source_overwrite.status.success(),
+        "develop must never replace a hard-linked source RAW"
+    );
+    assert!(
+        String::from_utf8_lossy(&source_overwrite.stderr)
+            .contains("refusing to replace source RAW file")
+    );
+
+    for (name, expected_dimensions) in [
+        ("DSC00851.ARW", (6_000, 4_000)),
+        ("DSC03270.ARW", (4_000, 6_000)),
+    ] {
+        let sample = corpus.join(name);
+        let output_path = outputs.path().join(format!("{name}.png"));
+        let development = run_cli(
+            &[
+                "develop",
+                "--exposure",
+                "0",
+                "--contrast",
+                "0",
+                "--saturation",
+                "1",
+                "--white-balance",
+                "1,1,1",
+                "--crop",
+                "recommended",
+                "--demosaic",
+                "bilinear",
+            ],
+            &[sample.as_path(), output_path.as_path()],
+        )?;
+        assert_success(&development, "develop");
+        let developed = image::open(&output_path)?;
+        assert_eq!(
+            (developed.width(), developed.height()),
+            expected_dimensions,
+            "{name}"
+        );
+        assert_eq!(developed.color(), image::ColorType::Rgb8, "{name}");
+
+        let overwrite = run_cli(&["develop"], &[sample.as_path(), output_path.as_path()])?;
+        assert!(
+            !overwrite.status.success(),
+            "develop overwrite unexpectedly succeeded for {name}"
+        );
+    }
+
+    let deterministic_sample = corpus.join("DSC00851.ARW");
+    let first_development = outputs.path().join("DSC00851.ARW.png");
+    let repeated_development = outputs.path().join("DSC00851-repeat.png");
+    let repeated = run_cli(
+        &[
+            "develop",
+            "--exposure",
+            "0",
+            "--contrast",
+            "0",
+            "--saturation",
+            "1",
+            "--white-balance",
+            "1,1,1",
+            "--crop",
+            "recommended",
+            "--demosaic",
+            "bilinear",
+        ],
+        &[
+            deterministic_sample.as_path(),
+            repeated_development.as_path(),
+        ],
+    )?;
+    assert_success(&repeated, "repeated develop");
+    assert_eq!(
+        fs::read(first_development)?,
+        fs::read(repeated_development)?,
+        "PNG development must be byte-for-byte deterministic"
+    );
 
     Ok(())
 }
