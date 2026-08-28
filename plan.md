@@ -477,6 +477,18 @@ approved.
 - CLI export works without initializing `wgpu`, a window system, or a physical GPU.
 - Repeated CPU rendering of the same recipe is deterministic within the chosen encoder constraints.
 
+**Phase 2 status (2026-08-28): complete.** Rohditor now owns typed mosaic,
+scene-linear RGB, and display RGB buffers. The Rayon CPU reference implements
+validated crop/level normalization, selectable bilinear demosaic, as-shot plus
+relative manual white balance, camera-to-XYZ-to-linear-Rec.2020/D65 conversion,
+global adjustments, a named hard-clip sRGB output policy, transfer encoding,
+quantization, and all EXIF orientation transforms. Synthetic fixtures cover all
+four supported Bayer phases, borders, matrices, parameter identities, and exact
+one-thread/four-thread parity. `rohditor-cli develop` produces deterministic
+full-resolution sRGB PNGs without graphics initialization. All six private
+samples pass numeric range, orientation, and repeated-render checks; the CPU
+baseline and measurements are recorded in `docs/cpu-pipeline.md`.
+
 ### Phase 3: Export implementation
 
 #### Tasks
@@ -718,4 +730,9 @@ These must be answered through input samples or implementation measurements rath
 
 ## 16. Immediate next action
 
-Phases 0 and 1 are complete, and Gate A is approved for the current corpus. The next implementation session should begin Phase 2 with Rohditor-owned typed mosaic, linear RGB, and display RGB buffers, followed by active-area cropping and black/white normalization over small synthetic RGGB fixtures. Do not add GPU adjustment code before the CPU reference behavior and tests exist.
+Phases 0 through 2 are complete, and Gate A is approved for the current corpus.
+The next implementation session should begin Phase 3 by defining
+`ExportSettings` independently of the CLI/UI, then add configurable JPEG and
+8/16-bit PNG encoding, explicit sRGB tagging, safe metadata preservation, and
+temporary-file/atomic destination handling. Keep codec and filesystem policy
+outside the tested CPU color transforms.

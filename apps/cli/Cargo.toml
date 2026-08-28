@@ -8,6 +8,8 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+image.workspace = true
+rohditor-core = { path = "../../crates/core" }
 rohditor-raw = { path = "../../crates/raw" }
 serde.workspace = true
 serde_json.workspace = true
@@ -16,4 +18,3 @@ tracing-subscriber.workspace = true
 
 [lints]
 workspace = true
-

@@ -20,6 +20,18 @@ reference workstation, not minimum system requirements.
 The current workspace checks do not initialize Vulkan. GPU capability checks
 belong to Phase 5.
 
+## Phase 2 CPU baseline
+
+On this workstation, a release build developed `DSC00851.ARW` at the 6000 x
+4000 recommended crop in 1.17 seconds for the CPU image stages and 2.01 seconds
+end to end including decode and lossless PNG output. `/usr/bin/time -v` reported
+a maximum resident set size of 475,368 KiB. Rohditor's deterministic live-buffer
+estimate was 413 MiB; the difference includes decoder, encoder, allocator,
+thread, executable, and operating-system overhead. Warm release renders of all
+six private samples took 0.31 to 0.36 seconds per CPU pipeline invocation before
+PNG encoding. See [`cpu-pipeline.md`](cpu-pipeline.md) for stage-level details
+and the exact baseline behavior.
+
 ## Target camera corpus
 
 - Camera: Sony alpha 6400

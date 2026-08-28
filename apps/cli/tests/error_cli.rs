@@ -13,6 +13,22 @@ fn unsupported_and_truncated_inputs_exit_with_errors() -> Result<(), Box<dyn Err
 
     let truncated = TempInput::new(&[0x49, 0x49, 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, 0x01, 0x00])?;
     assert_cli_rejects(truncated.path(), "RAW file")?;
+
+    let wrong_extension = Command::new(env!("CARGO_BIN_EXE_rohditor-cli"))
+        .arg("develop")
+        .arg(&unsupported)
+        .arg(truncated.path().with_extension("jpg"))
+        .output()?;
+    assert_error_contains(&wrong_extension, ".png extension");
+
+    let invalid_recipe = Command::new(env!("CARGO_BIN_EXE_rohditor-cli"))
+        .arg("develop")
+        .arg("--exposure")
+        .arg("9")
+        .arg(&unsupported)
+        .arg(truncated.path().with_extension("png"))
+        .output()?;
+    assert_error_contains(&invalid_recipe, "outside the inclusive range");
     Ok(())
 }
 
@@ -31,6 +47,15 @@ fn assert_cli_rejects(path: &Path, expected_message: &str) -> Result<(), std::io
         "CLI error did not contain {expected_message:?}: {stderr}"
     );
     Ok(())
+}
+
+fn assert_error_contains(output: &std::process::Output, expected_message: &str) {
+    assert!(!output.status.success(), "CLI unexpectedly succeeded");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(expected_message),
+        "CLI error did not contain {expected_message:?}: {stderr}"
+    );
 }
 
 #[derive(Debug)]

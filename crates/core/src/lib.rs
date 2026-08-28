@@ -1,16 +1,35 @@
-//! Editor-domain and CPU-pipeline types.
+//! Rohditor-owned editor-domain types and deterministic CPU reference pipeline.
 //!
-//! The processing implementation begins after the RAW decoder gate passes.
+//! Sensor mosaics, scene-linear RGB, and display-encoded RGB deliberately use
+//! distinct public types. The CPU implementation in this crate is the behavior
+//! that later preview and GPU implementations must match.
 
-/// Schema version reserved for the first non-destructive edit recipe.
-pub const EDIT_RECIPE_SCHEMA_VERSION: u32 = 1;
+mod color;
+mod cpu;
+mod edit;
+mod error;
+mod image;
+mod pipeline;
 
-#[cfg(test)]
-mod tests {
-    use super::EDIT_RECIPE_SCHEMA_VERSION;
-
-    #[test]
-    fn first_recipe_schema_is_version_one() {
-        assert_eq!(EDIT_RECIPE_SCHEMA_VERSION, 1);
-    }
-}
+pub use color::{
+    CameraColorTransform, LINEAR_REC2020_TO_XYZ_D65, Matrix3, XYZ_D65_TO_LINEAR_REC2020,
+    XYZ_D65_TO_LINEAR_SRGB, adapt_xyz_to_d65, camera_color_transform, clip_linear_srgb_for_output,
+    convert_rec2020_to_display_srgb, linear_srgb_to_srgb, srgb_to_linear_srgb,
+};
+pub use cpu::{
+    WhiteBalanceGains, apply_adjustments, demosaic, normalize_raw, render_display_srgb8,
+    white_balance_gains,
+};
+pub use edit::{
+    CONTRAST_RANGE, EDIT_RECIPE_SCHEMA_VERSION, EXPOSURE_EV_RANGE, EditRecipe, ParameterRange,
+    SATURATION_RANGE, WHITE_BALANCE_MULTIPLIER_RANGE, WhiteBalance,
+};
+pub use error::PipelineError;
+pub use image::{
+    BayerPattern, CfaColor, DisplayRgbImage, DisplayTransfer, Halo, ImageRegion, LinearRgbImage,
+    LinearRgbSpace, MosaicImage,
+};
+pub use pipeline::{
+    CpuPipeline, CropPolicy, DemosaicAlgorithm, MemoryEstimate, OutputPolicy, RenderOptions,
+    RenderResult, StageTimings,
+};

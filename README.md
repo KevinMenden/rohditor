@@ -1,21 +1,25 @@
 # Rohditor
 
 Rohditor is a Linux-first RAW photo editor being built for Sony `ILCE-6400`
-files. Decoder validation (Phase 1) is complete; the next milestone is the CPU
-reference image pipeline described in [`plan.md`](plan.md).
+files. Decoder validation and the deterministic CPU reference pipeline (Phases
+1 and 2) are complete. The next milestone is the formal export layer described
+in [`plan.md`](plan.md).
 
 ## Current capabilities
 
 - A Rust 2024 workspace with separate core, RAW, GPU, CLI, and desktop packages.
-- Headless `rohditor-cli inspect` and `extract-preview` commands backed by
-  `rawler`.
+- Headless `rohditor-cli inspect`, `extract-preview`, and `develop` commands.
 - Content-based ARW detection, normalized metadata, bounded sensor dimensions,
   exact embedded-JPEG extraction, and typed corrupt-input errors.
+- Typed sensor-mosaic, scene-linear Rec.2020, and display-sRGB buffers with
+  black/white normalization, bilinear Bayer demosaic, camera color conversion,
+  global adjustments, orientation, and deterministic PNG development.
 - A CPU-only test path; building and testing does not require Vulkan or a window
   system.
 
-Image development, export, the desktop UI, and GPU processing are not
-implemented yet.
+Formal JPEG/PNG export settings and metadata, the desktop UI, and GPU processing
+are not implemented yet. The Phase 2 color baseline and current limitations are
+documented in [`docs/cpu-pipeline.md`](docs/cpu-pipeline.md).
 
 ## Prerequisites
 
@@ -33,10 +37,11 @@ cargo build --workspace
 ```
 
 The private camera corpus is deliberately excluded from version control. To run
-all opt-in decoder and CLI tests against it locally:
+all opt-in decoder, CPU-pipeline, and CLI tests against it locally (release mode
+keeps full-resolution development fast):
 
 ```console
-cargo test --workspace --tests -- --ignored --nocapture
+cargo test --release --workspace --tests -- --ignored --nocapture
 ```
 
 ## Inspect a RAW file
@@ -59,6 +64,22 @@ cargo run -p rohditor-cli -- extract-preview \
 For Sony ARW files, this copies the camera's original embedded JPEG without
 re-encoding it. The destination must end in `.jpg` or `.jpeg`; an existing file
 is preserved unless `--force` is passed.
+
+## Develop a RAW on the CPU
+
+```console
+cargo run --release -p rohditor-cli -- develop \
+  testdata/private/DSC00851.ARW target/DSC00851-developed.png
+```
+
+`develop` produces a full-resolution, physically oriented, 8-bit sRGB PNG and
+prints decode, processing, encoding, and estimated buffer-memory diagnostics.
+It is headless and never initializes `wgpu` or a window system. Explicit recipe
+arguments include `--exposure`, `--contrast`, `--saturation`, relative
+`--white-balance RED,GREEN,BLUE`, `--crop`, `--demosaic`, and `--orientation`.
+Run `rohditor-cli develop --help` for their accepted values. Existing outputs
+are preserved unless `--force` is passed, and the command refuses to replace a
+source RAW even through a hard link.
 
 ## Dependency and licensing note
 

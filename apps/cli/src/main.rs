@@ -1,13 +1,21 @@
 use std::fmt::Write as _;
-use std::fs::OpenOptions;
-use std::io::{self, Write as _};
+use std::fs::{self, OpenOptions};
+use std::io::{self, BufWriter, Write as _};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+use image::codecs::png::PngEncoder;
+use image::{ExtendedColorType, ImageEncoder};
+use rohditor_core::{
+    CONTRAST_RANGE, CpuPipeline, CropPolicy, DemosaicAlgorithm, EXPOSURE_EV_RANGE, EditRecipe,
+    OutputPolicy, RenderOptions, SATURATION_RANGE, StageTimings, WhiteBalance,
+};
 use rohditor_raw::{
     EncodedPreviewFormat, ImageRect, PhotometricInterpretation, RawDecoder, RawFileInfo,
-    RawlerDecoder,
+    RawOrientation, RawlerDecoder,
 };
 use serde::Serialize;
 use tracing_subscriber::EnvFilter;
@@ -54,6 +62,134 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+
+    /// Develop the RAW mosaic through the deterministic CPU pipeline into sRGB PNG.
+    Develop {
+        /// RAW file to develop. Detection uses file contents, not this extension.
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+
+        /// Lossless 8-bit sRGB PNG destination.
+        #[arg(value_name = "OUTPUT")]
+        output: PathBuf,
+
+        /// Exposure compensation in stops (-5 to +5).
+        #[arg(long, default_value_t = EXPOSURE_EV_RANGE.neutral, allow_hyphen_values = true)]
+        exposure: f32,
+
+        /// Contrast in stops of slope around 18% gray (-1 to +1).
+        #[arg(long, default_value_t = CONTRAST_RANGE.neutral, allow_hyphen_values = true)]
+        contrast: f32,
+
+        /// Rec.2020 luminance-relative saturation (0 to 2; 1 is neutral).
+        #[arg(long, default_value_t = SATURATION_RANGE.neutral)]
+        saturation: f32,
+
+        /// R,G,B multipliers relative to the as-shot white balance.
+        #[arg(long, value_name = "RED,GREEN,BLUE")]
+        white_balance: Option<RgbMultipliers>,
+
+        /// Sensor crop policy.
+        #[arg(long, value_enum, default_value_t = CliCropPolicy::Recommended)]
+        crop: CliCropPolicy,
+
+        /// CPU demosaic algorithm.
+        #[arg(long, value_enum, default_value_t = CliDemosaic::Bilinear)]
+        demosaic: CliDemosaic,
+
+        /// Replace the RAW orientation metadata with an explicit transform.
+        #[arg(long, value_enum)]
+        orientation: Option<CliOrientation>,
+
+        /// Replace an existing output file.
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliCropPolicy {
+    ActiveArea,
+    Recommended,
+}
+
+impl From<CliCropPolicy> for CropPolicy {
+    fn from(value: CliCropPolicy) -> Self {
+        match value {
+            CliCropPolicy::ActiveArea => Self::ActiveArea,
+            CliCropPolicy::Recommended => Self::Recommended,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliDemosaic {
+    Bilinear,
+}
+
+impl From<CliDemosaic> for DemosaicAlgorithm {
+    fn from(value: CliDemosaic) -> Self {
+        match value {
+            CliDemosaic::Bilinear => Self::Bilinear,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliOrientation {
+    Normal,
+    HorizontalFlip,
+    Rotate180,
+    VerticalFlip,
+    Transpose,
+    Rotate90,
+    Transverse,
+    Rotate270,
+}
+
+impl From<CliOrientation> for RawOrientation {
+    fn from(value: CliOrientation) -> Self {
+        match value {
+            CliOrientation::Normal => Self::Normal,
+            CliOrientation::HorizontalFlip => Self::HorizontalFlip,
+            CliOrientation::Rotate180 => Self::Rotate180,
+            CliOrientation::VerticalFlip => Self::VerticalFlip,
+            CliOrientation::Transpose => Self::Transpose,
+            CliOrientation::Rotate90 => Self::Rotate90,
+            CliOrientation::Transverse => Self::Transverse,
+            CliOrientation::Rotate270 => Self::Rotate270,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RgbMultipliers {
+    red: f32,
+    green: f32,
+    blue: f32,
+}
+
+impl FromStr for RgbMultipliers {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let values = value
+            .split(',')
+            .map(|component| {
+                component
+                    .parse::<f32>()
+                    .map_err(|error| format!("invalid RGB multiplier {component:?}: {error}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let [red, green, blue] = values.as_slice() else {
+            return Err("expected exactly three comma-separated values: RED,GREEN,BLUE".to_owned());
+        };
+        Ok(Self {
+            red: *red,
+            green: *green,
+            blue: *blue,
+        })
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -79,7 +215,44 @@ fn main() -> Result<()> {
             output,
             force,
         } => extract_preview(&file, &output, force),
+        Command::Develop {
+            file,
+            output,
+            exposure,
+            contrast,
+            saturation,
+            white_balance,
+            crop,
+            demosaic,
+            orientation,
+            force,
+        } => develop(
+            &file,
+            &output,
+            DevelopArguments {
+                exposure,
+                contrast,
+                saturation,
+                white_balance,
+                crop,
+                demosaic,
+                orientation,
+                force,
+            },
+        ),
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DevelopArguments {
+    exposure: f32,
+    contrast: f32,
+    saturation: f32,
+    white_balance: Option<RgbMultipliers>,
+    crop: CliCropPolicy,
+    demosaic: CliDemosaic,
+    orientation: Option<CliOrientation>,
+    force: bool,
 }
 
 fn initialize_tracing() {
@@ -170,6 +343,155 @@ fn extract_preview(file: &Path, output: &Path, force: bool) -> Result<()> {
         preview.bytes.len(),
         output.display()
     ))
+}
+
+fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()> {
+    validate_develop_extension(output)?;
+    if output.exists() && paths_refer_to_same_file(file, output)? {
+        bail!(
+            "refusing to replace source RAW file {} with developed output",
+            file.display()
+        );
+    }
+    if !arguments.force && output.exists() {
+        bail!(
+            "output {} already exists; pass --force to replace it",
+            output.display()
+        );
+    }
+
+    let white_balance = arguments
+        .white_balance
+        .map_or(WhiteBalance::AsShot, |value| {
+            WhiteBalance::ManualMultipliers {
+                red: value.red,
+                green: value.green,
+                blue: value.blue,
+            }
+        });
+    let recipe = EditRecipe {
+        white_balance,
+        exposure_ev: arguments.exposure,
+        contrast: arguments.contrast,
+        saturation: arguments.saturation,
+        orientation_override: arguments.orientation.map(Into::into),
+        ..EditRecipe::default()
+    };
+    recipe
+        .validate()
+        .context("could not validate the development recipe")?;
+
+    let decoder = RawlerDecoder::default();
+    let decode_started = Instant::now();
+    let frame = decoder
+        .decode(file)
+        .with_context(|| format!("could not decode {} for development", file.display()))?;
+    let decode_time = decode_started.elapsed();
+    let result = CpuPipeline
+        .render(
+            &frame,
+            &recipe,
+            RenderOptions {
+                crop_policy: arguments.crop.into(),
+                demosaic: arguments.demosaic.into(),
+                output_policy: OutputPolicy::ClipToSrgb,
+            },
+        )
+        .with_context(|| format!("could not develop {}", file.display()))?;
+
+    let width = u32::try_from(result.image.width()).context("output width does not fit in PNG")?;
+    let height =
+        u32::try_from(result.image.height()).context("output height does not fit in PNG")?;
+    let mut options = OpenOptions::new();
+    options.write(true);
+    if arguments.force {
+        options.create(true).truncate(true);
+    } else {
+        options.create_new(true);
+    }
+    let destination = match options.open(output) {
+        Ok(destination) => destination,
+        Err(error) if !arguments.force && error.kind() == io::ErrorKind::AlreadyExists => {
+            bail!(
+                "output {} already exists; pass --force to replace it",
+                output.display()
+            );
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("could not create developed output {}", output.display())
+            });
+        }
+    };
+    let mut destination = BufWriter::new(destination);
+    let encoder = PngEncoder::new(&mut destination);
+    let encode_started = Instant::now();
+    encoder
+        .write_image(result.image.data(), width, height, ExtendedColorType::Rgb8)
+        .with_context(|| format!("could not encode developed PNG {}", output.display()))?;
+    destination
+        .flush()
+        .with_context(|| format!("could not finish developed PNG {}", output.display()))?;
+    let encode_time = encode_started.elapsed();
+
+    write_stdout(&format!(
+        "Developed {}x{} sRGB PNG to {}\n{}\nEstimated CPU buffer peak: {} MiB",
+        result.image.width(),
+        result.image.height(),
+        output.display(),
+        format_stage_timings(decode_time, result.timings, encode_time),
+        bytes_to_mib(result.memory.estimated_peak_bytes),
+    ))
+}
+
+fn validate_develop_extension(output: &Path) -> Result<()> {
+    if output
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
+    {
+        return Ok(());
+    }
+    bail!(
+        "developed output {} must use a .png extension",
+        output.display()
+    )
+}
+
+fn format_stage_timings(decode: Duration, timings: StageTimings, encode: Duration) -> String {
+    format!(
+        "CPU stages: decode {:.1} ms, metadata {:.1} ms, normalize {:.1} ms, demosaic {:.1} ms, color {:.1} ms, adjustments {:.1} ms, output {:.1} ms, pipeline total {:.1} ms, PNG encode {:.1} ms",
+        decode.as_secs_f64() * 1_000.0,
+        timings.metadata.as_secs_f64() * 1_000.0,
+        timings.normalization.as_secs_f64() * 1_000.0,
+        timings.demosaic.as_secs_f64() * 1_000.0,
+        timings.color_conversion.as_secs_f64() * 1_000.0,
+        timings.adjustments.as_secs_f64() * 1_000.0,
+        timings.output_conversion.as_secs_f64() * 1_000.0,
+        timings.total.as_secs_f64() * 1_000.0,
+        encode.as_secs_f64() * 1_000.0,
+    )
+}
+
+fn bytes_to_mib(bytes: usize) -> usize {
+    bytes.div_ceil(1024 * 1024)
+}
+
+fn paths_refer_to_same_file(left: &Path, right: &Path) -> Result<bool> {
+    let left_metadata = fs::metadata(left)
+        .with_context(|| format!("could not inspect source file {}", left.display()))?;
+    let right_metadata = fs::metadata(right)
+        .with_context(|| format!("could not inspect output file {}", right.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        Ok(left_metadata.dev() == right_metadata.dev()
+            && left_metadata.ino() == right_metadata.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(fs::canonicalize(left)? == fs::canonicalize(right)?)
+    }
 }
 
 fn validate_preview_extension(output: &Path, format: EncodedPreviewFormat) -> Result<()> {
@@ -352,10 +674,13 @@ fn format_option<T: ToString>(value: Option<T>) -> String {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+    use std::str::FromStr;
 
     use rohditor_raw::{CfaPattern, EncodedPreviewFormat, PhotometricInterpretation};
 
-    use super::{format_photometric, validate_preview_extension};
+    use super::{
+        RgbMultipliers, format_photometric, validate_develop_extension, validate_preview_extension,
+    };
 
     #[test]
     fn cfa_format_includes_pattern_and_dimensions() {
@@ -380,5 +705,15 @@ mod tests {
             validate_preview_extension(Path::new("preview.png"), EncodedPreviewFormat::Jpeg)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn develop_requires_png_and_parses_three_relative_wb_values() {
+        assert!(validate_develop_extension(Path::new("developed.PNG")).is_ok());
+        assert!(validate_develop_extension(Path::new("developed.jpg")).is_err());
+
+        let values = RgbMultipliers::from_str("1.2,1.0,0.8").expect("valid multipliers");
+        assert_eq!((values.red, values.green, values.blue), (1.2, 1.0, 0.8));
+        assert!(RgbMultipliers::from_str("1.0,1.0").is_err());
     }
 }
