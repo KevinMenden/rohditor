@@ -55,7 +55,7 @@ These items may be added later, but MVP code must not assume they will never exi
 
 ## 3. Assumptions and validation gate
 
-The exact Sony camera model is not yet recorded. RAW support must not be assumed from the `.ARW` extension alone because Sony cameras can produce uncompressed, lossless-compressed, and lossy-compressed variants with model-specific metadata.
+The target camera is a Sony alpha 6400, stored in EXIF as `ILCE-6400`, with camera firmware 2.00. This model records compressed ARW files. The current private corpus contains both capture precisions used by the camera: four 14-bit samples and two 12-bit samples. RAW support must still not be assumed from the `.ARW` extension alone because decoding is selected from file contents and model-specific metadata.
 
 Before implementing the editor pipeline, collect a private validation corpus containing at least:
 
@@ -73,6 +73,8 @@ Real RAW samples belong in `testdata/private/` and must be ignored by version co
 **Gate A: decoder approval**
 
 Implementation may proceed beyond the decoder spike only after every required camera mode can be decoded with correct dimensions, CFA layout, crop, black/white levels, orientation, as-shot white balance, and camera color matrices. If `rawler` fails this gate, first investigate a contained fix or update. If it remains unsuitable, add an optional LibRaw adapter despite the additional C/C++ dependency. The rest of the architecture must not depend directly on either library.
+
+**Gate A status (2026-08-28): approved for the current corpus.** `rawler` 0.7.2 decoded all six private samples as 6048x4024 RGGB mosaics with the expected 6000x4000 crop, black and white levels, as-shot white balance, dual-illuminant matrices, embedded preview, and EXIF orientation. Every decoded buffer contained exactly 24,337,152 samples. Rohditor reads the source RAW IFD separately inside the private adapter to distinguish 12-bit and 14-bit source precision because `rawler` expands both modes into a 16-bit output container. This gate must be rerun if a new camera firmware or RAW-producing shooting mode is added.
 
 ## 4. Architectural decisions
 
@@ -695,9 +697,8 @@ Suggested order after the MVP:
 
 These must be answered through input samples or implementation measurements rather than guessed now:
 
-- Exact Sony camera model and RAW variants.
-- Typical megapixel count and available system RAM.
 - Whether Wayland, X11, or both must be supported.
+- Which license to apply to Rohditor's own source code.
 - Whether matching a preferred Sony Creative Look is eventually important.
 - The desired default contrast/tone curve.
 - Whether sidecar persistence is needed immediately after the MVP.
@@ -707,4 +708,4 @@ These must be answered through input samples or implementation measurements rath
 
 ## 16. Immediate next action
 
-The next implementation session should complete Phase 0 and begin Phase 1. Before adding image-adjustment or GPU code, obtain the exact camera model and sample RAW modes, scaffold the workspace, implement `rohditor-cli inspect`, and make the decoder approval decision at Gate A.
+Phase 0 and the initial Phase 1 decoder slice are complete, and Gate A is approved for the current corpus. The next implementation session should finish Phase 1 by adding `rohditor-cli extract-preview`, scrubbed metadata expectations, and corrupt/truncated input checks. After those pass, begin the typed CPU reference pipeline in Phase 2; do not add GPU adjustment code before the CPU specification exists.

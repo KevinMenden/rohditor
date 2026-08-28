@@ -1,0 +1,9 @@
+/target/
+
+# Private camera files and generated local output.
+/testdata/private/
+/testdata/generated/
+
+# Local diagnostics and benchmark output.
+*.trace
+/benchmark-results/
