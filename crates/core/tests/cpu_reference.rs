@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use rayon::ThreadPoolBuilder;
 use rohditor_core::{
-    CpuPipeline, CropPolicy, EditRecipe, RenderOptions, WhiteBalance, camera_color_transform,
+    CpuPipeline, CropPolicy, DitherMode, EditRecipe, ExportImage, OutputBitDepth, RenderOptions,
+    WhiteBalance, camera_color_transform,
 };
 use rohditor_raw::{
     CameraColorMatrix, CaptureMetadata, CfaPattern, ImageRect, LevelPattern,
@@ -42,6 +43,44 @@ fn synthetic_pipeline_is_identical_with_one_and_multiple_rayon_threads()
     assert_eq!(single.memory.linear_rgb_bytes, 288);
     assert_eq!(single.memory.display_rgb_bytes, 72);
     assert_eq!(single.memory.estimated_peak_bytes, 480);
+    Ok(())
+}
+
+#[test]
+fn sixteen_bit_dithered_export_is_identical_across_rayon_thread_counts()
+-> Result<(), Box<dyn Error>> {
+    let frame = synthetic_rggb_frame();
+    let recipe = EditRecipe::default();
+    let options = RenderOptions::default();
+    let single_pool = ThreadPoolBuilder::new().num_threads(1).build()?;
+    let multi_pool = ThreadPoolBuilder::new().num_threads(4).build()?;
+    let single = single_pool.install(|| {
+        CpuPipeline.render_export(
+            &frame,
+            &recipe,
+            options,
+            OutputBitDepth::Sixteen,
+            DitherMode::Ordered8x8,
+        )
+    })?;
+    let multiple = multi_pool.install(|| {
+        CpuPipeline.render_export(
+            &frame,
+            &recipe,
+            options,
+            OutputBitDepth::Sixteen,
+            DitherMode::Ordered8x8,
+        )
+    })?;
+    let (ExportImage::Rgb16(single_image), ExportImage::Rgb16(multiple_image)) =
+        (single.image, multiple.image)
+    else {
+        return Err("16-bit render returned the wrong buffer type".into());
+    };
+
+    assert_eq!(single_image.data(), multiple_image.data());
+    assert_eq!(single.memory.display_rgb_bytes, 144);
+    assert_eq!(single.memory.estimated_peak_bytes, 528);
     Ok(())
 }
 

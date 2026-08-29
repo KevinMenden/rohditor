@@ -28,9 +28,30 @@ end to end including decode and lossless PNG output. `/usr/bin/time -v` reported
 a maximum resident set size of 475,368 KiB. Rohditor's deterministic live-buffer
 estimate was 413 MiB; the difference includes decoder, encoder, allocator,
 thread, executable, and operating-system overhead. Warm release renders of all
-six private samples took 0.31 to 0.36 seconds per CPU pipeline invocation before
+six private samples took 0.30 to 0.35 seconds per CPU pipeline invocation before
 PNG encoding. See [`cpu-pipeline.md`](cpu-pipeline.md) for stage-level details
 and the exact baseline behavior.
+
+## Phase 3 export validation
+
+Measured on 2026-08-29 with the same release build and reference workstation:
+
+- A neutral 6000 x 4000 16-bit PNG completed in about 1.3 seconds and produced
+  a 125,194,332-byte file. The reported core/decoded-buffer estimate was 459
+  MiB; the PNG encoder's endian-conversion allocation is additional.
+- A physically rotated 4000 x 6000 JPEG at quality 90 completed in about 1.3
+  seconds and produced a 3,343,286-byte file.
+- For the same 6000 x 4000 landscape, JPEG quality 20 produced 863,790 bytes
+  while quality 95 produced 5,260,150 bytes. Integration tests also confirm
+  lower decoded error at quality 95 relative to the lossless PNG reference.
+- `feh --loadable`, ImageMagick `identify`, FFmpeg `ffprobe`, the Rust `image`
+  decoder, and `file` all accepted the representative JPEG and PNG. ImageMagick
+  reported sRGB, top-left orientation, and both ICC and EXIF profiles. FFmpeg
+  reported `rgb48be` for the 16-bit PNG, and `file` independently identified it
+  as 16-bit-per-color RGB.
+
+See [`export.md`](export.md) for the format, metadata, and destination-write
+contract.
 
 ## Target camera corpus
 

@@ -17,9 +17,27 @@ fn unsupported_and_truncated_inputs_exit_with_errors() -> Result<(), Box<dyn Err
     let wrong_extension = Command::new(env!("CARGO_BIN_EXE_rohditor-cli"))
         .arg("develop")
         .arg(&unsupported)
+        .arg(truncated.path().with_extension("tiff"))
+        .output()?;
+    assert_error_contains(&wrong_extension, ".jpg, .jpeg, or .png extension");
+
+    let jpeg_option_for_png = Command::new(env!("CARGO_BIN_EXE_rohditor-cli"))
+        .arg("develop")
+        .arg("--jpeg-quality")
+        .arg("90")
+        .arg(&unsupported)
+        .arg(truncated.path().with_extension("png"))
+        .output()?;
+    assert_error_contains(&jpeg_option_for_png, "--jpeg-quality can only be used");
+
+    let png_option_for_jpeg = Command::new(env!("CARGO_BIN_EXE_rohditor-cli"))
+        .arg("develop")
+        .arg("--png-bit-depth")
+        .arg("16")
+        .arg(&unsupported)
         .arg(truncated.path().with_extension("jpg"))
         .output()?;
-    assert_error_contains(&wrong_extension, ".png extension");
+    assert_error_contains(&png_option_for_jpeg, "--png-bit-depth can only be used");
 
     let invalid_recipe = Command::new(env!("CARGO_BIN_EXE_rohditor-cli"))
         .arg("develop")
@@ -29,6 +47,16 @@ fn unsupported_and_truncated_inputs_exit_with_errors() -> Result<(), Box<dyn Err
         .arg(truncated.path().with_extension("png"))
         .output()?;
     assert_error_contains(&invalid_recipe, "outside the inclusive range");
+
+    let existing = TempInput::new_with_extension(b"complete existing export", "png")?;
+    let failed_replacement = Command::new(env!("CARGO_BIN_EXE_rohditor-cli"))
+        .arg("develop")
+        .arg("--force")
+        .arg(&unsupported)
+        .arg(existing.path())
+        .output()?;
+    assert_error_contains(&failed_replacement, "could not decode");
+    assert_eq!(fs::read(existing.path())?, b"complete existing export");
     Ok(())
 }
 
@@ -65,13 +93,17 @@ struct TempInput {
 
 impl TempInput {
     fn new(contents: &[u8]) -> Result<Self, std::io::Error> {
+        Self::new_with_extension(contents, "arw")
+    }
+
+    fn new_with_extension(contents: &[u8], extension: &str) -> Result<Self, std::io::Error> {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "rohditor-cli-test-{}-{unique}.arw",
-            std::process::id()
+            "rohditor-cli-test-{}-{unique}.{extension}",
+            std::process::id(),
         ));
         let mut file = OpenOptions::new()
             .write(true)

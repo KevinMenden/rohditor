@@ -477,7 +477,7 @@ approved.
 - CLI export works without initializing `wgpu`, a window system, or a physical GPU.
 - Repeated CPU rendering of the same recipe is deterministic within the chosen encoder constraints.
 
-**Phase 2 status (2026-08-28): complete.** Rohditor now owns typed mosaic,
+**Phase 2 status (2026-08-29): complete.** Rohditor now owns typed mosaic,
 scene-linear RGB, and display RGB buffers. The Rayon CPU reference implements
 validated crop/level normalization, selectable bilinear demosaic, as-shot plus
 relative manual white balance, camera-to-XYZ-to-linear-Rec.2020/D65 conversion,
@@ -511,6 +511,20 @@ baseline and measurements are recorded in `docs/cpu-pipeline.md`.
 - JPEG quality changes file size and visible compression as expected.
 - 16-bit PNG contains 16-bit samples rather than an up-converted 8-bit buffer.
 - A failed export does not leave the final destination partially written.
+
+**Phase 3 status (2026-08-29): complete.** `ExportSettings` now owns format,
+quality/depth, dithering, safe-metadata, and overwrite choices independently of
+the CLI/UI. The CPU pipeline quantizes directly from float to deterministic
+8-bit or native 16-bit sRGB buffers. The exporter writes JPEG and PNG through a
+temporary sibling, embeds a generated matrix/TRC sRGB ICC profile, carries a
+small allowlist of EXIF fields, and always writes orientation 1 after physical
+pixel rotation. Existing destinations require explicit replacement, and failed
+encoding preserves the prior destination. Synthetic and private CLI tests cover
+both formats, dimensions, portrait orientation, ICC/EXIF extraction, quality
+behavior, true 16-bit samples, and failure cleanup. Representative files were
+accepted by `feh`, ImageMagick, FFmpeg, the Rust `image` decoder, and `file`; the
+contract and measurements are recorded in `docs/export.md` and
+`docs/development-environment.md`.
 
 ### Phase 4: Minimal desktop application using the CPU pipeline
 
@@ -730,9 +744,9 @@ These must be answered through input samples or implementation measurements rath
 
 ## 16. Immediate next action
 
-Phases 0 through 2 are complete, and Gate A is approved for the current corpus.
-The next implementation session should begin Phase 3 by defining
-`ExportSettings` independently of the CLI/UI, then add configurable JPEG and
-8/16-bit PNG encoding, explicit sRGB tagging, safe metadata preservation, and
-temporary-file/atomic destination handling. Keep codec and filesystem policy
-outside the tested CPU color transforms.
+Phases 0 through 3 are complete, and Gate A is approved for the current corpus.
+The next implementation session should begin Phase 4 with the minimal `eframe`
+desktop shell and renderer selection, then add asynchronous document opening,
+the embedded-preview placeholder, CPU-developed previews, adjustment controls,
+revision-aware background coordination, and an export dialog backed by the
+Phase 3 `ExportSettings` API.

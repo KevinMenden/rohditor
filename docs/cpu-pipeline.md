@@ -19,11 +19,12 @@ strides, CFA/color spaces, and output transfer.
 5. Apply exposure, contrast, and saturation in linear Rec.2020.
 6. Convert Rec.2020 through D65 XYZ to linear sRGB. The named Phase 2 output
    policy hard-clips each linear-sRGB component to `[0, 1]` at this boundary.
-7. Apply the sRGB transfer function, quantize to the nearest 8-bit code value,
-   and physically apply the selected EXIF orientation.
+7. Apply the sRGB transfer function, quantize directly to the selected 8-bit or
+   16-bit sample depth with optional deterministic ordered dithering, and
+   physically apply the selected EXIF orientation.
 
-The lossless PNG encoder is a CLI consumer of the final display buffer; color
-matrix and transfer behavior do not depend on that codec.
+JPEG and PNG encoders consume the final typed display buffer; color matrix,
+transfer, orientation, and quantization behavior do not depend on either codec.
 
 ## Recipe definitions
 
@@ -43,14 +44,15 @@ out-of-bounds crops, and out-of-range edits are typed errors.
 Synthetic tests cover RGGB, BGGR, GRBG, and GBRG phase/border behavior,
 per-phase levels, unclipped normalized highlights, matrix inversion/adaptation,
 neutral edits, known exposure gains, grayscale saturation, clipping, sRGB
-round-trips, and orientation. The same synthetic end-to-end render is byte
-identical in Rayon pools restricted to one and four threads.
+round-trips, orientation, direct 16-bit quantization, and deterministic ordered
+dithering. Synthetic 8-bit and 16-bit end-to-end renders are identical in Rayon
+pools restricted to one and four threads.
 
 The opt-in private suite develops all six Sony ILCE-6400 samples. Each neutral
 render has the expected 6000 x 4000 or oriented 4000 x 6000 dimensions, broad
 numeric output range, and deterministic repeated full-image hash. The CLI suite
-decodes its PNGs and verifies a landscape and portrait output plus byte-identical
-repeated PNG encoding.
+decodes 8/16-bit PNG and JPEG output, verifies landscape and portrait geometry,
+checks native 16-bit values, and confirms byte-identical repeated PNG encoding.
 
 ## Reference measurement
 
@@ -71,7 +73,7 @@ from `development-environment.md`.
 
 The estimated peak of simultaneously live core/decoded buffers was 413 MiB.
 Measured maximum RSS was 475,368 KiB (about 464 MiB). Warm release tests without
-PNG encoding rendered the six samples in 0.31 to 0.36 seconds each, demonstrating
+PNG encoding rendered the six samples in 0.30 to 0.35 seconds each, demonstrating
 that these timings vary materially with cache and machine load.
 
 ## Known baseline limitations
@@ -83,7 +85,8 @@ that these timings vary materially with cache and machine load.
   white balance.
 - The neutral recipe intentionally has no camera-look tone curve or highlight
   roll-off. Out-of-gamut and over-range linear sRGB is hard-clipped.
-- PNG samples use sRGB coordinates, but explicit ICC/sRGB chunk embedding is a
-  Phase 3 export responsibility.
-- Full-resolution processing currently retains roughly 413 MiB of decoded/core
-  buffers. Preview scaling, buffer reuse, caching, and tiling remain later work.
+- Full-resolution 8-bit processing currently retains roughly 413 MiB of
+  decoded/core buffers; the deterministic estimate rises to 459 MiB for the
+  16-bit display buffer. PNG16 encoding also needs a temporary endian-conversion
+  buffer that is outside this core estimate.
+- Preview scaling, buffer reuse, caching, and tiling remain later work.

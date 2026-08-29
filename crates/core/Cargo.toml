@@ -6,6 +6,8 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+bytemuck.workspace = true
+image.workspace = true
 rayon.workspace = true
 rohditor-raw = { path = "../raw" }
 serde.workspace = true

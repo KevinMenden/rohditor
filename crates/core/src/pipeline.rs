@@ -6,8 +6,9 @@ use rohditor_raw::RawFrame;
 use crate::color::camera_color_transform;
 use crate::cpu::apply_camera_color_transform;
 use crate::{
-    DisplayRgbImage, EditRecipe, PipelineError, apply_adjustments, demosaic, normalize_raw,
-    render_display_srgb8, white_balance_gains,
+    DisplayRgbImage, DitherMode, EditRecipe, ExportImage, LinearRgbImage, OutputBitDepth,
+    PipelineError, apply_adjustments, demosaic, normalize_raw, render_display_srgb8,
+    render_display_srgb8_dithered, render_display_srgb16, white_balance_gains,
 };
 
 /// Sensor crop selected before normalization.
@@ -70,6 +71,14 @@ pub struct RenderResult {
     pub memory: MemoryEstimate,
 }
 
+/// A full-resolution export render and its processing diagnostics.
+#[derive(Debug)]
+pub struct ExportRenderResult {
+    pub image: ExportImage,
+    pub timings: StageTimings,
+    pub memory: MemoryEstimate,
+}
+
 /// Deterministic, headless CPU implementation of the Phase 2 reference pipeline.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CpuPipeline;
@@ -82,59 +91,117 @@ impl CpuPipeline {
         options: RenderOptions,
     ) -> Result<RenderResult, PipelineError> {
         let total_started = Instant::now();
-
-        let metadata_started = Instant::now();
-        recipe.validate()?;
-        let gains = white_balance_gains(&frame.info, recipe.white_balance)?;
-        let camera_transform = camera_color_transform(&frame.info)?;
-        let metadata = metadata_started.elapsed();
-
-        let normalization_started = Instant::now();
-        let normalized = normalize_raw(frame, options.crop_policy)?;
-        let normalization = normalization_started.elapsed();
-
-        let memory = memory_estimate(frame, normalized.width(), normalized.height())?;
-
-        let demosaic_started = Instant::now();
-        let mut linear = demosaic(&normalized, gains, options.demosaic)?;
-        let demosaic = demosaic_started.elapsed();
-        drop(normalized);
-
-        let color_started = Instant::now();
-        apply_camera_color_transform(&mut linear, &camera_transform)?;
-        let color_conversion = color_started.elapsed();
-
-        let adjustments_started = Instant::now();
-        apply_adjustments(&mut linear, recipe)?;
-        let adjustments = adjustments_started.elapsed();
+        let (linear, mut timings) = prepare_linear(frame, recipe, options)?;
+        let memory = memory_estimate(frame, linear.width(), linear.height(), size_of::<u8>())?;
 
         let output_started = Instant::now();
         let orientation = recipe
             .orientation_override
             .unwrap_or(frame.info.orientation);
         let image = render_display_srgb8(&linear, orientation, options.output_policy)?;
-        let output_conversion = output_started.elapsed();
+        timings.output_conversion = output_started.elapsed();
+        timings.total = total_started.elapsed();
 
         Ok(RenderResult {
             image,
-            timings: StageTimings {
-                metadata,
-                normalization,
-                demosaic,
-                color_conversion,
-                adjustments,
-                output_conversion,
-                total: total_started.elapsed(),
-            },
+            timings,
             memory,
         })
     }
+
+    /// Render full-resolution output samples for a subsequent file export.
+    pub fn render_export(
+        &self,
+        frame: &RawFrame,
+        recipe: &EditRecipe,
+        options: RenderOptions,
+        bit_depth: OutputBitDepth,
+        dithering: DitherMode,
+    ) -> Result<ExportRenderResult, PipelineError> {
+        let total_started = Instant::now();
+        let (linear, mut timings) = prepare_linear(frame, recipe, options)?;
+        let memory = memory_estimate(
+            frame,
+            linear.width(),
+            linear.height(),
+            bit_depth.bytes_per_sample(),
+        )?;
+        let orientation = recipe
+            .orientation_override
+            .unwrap_or(frame.info.orientation);
+
+        let output_started = Instant::now();
+        let image = match bit_depth {
+            OutputBitDepth::Eight => ExportImage::Rgb8(render_display_srgb8_dithered(
+                &linear,
+                orientation,
+                options.output_policy,
+                dithering,
+            )?),
+            OutputBitDepth::Sixteen => ExportImage::Rgb16(render_display_srgb16(
+                &linear,
+                orientation,
+                options.output_policy,
+                dithering,
+            )?),
+        };
+        timings.output_conversion = output_started.elapsed();
+        timings.total = total_started.elapsed();
+
+        Ok(ExportRenderResult {
+            image,
+            timings,
+            memory,
+        })
+    }
+}
+
+fn prepare_linear(
+    frame: &RawFrame,
+    recipe: &EditRecipe,
+    options: RenderOptions,
+) -> Result<(LinearRgbImage<f32>, StageTimings), PipelineError> {
+    let metadata_started = Instant::now();
+    recipe.validate()?;
+    let gains = white_balance_gains(&frame.info, recipe.white_balance)?;
+    let camera_transform = camera_color_transform(&frame.info)?;
+    let metadata = metadata_started.elapsed();
+
+    let normalization_started = Instant::now();
+    let normalized = normalize_raw(frame, options.crop_policy)?;
+    let normalization = normalization_started.elapsed();
+
+    let demosaic_started = Instant::now();
+    let mut linear = demosaic(&normalized, gains, options.demosaic)?;
+    let demosaic = demosaic_started.elapsed();
+    drop(normalized);
+
+    let color_started = Instant::now();
+    apply_camera_color_transform(&mut linear, &camera_transform)?;
+    let color_conversion = color_started.elapsed();
+
+    let adjustments_started = Instant::now();
+    apply_adjustments(&mut linear, recipe)?;
+    let adjustments = adjustments_started.elapsed();
+
+    Ok((
+        linear,
+        StageTimings {
+            metadata,
+            normalization,
+            demosaic,
+            color_conversion,
+            adjustments,
+            ..StageTimings::default()
+        },
+    ))
 }
 
 fn memory_estimate(
     frame: &RawFrame,
     width: usize,
     height: usize,
+    display_sample_bytes: usize,
 ) -> Result<MemoryEstimate, PipelineError> {
     let pixels = width
         .checked_mul(height)
@@ -153,7 +220,7 @@ fn memory_estimate(
         .ok_or_else(|| dimension_overflow(width, height))?;
     let display_rgb_bytes = pixels
         .checked_mul(3)
-        .and_then(|elements| elements.checked_mul(size_of::<u8>()))
+        .and_then(|elements| elements.checked_mul(display_sample_bytes))
         .ok_or_else(|| dimension_overflow(width, height))?;
     let demosaic_peak = decoded_raw_bytes
         .checked_add(normalized_mosaic_bytes)

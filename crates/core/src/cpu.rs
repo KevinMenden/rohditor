@@ -7,10 +7,10 @@ use crate::color::{
     CameraColorTransform, LINEAR_REC2020_TO_XYZ_D65, XYZ_D65_TO_LINEAR_SRGB,
     clip_linear_srgb_for_output, linear_srgb_to_srgb,
 };
-use crate::image::{allocate_zeroed_f32, allocate_zeroed_u8};
+use crate::image::{allocate_zeroed_f32, allocate_zeroed_u8, allocate_zeroed_u16};
 use crate::{
     BayerPattern, CfaColor, CropPolicy, DemosaicAlgorithm, DisplayRgbImage, DisplayTransfer,
-    EditRecipe, ImageRegion, LinearRgbImage, LinearRgbSpace, MosaicImage, OutputPolicy,
+    DitherMode, EditRecipe, ImageRegion, LinearRgbImage, LinearRgbSpace, MosaicImage, OutputPolicy,
     PipelineError, WhiteBalance,
 };
 
@@ -220,6 +220,17 @@ pub fn render_display_srgb8(
     orientation: RawOrientation,
     output_policy: OutputPolicy,
 ) -> Result<DisplayRgbImage<u8>, PipelineError> {
+    render_display_srgb8_dithered(image, orientation, output_policy, DitherMode::None)
+}
+
+/// Convert linear Rec.2020 to clipped, transfer-encoded sRGB8 with explicit
+/// deterministic output dithering.
+pub fn render_display_srgb8_dithered(
+    image: &LinearRgbImage<f32>,
+    orientation: RawOrientation,
+    output_policy: OutputPolicy,
+    dithering: DitherMode,
+) -> Result<DisplayRgbImage<u8>, PipelineError> {
     require_space(image, LinearRgbSpace::Rec2020D65)?;
     let (output_width, output_height) =
         oriented_dimensions(image.width(), image.height(), orientation);
@@ -256,7 +267,8 @@ pub fn render_display_srgb8(
                 };
                 for (value, output) in clipped.into_iter().zip(destination) {
                     let encoded = linear_srgb_to_srgb(value);
-                    *output = (encoded * 255.0).round().clamp(0.0, 255.0) as u8;
+                    let dither = quantization_dither(dithering, output_x, output_y);
+                    *output = (encoded * 255.0 + dither).round().clamp(0.0, 255.0) as u8;
                 }
             }
         });
@@ -267,6 +279,81 @@ pub fn render_display_srgb8(
         DisplayTransfer::Srgb,
         output,
     )
+}
+
+/// Convert linear Rec.2020 directly to clipped, transfer-encoded sRGB16 while
+/// physically applying the requested EXIF orientation.
+pub fn render_display_srgb16(
+    image: &LinearRgbImage<f32>,
+    orientation: RawOrientation,
+    output_policy: OutputPolicy,
+    dithering: DitherMode,
+) -> Result<DisplayRgbImage<u16>, PipelineError> {
+    require_space(image, LinearRgbSpace::Rec2020D65)?;
+    let (output_width, output_height) =
+        oriented_dimensions(image.width(), image.height(), orientation);
+    let row_stride = output_width.checked_mul(3).ok_or_else(|| {
+        invalid_dimensions(output_width, output_height, 0, "RGB stride overflowed")
+    })?;
+    let elements = row_stride.checked_mul(output_height).ok_or_else(|| {
+        invalid_dimensions(
+            output_width,
+            output_height,
+            row_stride,
+            "RGB sample count overflowed",
+        )
+    })?;
+    let mut output = allocate_zeroed_u16(elements)?;
+    let rec2020_to_srgb = LINEAR_REC2020_TO_XYZ_D65.then(XYZ_D65_TO_LINEAR_SRGB);
+    output
+        .par_chunks_mut(row_stride)
+        .enumerate()
+        .for_each(|(output_y, output_row)| {
+            for (output_x, destination) in output_row.chunks_exact_mut(3).enumerate() {
+                let (source_x, source_y) = source_coordinate(
+                    output_x,
+                    output_y,
+                    image.width(),
+                    image.height(),
+                    orientation,
+                );
+                let start = source_y * image.row_stride() + source_x * 3;
+                let source = &image.data()[start..start + 3];
+                let linear_srgb = rec2020_to_srgb.transform([source[0], source[1], source[2]]);
+                let clipped = match output_policy {
+                    OutputPolicy::ClipToSrgb => clip_linear_srgb_for_output(linear_srgb),
+                };
+                for (value, output) in clipped.into_iter().zip(destination) {
+                    let encoded = linear_srgb_to_srgb(value);
+                    let dither = quantization_dither(dithering, output_x, output_y);
+                    *output = (encoded * 65_535.0 + dither).round().clamp(0.0, 65_535.0) as u16;
+                }
+            }
+        });
+    DisplayRgbImage::new(
+        output_width,
+        output_height,
+        row_stride,
+        DisplayTransfer::Srgb,
+        output,
+    )
+}
+
+fn quantization_dither(mode: DitherMode, x: usize, y: usize) -> f32 {
+    const BAYER_8X8: [[u8; 8]; 8] = [
+        [0, 32, 8, 40, 2, 34, 10, 42],
+        [48, 16, 56, 24, 50, 18, 58, 26],
+        [12, 44, 4, 36, 14, 46, 6, 38],
+        [60, 28, 52, 20, 62, 30, 54, 22],
+        [3, 35, 11, 43, 1, 33, 9, 41],
+        [51, 19, 59, 27, 49, 17, 57, 25],
+        [15, 47, 7, 39, 13, 45, 5, 37],
+        [63, 31, 55, 23, 61, 29, 53, 21],
+    ];
+    match mode {
+        DitherMode::None => 0.0,
+        DitherMode::Ordered8x8 => (f32::from(BAYER_8X8[y & 7][x & 7]) + 0.5) / 64.0 - 0.5,
+    }
 }
 
 fn demosaic_bilinear(
@@ -835,6 +922,88 @@ mod tests {
         assert_eq!(rotated.pixel(0, 0), normal.pixel(0, 2));
         assert_eq!(rotated.pixel(2, 0), normal.pixel(0, 0));
         assert_eq!(rotated.pixel(0, 1), normal.pixel(1, 2));
+    }
+
+    #[test]
+    fn sixteen_bit_output_is_quantized_directly_from_float() {
+        let width = 1_024;
+        let data = (0..width)
+            .flat_map(|index| {
+                let value = index as f32 / (width - 1) as f32;
+                [value; 3]
+            })
+            .collect();
+        let image = LinearRgbImage::new(width, 1, width * 3, LinearRgbSpace::Rec2020D65, data)
+            .expect("valid gradient");
+        let eight = render_display_srgb8(&image, RawOrientation::Normal, OutputPolicy::ClipToSrgb)
+            .expect("8-bit output");
+        let sixteen = render_display_srgb16(
+            &image,
+            RawOrientation::Normal,
+            OutputPolicy::ClipToSrgb,
+            DitherMode::None,
+        )
+        .expect("16-bit output");
+
+        assert!(
+            sixteen
+                .data()
+                .iter()
+                .zip(eight.data())
+                .any(|(wide, narrow)| *wide != u16::from(*narrow) * 257)
+        );
+        let distinct = sixteen
+            .data()
+            .iter()
+            .step_by(3)
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(distinct.len() > 256);
+    }
+
+    #[test]
+    fn ordered_dithering_is_optional_and_deterministic() {
+        let width = 64;
+        let height = 64;
+        let data = (0..width * height)
+            .flat_map(|index| {
+                let encoded = ((index % 31) as f32 + 0.5) / 255.0;
+                let linear = crate::srgb_to_linear_srgb(encoded);
+                [linear; 3]
+            })
+            .collect();
+        let image = LinearRgbImage::new(width, height, width * 3, LinearRgbSpace::Rec2020D65, data)
+            .expect("valid dither fixture");
+        let without = render_display_srgb8_dithered(
+            &image,
+            RawOrientation::Normal,
+            OutputPolicy::ClipToSrgb,
+            DitherMode::None,
+        )
+        .expect("undithered output");
+        let with = render_display_srgb8_dithered(
+            &image,
+            RawOrientation::Normal,
+            OutputPolicy::ClipToSrgb,
+            DitherMode::Ordered8x8,
+        )
+        .expect("dithered output");
+        let repeated = render_display_srgb8_dithered(
+            &image,
+            RawOrientation::Normal,
+            OutputPolicy::ClipToSrgb,
+            DitherMode::Ordered8x8,
+        )
+        .expect("repeated dithered output");
+
+        assert_ne!(with.data(), without.data());
+        assert_eq!(with.data(), repeated.data());
+        assert!(
+            with.data()
+                .iter()
+                .zip(without.data())
+                .all(|(dithered, plain)| dithered.abs_diff(*plain) <= 1)
+        );
     }
 
     #[test]

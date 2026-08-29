@@ -1,17 +1,17 @@
 use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
-use std::io::{self, BufWriter, Write as _};
+use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
-use image::codecs::png::PngEncoder;
-use image::{ExtendedColorType, ImageEncoder};
 use rohditor_core::{
-    CONTRAST_RANGE, CpuPipeline, CropPolicy, DemosaicAlgorithm, EXPOSURE_EV_RANGE, EditRecipe,
-    OutputPolicy, RenderOptions, SATURATION_RANGE, StageTimings, WhiteBalance,
+    CONTRAST_RANGE, CpuPipeline, CropPolicy, DemosaicAlgorithm, DitherMode, EXPOSURE_EV_RANGE,
+    EditRecipe, ExportFormat, ExportMetadataPolicy, ExportSettings, JPEG_QUALITY_DEFAULT,
+    JPEG_QUALITY_MAX, JPEG_QUALITY_MIN, OutputPolicy, PngBitDepth, RenderOptions, SATURATION_RANGE,
+    StageTimings, WhiteBalance, export_image,
 };
 use rohditor_raw::{
     EncodedPreviewFormat, ImageRect, PhotometricInterpretation, RawDecoder, RawFileInfo,
@@ -63,13 +63,13 @@ enum Command {
         force: bool,
     },
 
-    /// Develop the RAW mosaic through the deterministic CPU pipeline into sRGB PNG.
+    /// Develop the RAW mosaic and transactionally export an sRGB JPEG or PNG.
     Develop {
         /// RAW file to develop. Detection uses file contents, not this extension.
         #[arg(value_name = "FILE")]
         file: PathBuf,
 
-        /// Lossless 8-bit sRGB PNG destination.
+        /// sRGB destination (`.jpg`, `.jpeg`, or `.png`).
         #[arg(value_name = "OUTPUT")]
         output: PathBuf,
 
@@ -100,6 +100,26 @@ enum Command {
         /// Replace the RAW orientation metadata with an explicit transform.
         #[arg(long, value_enum)]
         orientation: Option<CliOrientation>,
+
+        /// JPEG quality from 1 (smallest) to 100 (highest); JPEG only.
+        #[arg(
+            long,
+            value_name = "1-100",
+            value_parser = clap::value_parser!(u8).range(i64::from(JPEG_QUALITY_MIN)..=i64::from(JPEG_QUALITY_MAX))
+        )]
+        jpeg_quality: Option<u8>,
+
+        /// Integer sample depth; PNG only (default: 8).
+        #[arg(long, value_enum, value_name = "8|16")]
+        png_bit_depth: Option<CliPngBitDepth>,
+
+        /// Apply deterministic ordered dithering before integer quantization.
+        #[arg(long)]
+        dither: bool,
+
+        /// Preserve selected safe capture EXIF fields or omit source metadata.
+        #[arg(long, value_enum, default_value_t = CliMetadata::Safe)]
+        metadata: CliMetadata,
 
         /// Replace an existing output file.
         #[arg(long)]
@@ -145,6 +165,39 @@ enum CliOrientation {
     Rotate90,
     Transverse,
     Rotate270,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliPngBitDepth {
+    #[value(name = "8", alias = "eight")]
+    Eight,
+    #[value(name = "16", alias = "sixteen")]
+    Sixteen,
+}
+
+impl From<CliPngBitDepth> for PngBitDepth {
+    fn from(value: CliPngBitDepth) -> Self {
+        match value {
+            CliPngBitDepth::Eight => Self::Eight,
+            CliPngBitDepth::Sixteen => Self::Sixteen,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+enum CliMetadata {
+    None,
+    #[default]
+    Safe,
+}
+
+impl From<CliMetadata> for ExportMetadataPolicy {
+    fn from(value: CliMetadata) -> Self {
+        match value {
+            CliMetadata::None => Self::None,
+            CliMetadata::Safe => Self::Safe,
+        }
+    }
 }
 
 impl From<CliOrientation> for RawOrientation {
@@ -225,6 +278,10 @@ fn main() -> Result<()> {
             crop,
             demosaic,
             orientation,
+            jpeg_quality,
+            png_bit_depth,
+            dither,
+            metadata,
             force,
         } => develop(
             &file,
@@ -237,6 +294,10 @@ fn main() -> Result<()> {
                 crop,
                 demosaic,
                 orientation,
+                jpeg_quality,
+                png_bit_depth,
+                dither,
+                metadata,
                 force,
             },
         ),
@@ -252,6 +313,10 @@ struct DevelopArguments {
     crop: CliCropPolicy,
     demosaic: CliDemosaic,
     orientation: Option<CliOrientation>,
+    jpeg_quality: Option<u8>,
+    png_bit_depth: Option<CliPngBitDepth>,
+    dither: bool,
+    metadata: CliMetadata,
     force: bool,
 }
 
@@ -346,14 +411,14 @@ fn extract_preview(file: &Path, output: &Path, force: bool) -> Result<()> {
 }
 
 fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()> {
-    validate_develop_extension(output)?;
+    let export_settings = develop_export_settings(output, arguments)?;
     if output.exists() && paths_refer_to_same_file(file, output)? {
         bail!(
             "refusing to replace source RAW file {} with developed output",
             file.display()
         );
     }
-    if !arguments.force && output.exists() {
+    if !export_settings.overwrite && output.exists() {
         bail!(
             "output {} already exists; pass --force to replace it",
             output.display()
@@ -388,7 +453,7 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
         .with_context(|| format!("could not decode {} for development", file.display()))?;
     let decode_time = decode_started.elapsed();
     let result = CpuPipeline
-        .render(
+        .render_export(
             &frame,
             &recipe,
             RenderOptions {
@@ -396,71 +461,91 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
                 demosaic: arguments.demosaic.into(),
                 output_policy: OutputPolicy::ClipToSrgb,
             },
+            export_settings.format.bit_depth(),
+            export_settings.dithering,
         )
         .with_context(|| format!("could not develop {}", file.display()))?;
-
-    let width = u32::try_from(result.image.width()).context("output width does not fit in PNG")?;
-    let height =
-        u32::try_from(result.image.height()).context("output height does not fit in PNG")?;
-    let mut options = OpenOptions::new();
-    options.write(true);
-    if arguments.force {
-        options.create(true).truncate(true);
-    } else {
-        options.create_new(true);
-    }
-    let destination = match options.open(output) {
-        Ok(destination) => destination,
-        Err(error) if !arguments.force && error.kind() == io::ErrorKind::AlreadyExists => {
-            bail!(
-                "output {} already exists; pass --force to replace it",
-                output.display()
-            );
-        }
-        Err(error) => {
-            return Err(error).with_context(|| {
-                format!("could not create developed output {}", output.display())
-            });
-        }
-    };
-    let mut destination = BufWriter::new(destination);
-    let encoder = PngEncoder::new(&mut destination);
+    let source_info = frame.info.clone();
+    drop(frame);
     let encode_started = Instant::now();
-    encoder
-        .write_image(result.image.data(), width, height, ExtendedColorType::Rgb8)
-        .with_context(|| format!("could not encode developed PNG {}", output.display()))?;
-    destination
-        .flush()
-        .with_context(|| format!("could not finish developed PNG {}", output.display()))?;
+    let report = export_image(output, &result.image, &source_info, export_settings)
+        .with_context(|| format!("could not export developed image to {}", output.display()))?;
     let encode_time = encode_started.elapsed();
 
     write_stdout(&format!(
-        "Developed {}x{} sRGB PNG to {}\n{}\nEstimated CPU buffer peak: {} MiB",
-        result.image.width(),
-        result.image.height(),
+        "Developed {}x{} {}-bit sRGB {}{} to {} ({} bytes, {})\n{}\nEstimated CPU buffer peak: {} MiB",
+        report.width,
+        report.height,
+        report.bit_depth.bits(),
+        export_settings.format.description(),
+        format_quality(export_settings.format),
         output.display(),
+        report.bytes_written,
+        if report.metadata_embedded {
+            "safe EXIF"
+        } else {
+            "no EXIF"
+        },
         format_stage_timings(decode_time, result.timings, encode_time),
         bytes_to_mib(result.memory.estimated_peak_bytes),
     ))
 }
 
-fn validate_develop_extension(output: &Path) -> Result<()> {
-    if output
+fn develop_export_settings(output: &Path, arguments: DevelopArguments) -> Result<ExportSettings> {
+    let extension = output
         .extension()
         .and_then(|value| value.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
+        .unwrap_or_default();
+    let format = if extension.eq_ignore_ascii_case("jpg") || extension.eq_ignore_ascii_case("jpeg")
     {
-        return Ok(());
+        if arguments.png_bit_depth.is_some() {
+            bail!("--png-bit-depth can only be used with a .png destination");
+        }
+        ExportFormat::Jpeg {
+            quality: arguments.jpeg_quality.unwrap_or(JPEG_QUALITY_DEFAULT),
+        }
+    } else if extension.eq_ignore_ascii_case("png") {
+        if arguments.jpeg_quality.is_some() {
+            bail!("--jpeg-quality can only be used with a .jpg or .jpeg destination");
+        }
+        ExportFormat::Png {
+            bit_depth: arguments
+                .png_bit_depth
+                .unwrap_or(CliPngBitDepth::Eight)
+                .into(),
+        }
+    } else {
+        bail!(
+            "developed output {} must use a .jpg, .jpeg, or .png extension",
+            output.display()
+        );
+    };
+    let settings = ExportSettings {
+        format,
+        dithering: if arguments.dither {
+            DitherMode::Ordered8x8
+        } else {
+            DitherMode::None
+        },
+        metadata: arguments.metadata.into(),
+        overwrite: arguments.force,
+    };
+    settings
+        .validate_destination(output)
+        .context("could not validate export settings")?;
+    Ok(settings)
+}
+
+fn format_quality(format: ExportFormat) -> String {
+    match format {
+        ExportFormat::Jpeg { quality } => format!(" (quality {quality})"),
+        ExportFormat::Png { .. } => String::new(),
     }
-    bail!(
-        "developed output {} must use a .png extension",
-        output.display()
-    )
 }
 
 fn format_stage_timings(decode: Duration, timings: StageTimings, encode: Duration) -> String {
     format!(
-        "CPU stages: decode {:.1} ms, metadata {:.1} ms, normalize {:.1} ms, demosaic {:.1} ms, color {:.1} ms, adjustments {:.1} ms, output {:.1} ms, pipeline total {:.1} ms, PNG encode {:.1} ms",
+        "CPU stages: decode {:.1} ms, metadata {:.1} ms, normalize {:.1} ms, demosaic {:.1} ms, color {:.1} ms, adjustments {:.1} ms, output {:.1} ms, pipeline total {:.1} ms, export encode/commit {:.1} ms",
         decode.as_secs_f64() * 1_000.0,
         timings.metadata.as_secs_f64() * 1_000.0,
         timings.normalization.as_secs_f64() * 1_000.0,
@@ -679,7 +764,8 @@ mod tests {
     use rohditor_raw::{CfaPattern, EncodedPreviewFormat, PhotometricInterpretation};
 
     use super::{
-        RgbMultipliers, format_photometric, validate_develop_extension, validate_preview_extension,
+        CliCropPolicy, CliDemosaic, CliMetadata, DevelopArguments, RgbMultipliers,
+        develop_export_settings, format_photometric, validate_preview_extension,
     };
 
     #[test]
@@ -708,9 +794,24 @@ mod tests {
     }
 
     #[test]
-    fn develop_requires_png_and_parses_three_relative_wb_values() {
-        assert!(validate_develop_extension(Path::new("developed.PNG")).is_ok());
-        assert!(validate_develop_extension(Path::new("developed.jpg")).is_err());
+    fn develop_selects_export_format_and_parses_three_relative_wb_values() {
+        let base = DevelopArguments {
+            exposure: 0.0,
+            contrast: 0.0,
+            saturation: 1.0,
+            white_balance: None,
+            crop: CliCropPolicy::Recommended,
+            demosaic: CliDemosaic::Bilinear,
+            orientation: None,
+            jpeg_quality: None,
+            png_bit_depth: None,
+            dither: false,
+            metadata: CliMetadata::Safe,
+            force: false,
+        };
+        assert!(develop_export_settings(Path::new("developed.PNG"), base).is_ok());
+        assert!(develop_export_settings(Path::new("developed.jpg"), base).is_ok());
+        assert!(develop_export_settings(Path::new("developed.tiff"), base).is_err());
 
         let values = RgbMultipliers::from_str("1.2,1.0,0.8").expect("valid multipliers");
         assert_eq!((values.red, values.green, values.blue), (1.2, 1.0, 0.8));
