@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use image::{ColorType, ImageDecoder, ImageReader};
 use serde_json::Value;
 
 #[test]
@@ -163,7 +164,124 @@ fn inspect_extract_and_develop_cover_the_private_corpus() -> Result<(), Box<dyn 
         "PNG development must be byte-for-byte deterministic"
     );
 
+    let png16 = outputs.path().join("DSC00851-16.png");
+    let png16_export = run_cli(
+        &["develop", "--png-bit-depth", "16", "--dither"],
+        &[deterministic_sample.as_path(), png16.as_path()],
+    )?;
+    assert_success(&png16_export, "16-bit PNG develop");
+    let png16_image = image::open(&png16)?;
+    assert_eq!((png16_image.width(), png16_image.height()), (6_000, 4_000));
+    assert_eq!(png16_image.color(), ColorType::Rgb16);
+    assert!(
+        png16_image
+            .into_rgb16()
+            .as_raw()
+            .iter()
+            .any(|sample| sample % 257 != 0),
+        "16-bit PNG looks like an up-converted 8-bit buffer"
+    );
+    assert_tagged_srgb_and_normal_orientation(&png16)?;
+
+    let low_quality = outputs.path().join("DSC00851-q20.jpg");
+    let high_quality = outputs.path().join("DSC00851-q95.jpg");
+    for (destination, quality) in [(&low_quality, "20"), (&high_quality, "95")] {
+        let export = run_cli(
+            &["develop", "--jpeg-quality", quality],
+            &[deterministic_sample.as_path(), destination.as_path()],
+        )?;
+        assert_success(&export, "JPEG develop");
+        let decoded = image::open(destination)?;
+        assert_eq!((decoded.width(), decoded.height()), (6_000, 4_000));
+        assert_eq!(decoded.color(), ColorType::Rgb8);
+        assert_tagged_srgb_and_normal_orientation(destination)?;
+    }
+    assert!(fs::metadata(&high_quality)?.len() > fs::metadata(&low_quality)?.len());
+    let reference = image::open(outputs.path().join("DSC00851.ARW.png"))?
+        .into_rgb8()
+        .into_raw();
+    let low_error = mean_absolute_error(
+        &reference,
+        &image::open(&low_quality)?.into_rgb8().into_raw(),
+    );
+    let high_error = mean_absolute_error(
+        &reference,
+        &image::open(&high_quality)?.into_rgb8().into_raw(),
+    );
+    assert!(
+        high_error < low_error,
+        "quality 95: {high_error}, quality 20: {low_error}"
+    );
+
+    let portrait_jpeg = outputs.path().join("DSC03270-oriented.jpg");
+    let portrait_export = run_cli(
+        &["develop", "--jpeg-quality", "90"],
+        &[
+            corpus.join("DSC03270.ARW").as_path(),
+            portrait_jpeg.as_path(),
+        ],
+    )?;
+    assert_success(&portrait_export, "portrait JPEG develop");
+    let portrait = image::open(&portrait_jpeg)?;
+    assert_eq!((portrait.width(), portrait.height()), (4_000, 6_000));
+    assert_tagged_srgb_and_normal_orientation(&portrait_jpeg)?;
+
     Ok(())
+}
+
+fn assert_tagged_srgb_and_normal_orientation(path: &Path) -> Result<(), Box<dyn Error>> {
+    let reader = ImageReader::open(path)?.with_guessed_format()?;
+    let mut decoder = reader.into_decoder()?;
+    let profile = decoder.icc_profile()?.ok_or("export has no ICC profile")?;
+    assert_eq!(profile.get(16..20), Some(&b"RGB "[..]));
+    assert_eq!(profile.get(36..40), Some(&b"acsp"[..]));
+    assert!(
+        profile
+            .windows(b"Rohditor sRGB".len())
+            .any(|window| window == b"Rohditor sRGB")
+    );
+    let exif = decoder
+        .exif_metadata()?
+        .ok_or("export has no EXIF metadata")?;
+    assert_eq!(ifd0_short(&exif, 0x0112), Some(1));
+    Ok(())
+}
+
+fn ifd0_short(exif: &[u8], wanted_tag: u16) -> Option<u16> {
+    if exif.get(0..2)? != b"II" || read_le_u16(exif, 2)? != 42 {
+        return None;
+    }
+    let offset = usize::try_from(read_le_u32(exif, 4)?).ok()?;
+    let count = usize::from(read_le_u16(exif, offset)?);
+    for index in 0..count {
+        let entry = offset + 2 + index * 12;
+        if read_le_u16(exif, entry)? == wanted_tag && read_le_u16(exif, entry + 2)? == 3 {
+            return read_le_u16(exif, entry + 8);
+        }
+    }
+    None
+}
+
+fn read_le_u16(data: &[u8], offset: usize) -> Option<u16> {
+    Some(u16::from_le_bytes(
+        data.get(offset..offset + 2)?.try_into().ok()?,
+    ))
+}
+
+fn read_le_u32(data: &[u8], offset: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(
+        data.get(offset..offset + 4)?.try_into().ok()?,
+    ))
+}
+
+fn mean_absolute_error(reference: &[u8], candidate: &[u8]) -> f64 {
+    assert_eq!(reference.len(), candidate.len());
+    reference
+        .iter()
+        .zip(candidate)
+        .map(|(left, right)| f64::from(left.abs_diff(*right)))
+        .sum::<f64>()
+        / reference.len() as f64
 }
 
 fn run_cli(options: &[&str], paths: &[&Path]) -> Result<Output, std::io::Error> {

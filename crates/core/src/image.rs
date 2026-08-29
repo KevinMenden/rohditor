@@ -392,6 +392,15 @@ pub(crate) fn allocate_zeroed_u8(elements: usize) -> Result<Vec<u8>, PipelineErr
     Ok(values)
 }
 
+pub(crate) fn allocate_zeroed_u16(elements: usize) -> Result<Vec<u16>, PipelineError> {
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(elements)
+        .map_err(|_| PipelineError::Allocation { elements })?;
+    values.resize(elements, 0);
+    Ok(values)
+}
+
 fn validate_layout(
     width: usize,
     height: usize,

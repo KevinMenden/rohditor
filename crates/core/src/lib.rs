@@ -8,6 +8,7 @@ mod color;
 mod cpu;
 mod edit;
 mod error;
+mod export;
 mod image;
 mod pipeline;
 
@@ -18,18 +19,23 @@ pub use color::{
 };
 pub use cpu::{
     WhiteBalanceGains, apply_adjustments, demosaic, normalize_raw, render_display_srgb8,
-    white_balance_gains,
+    render_display_srgb8_dithered, render_display_srgb16, white_balance_gains,
 };
 pub use edit::{
     CONTRAST_RANGE, EDIT_RECIPE_SCHEMA_VERSION, EXPOSURE_EV_RANGE, EditRecipe, ParameterRange,
     SATURATION_RANGE, WHITE_BALANCE_MULTIPLIER_RANGE, WhiteBalance,
 };
 pub use error::PipelineError;
+pub use export::{
+    DitherMode, ExportError, ExportFormat, ExportImage, ExportMetadataPolicy, ExportReport,
+    ExportSettings, JPEG_QUALITY_DEFAULT, JPEG_QUALITY_MAX, JPEG_QUALITY_MIN, OutputBitDepth,
+    PngBitDepth, export_image,
+};
 pub use image::{
     BayerPattern, CfaColor, DisplayRgbImage, DisplayTransfer, Halo, ImageRegion, LinearRgbImage,
     LinearRgbSpace, MosaicImage,
 };
 pub use pipeline::{
-    CpuPipeline, CropPolicy, DemosaicAlgorithm, MemoryEstimate, OutputPolicy, RenderOptions,
-    RenderResult, StageTimings,
+    CpuPipeline, CropPolicy, DemosaicAlgorithm, ExportRenderResult, MemoryEstimate, OutputPolicy,
+    RenderOptions, RenderResult, StageTimings,
 };

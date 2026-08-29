@@ -16,6 +16,7 @@ publish = false
 
 [workspace.dependencies]
 anyhow = "1.0"
+bytemuck = "1.25"
 clap = { version = "4.5", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 rayon = "1.11"

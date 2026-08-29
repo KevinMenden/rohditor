@@ -1,9 +1,9 @@
 # Rohditor
 
 Rohditor is a Linux-first RAW photo editor being built for Sony `ILCE-6400`
-files. Decoder validation and the deterministic CPU reference pipeline (Phases
-1 and 2) are complete. The next milestone is the formal export layer described
-in [`plan.md`](plan.md).
+files. Decoder validation, the deterministic CPU reference pipeline, and the
+formal export layer (Phases 1 through 3) are complete. The next milestone is the
+minimal desktop application described in [`plan.md`](plan.md).
 
 ## Current capabilities
 
@@ -13,13 +13,17 @@ in [`plan.md`](plan.md).
   exact embedded-JPEG extraction, and typed corrupt-input errors.
 - Typed sensor-mosaic, scene-linear Rec.2020, and display-sRGB buffers with
   black/white normalization, bilinear Bayer demosaic, camera color conversion,
-  global adjustments, orientation, and deterministic PNG development.
+  global adjustments, orientation, deterministic 8/16-bit quantization, and
+  optional ordered dithering.
+- Transactional 8-bit JPEG and 8/16-bit PNG export with an embedded sRGB ICC
+  profile, selected safe EXIF, configurable JPEG quality, and explicit
+  overwrite protection.
 - A CPU-only test path; building and testing does not require Vulkan or a window
   system.
 
-Formal JPEG/PNG export settings and metadata, the desktop UI, and GPU processing
-are not implemented yet. The Phase 2 color baseline and current limitations are
-documented in [`docs/cpu-pipeline.md`](docs/cpu-pipeline.md).
+The desktop UI and GPU processing are not implemented yet. The Phase 2 color
+baseline is documented in [`docs/cpu-pipeline.md`](docs/cpu-pipeline.md), and
+the export contract is documented in [`docs/export.md`](docs/export.md).
 
 ## Prerequisites
 
@@ -65,21 +69,35 @@ For Sony ARW files, this copies the camera's original embedded JPEG without
 re-encoding it. The destination must end in `.jpg` or `.jpeg`; an existing file
 is preserved unless `--force` is passed.
 
-## Develop a RAW on the CPU
+## Develop and export a RAW on the CPU
 
 ```console
 cargo run --release -p rohditor-cli -- develop \
   testdata/private/DSC00851.ARW target/DSC00851-developed.png
+
+cargo run --release -p rohditor-cli -- develop \
+  --jpeg-quality 92 \
+  testdata/private/DSC00851.ARW target/DSC00851-developed.jpg
+
+cargo run --release -p rohditor-cli -- develop \
+  --png-bit-depth 16 --dither \
+  testdata/private/DSC00851.ARW target/DSC00851-developed-16.png
 ```
 
-`develop` produces a full-resolution, physically oriented, 8-bit sRGB PNG and
-prints decode, processing, encoding, and estimated buffer-memory diagnostics.
-It is headless and never initializes `wgpu` or a window system. Explicit recipe
-arguments include `--exposure`, `--contrast`, `--saturation`, relative
-`--white-balance RED,GREEN,BLUE`, `--crop`, `--demosaic`, and `--orientation`.
-Run `rohditor-cli develop --help` for their accepted values. Existing outputs
-are preserved unless `--force` is passed, and the command refuses to replace a
-source RAW even through a hard link.
+`develop` selects JPEG or PNG from the destination extension and produces a
+full-resolution, physically oriented sRGB image. JPEG quality defaults to 90;
+PNG depth defaults to 8-bit. `--metadata none` omits source EXIF, while safe
+metadata is preserved by default with orientation normalized to top-left after
+pixel rotation. It prints decode, processing, encoding, and estimated
+buffer-memory diagnostics. It is headless and never initializes `wgpu` or a
+window system.
+
+Explicit recipe arguments include `--exposure`, `--contrast`, `--saturation`,
+relative `--white-balance RED,GREEN,BLUE`, `--crop`, `--demosaic`, and
+`--orientation`. Run `rohditor-cli develop --help` for all export and recipe
+options. Existing outputs are preserved unless `--force` is passed, failed
+exports do not truncate an existing destination, and the command refuses to
+replace a source RAW even through a hard link.
 
 ## Dependency and licensing note
 
