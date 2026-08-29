@@ -26,6 +26,21 @@ strides, CFA/color spaces, and output transfer.
 JPEG and PNG encoders consume the final typed display buffer; color matrix,
 transfer, orientation, and quantization behavior do not depend on either codec.
 
+## Interactive preview variant
+
+`CpuPipeline::render_preview` uses the same recipe, color transforms,
+adjustments, orientation, and sRGB8 output contract. Its `PreviewOptions`
+changes only the input resolution. Before demosaic, normalization selects a
+bounded sensor mosaic whose long edge defaults to 2560 pixels. Red, green, and
+blue CFA sub-grids are mapped independently so every output coordinate retains
+the correct Bayer phase and original sensor coordinate is still used for
+black/white-level lookup.
+
+The current reduction is deterministic phase-preserving point selection. It is
+appropriate for the responsive Phase 4 baseline but is not a final antialiased
+RAW resampler. Full-resolution `render` and `render_export` remain byte-for-byte
+unchanged.
+
 ## Recipe definitions
 
 | Parameter | Range | Neutral | Definition |
@@ -50,9 +65,11 @@ pools restricted to one and four threads.
 
 The opt-in private suite develops all six Sony ILCE-6400 samples. Each neutral
 render has the expected 6000 x 4000 or oriented 4000 x 6000 dimensions, broad
-numeric output range, and deterministic repeated full-image hash. The CLI suite
-decodes 8/16-bit PNG and JPEG output, verifies landscape and portrait geometry,
-checks native 16-bit values, and confirms byte-identical repeated PNG encoding.
+numeric output range, and deterministic repeated full-image hash. It also checks
+that each interactive render is 2560 x 1707 or orientation-correct 1707 x 2560.
+The CLI suite decodes 8/16-bit PNG and JPEG output, verifies landscape and
+portrait geometry, checks native 16-bit values, and confirms byte-identical
+repeated PNG encoding.
 
 ## Reference measurement
 
@@ -89,4 +106,6 @@ that these timings vary materially with cache and machine load.
   decoded/core buffers; the deterministic estimate rises to 459 MiB for the
   16-bit display buffer. PNG16 encoding also needs a temporary endian-conversion
   buffer that is outside this core estimate.
-- Preview scaling, buffer reuse, caching, and tiling remain later work.
+- Preview reduction currently uses phase-preserving point selection rather than
+  an antialiased CFA-aware filter. Buffer reuse, stage caching, cancellation,
+  and tiling remain later work.

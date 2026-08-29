@@ -70,40 +70,131 @@ pub fn normalize_raw(
     frame: &RawFrame,
     crop_policy: CropPolicy,
 ) -> Result<MosaicImage<f32>, PipelineError> {
+    normalize_raw_impl(frame, crop_policy, None)
+}
+
+/// Normalize a resolution-limited Bayer mosaic for interactive development.
+///
+/// Samples are selected on their original color-filter phase, so reducing the
+/// mosaic never turns a red, green, or blue sensor site into a different CFA
+/// color. The output preserves the crop aspect ratio and never exceeds
+/// `max_long_edge` on its longest side.
+pub fn normalize_raw_preview(
+    frame: &RawFrame,
+    crop_policy: CropPolicy,
+    max_long_edge: usize,
+) -> Result<MosaicImage<f32>, PipelineError> {
+    normalize_raw_impl(frame, crop_policy, Some(max_long_edge))
+}
+
+fn normalize_raw_impl(
+    frame: &RawFrame,
+    crop_policy: CropPolicy,
+    max_long_edge: Option<usize>,
+) -> Result<MosaicImage<f32>, PipelineError> {
     validate_raw_layout(frame)?;
     let (pattern, crop) = development_geometry(&frame.info, crop_policy)?;
     validate_levels(&frame.info, pattern)?;
 
-    let elements = crop.width.checked_mul(crop.height).ok_or_else(|| {
-        invalid_dimensions(crop.width, crop.height, crop.width, "crop overflowed")
+    let (output_width, output_height) = match max_long_edge {
+        Some(max_long_edge) => preview_dimensions(crop.width, crop.height, max_long_edge)?,
+        None => (crop.width, crop.height),
+    };
+
+    let elements = output_width.checked_mul(output_height).ok_or_else(|| {
+        invalid_dimensions(
+            output_width,
+            output_height,
+            output_width,
+            "preview crop overflowed",
+        )
     })?;
     let mut normalized = allocate_zeroed_f32(elements)?;
     normalized
-        .par_chunks_mut(crop.width)
+        .par_chunks_mut(output_width)
         .enumerate()
         .for_each(|(output_y, output_row)| {
-            let sensor_y = crop.y + output_y;
-            let source_start = sensor_y * frame.row_stride + crop.x;
-            let source_row = &frame.mosaic[source_start..source_start + crop.width];
-            for (output_x, (sample, destination)) in
-                source_row.iter().zip(output_row.iter_mut()).enumerate()
-            {
-                let sensor_x = crop.x + output_x;
+            let crop_y = phase_preserving_sample(output_y, output_height, crop.height);
+            let sensor_y = crop.y + crop_y;
+            for (output_x, destination) in output_row.iter_mut().enumerate() {
+                let crop_x = phase_preserving_sample(output_x, output_width, crop.width);
+                let sensor_x = crop.x + crop_x;
+                let sample = frame.mosaic[sensor_y * frame.row_stride + sensor_x];
                 let black_index = level_index(&frame.info.black_levels, sensor_x, sensor_y, 0);
                 let black = frame.info.black_levels.values[black_index];
                 let color = pattern.color_at(sensor_x, sensor_y);
                 let white = white_level(&frame.info, black_index, color);
-                *destination = (f32::from(*sample) - black) / (white - black);
+                *destination = (f32::from(sample) - black) / (white - black);
             }
         });
 
     MosaicImage::new(
-        crop.width,
-        crop.height,
-        crop.width,
+        output_width,
+        output_height,
+        output_width,
         pattern.shifted(crop.x, crop.y),
         normalized,
     )
+}
+
+fn preview_dimensions(
+    width: usize,
+    height: usize,
+    max_long_edge: usize,
+) -> Result<(usize, usize), PipelineError> {
+    if width < 2 || height < 2 {
+        return Err(invalid_dimensions(
+            width,
+            height,
+            width,
+            "preview development requires a crop of at least 2x2 pixels",
+        ));
+    }
+    if max_long_edge < 2 {
+        return Err(invalid_dimensions(
+            width,
+            height,
+            width,
+            "preview long edge must be at least 2 pixels",
+        ));
+    }
+    let long_edge = width.max(height);
+    if long_edge <= max_long_edge {
+        return Ok((width, height));
+    }
+
+    let scale = |dimension: usize| -> Result<usize, PipelineError> {
+        let numerator = dimension
+            .checked_mul(max_long_edge)
+            .and_then(|value| value.checked_add(long_edge / 2))
+            .ok_or_else(|| {
+                invalid_dimensions(width, height, width, "preview scale calculation overflowed")
+            })?;
+        Ok((numerator / long_edge).clamp(2, dimension))
+    };
+    Ok((scale(width)?, scale(height)?))
+}
+
+fn phase_preserving_sample(
+    output_index: usize,
+    output_length: usize,
+    source_length: usize,
+) -> usize {
+    if output_length == source_length {
+        return output_index;
+    }
+
+    let phase = output_index & 1;
+    let output_phase_count = (output_length + (1 - phase)) / 2;
+    let source_phase_count = (source_length + (1 - phase)) / 2;
+    let output_phase_index = output_index / 2;
+    let source_phase_index = if output_phase_count <= 1 {
+        0
+    } else {
+        (output_phase_index * (source_phase_count - 1) + (output_phase_count - 1) / 2)
+            / (output_phase_count - 1)
+    };
+    phase + source_phase_index * 2
 }
 
 /// Parse and combine as-shot gains with optional relative manual multipliers.
@@ -790,6 +881,69 @@ mod tests {
         };
         let normalized = normalize_raw(&frame, CropPolicy::ActiveArea).expect("valid levels");
         assert_eq!(normalized.data(), [0.5; 4]);
+    }
+
+    #[test]
+    fn preview_normalization_limits_long_edge_and_preserves_cfa_phase() {
+        let width = 12;
+        let height = 8;
+        let info = test_info(width, height, "RGGB");
+        let pattern = BayerPattern::Rggb;
+        let samples = (0..height)
+            .flat_map(|y| {
+                (0..width).map(move |x| match pattern.color_at(x, y) {
+                    CfaColor::Red => 20,
+                    CfaColor::Green => 40,
+                    CfaColor::Blue => 80,
+                })
+            })
+            .collect::<Vec<_>>();
+        let frame = RawFrame {
+            info,
+            row_stride: width,
+            mosaic: Arc::from(samples),
+        };
+
+        let preview =
+            normalize_raw_preview(&frame, CropPolicy::ActiveArea, 6).expect("valid scaled preview");
+        assert_eq!((preview.width(), preview.height()), (6, 4));
+        assert_eq!(preview.pattern(), pattern);
+        for y in 0..preview.height() {
+            for x in 0..preview.width() {
+                let expected = match pattern.color_at(x, y) {
+                    CfaColor::Red => 0.2,
+                    CfaColor::Green => 0.4,
+                    CfaColor::Blue => 0.8,
+                };
+                assert_eq!(preview.get(x, y), Some(&expected));
+            }
+        }
+    }
+
+    #[test]
+    fn preview_normalization_rejects_an_unusable_target() {
+        let frame = RawFrame {
+            info: test_info(4, 4, "RGGB"),
+            row_stride: 4,
+            mosaic: Arc::from(vec![50; 16]),
+        };
+
+        let error = normalize_raw_preview(&frame, CropPolicy::ActiveArea, 1)
+            .expect_err("one-pixel preview target must fail");
+        assert!(error.to_string().contains("at least 2 pixels"));
+    }
+
+    #[test]
+    fn preview_normalization_rejects_a_one_pixel_crop_without_panicking() {
+        let frame = RawFrame {
+            info: test_info(1, 4, "RGGB"),
+            row_stride: 1,
+            mosaic: Arc::from(vec![50; 4]),
+        };
+
+        let error = normalize_raw_preview(&frame, CropPolicy::ActiveArea, 2_560)
+            .expect_err("one-pixel crop must fail");
+        assert!(error.to_string().contains("at least 2x2"));
     }
 
     #[test]

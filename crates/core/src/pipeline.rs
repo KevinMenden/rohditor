@@ -7,9 +7,13 @@ use crate::color::camera_color_transform;
 use crate::cpu::apply_camera_color_transform;
 use crate::{
     DisplayRgbImage, DitherMode, EditRecipe, ExportImage, LinearRgbImage, OutputBitDepth,
-    PipelineError, apply_adjustments, demosaic, normalize_raw, render_display_srgb8,
-    render_display_srgb8_dithered, render_display_srgb16, white_balance_gains,
+    PipelineError, apply_adjustments, demosaic, normalize_raw, normalize_raw_preview,
+    render_display_srgb8, render_display_srgb8_dithered, render_display_srgb16,
+    white_balance_gains,
 };
+
+/// Default longest edge of an interactively developed preview.
+pub const DEFAULT_PREVIEW_LONG_EDGE: usize = 2_560;
 
 /// Sensor crop selected before normalization.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -39,6 +43,22 @@ pub struct RenderOptions {
     pub crop_policy: CropPolicy,
     pub demosaic: DemosaicAlgorithm,
     pub output_policy: OutputPolicy,
+}
+
+/// Resolution and processing choices for an interactive CPU preview.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreviewOptions {
+    pub render: RenderOptions,
+    pub max_long_edge: usize,
+}
+
+impl Default for PreviewOptions {
+    fn default() -> Self {
+        Self {
+            render: RenderOptions::default(),
+            max_long_edge: DEFAULT_PREVIEW_LONG_EDGE,
+        }
+    }
 }
 
 /// Wall-clock timings for each full-frame CPU stage.
@@ -99,6 +119,33 @@ impl CpuPipeline {
             .orientation_override
             .unwrap_or(frame.info.orientation);
         let image = render_display_srgb8(&linear, orientation, options.output_policy)?;
+        timings.output_conversion = output_started.elapsed();
+        timings.total = total_started.elapsed();
+
+        Ok(RenderResult {
+            image,
+            timings,
+            memory,
+        })
+    }
+
+    /// Render an sRGB8 preview from a CFA-phase-preserving, resolution-limited
+    /// sensor mosaic.
+    pub fn render_preview(
+        &self,
+        frame: &RawFrame,
+        recipe: &EditRecipe,
+        options: PreviewOptions,
+    ) -> Result<RenderResult, PipelineError> {
+        let total_started = Instant::now();
+        let (linear, mut timings) = prepare_linear_preview(frame, recipe, options)?;
+        let memory = memory_estimate(frame, linear.width(), linear.height(), size_of::<u8>())?;
+
+        let output_started = Instant::now();
+        let orientation = recipe
+            .orientation_override
+            .unwrap_or(frame.info.orientation);
+        let image = render_display_srgb8(&linear, orientation, options.render.output_policy)?;
         timings.output_conversion = output_started.elapsed();
         timings.total = total_started.elapsed();
 
@@ -173,6 +220,48 @@ fn prepare_linear(
 
     let demosaic_started = Instant::now();
     let mut linear = demosaic(&normalized, gains, options.demosaic)?;
+    let demosaic = demosaic_started.elapsed();
+    drop(normalized);
+
+    let color_started = Instant::now();
+    apply_camera_color_transform(&mut linear, &camera_transform)?;
+    let color_conversion = color_started.elapsed();
+
+    let adjustments_started = Instant::now();
+    apply_adjustments(&mut linear, recipe)?;
+    let adjustments = adjustments_started.elapsed();
+
+    Ok((
+        linear,
+        StageTimings {
+            metadata,
+            normalization,
+            demosaic,
+            color_conversion,
+            adjustments,
+            ..StageTimings::default()
+        },
+    ))
+}
+
+fn prepare_linear_preview(
+    frame: &RawFrame,
+    recipe: &EditRecipe,
+    options: PreviewOptions,
+) -> Result<(LinearRgbImage<f32>, StageTimings), PipelineError> {
+    let metadata_started = Instant::now();
+    recipe.validate()?;
+    let gains = white_balance_gains(&frame.info, recipe.white_balance)?;
+    let camera_transform = camera_color_transform(&frame.info)?;
+    let metadata = metadata_started.elapsed();
+
+    let normalization_started = Instant::now();
+    let normalized =
+        normalize_raw_preview(frame, options.render.crop_policy, options.max_long_edge)?;
+    let normalization = normalization_started.elapsed();
+
+    let demosaic_started = Instant::now();
+    let mut linear = demosaic(&normalized, gains, options.render.demosaic)?;
     let demosaic = demosaic_started.elapsed();
     drop(normalized);
 

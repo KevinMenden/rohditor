@@ -554,6 +554,22 @@ contract and measurements are recorded in `docs/export.md` and
 - CPU mode works when GPU processing is disabled.
 - Export uses a recipe snapshot and is unaffected by subsequent UI changes.
 
+**Phase 4 status (2026-08-29): complete.** The `eframe` desktop application now
+uses Vulkan/wgpu by default with a compiled glow fallback and an XDG
+portal-capable `rfd` dialog path. A dedicated CPU worker asynchronously probes
+metadata, displays an orientation-correct embedded placeholder, decodes RAW,
+develops a phase-preserving 2560-pixel preview, and performs full-resolution
+snapshot exports. Document ID and monotonic recipe revision gates prevent stale
+texture installation; queued slider renders coalesce, drag history becomes one
+undo command, and reset/undo/redo enqueue the expected recipes. Zoom, fit, and
+pan touch only the display texture. The UI reports renderer versus CPU
+processor, job stages, timings, and actionable failures. Unit tests cover the
+revision/history/coalescing contracts, and opt-in private tests exercise all six
+preview dimensions plus a real background open/preview/export. Live Plasma
+Wayland checks displayed `DSC00851.ARW` correctly under both glow and Vulkan
+wgpu; the latter selected the RX 9070 XT through RADV. The implementation and
+limits are recorded in `docs/desktop.md`.
+
 ### Phase 5: GPU capability detection and first accelerated preview
 
 #### Tasks
@@ -744,9 +760,7 @@ These must be answered through input samples or implementation measurements rath
 
 ## 16. Immediate next action
 
-Phases 0 through 3 are complete, and Gate A is approved for the current corpus.
-The next implementation session should begin Phase 4 with the minimal `eframe`
-desktop shell and renderer selection, then add asynchronous document opening,
-the embedded-preview placeholder, CPU-developed previews, adjustment controls,
-revision-aware background coordination, and an export dialog backed by the
-Phase 3 `ExportSettings` API.
+Phases 0 through 4 are complete, and Gate A is approved for the current corpus.
+The next implementation session should begin Phase 5 by formalizing renderer
+and processor preferences, sharing eframe's wgpu device and adapter facts, and
+adding capability detection before the first GPU-adjusted preview path.

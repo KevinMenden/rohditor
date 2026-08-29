@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
-use rohditor_core::{CpuPipeline, EditRecipe, RenderOptions};
+use rohditor_core::{CpuPipeline, EditRecipe, PreviewOptions, RenderOptions};
 use rohditor_raw::{RawDecoder, RawOrientation, RawlerDecoder};
 
 const SAMPLES: [&str; 6] = [
@@ -42,6 +42,17 @@ fn neutral_recipe_develops_every_private_sample_deterministically() -> Result<()
             expected_dimensions.0 * expected_dimensions.1 * 3,
             "{name}"
         );
+        let preview = pipeline.render_preview(&frame, &recipe, PreviewOptions::default())?;
+        let expected_preview_dimensions = if orientation == RawOrientation::Rotate270 {
+            (1_707, 2_560)
+        } else {
+            (2_560, 1_707)
+        };
+        assert_eq!(
+            (preview.image.width(), preview.image.height()),
+            expected_preview_dimensions,
+            "{name} preview"
+        );
 
         let statistics = statistics(result.image.data());
         assert!(statistics.maximum - statistics.minimum >= 128, "{name}");
@@ -52,7 +63,7 @@ fn neutral_recipe_develops_every_private_sample_deterministically() -> Result<()
             first_hash = Some(hash);
         }
         println!(
-            "{name}: {}x{}, codes {}..{} ({} distinct), mean {:.2}, hash {hash:016x}, render {:.1} ms, estimated peak {} MiB",
+            "{name}: {}x{}, codes {}..{} ({} distinct), mean {:.2}, hash {hash:016x}, render {:.1} ms, 2560-edge preview {:.1} ms, estimated peak {} MiB",
             result.image.width(),
             result.image.height(),
             statistics.minimum,
@@ -60,6 +71,7 @@ fn neutral_recipe_develops_every_private_sample_deterministically() -> Result<()
             statistics.distinct_codes,
             statistics.mean,
             result.timings.total.as_secs_f64() * 1_000.0,
+            preview.timings.total.as_secs_f64() * 1_000.0,
             result.memory.estimated_peak_bytes.div_ceil(1024 * 1024),
         );
     }

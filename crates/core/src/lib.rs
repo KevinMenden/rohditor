@@ -18,8 +18,9 @@ pub use color::{
     convert_rec2020_to_display_srgb, linear_srgb_to_srgb, srgb_to_linear_srgb,
 };
 pub use cpu::{
-    WhiteBalanceGains, apply_adjustments, demosaic, normalize_raw, render_display_srgb8,
-    render_display_srgb8_dithered, render_display_srgb16, white_balance_gains,
+    WhiteBalanceGains, apply_adjustments, demosaic, normalize_raw, normalize_raw_preview,
+    render_display_srgb8, render_display_srgb8_dithered, render_display_srgb16,
+    white_balance_gains,
 };
 pub use edit::{
     CONTRAST_RANGE, EDIT_RECIPE_SCHEMA_VERSION, EXPOSURE_EV_RANGE, EditRecipe, ParameterRange,
@@ -36,6 +37,6 @@ pub use image::{
     LinearRgbSpace, MosaicImage,
 };
 pub use pipeline::{
-    CpuPipeline, CropPolicy, DemosaicAlgorithm, ExportRenderResult, MemoryEstimate, OutputPolicy,
-    RenderOptions, RenderResult, StageTimings,
+    CpuPipeline, CropPolicy, DEFAULT_PREVIEW_LONG_EDGE, DemosaicAlgorithm, ExportRenderResult,
+    MemoryEstimate, OutputPolicy, PreviewOptions, RenderOptions, RenderResult, StageTimings,
 };
