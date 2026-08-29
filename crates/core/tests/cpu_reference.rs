@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use rayon::ThreadPoolBuilder;
 use rohditor_core::{
-    CpuPipeline, CropPolicy, DitherMode, EditRecipe, ExportImage, OutputBitDepth, RenderOptions,
-    WhiteBalance, camera_color_transform,
+    CpuPipeline, CropPolicy, DitherMode, EditRecipe, ExportImage, OutputBitDepth, PreviewOptions,
+    RenderOptions, WhiteBalance, camera_color_transform,
 };
 use rohditor_raw::{
     CameraColorMatrix, CaptureMetadata, CfaPattern, ImageRect, LevelPattern,
@@ -43,6 +43,27 @@ fn synthetic_pipeline_is_identical_with_one_and_multiple_rayon_threads()
     assert_eq!(single.memory.linear_rgb_bytes, 288);
     assert_eq!(single.memory.display_rgb_bytes, 72);
     assert_eq!(single.memory.estimated_peak_bytes, 480);
+    Ok(())
+}
+
+#[test]
+fn preview_pipeline_is_resolution_limited_before_rgb_development() -> Result<(), Box<dyn Error>> {
+    let frame = synthetic_rggb_frame();
+    let result = CpuPipeline.render_preview(
+        &frame,
+        &EditRecipe::default(),
+        PreviewOptions {
+            render: RenderOptions::default(),
+            max_long_edge: 3,
+        },
+    )?;
+
+    // The recommended crop is 6x4 and the fixture is rotated 270 degrees.
+    assert_eq!((result.image.width(), result.image.height()), (2, 3));
+    assert_eq!(result.memory.normalized_mosaic_bytes, 24);
+    assert_eq!(result.memory.linear_rgb_bytes, 72);
+    assert_eq!(result.memory.display_rgb_bytes, 18);
+    assert_eq!(result.memory.decoded_raw_bytes, 96);
     Ok(())
 }
 

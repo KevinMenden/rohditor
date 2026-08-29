@@ -53,6 +53,32 @@ Measured on 2026-08-29 with the same release build and reference workstation:
 See [`export.md`](export.md) for the format, metadata, and destination-write
 contract.
 
+## Phase 4 desktop validation
+
+Measured on 2026-08-29 with a debug desktop build on the Plasma/KWin Wayland
+session:
+
+- The glow fallback opened `DSC00851.ARW`, installed the embedded placeholder,
+  and replaced it with a 2560×1707 CPU-developed texture in 991 ms.
+- The default wgpu path selected Vulkan and
+  `AMD Radeon RX 9070 XT (RADV GFX1201)`, then displayed the same CPU preview in
+  1,087 ms. llvmpipe was visible as a second adapter but was not selected.
+- Both windows reported the UI renderer separately from `Processor: CPU` and
+  displayed the expected adjustment, history, viewport, progress, and export
+  controls.
+- Across two release private-suite runs, all six 2560-edge previews completed
+  in 61 to 77 ms each after decode. The end-to-end desktop-worker test (open,
+  preview, and full-resolution JPEG snapshot export) completed in about 1.3
+  seconds on a warm filesystem cache.
+- The desktop dependency graph contains one `wgpu` version shared by eframe,
+  egui-wgpu, and Rohditor's explicit Vulkan feature selection. The glow backend
+  remains compiled for fallback use.
+
+The timings above measure the CPU preview stages after the full sensor frame was
+decoded; embedded-placeholder latency and decode timing are reported as
+separate UI states. See [`desktop.md`](desktop.md) for the worker and revision
+contract.
+
 ## Target camera corpus
 
 - Camera: Sony alpha 6400
@@ -76,6 +102,6 @@ in-camera JPEGs remain optional references.
 
 ## Still open
 
-- Whether Wayland, X11, or both need first-class testing.
+- X11 behavior still needs a live validation pass; Wayland is validated.
 - The eventual Rohditor project license.
 - Live `wgpu` format/limit validation, deferred until the GPU phase.

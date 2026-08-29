@@ -1,9 +1,10 @@
 # Rohditor
 
 Rohditor is a Linux-first RAW photo editor being built for Sony `ILCE-6400`
-files. Decoder validation, the deterministic CPU reference pipeline, and the
-formal export layer (Phases 1 through 3) are complete. The next milestone is the
-minimal desktop application described in [`plan.md`](plan.md).
+files. Decoder validation, the deterministic CPU reference pipeline, formal
+export layer, and minimal desktop editor (Phases 1 through 4) are complete. The
+next milestone is GPU capability detection and accelerated preview processing
+described in [`plan.md`](plan.md).
 
 ## Current capabilities
 
@@ -18,12 +19,18 @@ minimal desktop application described in [`plan.md`](plan.md).
 - Transactional 8-bit JPEG and 8/16-bit PNG export with an embedded sRGB ICC
   profile, selected safe EXIF, configurable JPEG quality, and explicit
   overwrite protection.
-- A CPU-only test path; building and testing does not require Vulkan or a window
-  system.
+- An `eframe` desktop editor with a portal-backed open/save workflow, embedded
+  loading preview, 2560-edge developed CPU preview, global adjustment controls,
+  zoom/pan/fit, revision-safe background work, undo/redo, and background export.
+- wgpu/Vulkan UI rendering with a compiled glow fallback. Image processing is
+  deliberately CPU-only until Phase 5.
+- Headless core, RAW, and CLI test paths that do not initialize Vulkan or a
+  window system.
 
-The desktop UI and GPU processing are not implemented yet. The Phase 2 color
-baseline is documented in [`docs/cpu-pipeline.md`](docs/cpu-pipeline.md), and
-the export contract is documented in [`docs/export.md`](docs/export.md).
+The desktop worker contract is documented in
+[`docs/desktop.md`](docs/desktop.md), the Phase 2 color baseline in
+[`docs/cpu-pipeline.md`](docs/cpu-pipeline.md), and the export contract in
+[`docs/export.md`](docs/export.md).
 
 ## Prerequisites
 
@@ -47,6 +54,18 @@ keeps full-resolution development fast):
 ```console
 cargo test --release --workspace --tests -- --ignored --nocapture
 ```
+
+## Run the desktop editor
+
+```console
+cargo run --release -p rohditor-desktop
+cargo run --release -p rohditor-desktop -- testdata/private/DSC00851.ARW
+```
+
+The first form opens files through the XDG portal-capable native dialog. The
+second opens a file immediately. wgpu/Vulkan is preferred for drawing the UI;
+use `--renderer glow` for the OpenGL fallback. Both modes still develop previews
+and exports on the CPU in Phase 4.
 
 ## Inspect a RAW file
 
