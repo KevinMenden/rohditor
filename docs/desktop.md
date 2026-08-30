@@ -1,6 +1,7 @@
-# Phase 4 desktop application
+# Phases 4 and 5 desktop application
 
-Phase 4 provides a minimal `eframe` editor around the CPU reference pipeline.
+Phase 4 provides the minimal `eframe` editor around the CPU reference pipeline.
+Phase 5 adds a downstream GPU preview processor while retaining that CPU path.
 The desktop crate owns widgets and document coordination; the core and RAW
 crates remain independent of `egui`.
 
@@ -23,9 +24,19 @@ rohditor-desktop --renderer wgpu   # require the Vulkan-backed wgpu UI
 rohditor-desktop --renderer glow   # OpenGL UI fallback
 ```
 
-Phase 4 always develops images on the CPU. Selecting wgpu only changes how
-`egui` draws the window and uploads the completed CPU image as a display
-texture. GPU image processing starts in Phase 5.
+Interactive preview processing is separate from UI renderer selection:
+
+```console
+rohditor-desktop --processor auto  # shared hardware wgpu processor, otherwise CPU
+rohditor-desktop --processor gpu   # require a compatible shared wgpu processor
+rohditor-desktop --processor cpu   # CPU preview only; no Rohditor GPU resources
+```
+
+In `Auto`, a wgpu renderer supplies its existing adapter, device, and queue to
+the GPU processor. A CPU rasterizer, incompatible texture formats, or a later
+GPU preview failure produces a visible CPU fallback reason. `GPU` reports an
+initialization/rendering error rather than silently changing processors. `glow`
+does not expose shared wgpu state, so it supports CPU preview only.
 
 ## Document and worker model
 
@@ -35,9 +46,12 @@ a mutable reference to an in-flight render buffer.
 
 A dedicated ordinary Rust thread receives these jobs:
 
-1. Probe metadata, decode and orient the embedded JPEG, then decode the sensor
-   frame.
-2. Develop a resolution-limited CPU preview.
+1. Open one coherent RAW session, probe metadata, decode and orient the optional
+   embedded JPEG, then decode the sensor frame.
+2. Develop a resolution-limited linear CPU base. CPU mode completes its display
+   conversion on this worker; GPU mode also packs a half-float upload payload
+   here, then sends it to the UI thread for one GPU upload and downstream shader
+   work.
 3. Render and transactionally encode a full-resolution export.
 
 The worker sends progress and typed result messages and asks `egui` to repaint.
@@ -49,9 +63,9 @@ Queued slider requests for the same document are collapsed to the newest
 revision before work begins. Work already running is allowed to finish, but the
 UI installs a result only when both identity fields still match. Closing a
 document invalidates its active identity, and every replacement receives a new
-ID; queued preview work for closed IDs is marked abandoned. The worker is
-detached during application shutdown so closing the window does not wait for a
-long render.
+ID; queued open, preview, and export work for closed IDs is marked abandoned.
+The coordinator retains the worker handle and reports an unexpected worker
+panic to the UI. Shutdown does not wait for an in-flight long render.
 
 ## Preview path
 
@@ -65,6 +79,14 @@ demosaic. Sampling maps the red, green, and blue CFA sub-grids independently,
 so reduced coordinates retain their Bayer phase. A 6000×4000 A6400 crop becomes
 2560×1707 (or 1707×2560 after portrait orientation). Full-resolution render and
 export behavior is unchanged.
+
+CPU mode retains one typed demosaiced linear base on the worker for the active
+frame and white balance. GPU mode retains its equivalent linear base as an
+`Rgba16Float` texture on eframe's shared device. Exposure, contrast, saturation,
+and orientation changes reuse the relevant base; a source or white-balance
+change rebuilds it. The GPU display texture is registered directly with egui;
+it is not copied back to CPU before the viewport samples it. See
+[`gpu-preview.md`](gpu-preview.md) for the detailed texture contract.
 
 Fit, 100%, wheel zoom, and drag panning transform only the displayed texture.
 They do not enqueue RAW development.
@@ -99,13 +121,17 @@ context.
 ## Verification and current limits
 
 Unit tests cover revision advancement, drag coalescing, reset/undo/redo, stale
-ticket rejection, preview-result coalescing, EXIF orientation mapping, and UI to
-core export-setting conversion. Core tests cover phase-preserving preview
-scaling. The opt-in private worker test performs real asynchronous open,
-2560-edge preview, and snapshot export with `DSC00851.ARW`.
+ticket rejection, preview-result coalescing, CPU-to-GPU base handoff, EXIF
+orientation mapping, and UI to core export-setting conversion. Core tests cover
+phase-preserving preview scaling. Opt-in Vulkan tests compare GPU output against
+the CPU reference with a rotated synthetic fixture and `DSC00851.ARW`; the
+acceptance tolerance is at most two 8-bit sRGB codes per channel. The opt-in
+private worker test performs real asynchronous open, 2560-edge preview, and
+snapshot export with `DSC00851.ARW`.
 
 On the reference Plasma Wayland desktop, both glow and Vulkan/wgpu displayed a
 real A6400 CPU preview correctly. The wgpu run selected the RX 9070 XT through
-RADV. Cooperative cancellation, stage caches, queue bounds, and GPU image
-processing remain later-phase work; stale results are safe now, but an obsolete
-render that has already started may still consume CPU until it finishes.
+RADV. GPU parity checks run against that Vulkan path. Cooperative cancellation,
+bounded command queues, multi-level cache eviction, and measured performance
+tuning remain Phase 6 work; stale results are safe now, but an obsolete CPU
+base render that has already started may still consume CPU until it finishes.

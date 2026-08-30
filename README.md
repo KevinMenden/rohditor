@@ -2,9 +2,9 @@
 
 Rohditor is a Linux-first RAW photo editor being built for Sony `ILCE-6400`
 files. Decoder validation, the deterministic CPU reference pipeline, formal
-export layer, and minimal desktop editor (Phases 1 through 4) are complete. The
-next milestone is GPU capability detection and accelerated preview processing
-described in [`plan.md`](plan.md).
+export layer, desktop editor, and first GPU preview path (Phases 1 through 5)
+are complete. The next milestone is preview caching, cancellation, and measured
+performance work described in [`plan.md`](plan.md).
 
 ## Current capabilities
 
@@ -20,16 +20,20 @@ described in [`plan.md`](plan.md).
   profile, selected safe EXIF, configurable JPEG quality, and explicit
   overwrite protection.
 - An `eframe` desktop editor with a portal-backed open/save workflow, embedded
-  loading preview, 2560-edge developed CPU preview, global adjustment controls,
-  zoom/pan/fit, revision-safe background work, undo/redo, and background export.
-- wgpu/Vulkan UI rendering with a compiled glow fallback. Image processing is
-  deliberately CPU-only until Phase 5.
+  loading preview, 2560-edge developed CPU or GPU preview, global adjustment
+  controls, zoom/pan/fit, revision-safe background work, undo/redo, and
+  background export.
+- wgpu/Vulkan UI rendering with a compiled glow fallback. GPU previews share
+  eframe's device and queue, retain the linear base on the GPU, and display an
+  egui-native texture without CPU readback. CPU previews and all exports remain
+  available without GPU processing.
 - Headless core, RAW, and CLI test paths that do not initialize Vulkan or a
   window system.
 
-The desktop worker contract is documented in
-[`docs/desktop.md`](docs/desktop.md), the Phase 2 color baseline in
-[`docs/cpu-pipeline.md`](docs/cpu-pipeline.md), and the export contract in
+The desktop worker and GPU-preview contracts are documented in
+[`docs/desktop.md`](docs/desktop.md) and
+[`docs/gpu-preview.md`](docs/gpu-preview.md). The Phase 2 color baseline is in
+[`docs/cpu-pipeline.md`](docs/cpu-pipeline.md), and the export contract is in
 [`docs/export.md`](docs/export.md).
 
 ## Prerequisites
@@ -64,8 +68,19 @@ cargo run --release -p rohditor-desktop -- testdata/private/DSC00851.ARW
 
 The first form opens files through the XDG portal-capable native dialog. The
 second opens a file immediately. wgpu/Vulkan is preferred for drawing the UI;
-use `--renderer glow` for the OpenGL fallback. Both modes still develop previews
-and exports on the CPU in Phase 4.
+use `--renderer glow` for the OpenGL fallback.
+
+Interactive preview processing is independently selectable:
+
+```console
+rohditor-desktop --processor auto  # use a shared hardware wgpu device, otherwise CPU
+rohditor-desktop --processor gpu   # require a compatible shared wgpu device
+rohditor-desktop --processor cpu   # never create image-processing GPU resources
+```
+
+`--renderer glow` cannot provide a shared `wgpu` device, so `--processor auto`
+falls back to CPU and `--processor gpu` reports an initialization error. Exports
+remain full-resolution CPU renders in Phase 5.
 
 ## Inspect a RAW file
 
@@ -86,7 +101,9 @@ cargo run -p rohditor-cli -- extract-preview \
 
 For Sony ARW files, this copies the camera's original embedded JPEG without
 re-encoding it. The destination must end in `.jpg` or `.jpeg`; an existing file
-is preserved unless `--force` is passed.
+is preserved unless `--force` is passed. Preview output uses the same
+transactional sibling-file commit as developed exports and refuses a destination
+that resolves to the source RAW through either a hard or symbolic link.
 
 ## Develop and export a RAW on the CPU
 

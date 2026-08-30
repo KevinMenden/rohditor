@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use rayon::ThreadPoolBuilder;
 use rohditor_core::{
-    CpuPipeline, CropPolicy, DitherMode, EditRecipe, ExportImage, OutputBitDepth, PreviewOptions,
-    RenderOptions, WhiteBalance, camera_color_transform,
+    CpuPipeline, CropPolicy, DitherMode, EditRecipe, ExportImage, LinearRgbSpace, OutputBitDepth,
+    PreviewOptions, RenderOptions, WhiteBalance, camera_color_transform,
 };
 use rohditor_raw::{
     CameraColorMatrix, CaptureMetadata, CfaPattern, ImageRect, LevelPattern,
@@ -68,6 +68,66 @@ fn preview_pipeline_is_resolution_limited_before_rgb_development() -> Result<(),
 }
 
 #[test]
+fn unbounded_preview_target_falls_back_to_the_full_crop_without_size_overflow()
+-> Result<(), Box<dyn Error>> {
+    let frame = synthetic_rggb_frame();
+    let result = CpuPipeline.render_preview(
+        &frame,
+        &EditRecipe::default(),
+        PreviewOptions {
+            render: RenderOptions::default(),
+            max_long_edge: usize::MAX,
+        },
+    )?;
+    assert_eq!((result.image.width(), result.image.height()), (4, 6));
+    Ok(())
+}
+
+#[test]
+fn reusable_preview_base_matches_direct_render_and_rejects_stale_white_balance()
+-> Result<(), Box<dyn Error>> {
+    let frame = synthetic_rggb_frame();
+    let options = PreviewOptions {
+        render: RenderOptions::default(),
+        max_long_edge: 3,
+    };
+    let base_recipe = EditRecipe::default();
+    let base = CpuPipeline.prepare_preview_base(&frame, &base_recipe, options)?;
+    assert_eq!(base.image().space(), LinearRgbSpace::Rec2020D65);
+    assert_eq!((base.image().width(), base.image().height()), (3, 2));
+
+    let adjusted = EditRecipe {
+        exposure_ev: 0.75,
+        contrast: 0.2,
+        saturation: 1.3,
+        ..base_recipe.clone()
+    };
+    let reused =
+        CpuPipeline.render_preview_from_base(&base, &adjusted, options.render.output_policy)?;
+    let direct = CpuPipeline.render_preview(&frame, &adjusted, options)?;
+    assert_eq!(reused.image, direct.image);
+    assert_eq!(
+        reused.memory.estimated_peak_bytes,
+        direct.memory.estimated_peak_bytes + direct.memory.linear_rgb_bytes
+    );
+
+    let stale = EditRecipe {
+        white_balance: WhiteBalance::ManualMultipliers {
+            red: 1.1,
+            green: 1.0,
+            blue: 0.9,
+        },
+        ..adjusted
+    };
+    assert!(
+        CpuPipeline
+            .render_preview_from_base(&base, &stale, options.render.output_policy)
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
 fn sixteen_bit_dithered_export_is_identical_across_rayon_thread_counts()
 -> Result<(), Box<dyn Error>> {
     let frame = synthetic_rggb_frame();
@@ -116,6 +176,20 @@ fn missing_camera_calibration_is_an_actionable_error() {
 }
 
 #[test]
+fn unreasonable_cpu_working_set_is_rejected_before_image_allocation() {
+    let mut frame = synthetic_rggb_frame();
+    frame.info.width = 200_000;
+    frame.info.height = 200_000;
+    let error = CpuPipeline
+        .render(&frame, &EditRecipe::default(), RenderOptions::default())
+        .expect_err("unreasonable working set must fail");
+    assert!(matches!(
+        error,
+        rohditor_core::PipelineError::WorkingSetLimit { .. }
+    ));
+}
+
+#[test]
 fn camera_matrix_direction_maps_a_balanced_neutral_to_rec2020_white() {
     let frame = synthetic_rggb_frame();
     let transform = camera_color_transform(&frame.info).expect("valid synthetic matrix");
@@ -156,6 +230,7 @@ fn synthetic_rggb_frame() -> RawFrame {
             clean_make: "Rohditor".to_owned(),
             clean_model: "RGGB fixture".to_owned(),
             source_size_bytes: 0,
+            source_identity: None,
             width,
             height,
             components_per_pixel: 1,

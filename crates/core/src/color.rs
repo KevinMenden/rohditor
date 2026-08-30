@@ -213,9 +213,10 @@ pub fn convert_rec2020_to_display_srgb(
                 .chunks_exact(3)
                 .zip(output_row.chunks_exact_mut(3))
             {
-                let linear_srgb = rec2020_to_srgb.transform([source[0], source[1], source[2]]);
-                let clipped = clip_linear_srgb_for_output(linear_srgb);
-                destination.copy_from_slice(&clipped.map(linear_srgb_to_srgb));
+                destination.copy_from_slice(&encode_rec2020_for_srgb_output(
+                    rec2020_to_srgb,
+                    [source[0], source[1], source[2]],
+                ));
             }
         });
     DisplayRgbImage::new(
@@ -225,6 +226,15 @@ pub fn convert_rec2020_to_display_srgb(
         DisplayTransfer::Srgb,
         output,
     )
+}
+
+/// The shared per-pixel output transform used by float display conversion and
+/// integer CPU quantization. Future shaders must implement this same sequence.
+pub(crate) fn encode_rec2020_for_srgb_output(
+    rec2020_to_srgb: Matrix3,
+    source: [f32; 3],
+) -> [f32; 3] {
+    clip_linear_srgb_for_output(rec2020_to_srgb.transform(source)).map(linear_srgb_to_srgb)
 }
 
 /// Phase 2's initial highlight and gamut policy: hard clip linear sRGB to [0, 1].

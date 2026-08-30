@@ -1,6 +1,7 @@
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use rohditor_raw::{
     CameraColorMatrix, DecoderLimits, EmbeddedPreviewInfo, EncodedPreviewFormat, ImageRect,
@@ -92,6 +93,17 @@ fn sony_a6400_corpus_matches_scrubbed_expectations() -> Result<(), Box<dyn Error
         assert_eq!(info.model, common.model, "{file_name}");
         assert_eq!(info.clean_make, common.clean_make, "{file_name}");
         assert_eq!(info.clean_model, common.clean_model, "{file_name}");
+        let source_identity = info
+            .source_identity
+            .as_ref()
+            .ok_or("decoded file has no source identity")?;
+        assert_eq!(source_identity.size_bytes, fs::metadata(&file)?.len());
+        assert!(source_identity.modified_unix_nanos.is_some());
+        #[cfg(unix)]
+        assert!(
+            source_identity.filesystem_device.is_some()
+                && source_identity.filesystem_inode.is_some()
+        );
         assert_eq!((info.width, info.height), (common.width, common.height));
         assert_eq!(
             info.components_per_pixel, common.components_per_pixel,
@@ -194,6 +206,7 @@ fn configured_limits_reject_the_private_image_before_full_decode() -> Result<(),
         max_width: 1_000,
         max_height: 1_000,
         max_samples: 1_000_000,
+        ..DecoderLimits::default()
     });
 
     assert!(matches!(
@@ -204,6 +217,57 @@ fn configured_limits_reject_the_private_image_before_full_decode() -> Result<(),
         decoder.decode(&sample),
         Err(RawError::InvalidDimensions { .. })
     ));
+    Ok(())
+}
+
+#[test]
+#[ignore = "derives a temporary damaged-preview input from the ignored private Sony corpus"]
+fn damaged_optional_preview_does_not_block_metadata_or_sensor_decode() -> Result<(), Box<dyn Error>>
+{
+    let source = private_corpus_directory().join("DSC00851.ARW");
+    let decoder = RawlerDecoder::default();
+    let preview = decoder
+        .embedded_preview(&source)?
+        .ok_or("private sample has no embedded preview")?;
+    let mut damaged = fs::read(&source)?;
+    let prefix_length = preview.bytes.len().min(64);
+    let prefix = &preview.bytes[..prefix_length];
+    let preview_offset = damaged
+        .windows(prefix.len())
+        .position(|window| window == prefix)
+        .ok_or("could not locate embedded preview bytes in private sample")?;
+    damaged[preview_offset] = 0;
+
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temporary = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target")
+        .join(format!(
+            "damaged-preview-{}-{unique}.ARW",
+            std::process::id()
+        ));
+    fs::write(&temporary, damaged)?;
+
+    let result = (|| -> Result<(), Box<dyn Error>> {
+        assert!(matches!(
+            decoder.embedded_preview(&temporary),
+            Err(RawError::Corrupt { .. })
+        ));
+        let info = decoder.probe(&temporary)?;
+        assert_eq!(info.embedded_preview, None);
+        let frame = decoder.decode(&temporary)?;
+        assert_eq!(frame.info.embedded_preview, None);
+        assert_eq!(
+            frame.mosaic.len(),
+            frame.info.width * frame.info.height * frame.info.components_per_pixel
+        );
+        Ok(())
+    })();
+    let cleanup = fs::remove_file(&temporary);
+    result?;
+    cleanup?;
     Ok(())
 }
 

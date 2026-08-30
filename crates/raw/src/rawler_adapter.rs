@@ -1,8 +1,11 @@
 use std::any::Any;
+use std::io::Cursor;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::UNIX_EPOCH;
 
+use image::ImageDecoder as _;
 use rawler::decoders::{Decoder, FormatHint, RawDecodeParams, RawMetadata};
 use rawler::formats::tiff::reader::{GenericTiffReader, TiffReader};
 use rawler::imgop::Rect;
@@ -10,12 +13,13 @@ use rawler::rawimage::{RawImage, RawImageData, RawPhotometricInterpretation};
 use rawler::rawsource::RawSource;
 use rawler::tags::{ExifTag, TiffCommonTag};
 use rawler::{Orientation, RawlerError};
-use tracing::info_span;
+use tracing::{info_span, warn};
 
 use crate::{
     CameraColorMatrix, CaptureMetadata, CfaPattern, DecoderLimits, EmbeddedPreviewInfo,
     EncodedPreview, EncodedPreviewFormat, ImageRect, LevelPattern, PhotometricInterpretation,
-    RationalValue, RawDecoder, RawError, RawFileInfo, RawFrame, RawOrientation,
+    RationalValue, RawDecoder, RawError, RawFileInfo, RawFrame, RawOrientation, RawSession,
+    SourceIdentity,
 };
 
 /// `rawler` implementation of Rohditor's private decoder boundary.
@@ -30,75 +34,112 @@ impl RawlerDecoder {
         Self { limits }
     }
 
-    fn probe_impl(&self, path: &Path) -> Result<RawFileInfo, RawError> {
+    fn open_impl(&self, path: &Path) -> Result<RawlerSession, RawError> {
+        let metadata = source_metadata(path)?;
+        let source_identity = map_source_identity(&metadata);
+        if source_identity.size_bytes > self.limits.max_source_bytes {
+            return Err(RawError::SourceTooLarge {
+                path: path.to_path_buf(),
+                actual_bytes: source_identity.size_bytes,
+                max_bytes: self.limits.max_source_bytes,
+            });
+        }
         let source = open_source(path)?;
         let decoder =
             rawler::get_decoder(&source).map_err(|error| map_rawler_error(path, error))?;
-        let params = RawDecodeParams::default();
-        let raw_image = decoder
-            .raw_image(&source, &params, true)
-            .map_err(|error| map_rawler_error(path, error))?;
-        self.validate_dimensions(path, &raw_image)?;
-        let metadata = decoder
-            .raw_metadata(&source, &params)
-            .map_err(|error| map_rawler_error(path, error))?;
-        let format_hint = decoder.format_hint();
-        let encoding = source_encoding(&source, format_hint, path)?;
-        let preview = preview_info(decoder.as_ref(), &source, &params, format_hint, path)?;
-        let source_size_bytes = source_metadata(path)?.len();
-
-        Ok(map_file_info(
-            &raw_image,
-            &metadata,
-            source_size_bytes,
-            preview,
-            encoding,
-            format_hint,
-        ))
+        Ok(RawlerSession {
+            limits: self.limits,
+            path: path.to_path_buf(),
+            source,
+            decoder,
+            params: RawDecodeParams::default(),
+            source_identity,
+            info: None,
+            preview: PreviewState::default(),
+        })
     }
+}
 
-    fn decode_impl(&self, path: &Path) -> Result<RawFrame, RawError> {
-        let source = open_source(path)?;
-        let decoder =
-            rawler::get_decoder(&source).map_err(|error| map_rawler_error(path, error))?;
-        let params = RawDecodeParams::default();
+struct RawlerSession {
+    limits: DecoderLimits,
+    path: PathBuf,
+    source: RawSource,
+    decoder: Box<dyn Decoder>,
+    params: RawDecodeParams,
+    source_identity: SourceIdentity,
+    info: Option<RawFileInfo>,
+    preview: PreviewState,
+}
 
-        // Ask for a dummy image first so dimensions can be rejected before the
-        // decoder allocates the full sensor buffer.
-        let header = decoder
-            .raw_image(&source, &params, true)
-            .map_err(|error| map_rawler_error(path, error))?;
-        self.validate_dimensions(path, &header)?;
+#[derive(Debug, Default)]
+enum PreviewState {
+    #[default]
+    Unloaded,
+    Missing,
+    Present(EncodedPreview),
+}
 
-        let metadata = decoder
-            .raw_metadata(&source, &params)
-            .map_err(|error| map_rawler_error(path, error))?;
-        let format_hint = decoder.format_hint();
-        let encoding = source_encoding(&source, format_hint, path)?;
-        let preview = preview_info(decoder.as_ref(), &source, &params, format_hint, path)?;
-        let raw_image = decoder
-            .raw_image(&source, &params, false)
-            .map_err(|error| map_rawler_error(path, error))?;
-        let expected_samples = self.validate_dimensions(path, &raw_image)?;
-        let source_size_bytes = source_metadata(path)?.len();
+impl RawlerSession {
+    fn probe_impl(&mut self) -> Result<RawFileInfo, RawError> {
+        if let Some(info) = &self.info {
+            return Ok(info.clone());
+        }
+
+        let raw_image = self
+            .decoder
+            .raw_image(&self.source, &self.params, true)
+            .map_err(|error| map_rawler_error(&self.path, error))?;
+        self.validate_dimensions(&raw_image)?;
+        let metadata = self
+            .decoder
+            .raw_metadata(&self.source, &self.params)
+            .map_err(|error| map_rawler_error(&self.path, error))?;
+        let format_hint = self.decoder.format_hint();
+        let encoding = source_encoding(&self.source, format_hint, &self.path)?;
+        let preview = match self.preview_impl() {
+            Ok(preview) => preview.map(|preview| EmbeddedPreviewInfo {
+                width: preview.width,
+                height: preview.height,
+                color_type: preview.color_type,
+            }),
+            Err(error) => {
+                warn!(error = %error, "ignoring unusable optional embedded preview");
+                None
+            }
+        };
+
         let info = map_file_info(
             &raw_image,
             &metadata,
-            source_size_bytes,
+            self.source_identity,
             preview,
             encoding,
             format_hint,
         );
+        self.info = Some(info.clone());
+        Ok(info)
+    }
+
+    fn decode_impl(&mut self) -> Result<RawFrame, RawError> {
+        // Probe first so dimensions are rejected before rawler allocates the
+        // complete sensor buffer. The resulting metadata is cached in this
+        // session and describes the same mapped source as the decoded pixels.
+        let info = self.probe_impl()?;
+        let raw_image = self
+            .decoder
+            .raw_image(&self.source, &self.params, false)
+            .map_err(|error| map_rawler_error(&self.path, error))?;
+        let expected_samples = self.validate_dimensions(&raw_image)?;
         let row_stride = raw_image
             .width
             .checked_mul(raw_image.cpp)
-            .ok_or_else(|| invalid_dimensions(path, &raw_image, self.limits))?;
+            .ok_or_else(|| invalid_dimensions(&self.path, &raw_image, self.limits))?;
 
         let mosaic = match raw_image.data {
             RawImageData::Integer(samples) => {
                 if samples.len() != expected_samples {
                     return Err(RawError::InvalidSampleCount {
-                        path: path.to_path_buf(),
+                        path: self.path.clone(),
                         expected: expected_samples,
                         actual: samples.len(),
                     });
@@ -107,7 +148,7 @@ impl RawlerDecoder {
             }
             RawImageData::Float(_) => {
                 return Err(RawError::UnsupportedPixelData {
-                    path: path.to_path_buf(),
+                    path: self.path.clone(),
                 });
             }
         };
@@ -119,21 +160,27 @@ impl RawlerDecoder {
         })
     }
 
-    fn embedded_preview_impl(&self, path: &Path) -> Result<Option<EncodedPreview>, RawError> {
-        let source = open_source(path)?;
-        let decoder =
-            rawler::get_decoder(&source).map_err(|error| map_rawler_error(path, error))?;
-        let params = RawDecodeParams::default();
-        encoded_preview(
-            decoder.as_ref(),
-            &source,
-            &params,
-            decoder.format_hint(),
-            path,
-        )
+    fn preview_impl(&mut self) -> Result<Option<EncodedPreview>, RawError> {
+        match &self.preview {
+            PreviewState::Missing => return Ok(None),
+            PreviewState::Present(preview) => return Ok(Some(preview.clone())),
+            PreviewState::Unloaded => {}
+        }
+        let preview = encoded_preview(
+            self.decoder.as_ref(),
+            &self.source,
+            &self.params,
+            self.decoder.format_hint(),
+            &self.path,
+            self.limits,
+        )?;
+        self.preview = preview.as_ref().map_or(PreviewState::Missing, |preview| {
+            PreviewState::Present(preview.clone())
+        });
+        Ok(preview)
     }
 
-    fn validate_dimensions(&self, path: &Path, image: &RawImage) -> Result<usize, RawError> {
+    fn validate_dimensions(&self, image: &RawImage) -> Result<usize, RawError> {
         let samples = image
             .width
             .checked_mul(image.height)
@@ -149,30 +196,42 @@ impl RawlerDecoder {
             {
                 Ok(sample_count)
             }
-            _ => Err(invalid_dimensions(path, image, self.limits)),
+            _ => Err(invalid_dimensions(&self.path, image, self.limits)),
         }
     }
 }
 
 impl RawDecoder for RawlerDecoder {
-    fn probe(&self, path: &Path) -> Result<RawFileInfo, RawError> {
-        let span = info_span!("raw.probe", file = %file_name(path));
+    fn open(&self, path: &Path) -> Result<Box<dyn RawSession>, RawError> {
+        let span = info_span!("raw.open", file = %file_name(path));
         let _guard = span.enter();
-        catch_decoder_panic(path, "probing", || self.probe_impl(path))
-    }
-
-    fn decode(&self, path: &Path) -> Result<RawFrame, RawError> {
-        let span = info_span!("raw.decode", file = %file_name(path));
-        let _guard = span.enter();
-        catch_decoder_panic(path, "decoding", || self.decode_impl(path))
-    }
-
-    fn embedded_preview(&self, path: &Path) -> Result<Option<EncodedPreview>, RawError> {
-        let span = info_span!("raw.embedded_preview", file = %file_name(path));
-        let _guard = span.enter();
-        catch_decoder_panic(path, "extracting the preview from", || {
-            self.embedded_preview_impl(path)
+        catch_decoder_panic(path, "opening", || {
+            self.open_impl(path)
+                .map(|session| Box::new(session) as Box<dyn RawSession>)
         })
+    }
+}
+
+impl RawSession for RawlerSession {
+    fn probe(&mut self) -> Result<RawFileInfo, RawError> {
+        let path = self.path.clone();
+        let span = info_span!("raw.probe", file = %file_name(&path));
+        let _guard = span.enter();
+        catch_decoder_panic(&path, "probing", || self.probe_impl())
+    }
+
+    fn decode(&mut self) -> Result<RawFrame, RawError> {
+        let path = self.path.clone();
+        let span = info_span!("raw.decode", file = %file_name(&path));
+        let _guard = span.enter();
+        catch_decoder_panic(&path, "decoding", || self.decode_impl())
+    }
+
+    fn embedded_preview(&mut self) -> Result<Option<EncodedPreview>, RawError> {
+        let path = self.path.clone();
+        let span = info_span!("raw.embedded_preview", file = %file_name(&path));
+        let _guard = span.enter();
+        catch_decoder_panic(&path, "extracting the preview from", || self.preview_impl())
     }
 }
 
@@ -188,6 +247,33 @@ fn source_metadata(path: &Path) -> Result<std::fs::Metadata, RawError> {
         path: path.to_path_buf(),
         source,
     })
+}
+
+fn map_source_identity(metadata: &std::fs::Metadata) -> SourceIdentity {
+    let modified_unix_nanos = metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos());
+    let (filesystem_device, filesystem_inode) = filesystem_identity(metadata);
+    SourceIdentity {
+        size_bytes: metadata.len(),
+        modified_unix_nanos,
+        filesystem_device,
+        filesystem_inode,
+    }
+}
+
+#[cfg(unix)]
+fn filesystem_identity(metadata: &std::fs::Metadata) -> (Option<u64>, Option<u64>) {
+    use std::os::unix::fs::MetadataExt as _;
+
+    (Some(metadata.dev()), Some(metadata.ino()))
+}
+
+#[cfg(not(unix))]
+const fn filesystem_identity(_metadata: &std::fs::Metadata) -> (Option<u64>, Option<u64>) {
+    (None, None)
 }
 
 fn invalid_dimensions(path: &Path, image: &RawImage, limits: DecoderLimits) -> RawError {
@@ -226,22 +312,28 @@ fn encoded_preview(
     params: &RawDecodeParams,
     format_hint: FormatHint,
     path: &Path,
+    limits: DecoderLimits,
 ) -> Result<Option<EncodedPreview>, RawError> {
     if format_hint == FormatHint::ARW {
         let Some(bytes) = sony_embedded_jpeg(source, path)? else {
             return Ok(None);
         };
-        let image = image::load_from_memory_with_format(bytes, image::ImageFormat::Jpeg).map_err(
-            |error| RawError::Corrupt {
-                path: path.to_path_buf(),
-                reason: format!("embedded JPEG cannot be decoded: {error}"),
-            },
-        )?;
+        validate_preview_byte_count(bytes.len(), path, limits)?;
+        let decoder =
+            image::codecs::jpeg::JpegDecoder::new(Cursor::new(bytes)).map_err(|error| {
+                RawError::Corrupt {
+                    path: path.to_path_buf(),
+                    reason: format!("embedded JPEG header cannot be decoded: {error}"),
+                }
+            })?;
+        let (width, height) = decoder.dimensions();
+        validate_preview_dimensions(width as usize, height as usize, path, limits)?;
+        let color_type = format!("{:?}", decoder.color_type());
 
         return Ok(Some(EncodedPreview {
-            width: image.width(),
-            height: image.height(),
-            color_type: format!("{:?}", image.color()),
+            width,
+            height,
+            color_type,
             format: EncodedPreviewFormat::Jpeg,
             bytes: Arc::from(bytes),
             is_original_encoding: true,
@@ -253,6 +345,7 @@ fn encoded_preview(
     };
     let width = image.width();
     let height = image.height();
+    validate_preview_dimensions(width as usize, height as usize, path, limits)?;
     let color_type = format!("{:?}", image.color());
     let mut bytes = Vec::new();
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 90)
@@ -261,6 +354,7 @@ fn encoded_preview(
             path: path.to_path_buf(),
             reason: format!("could not normalize the embedded preview as JPEG: {error}"),
         })?;
+    validate_preview_byte_count(bytes.len(), path, limits)?;
 
     Ok(Some(EncodedPreview {
         width,
@@ -270,6 +364,48 @@ fn encoded_preview(
         bytes: Arc::from(bytes),
         is_original_encoding: false,
     }))
+}
+
+fn validate_preview_byte_count(
+    bytes: usize,
+    path: &Path,
+    limits: DecoderLimits,
+) -> Result<(), RawError> {
+    if bytes <= limits.max_preview_bytes {
+        Ok(())
+    } else {
+        Err(RawError::PreviewTooLarge {
+            path: path.to_path_buf(),
+            actual_bytes: bytes,
+            max_bytes: limits.max_preview_bytes,
+        })
+    }
+}
+
+fn validate_preview_dimensions(
+    width: usize,
+    height: usize,
+    path: &Path,
+    limits: DecoderLimits,
+) -> Result<(), RawError> {
+    let pixels = width.checked_mul(height);
+    if width > 0
+        && height > 0
+        && width <= limits.max_preview_width
+        && height <= limits.max_preview_height
+        && pixels.is_some_and(|pixels| pixels <= limits.max_preview_pixels)
+    {
+        Ok(())
+    } else {
+        Err(RawError::InvalidPreviewDimensions {
+            path: path.to_path_buf(),
+            width,
+            height,
+            max_width: limits.max_preview_width,
+            max_height: limits.max_preview_height,
+            max_pixels: limits.max_preview_pixels,
+        })
+    }
 }
 
 fn sony_embedded_jpeg<'a>(
@@ -353,24 +489,6 @@ fn decoded_preview(
         .map_err(|error| map_rawler_error(path, error))
 }
 
-fn preview_info(
-    decoder: &dyn Decoder,
-    source: &RawSource,
-    params: &RawDecodeParams,
-    format_hint: FormatHint,
-    path: &Path,
-) -> Result<Option<EmbeddedPreviewInfo>, RawError> {
-    Ok(
-        encoded_preview(decoder, source, params, format_hint, path)?.map(|preview| {
-            EmbeddedPreviewInfo {
-                width: preview.width,
-                height: preview.height,
-                color_type: preview.color_type,
-            }
-        }),
-    )
-}
-
 #[derive(Debug, Clone, Default)]
 struct SourceEncoding {
     bits_per_sample: Option<usize>,
@@ -429,7 +547,7 @@ fn describe_compression(value: u32) -> String {
 fn map_file_info(
     image: &RawImage,
     metadata: &RawMetadata,
-    source_size_bytes: u64,
+    source_identity: SourceIdentity,
     embedded_preview: Option<EmbeddedPreviewInfo>,
     encoding: SourceEncoding,
     format_hint: FormatHint,
@@ -450,7 +568,8 @@ fn map_file_info(
         model: image.model.clone(),
         clean_make: image.clean_make.clone(),
         clean_model: image.clean_model.clone(),
-        source_size_bytes,
+        source_size_bytes: source_identity.size_bytes,
+        source_identity: Some(source_identity),
         width: image.width,
         height: image.height,
         components_per_pixel: image.cpp,

@@ -5,13 +5,13 @@ use rohditor_raw::{
 
 use crate::color::{
     CameraColorTransform, LINEAR_REC2020_TO_XYZ_D65, XYZ_D65_TO_LINEAR_SRGB,
-    clip_linear_srgb_for_output, linear_srgb_to_srgb,
+    encode_rec2020_for_srgb_output,
 };
 use crate::image::{allocate_zeroed_f32, allocate_zeroed_u8, allocate_zeroed_u16};
 use crate::{
     BayerPattern, CfaColor, CropPolicy, DemosaicAlgorithm, DisplayRgbImage, DisplayTransfer,
-    DitherMode, EditRecipe, ImageRegion, LinearRgbImage, LinearRgbSpace, MosaicImage, OutputPolicy,
-    PipelineError, WhiteBalance,
+    DitherMode, EditRecipe, ImageRegion, LinearRgbImage, LinearRgbSpace, MosaicImage,
+    OrientationMap, OutputPolicy, PipelineError, WhiteBalance,
 };
 
 const CONTRAST_PIVOT: f32 = 0.18;
@@ -323,8 +323,8 @@ pub fn render_display_srgb8_dithered(
     dithering: DitherMode,
 ) -> Result<DisplayRgbImage<u8>, PipelineError> {
     require_space(image, LinearRgbSpace::Rec2020D65)?;
-    let (output_width, output_height) =
-        oriented_dimensions(image.width(), image.height(), orientation);
+    let orientation_map = OrientationMap::new(image.width(), image.height(), orientation)?;
+    let (output_width, output_height) = orientation_map.output_dimensions();
     let row_stride = output_width.checked_mul(3).ok_or_else(|| {
         invalid_dimensions(output_width, output_height, 0, "RGB stride overflowed")
     })?;
@@ -343,21 +343,17 @@ pub fn render_display_srgb8_dithered(
         .enumerate()
         .for_each(|(output_y, output_row)| {
             for (output_x, destination) in output_row.chunks_exact_mut(3).enumerate() {
-                let (source_x, source_y) = source_coordinate(
-                    output_x,
-                    output_y,
-                    image.width(),
-                    image.height(),
-                    orientation,
-                );
+                let (source_x, source_y) =
+                    orientation_map.source_coordinate_in_bounds(output_x, output_y);
                 let start = source_y * image.row_stride() + source_x * 3;
                 let source = &image.data()[start..start + 3];
-                let linear_srgb = rec2020_to_srgb.transform([source[0], source[1], source[2]]);
-                let clipped = match output_policy {
-                    OutputPolicy::ClipToSrgb => clip_linear_srgb_for_output(linear_srgb),
+                let encoded = match output_policy {
+                    OutputPolicy::ClipToSrgb => encode_rec2020_for_srgb_output(
+                        rec2020_to_srgb,
+                        [source[0], source[1], source[2]],
+                    ),
                 };
-                for (value, output) in clipped.into_iter().zip(destination) {
-                    let encoded = linear_srgb_to_srgb(value);
+                for (encoded, output) in encoded.into_iter().zip(destination) {
                     let dither = quantization_dither(dithering, output_x, output_y);
                     *output = (encoded * 255.0 + dither).round().clamp(0.0, 255.0) as u8;
                 }
@@ -381,8 +377,8 @@ pub fn render_display_srgb16(
     dithering: DitherMode,
 ) -> Result<DisplayRgbImage<u16>, PipelineError> {
     require_space(image, LinearRgbSpace::Rec2020D65)?;
-    let (output_width, output_height) =
-        oriented_dimensions(image.width(), image.height(), orientation);
+    let orientation_map = OrientationMap::new(image.width(), image.height(), orientation)?;
+    let (output_width, output_height) = orientation_map.output_dimensions();
     let row_stride = output_width.checked_mul(3).ok_or_else(|| {
         invalid_dimensions(output_width, output_height, 0, "RGB stride overflowed")
     })?;
@@ -401,21 +397,17 @@ pub fn render_display_srgb16(
         .enumerate()
         .for_each(|(output_y, output_row)| {
             for (output_x, destination) in output_row.chunks_exact_mut(3).enumerate() {
-                let (source_x, source_y) = source_coordinate(
-                    output_x,
-                    output_y,
-                    image.width(),
-                    image.height(),
-                    orientation,
-                );
+                let (source_x, source_y) =
+                    orientation_map.source_coordinate_in_bounds(output_x, output_y);
                 let start = source_y * image.row_stride() + source_x * 3;
                 let source = &image.data()[start..start + 3];
-                let linear_srgb = rec2020_to_srgb.transform([source[0], source[1], source[2]]);
-                let clipped = match output_policy {
-                    OutputPolicy::ClipToSrgb => clip_linear_srgb_for_output(linear_srgb),
+                let encoded = match output_policy {
+                    OutputPolicy::ClipToSrgb => encode_rec2020_for_srgb_output(
+                        rec2020_to_srgb,
+                        [source[0], source[1], source[2]],
+                    ),
                 };
-                for (value, output) in clipped.into_iter().zip(destination) {
-                    let encoded = linear_srgb_to_srgb(value);
+                for (encoded, output) in encoded.into_iter().zip(destination) {
                     let dither = quantization_dither(dithering, output_x, output_y);
                     *output = (encoded * 65_535.0 + dither).round().clamp(0.0, 65_535.0) as u16;
                 }
@@ -728,35 +720,6 @@ fn require_space(
     }
 }
 
-fn oriented_dimensions(width: usize, height: usize, orientation: RawOrientation) -> (usize, usize) {
-    match orientation {
-        RawOrientation::Transpose
-        | RawOrientation::Rotate90
-        | RawOrientation::Transverse
-        | RawOrientation::Rotate270 => (height, width),
-        _ => (width, height),
-    }
-}
-
-fn source_coordinate(
-    output_x: usize,
-    output_y: usize,
-    source_width: usize,
-    source_height: usize,
-    orientation: RawOrientation,
-) -> (usize, usize) {
-    match orientation {
-        RawOrientation::Normal | RawOrientation::Unknown => (output_x, output_y),
-        RawOrientation::HorizontalFlip => (source_width - 1 - output_x, output_y),
-        RawOrientation::Rotate180 => (source_width - 1 - output_x, source_height - 1 - output_y),
-        RawOrientation::VerticalFlip => (output_x, source_height - 1 - output_y),
-        RawOrientation::Transpose => (output_y, output_x),
-        RawOrientation::Rotate90 => (output_y, source_height - 1 - output_x),
-        RawOrientation::Transverse => (source_width - 1 - output_y, source_height - 1 - output_x),
-        RawOrientation::Rotate270 => (source_width - 1 - output_y, output_x),
-    }
-}
-
 fn invalid_dimensions(
     width: usize,
     height: usize,
@@ -787,6 +750,7 @@ mod tests {
             clean_make: "Rohditor".to_owned(),
             clean_model: "Fixture".to_owned(),
             source_size_bytes: 0,
+            source_identity: None,
             width,
             height,
             components_per_pixel: 1,
@@ -1207,10 +1171,12 @@ mod tests {
         ];
 
         for (orientation, dimensions, expected) in cases {
-            assert_eq!(oriented_dimensions(2, 3, orientation), dimensions);
+            let map = OrientationMap::new(2, 3, orientation).expect("valid orientation map");
+            assert_eq!(map.output_dimensions(), dimensions);
             let actual = (0..dimensions.1)
                 .flat_map(|y| {
-                    (0..dimensions.0).map(move |x| source_coordinate(x, y, 2, 3, orientation))
+                    (0..dimensions.0)
+                        .map(move |x| map.source_coordinate(x, y).expect("in-range coordinate"))
                 })
                 .collect::<Vec<_>>();
             assert_eq!(actual, expected, "{orientation:?}");

@@ -4,7 +4,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use rohditor_raw::{RawDecoder, RawError, RawlerDecoder};
+use rohditor_raw::{DecoderLimits, RawDecoder, RawError, RawlerDecoder};
 
 static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(0);
 
@@ -29,6 +29,25 @@ fn incomplete_tiff_is_rejected_by_every_decoder_operation() -> Result<(), Box<dy
     )?;
 
     assert_all_operations_fail(input.path());
+    Ok(())
+}
+
+#[test]
+fn configured_source_size_limit_is_checked_before_format_decoding() -> Result<(), Box<dyn Error>> {
+    let input = TempInput::new("too-large.arw", b"four")?;
+    let decoder = RawlerDecoder::new(DecoderLimits {
+        max_source_bytes: 3,
+        ..DecoderLimits::default()
+    });
+
+    assert!(matches!(
+        decoder.open(input.path()),
+        Err(RawError::SourceTooLarge {
+            actual_bytes: 4,
+            max_bytes: 3,
+            ..
+        })
+    ));
     Ok(())
 }
 

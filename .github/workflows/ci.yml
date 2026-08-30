@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable Rust with project components
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+      - name: Run the project gate
+        run: ./scripts/check.sh
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust 1.88
+        run: rustup toolchain install 1.88.0 --profile minimal
+      - name: Check the declared minimum Rust version
+        run: cargo +1.88.0 check --workspace --all-targets --locked

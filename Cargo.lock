@@ -2696,6 +2696,7 @@ dependencies = [
  "image",
  "rfd",
  "rohditor-core",
+ "rohditor-gpu",
  "rohditor-raw",
  "tracing",
  "tracing-subscriber",
@@ -2705,6 +2706,15 @@ dependencies = [
 [[package]]
 name = "rohditor-gpu"
 version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "half",
+ "pollster",
+ "rohditor-core",
+ "rohditor-raw",
+ "thiserror 2.0.20",
+ "wgpu",
+]
 
 [[package]]
 name = "rohditor-raw"

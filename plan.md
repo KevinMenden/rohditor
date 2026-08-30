@@ -199,6 +199,23 @@ No stage may silently clamp scene-linear values to `[0, 1]`. Clipping or gamut m
 
 **Why:** Extra full-frame passes cost memory bandwidth and intermediate textures. Logical stages remain separate in the core specification even if a GPU shader evaluates several stages in one pass.
 
+### D-018: Give the desktop application a Rohditor-owned visual system
+
+**Decision:** Keep `egui`, `eframe`, and direct `wgpu` integration, but build a
+small, deliberate Rohditor design system on top of them rather than relying on
+stock `egui` visuals and widgets. The system will own the dark palette,
+typography, spacing, panel surfaces, borders, radii, interaction states, and
+reusable editor controls. It must remain separate from the document and image
+processing layers.
+
+**Why:** The current framework is capable of the intended photo-editor
+experience; changing GUI frameworks would add risk without addressing the
+visual hierarchy. A custom theme and a small set of composable widgets make the
+application recognizably Rohditor, keep the image viewport dominant, and avoid
+styling decisions being duplicated throughout the application. Direct `wgpu`
+display integration remains intact so a future GPU-developed preview can stay
+GPU-resident.
+
 ## 5. Proposed repository structure
 
 ```text
@@ -214,8 +231,15 @@ rohditor/
 │   │       ├── main.rs
 │   │       ├── app.rs
 │   │       ├── commands.rs
-│   │       ├── render_coordinator.rs
+│   │       ├── coordinator.rs
 │   │       └── ui/
+│   │           ├── mod.rs
+│   │           ├── theme.rs
+│   │           ├── icons.rs
+│   │           ├── widgets.rs
+│   │           ├── adjustment_panel.rs
+│   │           ├── toolbar.rs
+│   │           └── viewport.rs
 │   └── cli/
 │       ├── Cargo.toml
 │       └── src/main.rs
@@ -261,11 +285,20 @@ Names below are provisional Rust names but represent committed architectural bou
 
 ```rust
 pub trait RawDecoder: Send + Sync {
-    fn probe(&self, path: &Path) -> Result<RawFileInfo, RawError>;
-    fn decode(&self, path: &Path) -> Result<RawFrame, RawError>;
-    fn embedded_preview(&self, path: &Path) -> Result<Option<EncodedPreview>, RawError>;
+    fn open(&self, path: &Path) -> Result<Box<dyn RawSession>, RawError>;
+}
+
+pub trait RawSession: Send {
+    fn probe(&mut self) -> Result<RawFileInfo, RawError>;
+    fn decode(&mut self) -> Result<RawFrame, RawError>;
+    fn embedded_preview(&mut self) -> Result<Option<EncodedPreview>, RawError>;
 }
 ```
+
+`RawDecoder` also provides one-shot convenience methods for CLI callers. The
+session is the desktop path: it keeps one coherent mapped source across probe,
+placeholder extraction, and sensor decode. An unusable optional preview is
+reported by explicit extraction but does not prevent metadata or sensor decode.
 
 `RawFrame` owns or shares:
 
@@ -597,6 +630,23 @@ limits are recorded in `docs/desktop.md`.
 - Automatic GPU failure leaves the document editable through the CPU path.
 - No shader contains an undocumented color transform or clamp absent from the CPU specification.
 
+**Phase 5 status (2026-08-30): complete.** The desktop CLI now exposes
+`--processor auto|gpu|cpu` independently of `--renderer`. On the wgpu renderer,
+Rohditor shares eframe's adapter, device, queue, renderer, and target format;
+no second GPU device is created. It records adapter type/backend/driver,
+texture and storage-format support, dimensions/workgroup limits, and
+timestamp-query availability before enabling the processor. The worker creates
+the typed linear Rec.2020 base and packs its half-float upload payload; the UI
+uploads that payload once to a retained `Rgba16Float` source, dispatches a
+fused WGSL downstream transform into retained `Rgba16Float` working and
+egui-native `Rgba8Unorm` display textures, and updates
+the viewport without CPU readback. `Auto` visibly falls back to CPU when this
+path is unavailable or fails, while forced GPU reports an error. Synthetic
+all-orientation and private `DSC00851.ARW` tests compare CPU/GPU output within
+two 8-bit sRGB codes. The release tests passed on the RX 9070 XT through
+RADV/Vulkan.
+The boundary and diagnostics are documented in `docs/gpu-preview.md`.
+
 ### Phase 6: Preview caching, cancellation, and performance pass
 
 #### Tasks
@@ -629,7 +679,65 @@ These are goals rather than cross-machine correctness requirements:
 - The newest slider state becomes visible even when an older expensive job was started first.
 - Performance measurements are documented with image dimensions and active backend.
 
-### Phase 7: MVP stabilization
+### Phase 7: Rohditor visual design system and desktop polish
+
+This phase is preferred after the performance/caching work and before final MVP
+stabilization. It is deliberately isolated from core editing behavior: if Phase
+5 or 6 requires more time, it may become the first post-MVP visual release
+without blocking a functionally complete editor.
+
+#### Tasks
+
+1. Introduce `ui/theme.rs` with a dedicated Rohditor dark theme: typography,
+   spacing, panel backgrounds, borders, muted text, accent colors, hover/active
+   states, and consistent corner radii. Do not use `Visuals::dark()` as the
+   finished visual language.
+2. Extract reusable UI primitives into `ui/widgets.rs`, including
+   `adjustment_slider`, `icon_button`, `section_header`, `toolbar_button`, and
+   a consistent custom dropdown/menu treatment. Keep callbacks and data types
+   owned by `app.rs`/the command layer rather than by widgets.
+3. Refactor the desktop UI incrementally into `ui/adjustment_panel.rs`,
+   `ui/toolbar.rs`, and `ui/viewport.rs`; preserve existing command, revision,
+   worker, and export behavior during the refactor.
+4. Replace generic adjustment rows with compact photo-editor controls: a label
+   and formatted numeric value on one line, followed by a full-width slider.
+   Define neutral values, units, keyboard input, reset affordances, and ranges
+   consistently across exposure, contrast, saturation, and white balance.
+5. Make the viewport visually dominant. Surrounding panels should be darker,
+   quieter, denser, and visually secondary; avoid permanent decoration inside
+   the image area.
+6. Establish the primary layout: a sparse top toolbar, file/navigation area,
+   central viewport, Lightroom/Capture One-style grouped right adjustment panel,
+   and compact status/diagnostics bar. Keep the viewport usable at modest window
+   sizes.
+7. Add contextual viewport overlays only when useful: transient zoom feedback,
+   fit/100% controls, before/after affordance, and current source state
+   (embedded preview versus developed RAW). Avoid cluttering the photo.
+8. Add visual shells and layout space for a future histogram, clipping
+   indicators, and GPU/preview diagnostics. Do not require histogram analysis
+   or GPU processing to complete this UI phase.
+9. Preserve the existing direct `wgpu` texture path. A GPU-developed preview
+   must remain displayable through `egui-wgpu` without a CPU readback solely for
+   UI presentation.
+10. Document the visual tokens and widget conventions so future controls do
+    not reintroduce one-off styling.
+
+#### Acceptance criteria
+
+- The application has a coherent Rohditor visual identity rather than a mostly
+  stock-egui appearance.
+- All adjustment controls use the shared component and retain their existing
+  keyboard, undo/redo, coalescing, and revision behavior.
+- The viewport remains the strongest visual element, while controls are clear
+  and compact at common desktop sizes.
+- No widget module depends on RAW, CPU-pipeline, or GPU-processing internals.
+- Existing UI/worker tests continue to pass, and the refactor does not add image
+  readbacks or UI-thread image processing.
+- At least one documented manual visual check covers dark/light desktop themes,
+  normal and narrow window layouts, zoom/pan, placeholder-to-developed
+  replacement, and visible diagnostics/error states.
+
+### Phase 8: MVP stabilization
 
 #### Tasks
 
@@ -736,7 +844,8 @@ Suggested order after the MVP:
 4. JSON/RON sidecar save/load with recipe migration.
 5. Proper temperature-in-Kelvin/tint UI and dual-illuminant camera profiles.
 6. Monitor ICC support and soft proofing using a Rust color-management library.
-7. Histogram, clipping warnings, and channel inspection.
+7. Histogram analysis, clipping warnings, and channel inspection beyond the
+   Phase 7 UI shell.
 8. Sharpening and noise reduction.
 9. Lens profiles, distortion, vignetting, and chromatic-aberration correction.
 10. Tiled full-resolution GPU export.
@@ -760,7 +869,10 @@ These must be answered through input samples or implementation measurements rath
 
 ## 16. Immediate next action
 
-Phases 0 through 4 are complete, and Gate A is approved for the current corpus.
-The next implementation session should begin Phase 5 by formalizing renderer
-and processor preferences, sharing eframe's wgpu device and adapter facts, and
-adding capability detection before the first GPU-adjusted preview path.
+Phases 0 through 5 are complete, and Gate A is approved for the current corpus.
+The next implementation session should begin Phase 6: bound queued preview
+work, add cooperative cancellation where measurements justify it, expand cache
+reuse/eviction, and record benchmarks and diagnostics for the CPU and GPU
+paths. Phase 7 then provides the Rohditor visual-design pass before MVP
+stabilization, unless it is intentionally scheduled as the first post-MVP
+visual release.
