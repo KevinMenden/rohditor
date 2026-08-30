@@ -1,23 +1,25 @@
 use std::any::Any;
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
 use std::fmt;
+use std::mem::size_of;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, MutexGuard, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
 use image::RgbImage;
 use rohditor_core::{
-    CpuPipeline, DemosaicedBase, EditRecipe, ExportReport, ExportSettings, OrientationMap,
-    PreviewOptions, StageTimings, export_image,
+    CancellationToken, CpuPipeline, EditRecipe, ExportReport, ExportSettings, MemoryEstimate,
+    OrientationMap, PipelineError, PreviewOptions, StageTimings, export_image,
 };
-use rohditor_gpu::GpuPreviewUpload;
+use rohditor_gpu::{GpuPreviewError, GpuPreviewUpload};
 use rohditor_raw::{RawDecoder, RawFileInfo, RawFrame, RawOrientation, RawSession, RawlerDecoder};
 use tracing::{info, info_span};
 
 use crate::document::PreviewTicket;
+use crate::preview_cache::{PreviewCache, PreviewCacheHits, PreviewCacheKeys};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum JobKind {
@@ -32,6 +34,37 @@ pub(crate) enum PreviewBackend {
     GpuBase,
 }
 
+impl PreviewBackend {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Cpu => "CPU",
+            Self::GpuBase => "GPU base",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct PreviewQueueStats {
+    pub requested: u64,
+    pub coalesced: u64,
+    pub cancellation_requests: u64,
+    pub cancelled: u64,
+    pub completed: u64,
+    pub failed: u64,
+    pub pending: bool,
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct WorkerPreviewDiagnostics {
+    pub backend: PreviewBackend,
+    pub cache_hits: PreviewCacheHits,
+    pub timings: StageTimings,
+    pub memory: MemoryEstimate,
+    pub cache_resident_bytes: usize,
+    pub workspace_reused: bool,
+}
+
 impl fmt::Display for JobKind {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
@@ -42,7 +75,7 @@ impl fmt::Display for JobKind {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct WorkerImage {
     pub width: usize,
     pub height: usize,
@@ -114,12 +147,12 @@ pub(crate) enum WorkerEvent {
     PreviewReady {
         ticket: PreviewTicket,
         image: WorkerImage,
-        timings: StageTimings,
+        diagnostics: WorkerPreviewDiagnostics,
     },
     GpuUploadReady {
         ticket: PreviewTicket,
         upload: Box<GpuPreviewUpload>,
-        base_timings: StageTimings,
+        diagnostics: WorkerPreviewDiagnostics,
         upload_preparation: Duration,
     },
     ExportReady {
@@ -155,23 +188,6 @@ struct PreviewJob {
 }
 
 #[derive(Debug)]
-struct PreviewCache {
-    document_id: u64,
-    frame: Arc<RawFrame>,
-    options: PreviewOptions,
-    base: DemosaicedBase,
-}
-
-impl PreviewCache {
-    fn matches(&self, job: &PreviewJob, options: PreviewOptions) -> bool {
-        self.document_id == job.ticket.document_id
-            && Arc::ptr_eq(&self.frame, &job.frame)
-            && self.options == options
-            && self.base.white_balance() == job.recipe.white_balance
-    }
-}
-
-#[derive(Debug)]
 struct ExportJob {
     document_id: u64,
     export_id: u64,
@@ -185,15 +201,169 @@ struct ExportJob {
 #[derive(Debug)]
 enum WorkerRequest {
     Open { document_id: u64, path: PathBuf },
-    Preview(PreviewJob),
+    PreviewAvailable,
     Export(ExportJob),
     AbandonDocument(u64),
     Shutdown,
 }
 
+#[derive(Debug)]
+struct ActivePreview {
+    ticket: PreviewTicket,
+    cancellation: CancellationToken,
+}
+
+#[derive(Debug, Default)]
+struct PreviewMailboxState {
+    pending: Option<PreviewJob>,
+    active: Option<ActivePreview>,
+    wake_queued: bool,
+    stats: PreviewQueueStats,
+}
+
+#[derive(Debug, Default)]
+struct PreviewMailbox {
+    state: Mutex<PreviewMailboxState>,
+}
+
+struct ScheduledPreview {
+    job: PreviewJob,
+    cancellation: CancellationToken,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreviewCompletion {
+    Completed,
+    Cancelled,
+    Failed,
+}
+
+impl PreviewMailbox {
+    fn queue(&self, job: PreviewJob, requests: &mpsc::Sender<WorkerRequest>) -> Result<(), String> {
+        let mut state = self.lock();
+        state.stats.requested = state.stats.requested.saturating_add(1);
+
+        if let Some(active) = &state.active
+            && (active.ticket.document_id != job.ticket.document_id
+                || should_replace_preview(active.ticket, job.ticket))
+            && !active.cancellation.is_cancelled()
+        {
+            active.cancellation.cancel();
+            state.stats.cancellation_requests = state.stats.cancellation_requests.saturating_add(1);
+        }
+
+        let replace_pending = state.pending.as_ref().is_none_or(|pending| {
+            pending.ticket.document_id != job.ticket.document_id
+                || should_replace_preview(pending.ticket, job.ticket)
+        });
+        if replace_pending {
+            if state.pending.replace(job).is_some() {
+                state.stats.coalesced = state.stats.coalesced.saturating_add(1);
+            }
+        } else {
+            state.stats.coalesced = state.stats.coalesced.saturating_add(1);
+            return Ok(());
+        }
+
+        if state.wake_queued {
+            return Ok(());
+        }
+        state.wake_queued = true;
+        drop(state);
+
+        if requests.send(WorkerRequest::PreviewAvailable).is_err() {
+            let mut state = self.lock();
+            state.pending = None;
+            state.wake_queued = false;
+            return Err("the background CPU worker stopped unexpectedly".to_owned());
+        }
+        Ok(())
+    }
+
+    fn take(&self) -> Option<ScheduledPreview> {
+        let mut state = self.lock();
+        state.wake_queued = false;
+        let job = state.pending.take()?;
+        let cancellation = CancellationToken::new();
+        state.active = Some(ActivePreview {
+            ticket: job.ticket,
+            cancellation: cancellation.clone(),
+        });
+        Some(ScheduledPreview { job, cancellation })
+    }
+
+    fn finish(&self, ticket: PreviewTicket, completion: PreviewCompletion) {
+        let mut state = self.lock();
+        if state
+            .active
+            .as_ref()
+            .is_some_and(|active| active.ticket == ticket)
+        {
+            state.active = None;
+        }
+        match completion {
+            PreviewCompletion::Completed => {
+                state.stats.completed = state.stats.completed.saturating_add(1);
+            }
+            PreviewCompletion::Cancelled => {
+                state.stats.cancelled = state.stats.cancelled.saturating_add(1);
+            }
+            PreviewCompletion::Failed => {
+                state.stats.failed = state.stats.failed.saturating_add(1);
+            }
+        }
+    }
+
+    fn abandon(&self, document_id: u64) {
+        let mut state = self.lock();
+        if state
+            .pending
+            .as_ref()
+            .is_some_and(|job| job.ticket.document_id == document_id)
+        {
+            state.pending = None;
+            state.stats.coalesced = state.stats.coalesced.saturating_add(1);
+        }
+        if let Some(active) = &state.active
+            && active.ticket.document_id == document_id
+            && !active.cancellation.is_cancelled()
+        {
+            active.cancellation.cancel();
+            state.stats.cancellation_requests = state.stats.cancellation_requests.saturating_add(1);
+        }
+    }
+
+    fn cancel_all(&self) {
+        let mut state = self.lock();
+        state.pending = None;
+        if let Some(active) = &state.active
+            && !active.cancellation.is_cancelled()
+        {
+            active.cancellation.cancel();
+            state.stats.cancellation_requests = state.stats.cancellation_requests.saturating_add(1);
+        }
+    }
+
+    fn stats(&self) -> PreviewQueueStats {
+        let state = self.lock();
+        PreviewQueueStats {
+            pending: state.pending.is_some(),
+            active: state.active.is_some(),
+            ..state.stats
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, PreviewMailboxState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 pub(crate) struct RenderCoordinator {
     requests: mpsc::Sender<WorkerRequest>,
     events: mpsc::Receiver<WorkerEvent>,
+    previews: Arc<PreviewMailbox>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -208,13 +378,21 @@ impl RenderCoordinator {
     ) -> Result<Self, String> {
         let (request_sender, request_receiver) = mpsc::channel();
         let (event_sender, event_receiver) = mpsc::channel();
+        let previews = Arc::new(PreviewMailbox::default());
+        let worker_previews = Arc::clone(&previews);
         let stopped_sender = event_sender.clone();
         let stopped_context = context.clone();
         let worker = thread::Builder::new()
             .name("rohditor-cpu-worker".to_owned())
             .spawn(move || {
                 let result = catch_unwind(AssertUnwindSafe(|| {
-                    worker_loop(request_receiver, event_sender, context, decoder);
+                    worker_loop(
+                        request_receiver,
+                        event_sender,
+                        context,
+                        decoder,
+                        worker_previews,
+                    );
                 }));
                 if let Err(payload) = result {
                     send_event(
@@ -233,6 +411,7 @@ impl RenderCoordinator {
         Ok(Self {
             requests: request_sender,
             events: event_receiver,
+            previews,
             worker: Some(worker),
         })
     }
@@ -247,12 +426,15 @@ impl RenderCoordinator {
         frame: Arc<RawFrame>,
         recipe: EditRecipe,
     ) -> Result<(), String> {
-        self.send(WorkerRequest::Preview(PreviewJob {
-            ticket,
-            frame,
-            recipe,
-            backend: PreviewBackend::Cpu,
-        }))
+        self.previews.queue(
+            PreviewJob {
+                ticket,
+                frame,
+                recipe,
+                backend: PreviewBackend::Cpu,
+            },
+            &self.requests,
+        )
     }
 
     pub(crate) fn prepare_gpu_base(
@@ -261,12 +443,15 @@ impl RenderCoordinator {
         frame: Arc<RawFrame>,
         recipe: EditRecipe,
     ) -> Result<(), String> {
-        self.send(WorkerRequest::Preview(PreviewJob {
-            ticket,
-            frame,
-            recipe,
-            backend: PreviewBackend::GpuBase,
-        }))
+        self.previews.queue(
+            PreviewJob {
+                ticket,
+                frame,
+                recipe,
+                backend: PreviewBackend::GpuBase,
+            },
+            &self.requests,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -292,6 +477,7 @@ impl RenderCoordinator {
     }
 
     pub(crate) fn abandon(&self, document_id: u64) {
+        self.previews.abandon(document_id);
         drop(
             self.requests
                 .send(WorkerRequest::AbandonDocument(document_id)),
@@ -300,6 +486,10 @@ impl RenderCoordinator {
 
     pub(crate) fn try_events(&self) -> impl Iterator<Item = WorkerEvent> + '_ {
         self.events.try_iter()
+    }
+
+    pub(crate) fn preview_queue_stats(&self) -> PreviewQueueStats {
+        self.previews.stats()
     }
 
     fn send(&self, request: WorkerRequest) -> Result<(), String> {
@@ -314,6 +504,7 @@ impl Drop for RenderCoordinator {
         // Do not join here: a close action must never wait for an in-flight RAW
         // render. Reap an already-finished thread, while an active worker exits
         // after its current operation observes shutdown or channel disconnect.
+        self.previews.cancel_all();
         drop(self.requests.send(WorkerRequest::Shutdown));
         if self.worker.as_ref().is_some_and(JoinHandle::is_finished)
             && let Some(worker) = self.worker.take()
@@ -328,44 +519,47 @@ fn worker_loop(
     sender: mpsc::Sender<WorkerEvent>,
     context: egui::Context,
     decoder: Arc<dyn RawDecoder>,
+    previews: Arc<PreviewMailbox>,
 ) {
-    let mut pending = VecDeque::new();
     let mut abandoned = HashSet::new();
-    let mut preview_cache: Option<PreviewCache> = None;
+    let mut preview_cache = PreviewCache::default();
 
-    loop {
-        let request = match pending.pop_front() {
-            Some(request) => request,
-            None => match receiver.recv() {
-                Ok(request) => request,
-                Err(_) => break,
-            },
-        };
-
-        if drain_waiting_requests(&receiver, &mut pending, &mut abandoned, &mut preview_cache) {
-            break;
-        }
-
+    while let Ok(request) = receiver.recv() {
         if request_belongs_to_abandoned_document(&request, &abandoned) {
             continue;
         }
 
         match request {
             WorkerRequest::Open { document_id, path } => {
+                abandoned.remove(&document_id);
                 process_open(document_id, &path, &sender, &context, decoder.as_ref());
             }
-            WorkerRequest::Preview(job) => {
-                let job = coalesce_pending_preview(job, &mut pending);
-                if !abandoned.contains(&job.ticket.document_id) {
-                    match job.backend {
-                        PreviewBackend::Cpu => {
-                            process_preview(job, &sender, &context, &mut preview_cache);
-                        }
-                        PreviewBackend::GpuBase => {
-                            process_gpu_base(job, &sender, &context);
-                        }
+            WorkerRequest::PreviewAvailable => {
+                let Some(scheduled) = previews.take() else {
+                    continue;
+                };
+                let ticket = scheduled.job.ticket;
+                let completion = if abandoned.contains(&ticket.document_id) {
+                    PreviewCompletion::Cancelled
+                } else {
+                    match scheduled.job.backend {
+                        PreviewBackend::Cpu => process_preview(
+                            scheduled.job,
+                            &sender,
+                            &context,
+                            &scheduled.cancellation,
+                            &mut preview_cache,
+                        ),
+                        PreviewBackend::GpuBase => process_gpu_base(
+                            scheduled.job,
+                            &sender,
+                            &context,
+                            &scheduled.cancellation,
+                            &mut preview_cache,
+                        ),
                     }
-                }
+                };
+                previews.finish(ticket, completion);
             }
             WorkerRequest::Export(job) => {
                 if !abandoned.contains(&job.document_id) {
@@ -373,65 +567,13 @@ fn worker_loop(
                 }
             }
             WorkerRequest::AbandonDocument(document_id) => {
-                abandon_document(document_id, &mut abandoned, &mut preview_cache);
+                abandoned.clear();
+                abandoned.insert(document_id);
+                preview_cache.clear_document(document_id);
             }
             WorkerRequest::Shutdown => break,
-        }
+        };
     }
-}
-
-fn drain_waiting_requests(
-    receiver: &mpsc::Receiver<WorkerRequest>,
-    pending: &mut VecDeque<WorkerRequest>,
-    abandoned: &mut HashSet<u64>,
-    preview_cache: &mut Option<PreviewCache>,
-) -> bool {
-    let mut shutdown = false;
-    while let Ok(request) = receiver.try_recv() {
-        match request {
-            WorkerRequest::AbandonDocument(document_id) => {
-                abandon_document(document_id, abandoned, preview_cache);
-            }
-            WorkerRequest::Shutdown => shutdown = true,
-            other => pending.push_back(other),
-        }
-    }
-    shutdown
-}
-
-fn abandon_document(
-    document_id: u64,
-    abandoned: &mut HashSet<u64>,
-    preview_cache: &mut Option<PreviewCache>,
-) {
-    abandoned.insert(document_id);
-    if preview_cache
-        .as_ref()
-        .is_some_and(|cache| cache.document_id == document_id)
-    {
-        *preview_cache = None;
-    }
-}
-
-fn coalesce_pending_preview(
-    mut current: PreviewJob,
-    pending: &mut VecDeque<WorkerRequest>,
-) -> PreviewJob {
-    let mut retained = VecDeque::with_capacity(pending.len());
-    while let Some(request) = pending.pop_front() {
-        match request {
-            WorkerRequest::Preview(candidate)
-                if candidate.ticket.document_id == current.ticket.document_id =>
-            {
-                if should_replace_preview(current.ticket, candidate.ticket) {
-                    current = candidate;
-                }
-            }
-            other => retained.push_back(other),
-        }
-    }
-    *pending = retained;
-    current
 }
 
 fn request_belongs_to_abandoned_document(
@@ -449,9 +591,8 @@ impl WorkerRequest {
             Self::Open { document_id, .. } | Self::AbandonDocument(document_id) => {
                 Some(*document_id)
             }
-            Self::Preview(job) => Some(job.ticket.document_id),
             Self::Export(job) => Some(job.document_id),
-            Self::Shutdown => None,
+            Self::PreviewAvailable | Self::Shutdown => None,
         }
     }
 }
@@ -615,8 +756,9 @@ fn process_preview(
     job: PreviewJob,
     sender: &mpsc::Sender<WorkerEvent>,
     context: &egui::Context,
-    preview_cache: &mut Option<PreviewCache>,
-) {
+    cancellation: &CancellationToken,
+    preview_cache: &mut PreviewCache,
+) -> PreviewCompletion {
     let span = info_span!(
         "desktop.preview",
         document_id = job.ticket.document_id,
@@ -624,9 +766,8 @@ fn process_preview(
     );
     let _guard = span.enter();
     let options = PreviewOptions::default();
-    let cache_hit = preview_cache
-        .as_ref()
-        .is_some_and(|cache| cache.matches(&job, options));
+    let keys = PreviewCacheKeys::new(job.ticket.document_id, &job.frame, &job.recipe, options);
+    let cache_hits = preview_cache.prepare(&keys, &job.frame);
     send_progress(
         sender,
         context,
@@ -634,54 +775,77 @@ fn process_preview(
         JobKind::Preview,
         Some(job.ticket.revision),
         None,
-        if cache_hit {
-            "Applying edits to cached 2560 px CPU preview"
+        if cache_hits.adjusted {
+            "Restoring cached adjusted CPU preview"
+        } else if cache_hits.demosaiced {
+            "Applying edits to cached demosaiced CPU base"
+        } else if cache_hits.normalized {
+            "Demosaicing cached normalized CPU preview"
         } else {
             "Developing 2560 px CPU preview"
         },
     );
-    match develop_preview(&job, options, cache_hit, preview_cache) {
-        Ok(result) => match WorkerImage::from_display(result.image) {
+    match develop_preview(
+        &job,
+        options,
+        &keys,
+        cache_hits,
+        cancellation,
+        preview_cache,
+    ) {
+        Ok((display, diagnostics)) => match WorkerImage::from_display(display) {
             Ok(image) => {
-                info!(
-                    width = image.width,
-                    height = image.height,
-                    elapsed_ms = result.timings.total.as_millis(),
-                    "CPU preview complete"
-                );
+                log_preview_diagnostics(job.ticket, image.width, image.height, diagnostics);
                 send_event(
                     sender,
                     context,
                     WorkerEvent::PreviewReady {
                         ticket: job.ticket,
                         image,
-                        timings: result.timings,
+                        diagnostics,
                     },
                 );
+                PreviewCompletion::Completed
             }
-            Err(error) => send_failure(
+            Err(error) => {
+                send_failure(
+                    sender,
+                    context,
+                    job.ticket.document_id,
+                    JobKind::Preview,
+                    Some(job.ticket.revision),
+                    None,
+                    format!("Could not prepare the CPU preview for display: {error}"),
+                );
+                PreviewCompletion::Failed
+            }
+        },
+        Err(PipelineError::Cancelled) => {
+            info!("CPU preview cancelled after being superseded");
+            PreviewCompletion::Cancelled
+        }
+        Err(error) => {
+            send_failure(
                 sender,
                 context,
                 job.ticket.document_id,
                 JobKind::Preview,
                 Some(job.ticket.revision),
                 None,
-                format!("Could not prepare the CPU preview for display: {error}"),
-            ),
-        },
-        Err(error) => send_failure(
-            sender,
-            context,
-            job.ticket.document_id,
-            JobKind::Preview,
-            Some(job.ticket.revision),
-            None,
-            error,
-        ),
+                format!("CPU preview development failed: {error}"),
+            );
+            PreviewCompletion::Failed
+        }
     }
 }
 
-fn process_gpu_base(job: PreviewJob, sender: &mpsc::Sender<WorkerEvent>, context: &egui::Context) {
+fn process_gpu_base(
+    job: PreviewJob,
+    sender: &mpsc::Sender<WorkerEvent>,
+    context: &egui::Context,
+    cancellation: &CancellationToken,
+    preview_cache: &mut PreviewCache,
+) -> PreviewCompletion {
     let span = info_span!(
         "desktop.gpu_base",
         document_id = job.ticket.document_id,
@@ -689,6 +853,8 @@ fn process_gpu_base(job: PreviewJob, sender: &mpsc::Sender<WorkerEvent>, context
     );
     let _guard = span.enter();
     let options = PreviewOptions::default();
+    let keys = PreviewCacheKeys::new(job.ticket.document_id, &job.frame, &job.recipe, options);
+    let cache_hits = preview_cache.prepare(&keys, &job.frame);
     send_progress(
         sender,
         context,
@@ -696,84 +862,256 @@ fn process_gpu_base(job: PreviewJob, sender: &mpsc::Sender<WorkerEvent>, context
         JobKind::Preview,
         Some(job.ticket.revision),
         None,
-        "Preparing linear 2560 px GPU preview base",
+        if cache_hits.demosaiced {
+            "Packing cached linear base for GPU preview"
+        } else if cache_hits.normalized {
+            "Demosaicing cached normalized GPU preview base"
+        } else {
+            "Preparing linear 2560 px GPU preview base"
+        },
     );
-    match CpuPipeline.prepare_preview_base(&job.frame, &job.recipe, options) {
-        Ok(base) => {
-            let timings = base.timings();
-            info!(
-                width = base.image().width(),
-                height = base.image().height(),
-                elapsed_ms = timings.total.as_millis(),
-                "GPU preview base complete"
-            );
-            let upload_started = Instant::now();
-            match GpuPreviewUpload::from_demosaiced_base(&base) {
-                Ok(upload) => send_event(
-                    sender,
-                    context,
-                    WorkerEvent::GpuUploadReady {
-                        ticket: job.ticket,
-                        upload: Box::new(upload),
-                        base_timings: timings,
-                        upload_preparation: upload_started.elapsed(),
-                    },
-                ),
-                Err(error) => send_failure(
-                    sender,
-                    context,
-                    job.ticket.document_id,
-                    JobKind::Preview,
-                    Some(job.ticket.revision),
-                    None,
-                    format!("Could not prepare the GPU preview upload: {error}"),
-                ),
-            }
+    let timings = match ensure_preview_base(
+        &job,
+        options,
+        &keys,
+        cache_hits,
+        cancellation,
+        preview_cache,
+    ) {
+        Ok(timings) => timings,
+        Err(PipelineError::Cancelled) => {
+            info!("GPU preview base cancelled after being superseded");
+            return PreviewCompletion::Cancelled;
         }
-        Err(error) => send_failure(
+        Err(error) => {
+            send_failure(
+                sender,
+                context,
+                job.ticket.document_id,
+                JobKind::Preview,
+                Some(job.ticket.revision),
+                None,
+                format!("GPU preview base development failed: {error}"),
+            );
+            return PreviewCompletion::Failed;
+        }
+    };
+    let Some(base) = preview_cache.demosaiced(&keys) else {
+        send_failure(
             sender,
             context,
             job.ticket.document_id,
             JobKind::Preview,
             Some(job.ticket.revision),
             None,
-            format!("GPU preview base development failed: {error}"),
-        ),
-    }
+            "GPU preview cache lost its demosaiced base unexpectedly".to_owned(),
+        );
+        return PreviewCompletion::Failed;
+    };
+    let width = base.image().width();
+    let height = base.image().height();
+    let upload_started = Instant::now();
+    let upload = match GpuPreviewUpload::from_demosaiced_base_cancellable(base, cancellation) {
+        Ok(upload) => upload,
+        Err(GpuPreviewError::Cancelled) => {
+            info!("GPU upload packing cancelled after being superseded");
+            return PreviewCompletion::Cancelled;
+        }
+        Err(error) => {
+            send_failure(
+                sender,
+                context,
+                job.ticket.document_id,
+                JobKind::Preview,
+                Some(job.ticket.revision),
+                None,
+                format!("Could not prepare the GPU preview upload: {error}"),
+            );
+            return PreviewCompletion::Failed;
+        }
+    };
+    let upload_preparation = upload_started.elapsed();
+    let cache_resident_bytes = preview_cache.resident_bytes();
+    let memory = gpu_base_memory(&job.frame, base, cache_resident_bytes);
+    let diagnostics = WorkerPreviewDiagnostics {
+        backend: PreviewBackend::GpuBase,
+        cache_hits,
+        timings,
+        memory,
+        cache_resident_bytes,
+        workspace_reused: false,
+    };
+    log_preview_diagnostics(job.ticket, width, height, diagnostics);
+    send_event(
+        sender,
+        context,
+        WorkerEvent::GpuUploadReady {
+            ticket: job.ticket,
+            upload: Box::new(upload),
+            diagnostics,
+            upload_preparation,
+        },
+    );
+    PreviewCompletion::Completed
 }
 
 fn develop_preview(
     job: &PreviewJob,
     options: PreviewOptions,
-    cache_hit: bool,
-    preview_cache: &mut Option<PreviewCache>,
-) -> Result<rohditor_core::RenderResult, String> {
-    if !cache_hit {
-        let base = CpuPipeline
-            .prepare_preview_base(&job.frame, &job.recipe, options)
-            .map_err(|error| format!("CPU preview base development failed: {error}"))?;
-        *preview_cache = Some(PreviewCache {
-            document_id: job.ticket.document_id,
-            frame: Arc::clone(&job.frame),
+    keys: &PreviewCacheKeys,
+    cache_hits: PreviewCacheHits,
+    cancellation: &CancellationToken,
+    preview_cache: &mut PreviewCache,
+) -> Result<(rohditor_core::DisplayRgbImage<u8>, WorkerPreviewDiagnostics), PipelineError> {
+    if let Some(cached) = preview_cache.adjusted(keys) {
+        let copy_started = Instant::now();
+        let image = cached.image.clone();
+        let memory = cached.memory;
+        let timings = StageTimings {
+            total: copy_started.elapsed(),
+            ..StageTimings::default()
+        };
+        return Ok((
+            image,
+            WorkerPreviewDiagnostics {
+                backend: PreviewBackend::Cpu,
+                cache_hits,
+                timings,
+                memory,
+                cache_resident_bytes: preview_cache.resident_bytes(),
+                workspace_reused: false,
+            },
+        ));
+    }
+
+    let base_timings =
+        ensure_preview_base(job, options, keys, cache_hits, cancellation, preview_cache)?;
+    let workspace_reused = preview_cache.workspace_reusable(keys);
+    let Some((base, workspace)) = preview_cache.base_and_workspace(keys) else {
+        return Err(cache_invariant(
+            "demosaiced base was unavailable after preparation",
+        ));
+    };
+    let mut result = CpuPipeline.render_preview_from_base_reusing_cancellable(
+        base,
+        &job.recipe,
+        options.render.output_policy,
+        workspace,
+        cancellation,
+    )?;
+    add_stage_timings(&mut result.timings, base_timings);
+    let memory = result.memory;
+    let timings = result.timings;
+    preview_cache.insert_adjusted(keys, result.image.clone(), memory);
+    let diagnostics = WorkerPreviewDiagnostics {
+        backend: PreviewBackend::Cpu,
+        cache_hits,
+        timings,
+        memory,
+        cache_resident_bytes: preview_cache.resident_bytes(),
+        workspace_reused,
+    };
+    Ok((result.image, diagnostics))
+}
+
+fn ensure_preview_base(
+    job: &PreviewJob,
+    options: PreviewOptions,
+    keys: &PreviewCacheKeys,
+    cache_hits: PreviewCacheHits,
+    cancellation: &CancellationToken,
+    preview_cache: &mut PreviewCache,
+) -> Result<StageTimings, PipelineError> {
+    let mut timings = StageTimings::default();
+    if !cache_hits.normalized {
+        let normalized = CpuPipeline.prepare_preview_normalized_cancellable(
+            &job.frame,
             options,
-            base,
-        });
+            cancellation,
+        )?;
+        add_stage_timings(&mut timings, normalized.timings());
+        preview_cache.insert_normalized(keys, normalized);
     }
-    let cached = preview_cache
-        .as_ref()
-        .ok_or_else(|| "CPU preview cache was unexpectedly unavailable".to_owned())?;
-    let mut result = CpuPipeline
-        .render_preview_from_base(&cached.base, &job.recipe, options.render.output_policy)
-        .map_err(|error| format!("CPU preview development failed: {error}"))?;
-    if !cache_hit {
-        let base_timings = cached.base.timings();
-        result.timings.metadata = base_timings.metadata;
-        result.timings.normalization = base_timings.normalization;
-        result.timings.demosaic = base_timings.demosaic;
-        result.timings.color_conversion = base_timings.color_conversion;
-        result.timings.total += base_timings.total;
+    if !cache_hits.demosaiced {
+        let normalized = preview_cache
+            .normalized(keys)
+            .ok_or_else(|| cache_invariant("normalized preview was unavailable before demosaic"))?;
+        let base = CpuPipeline.prepare_preview_base_from_normalized_cancellable(
+            normalized,
+            &job.recipe,
+            options.render.demosaic,
+            cancellation,
+        )?;
+        add_stage_timings(&mut timings, base.timings());
+        preview_cache.insert_demosaiced(keys, base);
     }
-    Ok(result)
+    cancellation.checkpoint()?;
+    Ok(timings)
+}
+
+fn add_stage_timings(target: &mut StageTimings, additional: StageTimings) {
+    target.metadata += additional.metadata;
+    target.normalization += additional.normalization;
+    target.demosaic += additional.demosaic;
+    target.color_conversion += additional.color_conversion;
+    target.adjustments += additional.adjustments;
+    target.output_conversion += additional.output_conversion;
+    target.total += additional.total;
+}
+
+fn gpu_base_memory(
+    frame: &RawFrame,
+    base: &rohditor_core::DemosaicedBase,
+    cache_resident_bytes: usize,
+) -> MemoryEstimate {
+    MemoryEstimate {
+        decoded_raw_bytes: frame.mosaic.len().saturating_mul(size_of::<u16>()),
+        normalized_mosaic_bytes: base
+            .image()
+            .width()
+            .saturating_mul(base.image().height())
+            .saturating_mul(size_of::<f32>()),
+        linear_rgb_bytes: base.buffer_bytes(),
+        display_rgb_bytes: 0,
+        estimated_peak_bytes: cache_resident_bytes,
+    }
+}
+
+fn log_preview_diagnostics(
+    ticket: PreviewTicket,
+    width: usize,
+    height: usize,
+    diagnostics: WorkerPreviewDiagnostics,
+) {
+    info!(
+        document_id = ticket.document_id,
+        revision = ticket.revision,
+        backend = diagnostics.backend.label(),
+        width,
+        height,
+        cache_decoded = diagnostics.cache_hits.decoded,
+        cache_normalized = diagnostics.cache_hits.normalized,
+        cache_demosaiced = diagnostics.cache_hits.demosaiced,
+        cache_adjusted = diagnostics.cache_hits.adjusted,
+        workspace_reused = diagnostics.workspace_reused,
+        metadata_us = diagnostics.timings.metadata.as_micros(),
+        normalization_us = diagnostics.timings.normalization.as_micros(),
+        demosaic_us = diagnostics.timings.demosaic.as_micros(),
+        color_us = diagnostics.timings.color_conversion.as_micros(),
+        adjustments_us = diagnostics.timings.adjustments.as_micros(),
+        output_us = diagnostics.timings.output_conversion.as_micros(),
+        total_us = diagnostics.timings.total.as_micros(),
+        cache_bytes = diagnostics.cache_resident_bytes,
+        estimated_peak_bytes = diagnostics.memory.estimated_peak_bytes,
+        "preview processing complete"
+    );
+}
+
+fn cache_invariant(reason: &str) -> PipelineError {
+    PipelineError::InvalidMetadata {
+        field: "preview_cache",
+        reason: reason.to_owned(),
+    }
 }
 
 fn process_export(job: ExportJob, sender: &mpsc::Sender<WorkerEvent>, context: &egui::Context) {
@@ -989,7 +1327,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use image::{Rgb, RgbImage};
-    use rohditor_core::{ExportFormat, JPEG_QUALITY_DEFAULT};
+    use rohditor_core::{ExportFormat, JPEG_QUALITY_DEFAULT, WhiteBalance};
     use rohditor_raw::{
         CameraColorMatrix, CaptureMetadata, CfaPattern, LevelPattern, PhotometricInterpretation,
         RawError, RawSession,
@@ -1038,30 +1376,72 @@ mod tests {
             recipe: EditRecipe::default(),
             backend: PreviewBackend::Cpu,
         };
-        let mut pending = VecDeque::from([
-            WorkerRequest::Preview(job(4, 7)),
-            WorkerRequest::Preview(job(5, 20)),
-            WorkerRequest::Preview(job(4, 10)),
-            WorkerRequest::Preview(job(4, 8)),
-        ]);
+        let mailbox = PreviewMailbox::default();
+        let (sender, receiver) = mpsc::channel();
+        for revision in 0..1_000 {
+            mailbox
+                .queue(job(4, revision), &sender)
+                .expect("worker wake should remain connected");
+        }
 
-        let selected = coalesce_pending_preview(job(4, 9), &mut pending);
-        assert_eq!(selected.ticket.revision, 10);
-        assert_eq!(pending.len(), 1);
         assert!(matches!(
-            pending.front(),
-            Some(WorkerRequest::Preview(PreviewJob {
-                ticket: PreviewTicket { document_id: 5, .. },
-                ..
-            }))
+            receiver.try_recv(),
+            Ok(WorkerRequest::PreviewAvailable)
         ));
+        assert!(receiver.try_recv().is_err());
+        let selected = mailbox
+            .take()
+            .expect("newest preview should remain pending");
+        assert_eq!(selected.job.ticket.revision, 999);
+        let stats = mailbox.stats();
+        assert_eq!(stats.requested, 1_000);
+        assert_eq!(stats.coalesced, 999);
+        assert!(stats.active);
+        assert!(!stats.pending);
+    }
+
+    #[test]
+    fn a_newer_preview_cancels_the_active_revision() {
+        let frame = Arc::new(fake_frame());
+        let job = |revision| PreviewJob {
+            ticket: PreviewTicket {
+                document_id: 4,
+                revision,
+            },
+            frame: Arc::clone(&frame),
+            recipe: EditRecipe::default(),
+            backend: PreviewBackend::Cpu,
+        };
+        let mailbox = PreviewMailbox::default();
+        let (sender, receiver) = mpsc::channel();
+        mailbox.queue(job(1), &sender).expect("queue active job");
+        assert!(matches!(
+            receiver.recv(),
+            Ok(WorkerRequest::PreviewAvailable)
+        ));
+        let active = mailbox.take().expect("active preview");
+
+        mailbox.queue(job(2), &sender).expect("queue replacement");
+
+        assert!(active.cancellation.is_cancelled());
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(WorkerRequest::PreviewAvailable)
+        ));
+        let stats = mailbox.stats();
+        assert_eq!(stats.cancellation_requests, 1);
+        assert!(stats.pending);
+
+        mailbox.finish(active.job.ticket, PreviewCompletion::Cancelled);
+        let replacement = mailbox.take().expect("replacement should run next");
+        assert_eq!(replacement.job.ticket.revision, 2);
     }
 
     #[test]
     fn downstream_edits_reuse_the_demosaiced_preview_base() {
         let frame = Arc::new(fake_frame());
         let options = PreviewOptions::default();
-        let mut cache = None;
+        let mut cache = PreviewCache::default();
         let initial = PreviewJob {
             ticket: PreviewTicket {
                 document_id: 9,
@@ -1071,8 +1451,18 @@ mod tests {
             recipe: EditRecipe::default(),
             backend: PreviewBackend::Cpu,
         };
-        let first = develop_preview(&initial, options, false, &mut cache)
-            .expect("initial preview should build its base");
+        let initial_keys =
+            PreviewCacheKeys::new(initial.ticket.document_id, &frame, &initial.recipe, options);
+        let initial_hits = cache.prepare(&initial_keys, &frame);
+        let first = develop_preview(
+            &initial,
+            options,
+            &initial_keys,
+            initial_hits,
+            &CancellationToken::new(),
+            &mut cache,
+        )
+        .expect("initial preview should build its base");
 
         let adjusted = PreviewJob {
             ticket: PreviewTicket {
@@ -1086,18 +1476,60 @@ mod tests {
             },
             backend: PreviewBackend::Cpu,
         };
-        assert!(
-            cache
-                .as_ref()
-                .is_some_and(|cache| cache.matches(&adjusted, options))
+        let adjusted_keys = PreviewCacheKeys::new(
+            adjusted.ticket.document_id,
+            &adjusted.frame,
+            &adjusted.recipe,
+            options,
         );
-        let second = develop_preview(&adjusted, options, true, &mut cache)
-            .expect("downstream edit should reuse its base");
+        let adjusted_hits = cache.prepare(&adjusted_keys, &adjusted.frame);
+        assert!(adjusted_hits.decoded);
+        assert!(adjusted_hits.normalized);
+        assert!(adjusted_hits.demosaiced);
+        assert!(!adjusted_hits.adjusted);
+        let second = develop_preview(
+            &adjusted,
+            options,
+            &adjusted_keys,
+            adjusted_hits,
+            &CancellationToken::new(),
+            &mut cache,
+        )
+        .expect("downstream edit should reuse its base");
 
-        assert_ne!(first.image, second.image);
-        assert_eq!(second.timings.normalization, Duration::ZERO);
-        assert_eq!(second.timings.demosaic, Duration::ZERO);
-        assert_eq!(second.timings.color_conversion, Duration::ZERO);
+        assert_ne!(first.0, second.0);
+        assert_eq!(second.1.timings.normalization, Duration::ZERO);
+        assert_eq!(second.1.timings.demosaic, Duration::ZERO);
+        assert_eq!(second.1.timings.color_conversion, Duration::ZERO);
+        assert!(second.1.workspace_reused);
+
+        let invalid_schema_recipe = EditRecipe {
+            schema_version: u32::MAX,
+            ..adjusted.recipe.clone()
+        };
+        let invalid_schema_keys =
+            PreviewCacheKeys::new(9, &adjusted.frame, &invalid_schema_recipe, options);
+        let invalid_schema_hits = cache.prepare(&invalid_schema_keys, &adjusted.frame);
+        assert!(invalid_schema_hits.decoded);
+        assert!(invalid_schema_hits.normalized);
+        assert!(!invalid_schema_hits.demosaiced);
+        assert!(!invalid_schema_hits.adjusted);
+
+        let white_balance_recipe = EditRecipe {
+            white_balance: WhiteBalance::ManualMultipliers {
+                red: 1.1,
+                green: 1.0,
+                blue: 0.9,
+            },
+            ..EditRecipe::default()
+        };
+        let white_balance_keys =
+            PreviewCacheKeys::new(9, &adjusted.frame, &white_balance_recipe, options);
+        let white_balance_hits = cache.prepare(&white_balance_keys, &adjusted.frame);
+        assert!(white_balance_hits.decoded);
+        assert!(white_balance_hits.normalized);
+        assert!(!white_balance_hits.demosaiced);
+        assert!(!white_balance_hits.adjusted);
     }
 
     #[test]
@@ -1113,7 +1545,14 @@ mod tests {
             backend: PreviewBackend::GpuBase,
         };
 
-        process_gpu_base(job, &sender, &egui::Context::default());
+        let completion = process_gpu_base(
+            job,
+            &sender,
+            &egui::Context::default(),
+            &CancellationToken::new(),
+            &mut PreviewCache::default(),
+        );
+        assert_eq!(completion, PreviewCompletion::Completed);
         let events = receiver.try_iter().collect::<Vec<_>>();
         let upload = events.iter().find_map(|event| match event {
             WorkerEvent::GpuUploadReady { ticket, upload, .. }
@@ -1419,6 +1858,102 @@ mod tests {
         }
         assert!(destination.is_file());
         fs::remove_file(destination)?;
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires the ignored Sony ARW corpus in testdata/private"]
+    fn private_cached_cpu_preview_reports_bounded_memory_and_stage_skips()
+    -> Result<(), Box<dyn Error>> {
+        let source =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/private/DSC00851.ARW");
+        if !source.is_file() {
+            eprintln!(
+                "skipping cache measurement because {} is absent",
+                source.display()
+            );
+            return Ok(());
+        }
+        let decoder = RawlerDecoder::default();
+        let mut session = decoder.open(&source)?;
+        let frame = Arc::new(session.decode()?);
+        let options = PreviewOptions::default();
+        let mut cache = PreviewCache::default();
+
+        let initial = PreviewJob {
+            ticket: PreviewTicket {
+                document_id: 71,
+                revision: 0,
+            },
+            frame: Arc::clone(&frame),
+            recipe: EditRecipe::default(),
+            backend: PreviewBackend::Cpu,
+        };
+        let initial_keys =
+            PreviewCacheKeys::new(initial.ticket.document_id, &frame, &initial.recipe, options);
+        let initial_hits = cache.prepare(&initial_keys, &frame);
+        let initial_started = Instant::now();
+        let (initial_image, initial_diagnostics) = develop_preview(
+            &initial,
+            options,
+            &initial_keys,
+            initial_hits,
+            &CancellationToken::new(),
+            &mut cache,
+        )?;
+        let first_wall = initial_started.elapsed();
+        let stable_cache_bytes = cache.resident_bytes();
+        let mut cached_wall = Vec::new();
+
+        for revision in 1..=24 {
+            let recipe = EditRecipe {
+                exposure_ev: (revision as f32 / 24.0) * 2.0 - 1.0,
+                contrast: revision as f32 / 48.0,
+                saturation: 0.8 + revision as f32 / 60.0,
+                ..EditRecipe::default()
+            };
+            let job = PreviewJob {
+                ticket: PreviewTicket {
+                    document_id: 71,
+                    revision,
+                },
+                frame: Arc::clone(&frame),
+                recipe,
+                backend: PreviewBackend::Cpu,
+            };
+            let keys = PreviewCacheKeys::new(job.ticket.document_id, &frame, &job.recipe, options);
+            let hits = cache.prepare(&keys, &frame);
+            assert!(hits.decoded && hits.normalized && hits.demosaiced && !hits.adjusted);
+            let started = Instant::now();
+            let (_, diagnostics) = develop_preview(
+                &job,
+                options,
+                &keys,
+                hits,
+                &CancellationToken::new(),
+                &mut cache,
+            )?;
+            cached_wall.push(started.elapsed());
+            assert_eq!(diagnostics.timings.normalization, Duration::ZERO);
+            assert_eq!(diagnostics.timings.demosaic, Duration::ZERO);
+            assert_eq!(diagnostics.timings.color_conversion, Duration::ZERO);
+            assert!(diagnostics.workspace_reused);
+            assert_eq!(cache.resident_bytes(), stable_cache_bytes);
+        }
+
+        cached_wall.sort_unstable();
+        let median = cached_wall[cached_wall.len() / 2];
+        let worst = cached_wall.last().copied().unwrap_or(Duration::ZERO);
+        eprintln!(
+            "Phase 6 CPU cache measurement: {}x{}, first={:.2} ms, cached median={:.2} ms, cached max={:.2} ms, cache={:.1} MiB, render peak={:.1} MiB",
+            initial_image.width(),
+            initial_image.height(),
+            first_wall.as_secs_f64() * 1_000.0,
+            median.as_secs_f64() * 1_000.0,
+            worst.as_secs_f64() * 1_000.0,
+            stable_cache_bytes as f64 / 1_048_576.0,
+            initial_diagnostics.memory.estimated_peak_bytes as f64 / 1_048_576.0,
+        );
         Ok(())
     }
 }

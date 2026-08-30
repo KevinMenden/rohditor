@@ -3,6 +3,9 @@ use thiserror::Error;
 /// Errors from validation or execution of Rohditor's CPU image pipeline.
 #[derive(Debug, Error)]
 pub enum PipelineError {
+    #[error("image processing was cancelled because a newer preview superseded it")]
+    Cancelled,
+
     #[error("invalid image dimensions {width}x{height} with row stride {row_stride}: {reason}")]
     InvalidDimensions {
         width: usize,

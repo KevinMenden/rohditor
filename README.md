@@ -2,9 +2,9 @@
 
 Rohditor is a Linux-first RAW photo editor being built for Sony `ILCE-6400`
 files. Decoder validation, the deterministic CPU reference pipeline, formal
-export layer, desktop editor, and first GPU preview path (Phases 1 through 5)
-are complete. The next milestone is preview caching, cancellation, and measured
-performance work described in [`plan.md`](plan.md).
+export layer, desktop editor, first GPU preview path, and the caching/performance
+pass (Phases 1 through 6) are complete. The next milestone is the Rohditor
+visual design system described in [`plan.md`](plan.md).
 
 ## Current capabilities
 
@@ -23,6 +23,9 @@ performance work described in [`plan.md`](plan.md).
   loading preview, 2560-edge developed CPU or GPU preview, global adjustment
   controls, zoom/pan/fit, revision-safe background work, undo/redo, and
   background export.
+- A bounded newest-wins preview scheduler with cooperative CPU cancellation,
+  explicit decoded/normalized/demosaiced/adjusted cache keys, reusable CPU/GPU
+  buffers, structured stage traces, and an in-app developer diagnostics window.
 - wgpu/Vulkan UI rendering with a compiled glow fallback. GPU previews share
   eframe's device and queue, retain the linear base on the GPU, and display an
   egui-native texture without CPU readback. CPU previews and all exports remain
@@ -34,7 +37,8 @@ The desktop worker and GPU-preview contracts are documented in
 [`docs/desktop.md`](docs/desktop.md) and
 [`docs/gpu-preview.md`](docs/gpu-preview.md). The Phase 2 color baseline is in
 [`docs/cpu-pipeline.md`](docs/cpu-pipeline.md), and the export contract is in
-[`docs/export.md`](docs/export.md).
+[`docs/export.md`](docs/export.md). Phase 6 measurements and their scope are in
+[`docs/preview-performance.md`](docs/preview-performance.md).
 
 ## Prerequisites
 
@@ -49,6 +53,7 @@ No native image-decoder dependency is required for the current implementation.
 ```console
 cargo build --workspace
 ./scripts/check.sh
+cargo bench -p rohditor-core --bench pipeline_stages
 ```
 
 The private camera corpus is deliberately excluded from version control. To run
@@ -78,9 +83,12 @@ rohditor-desktop --processor gpu   # require a compatible shared wgpu device
 rohditor-desktop --processor cpu   # never create image-processing GPU resources
 ```
 
-`--renderer glow` cannot provide a shared `wgpu` device, so `--processor auto`
+Use the **Diagnostics** toggle in the top bar to inspect cache hits, queue and
+cancellation counters, CPU stage timings, retained-memory estimates, and GPU
+submission/completion timing. `--renderer glow` cannot provide a shared `wgpu`
+device, so `--processor auto`
 falls back to CPU and `--processor gpu` reports an initialization error. Exports
-remain full-resolution CPU renders in Phase 5.
+remain full-resolution CPU renders by design.
 
 ## Inspect a RAW file
 

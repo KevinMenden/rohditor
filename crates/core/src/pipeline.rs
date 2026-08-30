@@ -1,15 +1,19 @@
 use std::mem::size_of;
 use std::time::{Duration, Instant};
 
-use rohditor_raw::{RawFrame, RawOrientation};
+use rohditor_raw::{RawFileInfo, RawFrame, RawOrientation};
 
-use crate::color::camera_color_transform;
-use crate::cpu::apply_camera_color_transform;
+use crate::color::{CameraColorTransform, camera_color_transform};
+use crate::cpu::{
+    apply_adjustments_cancellable, apply_camera_color_transform,
+    apply_camera_color_transform_cancellable, demosaic_cancellable,
+    normalize_raw_preview_cancellable, render_display_srgb8_cancellable,
+};
 use crate::{
-    DisplayRgbImage, DitherMode, EditRecipe, ExportImage, LinearRgbImage, OutputBitDepth,
-    PipelineError, WhiteBalance, apply_adjustments, demosaic, normalize_raw, normalize_raw_preview,
-    render_display_srgb8, render_display_srgb8_dithered, render_display_srgb16,
-    white_balance_gains,
+    CancellationToken, DisplayRgbImage, DitherMode, EditRecipe, ExportImage, LinearRgbImage,
+    MosaicImage, OutputBitDepth, PipelineError, WhiteBalance, apply_adjustments, demosaic,
+    normalize_raw, normalize_raw_preview, render_display_srgb8, render_display_srgb8_dithered,
+    render_display_srgb16, white_balance_gains,
 };
 
 /// Default longest edge of an interactively developed preview.
@@ -86,6 +90,36 @@ pub struct MemoryEstimate {
     pub estimated_peak_bytes: usize,
 }
 
+/// Resolution-limited, normalized sensor mosaic retained between preview base
+/// rebuilds. White balance and demosaic selection have not been applied yet.
+#[derive(Debug, Clone)]
+pub struct NormalizedPreview {
+    mosaic: MosaicImage<f32>,
+    info: RawFileInfo,
+    camera_transform: CameraColorTransform,
+    timings: StageTimings,
+    decoded_raw_bytes: usize,
+}
+
+impl NormalizedPreview {
+    /// Normalized CFA samples, mainly exposed for diagnostics and benchmarks.
+    #[must_use]
+    pub const fn image(&self) -> &MosaicImage<f32> {
+        &self.mosaic
+    }
+
+    #[must_use]
+    pub const fn timings(&self) -> StageTimings {
+        self.timings
+    }
+
+    /// Bytes held by the normalized image buffer itself.
+    #[must_use]
+    pub fn buffer_bytes(&self) -> usize {
+        self.mosaic.data().len().saturating_mul(size_of::<f32>())
+    }
+}
+
 /// A completed CPU render and its diagnostics.
 #[derive(Debug)]
 pub struct RenderResult {
@@ -138,6 +172,57 @@ impl DemosaicedBase {
     pub const fn timings(&self) -> StageTimings {
         self.timings
     }
+
+    /// Bytes held by the scene-linear RGB image buffer itself.
+    #[must_use]
+    pub fn buffer_bytes(&self) -> usize {
+        self.image.data().len().saturating_mul(size_of::<f32>())
+    }
+}
+
+/// Reusable scene-linear working buffer for cached CPU preview adjustments.
+///
+/// Each edit still copies the immutable base pixels into this buffer, but it no
+/// longer allocates another full `f32` RGB image for every slider revision.
+#[derive(Debug, Default)]
+pub struct CpuPreviewWorkspace {
+    image: Option<LinearRgbImage<f32>>,
+}
+
+impl CpuPreviewWorkspace {
+    /// Whether the current allocation can be overwritten for this base.
+    #[must_use]
+    pub fn can_reuse(&self, base: &DemosaicedBase) -> bool {
+        self.image.as_ref().is_some_and(|image| {
+            image.width() == base.image.width()
+                && image.height() == base.image.height()
+                && image.row_stride() == base.image.row_stride()
+                && image.data().len() == base.image.data().len()
+        })
+    }
+
+    /// Bytes held by the reusable scene-linear allocation.
+    #[must_use]
+    pub fn buffer_bytes(&self) -> usize {
+        self.image.as_ref().map_or(0, |image| {
+            image.data().len().saturating_mul(size_of::<f32>())
+        })
+    }
+
+    fn reset_from(&mut self, base: &DemosaicedBase) -> &mut LinearRgbImage<f32> {
+        if self.can_reuse(base) {
+            if let Some(image) = self.image.as_mut() {
+                image.data_mut().copy_from_slice(base.image.data());
+                image.set_space(base.image.space());
+            }
+        } else {
+            self.image = Some(base.image.clone());
+        }
+        match self.image.as_mut() {
+            Some(image) => image,
+            None => unreachable!("the workspace always contains an image after reset"),
+        }
+    }
 }
 
 /// Deterministic, headless CPU implementation of the Phase 2 reference pipeline.
@@ -174,12 +259,75 @@ impl CpuPipeline {
         recipe: &EditRecipe,
         options: PreviewOptions,
     ) -> Result<DemosaicedBase, PipelineError> {
-        prepare_base(
-            frame,
+        self.prepare_preview_base_cancellable(frame, recipe, options, &CancellationToken::new())
+    }
+
+    /// Build the preview base while observing a cooperative cancellation token.
+    pub fn prepare_preview_base_cancellable(
+        &self,
+        frame: &RawFrame,
+        recipe: &EditRecipe,
+        options: PreviewOptions,
+        cancellation: &CancellationToken,
+    ) -> Result<DemosaicedBase, PipelineError> {
+        let normalized =
+            self.prepare_preview_normalized_cancellable(frame, options, cancellation)?;
+        let mut base = self.prepare_preview_base_from_normalized_cancellable(
+            &normalized,
             recipe,
-            options.render,
-            BaseResolution::Preview(options.max_long_edge),
+            options.render.demosaic,
+            cancellation,
+        )?;
+        base.timings.metadata += normalized.timings.metadata;
+        base.timings.normalization = normalized.timings.normalization;
+        base.timings.total += normalized.timings.total;
+        Ok(base)
+    }
+
+    /// Normalize a resolution-limited sensor mosaic for reuse across white
+    /// balance and demosaic changes.
+    pub fn prepare_preview_normalized(
+        &self,
+        frame: &RawFrame,
+        options: PreviewOptions,
+    ) -> Result<NormalizedPreview, PipelineError> {
+        self.prepare_preview_normalized_cancellable(frame, options, &CancellationToken::new())
+    }
+
+    /// Cancellable form of [`Self::prepare_preview_normalized`].
+    pub fn prepare_preview_normalized_cancellable(
+        &self,
+        frame: &RawFrame,
+        options: PreviewOptions,
+        cancellation: &CancellationToken,
+    ) -> Result<NormalizedPreview, PipelineError> {
+        prepare_normalized_preview(frame, options, cancellation)
+    }
+
+    /// Demosaic and color-convert a retained normalized preview.
+    pub fn prepare_preview_base_from_normalized(
+        &self,
+        normalized: &NormalizedPreview,
+        recipe: &EditRecipe,
+        algorithm: DemosaicAlgorithm,
+    ) -> Result<DemosaicedBase, PipelineError> {
+        self.prepare_preview_base_from_normalized_cancellable(
+            normalized,
+            recipe,
+            algorithm,
+            &CancellationToken::new(),
         )
+    }
+
+    /// Cancellable form of [`Self::prepare_preview_base_from_normalized`].
+    pub fn prepare_preview_base_from_normalized_cancellable(
+        &self,
+        normalized: &NormalizedPreview,
+        recipe: &EditRecipe,
+        algorithm: DemosaicAlgorithm,
+        cancellation: &CancellationToken,
+    ) -> Result<DemosaicedBase, PipelineError> {
+        prepare_demosaiced_preview(normalized, recipe, algorithm, cancellation)
     }
 
     /// Apply downstream edits and output conversion to a reusable preview base.
@@ -195,6 +343,42 @@ impl CpuPipeline {
         recipe: &EditRecipe,
         output_policy: OutputPolicy,
     ) -> Result<RenderResult, PipelineError> {
+        self.render_preview_from_base_reusing(
+            base,
+            recipe,
+            output_policy,
+            &mut CpuPreviewWorkspace::default(),
+        )
+    }
+
+    /// Apply downstream edits using a retained scene-linear working allocation.
+    pub fn render_preview_from_base_reusing(
+        &self,
+        base: &DemosaicedBase,
+        recipe: &EditRecipe,
+        output_policy: OutputPolicy,
+        workspace: &mut CpuPreviewWorkspace,
+    ) -> Result<RenderResult, PipelineError> {
+        self.render_preview_from_base_reusing_cancellable(
+            base,
+            recipe,
+            output_policy,
+            workspace,
+            &CancellationToken::new(),
+        )
+    }
+
+    /// Cancellable form of [`Self::render_preview_from_base_reusing`].
+    pub fn render_preview_from_base_reusing_cancellable(
+        &self,
+        base: &DemosaicedBase,
+        recipe: &EditRecipe,
+        output_policy: OutputPolicy,
+        workspace: &mut CpuPreviewWorkspace,
+        cancellation: &CancellationToken,
+    ) -> Result<RenderResult, PipelineError> {
+        let total_started = Instant::now();
+        cancellation.checkpoint()?;
         validate_base_recipe(base, recipe)?;
         let retained_base_bytes = base
             .image
@@ -207,15 +391,33 @@ impl CpuPipeline {
             .checked_add(retained_base_bytes)
             .ok_or_else(|| dimension_overflow(base.image.width(), base.image.height()))?;
         validate_working_set(retained_peak)?;
-        let mut reusable = base.clone();
-        reusable.timings = StageTimings::default();
-        let mut result = render_base(reusable, recipe, output_policy)?;
-        result.memory.estimated_peak_bytes = result
-            .memory
+        let mut memory = memory_estimate(base, size_of::<u8>())?;
+        memory.estimated_peak_bytes = memory
             .estimated_peak_bytes
             .checked_add(retained_base_bytes)
             .ok_or_else(|| dimension_overflow(base.image.width(), base.image.height()))?;
-        Ok(result)
+
+        let working = workspace.reset_from(base);
+        cancellation.checkpoint()?;
+        let mut timings = StageTimings::default();
+        let adjustments_started = Instant::now();
+        apply_adjustments_cancellable(working, recipe, cancellation)?;
+        timings.adjustments = adjustments_started.elapsed();
+
+        let orientation = recipe
+            .orientation_override
+            .unwrap_or(base.source_orientation);
+        let output_started = Instant::now();
+        let image =
+            render_display_srgb8_cancellable(working, orientation, output_policy, cancellation)?;
+        timings.output_conversion = output_started.elapsed();
+        timings.total = total_started.elapsed();
+
+        Ok(RenderResult {
+            image,
+            timings,
+            memory,
+        })
     }
 
     /// Render an sRGB8 preview from a CFA-phase-preserving, resolution-limited
@@ -278,6 +480,105 @@ impl CpuPipeline {
     }
 }
 
+fn prepare_normalized_preview(
+    frame: &RawFrame,
+    options: PreviewOptions,
+    cancellation: &CancellationToken,
+) -> Result<NormalizedPreview, PipelineError> {
+    let total_started = Instant::now();
+    cancellation.checkpoint()?;
+    validate_base_working_set(frame, BaseResolution::Preview(options.max_long_edge))?;
+
+    let metadata_started = Instant::now();
+    let metadata_span = tracing::info_span!(
+        "cpu.metadata",
+        width = frame.info.width,
+        height = frame.info.height,
+        purpose = "preview normalization"
+    );
+    let metadata_guard = metadata_span.enter();
+    let camera_transform = camera_color_transform(&frame.info)?;
+    let metadata = metadata_started.elapsed();
+    drop(metadata_guard);
+
+    let normalization_started = Instant::now();
+    let mosaic = normalize_raw_preview_cancellable(
+        frame,
+        options.render.crop_policy,
+        options.max_long_edge,
+        cancellation,
+    )?;
+    let normalization = normalization_started.elapsed();
+    let decoded_raw_bytes = frame
+        .mosaic
+        .len()
+        .checked_mul(size_of::<u16>())
+        .ok_or_else(|| dimension_overflow(frame.info.width, frame.info.height))?;
+    let timings = StageTimings {
+        metadata,
+        normalization,
+        total: total_started.elapsed(),
+        ..StageTimings::default()
+    };
+
+    Ok(NormalizedPreview {
+        mosaic,
+        info: frame.info.clone(),
+        camera_transform,
+        timings,
+        decoded_raw_bytes,
+    })
+}
+
+fn prepare_demosaiced_preview(
+    normalized: &NormalizedPreview,
+    recipe: &EditRecipe,
+    algorithm: DemosaicAlgorithm,
+    cancellation: &CancellationToken,
+) -> Result<DemosaicedBase, PipelineError> {
+    let total_started = Instant::now();
+    cancellation.checkpoint()?;
+    let metadata_started = Instant::now();
+    let metadata_span = tracing::info_span!(
+        "cpu.metadata",
+        width = normalized.mosaic.width(),
+        height = normalized.mosaic.height(),
+        purpose = "preview white balance"
+    );
+    let metadata_guard = metadata_span.enter();
+    recipe.validate()?;
+    let gains = white_balance_gains(&normalized.info, recipe.white_balance)?;
+    let metadata = metadata_started.elapsed();
+    drop(metadata_guard);
+
+    let demosaic_started = Instant::now();
+    let mut image = demosaic_cancellable(&normalized.mosaic, gains, algorithm, cancellation)?;
+    let demosaic = demosaic_started.elapsed();
+
+    let color_started = Instant::now();
+    apply_camera_color_transform_cancellable(
+        &mut image,
+        &normalized.camera_transform,
+        cancellation,
+    )?;
+    let color_conversion = color_started.elapsed();
+    let timings = StageTimings {
+        metadata,
+        demosaic,
+        color_conversion,
+        total: total_started.elapsed(),
+        ..StageTimings::default()
+    };
+
+    Ok(DemosaicedBase {
+        image,
+        source_orientation: normalized.info.orientation,
+        white_balance: recipe.white_balance,
+        timings,
+        decoded_raw_bytes: normalized.decoded_raw_bytes,
+    })
+}
+
 #[derive(Debug, Clone, Copy)]
 enum BaseResolution {
     Full,
@@ -293,10 +594,18 @@ fn prepare_base(
     let total_started = Instant::now();
     validate_base_working_set(frame, resolution)?;
     let metadata_started = Instant::now();
+    let metadata_span = tracing::info_span!(
+        "cpu.metadata",
+        width = frame.info.width,
+        height = frame.info.height,
+        purpose = "full pipeline base"
+    );
+    let metadata_guard = metadata_span.enter();
     recipe.validate()?;
     let gains = white_balance_gains(&frame.info, recipe.white_balance)?;
     let camera_transform = camera_color_transform(&frame.info)?;
     let metadata = metadata_started.elapsed();
+    drop(metadata_guard);
 
     let normalization_started = Instant::now();
     let normalized = match resolution {

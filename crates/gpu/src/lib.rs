@@ -20,6 +20,10 @@ use thiserror::Error;
 /// Failure while creating, uploading, or rendering a GPU preview.
 #[derive(Debug, Error)]
 pub enum GpuPreviewError {
+    /// CPU-side preparation was superseded before an upload was submitted.
+    #[error("GPU preview preparation was cancelled by a newer preview")]
+    Cancelled,
+
     /// The eframe-created device cannot perform the required texture operations.
     #[error("the selected wgpu device cannot support GPU previews: {reason}")]
     Unsupported { reason: String },
@@ -36,6 +40,10 @@ pub enum GpuPreviewError {
     /// white-balance selection.
     #[error("GPU preview base does not match the recipe: {reason}")]
     BaseMismatch { reason: String },
+
+    /// Waiting for already-submitted GPU work failed.
+    #[error("GPU preview queue synchronization failed: {reason}")]
+    Synchronization { reason: String },
 
     /// The core recipe or image state is invalid for the GPU boundary.
     #[error("GPU preview input is invalid: {reason}")]

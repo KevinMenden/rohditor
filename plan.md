@@ -679,6 +679,34 @@ These are goals rather than cross-machine correctness requirements:
 - The newest slider state becomes visible even when an older expensive job was started first.
 - Performance measurements are documented with image dimensions and active backend.
 
+**Phase 6 status (2026-08-30): complete.** Preview submissions now use a
+one-slot newest-wins mailbox: any slider burst retains one pending job and one
+wake message, while a newer revision cooperatively cancels an active CPU stage
+or GPU-upload packing operation. Stale ticket checks remain the final install
+guard. The desktop owns an explicit, cascading, one-document cache keyed at the
+`DecodedRaw`, `NormalizedMosaic`, `DemosaicedBase`, and `AdjustedPreview`
+boundaries. White-balance changes retain normalization; downstream changes
+retain demosaic. CPU edits reuse one scene-linear workspace, and GPU edits
+reuse their source, working, display, and egui texture registrations when
+dimensions permit.
+
+Structured preview traces include every stage duration, cache result, retained
+cache bytes, and estimated peak bytes. The developer diagnostics window also
+shows live queue/coalescing/cancellation counters, CPU workspace reuse, GPU
+texture reuse, and conservative GPU queue completion. Criterion covers
+normalization, demosaic, adjustments, and output conversion. On the reference
+workstation with `DSC00851.ARW` at 2560×1707, the first CPU preview measured
+67.19 ms; cached CPU edits measured 32.12 ms median / 35.17 ms maximum with a
+stable 175.6 MiB logical cache. On the RX 9070 XT through RADV/Vulkan, cached
+GPU edits measured 0.159 ms median / 0.406 ms maximum queue-completion latency
+and reused an 83.3 MiB texture set. The shared eframe device lacks timestamp
+queries, so this is conservative shared-queue wall latency rather than isolated
+shader time. Concurrent full-suite validation also remained inside budget at
+185.99 ms worst-case CPU and 3.491 ms worst-case GPU. Measurements and tuning
+decisions are documented in `docs/preview-performance.md`; they support
+retaining the 2560 preview edge and
+single fused GPU pass without adding interactive tiling.
+
 ### Phase 7: Rohditor visual design system and desktop polish
 
 This phase is preferred after the performance/caching work and before final MVP
@@ -869,10 +897,7 @@ These must be answered through input samples or implementation measurements rath
 
 ## 16. Immediate next action
 
-Phases 0 through 5 are complete, and Gate A is approved for the current corpus.
-The next implementation session should begin Phase 6: bound queued preview
-work, add cooperative cancellation where measurements justify it, expand cache
-reuse/eviction, and record benchmarks and diagnostics for the CPU and GPU
-paths. Phase 7 then provides the Rohditor visual-design pass before MVP
-stabilization, unless it is intentionally scheduled as the first post-MVP
-visual release.
+Phases 0 through 6 are complete, and Gate A is approved for the current corpus.
+The next implementation session should begin Phase 7: build the Rohditor visual
+design system and reusable desktop UI components before MVP stabilization,
+unless it is intentionally scheduled as the first post-MVP visual release.
