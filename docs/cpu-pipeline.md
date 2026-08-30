@@ -36,6 +36,13 @@ blue CFA sub-grids are mapped independently so every output coordinate retains
 the correct Bayer phase and original sensor coordinate is still used for
 black/white-level lookup.
 
+`CpuPipeline::prepare_preview_base` exposes the typed `DemosaicedBase` boundary:
+linear Rec.2020/D65 pixels after normalization, white balance, demosaic, and
+camera color conversion, but before exposure, contrast, saturation, orientation,
+and display conversion. `render_preview_from_base` applies those downstream
+stages without rebuilding the base. The desktop keeps the latest matching base,
+and Phase 5 can upload the same typed image once for GPU adjustments.
+
 The current reduction is deterministic phase-preserving point selection. It is
 appropriate for the responsive Phase 4 baseline but is not a final antialiased
 RAW resampler. Full-resolution `render` and `render_export` remain byte-for-byte
@@ -52,7 +59,9 @@ unchanged.
 
 The recipe schema version is validated during deserialization. Missing or
 non-finite white balance, singular/unsupported matrices, invalid level patterns,
-out-of-bounds crops, and out-of-range edits are typed errors.
+out-of-bounds crops, and out-of-range edits are typed errors. A named 2 GiB
+estimated CPU working-set limit rejects unreasonable full-frame buffer plans
+before normalization allocates its first image.
 
 ## Determinism and private-corpus checks
 

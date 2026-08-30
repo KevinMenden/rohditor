@@ -8,3 +8,13 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[dependencies]
+bytemuck.workspace = true
+half.workspace = true
+rohditor-core = { path = "../core" }
+rohditor-raw = { path = "../raw" }
+thiserror.workspace = true
+wgpu.workspace = true
+
+[dev-dependencies]
+pollster.workspace = true

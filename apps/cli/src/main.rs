@@ -1,5 +1,4 @@
 use std::fmt::Write as _;
-use std::fs::{self, OpenOptions};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -11,7 +10,7 @@ use rohditor_core::{
     CONTRAST_RANGE, CpuPipeline, CropPolicy, DemosaicAlgorithm, DitherMode, EXPOSURE_EV_RANGE,
     EditRecipe, ExportFormat, ExportMetadataPolicy, ExportSettings, JPEG_QUALITY_DEFAULT,
     JPEG_QUALITY_MAX, JPEG_QUALITY_MIN, OutputPolicy, PngBitDepth, RenderOptions, SATURATION_RANGE,
-    StageTimings, WhiteBalance, export_image,
+    StageTimings, WhiteBalance, export_image, paths_refer_to_same_file, write_output_bytes,
 };
 use rohditor_raw::{
     EncodedPreviewFormat, ImageRect, PhotometricInterpretation, RawDecoder, RawFileInfo,
@@ -362,6 +361,19 @@ fn inspect(file: &Path, json: bool, metadata_only: bool) -> Result<()> {
 }
 
 fn extract_preview(file: &Path, output: &Path, force: bool) -> Result<()> {
+    if paths_refer_to_same_file(file, output).with_context(|| {
+        format!(
+            "could not compare preview source {} with output {}",
+            file.display(),
+            output.display()
+        )
+    })? {
+        bail!(
+            "refusing to replace source RAW file {} with its embedded preview",
+            file.display()
+        );
+    }
+
     let decoder = RawlerDecoder::default();
     let preview = decoder
         .embedded_preview(file)
@@ -371,29 +383,8 @@ fn extract_preview(file: &Path, output: &Path, force: bool) -> Result<()> {
     };
     validate_preview_extension(output, preview.format)?;
 
-    let mut options = OpenOptions::new();
-    options.write(true);
-    if force {
-        options.create(true).truncate(true);
-    } else {
-        options.create_new(true);
-    }
-    let mut destination = match options.open(output) {
-        Ok(destination) => destination,
-        Err(error) if !force && error.kind() == io::ErrorKind::AlreadyExists => {
-            bail!(
-                "output {} already exists; pass --force to replace it",
-                output.display()
-            );
-        }
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("could not create preview output {}", output.display()));
-        }
-    };
-    destination
-        .write_all(&preview.bytes)
-        .with_context(|| format!("could not write preview output {}", output.display()))?;
+    write_output_bytes(output, &preview.bytes, force)
+        .with_context(|| format!("could not commit preview output {}", output.display()))?;
 
     let representation = if preview.is_original_encoding {
         "original embedded"
@@ -412,7 +403,13 @@ fn extract_preview(file: &Path, output: &Path, force: bool) -> Result<()> {
 
 fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()> {
     let export_settings = develop_export_settings(output, arguments)?;
-    if output.exists() && paths_refer_to_same_file(file, output)? {
+    if paths_refer_to_same_file(file, output).with_context(|| {
+        format!(
+            "could not compare RAW source {} with output {}",
+            file.display(),
+            output.display()
+        )
+    })? {
         bail!(
             "refusing to replace source RAW file {} with developed output",
             file.display()
@@ -560,23 +557,6 @@ fn format_stage_timings(decode: Duration, timings: StageTimings, encode: Duratio
 
 fn bytes_to_mib(bytes: usize) -> usize {
     bytes.div_ceil(1024 * 1024)
-}
-
-fn paths_refer_to_same_file(left: &Path, right: &Path) -> Result<bool> {
-    let left_metadata = fs::metadata(left)
-        .with_context(|| format!("could not inspect source file {}", left.display()))?;
-    let right_metadata = fs::metadata(right)
-        .with_context(|| format!("could not inspect output file {}", right.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        Ok(left_metadata.dev() == right_metadata.dev()
-            && left_metadata.ino() == right_metadata.ino())
-    }
-    #[cfg(not(unix))]
-    {
-        Ok(fs::canonicalize(left)? == fs::canonicalize(right)?)
-    }
 }
 
 fn validate_preview_extension(output: &Path, format: EncodedPreviewFormat) -> Result<()> {
@@ -758,14 +738,16 @@ fn format_option<T: ToString>(value: Option<T>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::path::Path;
     use std::str::FromStr;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use rohditor_raw::{CfaPattern, EncodedPreviewFormat, PhotometricInterpretation};
 
     use super::{
         CliCropPolicy, CliDemosaic, CliMetadata, DevelopArguments, RgbMultipliers,
-        develop_export_settings, format_photometric, validate_preview_extension,
+        develop_export_settings, extract_preview, format_photometric, validate_preview_extension,
     };
 
     #[test]
@@ -816,5 +798,34 @@ mod tests {
         let values = RgbMultipliers::from_str("1.2,1.0,0.8").expect("valid multipliers");
         assert_eq!((values.red, values.green, values.blue), (1.2, 1.0, 0.8));
         assert!(RgbMultipliers::from_str("1.0,1.0").is_err());
+    }
+
+    #[test]
+    fn preview_extraction_rejects_a_hard_link_to_its_source_before_decoding() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!(
+                "preview-alias-test-{}-{unique}",
+                std::process::id()
+            ));
+        fs::create_dir_all(&directory).expect("create test directory");
+        let source = directory.join("source.ARW");
+        let destination = directory.join("source-alias.jpg");
+        fs::write(&source, b"sentinel RAW bytes").expect("write source sentinel");
+        fs::hard_link(&source, &destination).expect("create hard link");
+
+        let error = extract_preview(&source, &destination, true)
+            .expect_err("source alias must be rejected before RAW decoding");
+        assert!(error.to_string().contains("refusing to replace source RAW"));
+        assert_eq!(
+            fs::read(&source).expect("read preserved source"),
+            b"sentinel RAW bytes"
+        );
+
+        fs::remove_dir_all(directory).expect("remove test directory");
     }
 }

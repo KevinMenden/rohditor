@@ -14,6 +14,14 @@ pub enum PipelineError {
     #[error("could not allocate {elements} image elements")]
     Allocation { elements: usize },
 
+    #[error(
+        "refusing an estimated {estimated_bytes}-byte CPU image working set; configured maximum is {max_bytes} bytes"
+    )]
+    WorkingSetLimit {
+        estimated_bytes: usize,
+        max_bytes: usize,
+    },
+
     #[error("unsupported CFA pattern {name} ({width}x{height})")]
     UnsupportedCfa {
         name: String,

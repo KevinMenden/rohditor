@@ -7,10 +7,10 @@ mod decoder;
 mod model;
 mod rawler_adapter;
 
-pub use decoder::{DecoderLimits, RawDecoder, RawError};
+pub use decoder::{DecoderLimits, RawDecoder, RawError, RawSession};
 pub use model::{
     CameraColorMatrix, CaptureMetadata, CfaPattern, EmbeddedPreviewInfo, EncodedPreview,
     EncodedPreviewFormat, ImageRect, LevelPattern, PhotometricInterpretation, RationalValue,
-    RawFileInfo, RawFrame, RawOrientation,
+    RawFileInfo, RawFrame, RawOrientation, SourceIdentity,
 };
 pub use rawler_adapter::RawlerDecoder;

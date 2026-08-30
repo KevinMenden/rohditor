@@ -10,6 +10,8 @@ mod edit;
 mod error;
 mod export;
 mod image;
+mod orientation;
+mod output;
 mod pipeline;
 
 pub use color::{
@@ -36,7 +38,10 @@ pub use image::{
     BayerPattern, CfaColor, DisplayRgbImage, DisplayTransfer, Halo, ImageRegion, LinearRgbImage,
     LinearRgbSpace, MosaicImage,
 };
+pub use orientation::OrientationMap;
+pub use output::{paths_refer_to_same_file, write_output_bytes};
 pub use pipeline::{
-    CpuPipeline, CropPolicy, DEFAULT_PREVIEW_LONG_EDGE, DemosaicAlgorithm, ExportRenderResult,
-    MemoryEstimate, OutputPolicy, PreviewOptions, RenderOptions, RenderResult, StageTimings,
+    CPU_WORKING_SET_LIMIT_BYTES, CpuPipeline, CropPolicy, DEFAULT_PREVIEW_LONG_EDGE,
+    DemosaicAlgorithm, DemosaicedBase, ExportRenderResult, MemoryEstimate, OutputPolicy,
+    PreviewOptions, RenderOptions, RenderResult, StageTimings,
 };

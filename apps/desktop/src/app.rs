@@ -1,4 +1,3 @@
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -7,27 +6,79 @@ use eframe::egui;
 use rohditor_core::{
     CONTRAST_RANGE, DitherMode, EXPOSURE_EV_RANGE, ExportFormat, ExportMetadataPolicy,
     ExportSettings, JPEG_QUALITY_DEFAULT, PngBitDepth, SATURATION_RANGE,
-    WHITE_BALANCE_MULTIPLIER_RANGE, WhiteBalance,
+    WHITE_BALANCE_MULTIPLIER_RANGE, WhiteBalance, paths_refer_to_same_file,
+};
+use rohditor_gpu::{
+    GpuCapabilities, GpuPreviewFrame, GpuPreviewProcessor, GpuPreviewSource, GpuPreviewUpload,
 };
 use rohditor_raw::{RawFileInfo, RawFrame};
-use tracing::info;
+use tracing::{info, warn};
 
+use crate::ProcessorPreference;
 use crate::coordinator::{JobKind, RenderCoordinator, WorkerEvent, WorkerImage};
 use crate::document::{EditSession, PreviewTicket};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TextureKind {
-    EmbeddedPreview,
-    DevelopedPreview,
+    Embedded,
+    DevelopedCpu,
+    DevelopedGpu,
 }
 
 impl TextureKind {
     const fn label(self) -> &'static str {
         match self {
-            Self::EmbeddedPreview => "Embedded preview (developing RAW…)",
-            Self::DevelopedPreview => "CPU-developed RAW preview",
+            Self::Embedded => "Embedded preview (developing RAW…)",
+            Self::DevelopedCpu => "CPU-developed RAW preview",
+            Self::DevelopedGpu => "GPU-developed RAW preview",
         }
     }
+}
+
+#[derive(Clone)]
+enum DocumentTexture {
+    Cpu(egui::TextureHandle),
+    Gpu {
+        id: egui::TextureId,
+        size: egui::Vec2,
+    },
+}
+
+impl DocumentTexture {
+    fn size_vec2(&self) -> egui::Vec2 {
+        match self {
+            Self::Cpu(texture) => texture.size_vec2(),
+            Self::Gpu { size, .. } => *size,
+        }
+    }
+
+    fn paint(&self, ui: &mut egui::Ui, rect: egui::Rect) {
+        match self {
+            Self::Cpu(texture) => {
+                egui::Image::new(texture)
+                    .fit_to_exact_size(rect.size())
+                    .texture_options(egui::TextureOptions::LINEAR)
+                    .paint_at(ui, rect);
+            }
+            Self::Gpu { id, size } => {
+                egui::Image::from_texture((*id, *size))
+                    .fit_to_exact_size(rect.size())
+                    .texture_options(egui::TextureOptions::LINEAR)
+                    .paint_at(ui, rect);
+            }
+        }
+    }
+}
+
+struct GpuDocumentPreview {
+    source: GpuPreviewSource,
+    frame: GpuPreviewFrame,
+    texture_id: egui::TextureId,
+}
+
+struct GpuRuntime {
+    render_state: eframe::egui_wgpu::RenderState,
+    processor: GpuPreviewProcessor,
 }
 
 #[derive(Debug)]
@@ -73,8 +124,9 @@ struct Document {
     info: Option<RawFileInfo>,
     frame: Option<Arc<RawFrame>>,
     edits: EditSession,
-    texture: Option<egui::TextureHandle>,
+    texture: Option<DocumentTexture>,
     texture_kind: Option<TextureKind>,
+    gpu_preview: Option<GpuDocumentPreview>,
     view: ViewState,
     open_status: Option<String>,
     preview_status: Option<(u64, String)>,
@@ -95,6 +147,7 @@ impl Document {
             edits: EditSession::default(),
             texture: None,
             texture_kind: None,
+            gpu_preview: None,
             view: ViewState::default(),
             open_status: Some("Opening RAW file".to_owned()),
             preview_status: None,
@@ -187,6 +240,9 @@ pub(crate) struct RohditorApp {
     next_export_id: u64,
     export_settings: ExportUiSettings,
     ui_renderer: &'static str,
+    processor_preference: ProcessorPreference,
+    gpu: Option<GpuRuntime>,
+    processor_note: Option<String>,
     startup_error: Option<String>,
 }
 
@@ -194,6 +250,7 @@ impl RohditorApp {
     pub(crate) fn new(
         context: &eframe::CreationContext<'_>,
         initial_path: Option<PathBuf>,
+        processor_preference: ProcessorPreference,
     ) -> std::io::Result<Self> {
         context.egui_ctx.set_visuals(egui::Visuals::dark());
         let ui_renderer = if context.wgpu_render_state.is_some() {
@@ -203,9 +260,11 @@ impl RohditorApp {
         } else {
             "unknown"
         };
+        let (gpu, processor_note) = initialize_gpu_runtime(context, processor_preference)?;
         info!(
             ui_renderer,
-            processor = "CPU",
+            processor = if gpu.is_some() { "GPU" } else { "CPU" },
+            processor_preference = ?processor_preference,
             "desktop application started"
         );
         let coordinator =
@@ -217,6 +276,9 @@ impl RohditorApp {
             next_export_id: 1,
             export_settings: ExportUiSettings::default(),
             ui_renderer,
+            processor_preference,
+            gpu,
+            processor_note,
             startup_error: None,
         };
         if let Some(path) = initial_path {
@@ -250,7 +312,8 @@ impl RohditorApp {
     }
 
     fn close_document(&mut self, context: &egui::Context) {
-        if let Some(document) = self.document.take() {
+        if let Some(mut document) = self.document.take() {
+            self.release_gpu_preview(&mut document);
             self.coordinator.abandon(document.id);
         }
         self.update_window_title(context);
@@ -307,9 +370,12 @@ impl RohditorApp {
             }
             WorkerEvent::PlaceholderReady { document_id, image } => {
                 if let Some(document) = self.document.as_mut().filter(|doc| doc.id == document_id)
-                    && document.texture_kind != Some(TextureKind::DevelopedPreview)
+                    && !matches!(
+                        document.texture_kind,
+                        Some(TextureKind::DevelopedCpu | TextureKind::DevelopedGpu)
+                    )
                 {
-                    install_texture(context, document, image, TextureKind::EmbeddedPreview);
+                    install_texture(context, document, image, TextureKind::Embedded);
                 }
             }
             WorkerEvent::RawReady { document_id, frame } => {
@@ -324,7 +390,7 @@ impl RohditorApp {
                     false
                 };
                 if should_preview {
-                    self.queue_preview(document_id);
+                    self.queue_preview(context, document_id);
                 }
             }
             WorkerEvent::PreviewReady {
@@ -332,14 +398,23 @@ impl RohditorApp {
                 image,
                 timings,
             } => {
-                if let Some(document) = self.document.as_mut()
+                if self.gpu.is_none()
+                    && let Some(document) = self.document.as_mut()
                     && ticket.is_current(document.id, document.edits.revision())
                 {
-                    install_texture(context, document, image, TextureKind::DevelopedPreview);
+                    install_texture(context, document, image, TextureKind::DevelopedCpu);
                     document.preview_status = None;
                     document.last_preview_time = Some(timings.total);
                     document.error = None;
                 }
+            }
+            WorkerEvent::GpuUploadReady {
+                ticket,
+                upload,
+                base_timings,
+                upload_preparation,
+            } => {
+                self.install_gpu_upload(context, ticket, *upload, base_timings, upload_preparation);
             }
             WorkerEvent::ExportReady {
                 document_id,
@@ -409,10 +484,18 @@ impl RohditorApp {
                     document.error = Some(message);
                 }
             }
+            WorkerEvent::WorkerStopped { message } => {
+                if let Some(document) = self.document.as_mut() {
+                    document.open_status = None;
+                    document.preview_status = None;
+                    document.export_status = None;
+                    document.error = Some(message);
+                }
+            }
         }
     }
 
-    fn queue_preview(&mut self, document_id: u64) {
+    fn queue_preview(&mut self, context: &egui::Context, document_id: u64) {
         let request = self
             .document
             .as_ref()
@@ -429,6 +512,30 @@ impl RohditorApp {
         let Some((ticket, frame, recipe)) = request else {
             return;
         };
+        if self.gpu.is_some() {
+            let gpu_base_is_current = self
+                .document
+                .as_ref()
+                .and_then(|document| document.gpu_preview.as_ref())
+                .is_some_and(|preview| preview.source.white_balance() == recipe.white_balance);
+            if gpu_base_is_current {
+                self.render_gpu_preview(context, document_id);
+                return;
+            }
+            if let Some(document) = self.document.as_mut() {
+                document.preview_status = Some((
+                    ticket.revision,
+                    "Preparing linear base for GPU preview".to_owned(),
+                ));
+            }
+            if let Err(error) = self.coordinator.prepare_gpu_base(ticket, frame, recipe)
+                && let Some(document) = self.document.as_mut()
+            {
+                document.preview_status = None;
+                document.error = Some(error);
+            }
+            return;
+        }
         if let Some(document) = self.document.as_mut() {
             document.preview_status = Some((ticket.revision, "Queued CPU preview".to_owned()));
         }
@@ -437,6 +544,251 @@ impl RohditorApp {
         {
             document.preview_status = None;
             document.error = Some(error);
+        }
+    }
+
+    fn install_gpu_upload(
+        &mut self,
+        context: &egui::Context,
+        ticket: PreviewTicket,
+        upload: GpuPreviewUpload,
+        base_timings: rohditor_core::StageTimings,
+        upload_preparation: Duration,
+    ) {
+        let Some(document) = self.document.as_ref().filter(|document| {
+            document.id == ticket.document_id
+                && document.edits.recipe().white_balance == upload.white_balance()
+        }) else {
+            return;
+        };
+        let recipe = document.edits.recipe().clone();
+        let previous = self
+            .document
+            .as_mut()
+            .and_then(|document| document.gpu_preview.take());
+        let previous_texture_id = previous.as_ref().map(|preview| preview.texture_id);
+        let reusable_frame = previous.map(|preview| preview.frame);
+
+        let result = self
+            .gpu
+            .as_ref()
+            .ok_or_else(|| {
+                "the GPU processor is no longer active while its preview base was prepared"
+                    .to_owned()
+            })
+            .and_then(|runtime| {
+                let source = runtime
+                    .processor
+                    .upload_prepared(upload)
+                    .map_err(|error| error.to_string())?;
+                let frame = runtime
+                    .processor
+                    .render(&source, &recipe, reusable_frame)
+                    .map_err(|error| error.to_string())?;
+                let texture_id =
+                    register_or_update_gpu_texture(runtime, previous_texture_id, &frame);
+                Ok::<_, String>((source, frame, texture_id))
+            });
+
+        match result {
+            Ok((source, frame, texture_id)) => {
+                let output_size = gpu_output_size(frame.output_dimensions());
+                let elapsed = base_timings.total + upload_preparation + frame.submission_time();
+                info!(
+                    document_id = ticket.document_id,
+                    revision = ticket.revision,
+                    width = frame.output_dimensions().0,
+                    height = frame.output_dimensions().1,
+                    base_ms = base_timings.total.as_millis(),
+                    upload_prepare_ms = upload_preparation.as_millis(),
+                    submission_us = frame.submission_time().as_micros(),
+                    "GPU preview complete"
+                );
+                if let Some(document) = self
+                    .document
+                    .as_mut()
+                    .filter(|document| document.id == ticket.document_id)
+                {
+                    document.gpu_preview = Some(GpuDocumentPreview {
+                        source,
+                        frame,
+                        texture_id,
+                    });
+                    document.texture = Some(DocumentTexture::Gpu {
+                        id: texture_id,
+                        size: output_size,
+                    });
+                    document.texture_kind = Some(TextureKind::DevelopedGpu);
+                    document.preview_status = None;
+                    document.last_preview_time = Some(elapsed);
+                    document.error = None;
+                    document.warning = None;
+                }
+                context.request_repaint();
+            }
+            Err(error) => {
+                if let Some(texture_id) = previous_texture_id {
+                    self.clear_orphaned_gpu_display(ticket.document_id, texture_id);
+                }
+                self.handle_gpu_failure(context, ticket.document_id, error);
+            }
+        }
+    }
+
+    fn render_gpu_preview(&mut self, context: &egui::Context, document_id: u64) {
+        let Some(document) = self
+            .document
+            .as_mut()
+            .filter(|document| document.id == document_id)
+        else {
+            return;
+        };
+        let Some(preview) = document.gpu_preview.take() else {
+            return;
+        };
+        let texture_id = preview.texture_id;
+        let recipe = document.edits.recipe().clone();
+        let revision = document.edits.revision();
+        document.preview_status = Some((
+            revision,
+            "Applying edits to resident GPU preview".to_owned(),
+        ));
+
+        let result = self
+            .gpu
+            .as_ref()
+            .ok_or_else(|| "the GPU processor is no longer active while applying edits".to_owned())
+            .and_then(|runtime| {
+                let frame = runtime
+                    .processor
+                    .render(&preview.source, &recipe, Some(preview.frame))
+                    .map_err(|error| error.to_string())?;
+                register_or_update_gpu_texture(runtime, Some(texture_id), &frame);
+                Ok::<_, String>(frame)
+            });
+
+        match result {
+            Ok(frame) => {
+                let output_size = gpu_output_size(frame.output_dimensions());
+                info!(
+                    document_id,
+                    revision,
+                    width = frame.output_dimensions().0,
+                    height = frame.output_dimensions().1,
+                    submission_us = frame.submission_time().as_micros(),
+                    "GPU preview adjustment complete"
+                );
+                if let Some(document) = self
+                    .document
+                    .as_mut()
+                    .filter(|document| document.id == document_id)
+                {
+                    document.gpu_preview = Some(GpuDocumentPreview {
+                        source: preview.source,
+                        frame,
+                        texture_id,
+                    });
+                    document.texture = Some(DocumentTexture::Gpu {
+                        id: texture_id,
+                        size: output_size,
+                    });
+                    document.texture_kind = Some(TextureKind::DevelopedGpu);
+                    document.preview_status = None;
+                    document.last_preview_time = document
+                        .gpu_preview
+                        .as_ref()
+                        .map(|preview| preview.frame.submission_time());
+                    document.error = None;
+                }
+                context.request_repaint();
+            }
+            Err(error) => {
+                self.clear_orphaned_gpu_display(document_id, texture_id);
+                self.handle_gpu_failure(context, document_id, error);
+            }
+        }
+    }
+
+    fn handle_gpu_failure(&mut self, context: &egui::Context, document_id: u64, error: String) {
+        warn!(
+            document_id,
+            processor_preference = ?self.processor_preference,
+            %error,
+            "GPU preview failed"
+        );
+        if self.processor_preference == ProcessorPreference::Auto {
+            if let Some(mut document) = self.document.take() {
+                if document.id == document_id {
+                    self.release_gpu_preview(&mut document);
+                    document.warning = Some(format!(
+                        "GPU preview failed ({error}); continuing with the CPU processor."
+                    ));
+                    document.preview_status = None;
+                }
+                self.document = Some(document);
+            }
+            self.gpu = None;
+            self.processor_note = Some(format!("GPU fallback: {error}"));
+            self.queue_preview(context, document_id);
+        } else if let Some(document) = self
+            .document
+            .as_mut()
+            .filter(|document| document.id == document_id)
+        {
+            document.preview_status = None;
+            document.error = Some(format!("GPU preview failed: {error}"));
+        }
+    }
+
+    fn release_gpu_preview(&mut self, document: &mut Document) {
+        let texture_id = document
+            .gpu_preview
+            .take()
+            .map(|preview| preview.texture_id);
+        if let Some(texture_id) = texture_id {
+            self.free_gpu_texture(texture_id);
+        }
+        if matches!(document.texture, Some(DocumentTexture::Gpu { .. })) {
+            document.texture = None;
+            document.texture_kind = None;
+        }
+    }
+
+    fn clear_orphaned_gpu_display(&mut self, document_id: u64, texture_id: egui::TextureId) {
+        self.free_gpu_texture(texture_id);
+        if let Some(document) = self
+            .document
+            .as_mut()
+            .filter(|document| document.id == document_id)
+            && matches!(
+                document.texture,
+                Some(DocumentTexture::Gpu { id, .. }) if id == texture_id
+            )
+        {
+            document.texture = None;
+            document.texture_kind = None;
+        }
+    }
+
+    fn free_gpu_texture(&self, texture_id: egui::TextureId) {
+        if let Some(runtime) = self.gpu.as_ref() {
+            runtime
+                .render_state
+                .renderer
+                .write()
+                .free_texture(&texture_id);
+        }
+    }
+
+    fn processor_description(&self) -> String {
+        if let Some(runtime) = &self.gpu {
+            let capabilities = runtime.processor.capabilities();
+            format!(
+                "GPU · {} · {}",
+                capabilities.adapter_name, capabilities.backend
+            )
+        } else {
+            format!("CPU ({})", self.processor_preference.label())
         }
     }
 
@@ -472,14 +824,26 @@ impl RohditorApp {
             }
             return;
         }
-        if paths_refer_to_same_file(&document.path, &destination) {
-            if let Some(document) = self.document.as_mut() {
-                document.error = Some(
-                    "Refusing to replace the source RAW, including through a symbolic or hard link. Choose a different export destination."
-                        .to_owned(),
-                );
+        match paths_refer_to_same_file(&document.path, &destination) {
+            Ok(true) => {
+                if let Some(document) = self.document.as_mut() {
+                    document.error = Some(
+                        "Refusing to replace the source RAW, including through a symbolic or hard link. Choose a different export destination."
+                            .to_owned(),
+                    );
+                }
+                return;
             }
-            return;
+            Ok(false) => {}
+            Err(error) => {
+                if let Some(document) = self.document.as_mut() {
+                    document.error = Some(format!(
+                        "Could not validate the export destination {}: {error}",
+                        destination.display()
+                    ));
+                }
+                return;
+            }
         }
 
         let export_id = self.next_export_id;
@@ -567,7 +931,7 @@ impl RohditorApp {
             self.close_document(context);
         }
         if let Some(document_id) = changed_document {
-            self.queue_preview(document_id);
+            self.queue_preview(context, document_id);
         }
     }
 
@@ -632,7 +996,7 @@ impl RohditorApp {
                 }
             });
         if let Some(document_id) = changed_document {
-            self.queue_preview(document_id);
+            self.queue_preview(context, document_id);
         }
         if export {
             self.request_export();
@@ -651,7 +1015,7 @@ impl RohditorApp {
                     });
                     return;
                 };
-                let Some(texture) = document.texture.as_ref() else {
+                let Some(texture) = document.texture.clone() else {
                     ui.centered_and_justified(|ui| {
                         if document.open_status.is_some() || document.preview_status.is_some() {
                             ui.horizontal(|ui| {
@@ -697,10 +1061,7 @@ impl RohditorApp {
                 let size = image_size * scale;
                 let image_rect =
                     egui::Rect::from_center_size(viewport.center() + document.view.pan, size);
-                egui::Image::new(texture)
-                    .fit_to_exact_size(size)
-                    .texture_options(egui::TextureOptions::LINEAR)
-                    .paint_at(ui, image_rect);
+                texture.paint(ui, image_rect);
 
                 if let Some(kind) = document.texture_kind {
                     let badge = egui::Rect::from_min_size(
@@ -724,9 +1085,14 @@ impl RohditorApp {
         egui::TopBottomPanel::bottom("status_bar").show(context, |ui| {
             ui.horizontal(|ui| {
                 ui.label(format!(
-                    "UI renderer: {}  ·  Processor: CPU",
-                    self.ui_renderer
+                    "UI renderer: {}  ·  Processor: {}",
+                    self.ui_renderer,
+                    self.processor_description()
                 ));
+                if let Some(note) = &self.processor_note {
+                    ui.separator();
+                    ui.weak(note);
+                }
                 if let Some(document) = &self.document {
                     if let Some(status) = &document.open_status {
                         ui.separator();
@@ -760,6 +1126,89 @@ impl RohditorApp {
             });
         });
     }
+}
+
+fn initialize_gpu_runtime(
+    context: &eframe::CreationContext<'_>,
+    preference: ProcessorPreference,
+) -> std::io::Result<(Option<GpuRuntime>, Option<String>)> {
+    match preference {
+        ProcessorPreference::Cpu => Ok((None, None)),
+        ProcessorPreference::Auto => match create_gpu_runtime(context) {
+            Ok(runtime) => Ok((Some(runtime), None)),
+            Err(error) => Ok((
+                None,
+                Some(format!("GPU unavailable; using CPU preview ({error})")),
+            )),
+        },
+        ProcessorPreference::Gpu => create_gpu_runtime(context)
+            .map(|runtime| (Some(runtime), None))
+            .map_err(std::io::Error::other),
+    }
+}
+
+fn create_gpu_runtime(context: &eframe::CreationContext<'_>) -> Result<GpuRuntime, String> {
+    let render_state = context.wgpu_render_state.clone().ok_or_else(|| {
+        "the selected UI renderer does not expose a shared wgpu device".to_owned()
+    })?;
+    let capabilities = GpuCapabilities::detect(
+        &render_state.adapter,
+        &render_state.device,
+        render_state.target_format,
+    );
+    if !capabilities.is_hardware_adapter() {
+        return Err(format!(
+            "wgpu selected the {} CPU adapter; GPU processing is intentionally disabled",
+            capabilities.adapter_name
+        ));
+    }
+    let processor = GpuPreviewProcessor::new(
+        &render_state.adapter,
+        &render_state.device,
+        &render_state.queue,
+        render_state.target_format,
+    )
+    .map_err(|error| error.to_string())?;
+    let capabilities = processor.capabilities();
+    info!(
+        adapter = capabilities.adapter_name,
+        backend = capabilities.backend,
+        device_type = capabilities.device_type,
+        target_format = capabilities.target_format,
+        timestamp_queries = capabilities.timestamp_queries,
+        "GPU preview processor initialized from eframe's shared wgpu state"
+    );
+    Ok(GpuRuntime {
+        render_state,
+        processor,
+    })
+}
+
+fn register_or_update_gpu_texture(
+    runtime: &GpuRuntime,
+    existing: Option<egui::TextureId>,
+    frame: &GpuPreviewFrame,
+) -> egui::TextureId {
+    let mut renderer = runtime.render_state.renderer.write();
+    if let Some(texture_id) = existing {
+        renderer.update_egui_texture_from_wgpu_texture(
+            &runtime.render_state.device,
+            frame.display_view(),
+            wgpu::FilterMode::Linear,
+            texture_id,
+        );
+        texture_id
+    } else {
+        renderer.register_native_texture(
+            &runtime.render_state.device,
+            frame.display_view(),
+            wgpu::FilterMode::Linear,
+        )
+    }
+}
+
+fn gpu_output_size((width, height): (u32, u32)) -> egui::Vec2 {
+    egui::vec2(width as f32, height as f32)
 }
 
 impl eframe::App for RohditorApp {
@@ -934,12 +1383,18 @@ fn install_texture(
     kind: TextureKind,
 ) {
     let texture_name = format!("document-{}-preview", document.id);
-    if let Some(texture) = document.texture.as_mut() {
-        texture.set(image.color, egui::TextureOptions::LINEAR);
-    } else {
-        document.texture =
-            Some(context.load_texture(texture_name, image.color, egui::TextureOptions::LINEAR));
-        document.view.fit();
+    match document.texture.as_mut() {
+        Some(DocumentTexture::Cpu(texture)) => {
+            texture.set(image.color, egui::TextureOptions::LINEAR);
+        }
+        _ => {
+            document.texture = Some(DocumentTexture::Cpu(context.load_texture(
+                texture_name,
+                image.color,
+                egui::TextureOptions::LINEAR,
+            )));
+            document.view.fit();
+        }
     }
     document.texture_kind = Some(kind);
 }
@@ -957,33 +1412,6 @@ fn display_file_name(path: &Path) -> String {
         .and_then(|name| name.to_str())
         .unwrap_or("RAW file")
         .to_owned()
-}
-
-fn paths_refer_to_same_file(source: &Path, destination: &Path) -> bool {
-    if source == destination {
-        return true;
-    }
-    if let (Ok(source), Ok(destination)) = (fs::canonicalize(source), fs::canonicalize(destination))
-        && source == destination
-    {
-        return true;
-    }
-    same_file_identity(source, destination)
-}
-
-#[cfg(unix)]
-fn same_file_identity(source: &Path, destination: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt as _;
-
-    let (Ok(source), Ok(destination)) = (fs::metadata(source), fs::metadata(destination)) else {
-        return false;
-    };
-    source.dev() == destination.dev() && source.ino() == destination.ino()
-}
-
-#[cfg(not(unix))]
-fn same_file_identity(_source: &Path, _destination: &Path) -> bool {
-    false
 }
 
 #[cfg(test)]

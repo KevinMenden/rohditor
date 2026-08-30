@@ -1,7 +1,5 @@
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufWriter, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
@@ -10,13 +8,12 @@ use rohditor_raw::{RationalValue, RawFileInfo};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::output::write_transactionally;
 use crate::{DisplayRgbImage, DisplayTransfer};
 
 pub const JPEG_QUALITY_MIN: u8 = 1;
 pub const JPEG_QUALITY_MAX: u8 = 100;
 pub const JPEG_QUALITY_DEFAULT: u8 = 90;
-
-static TEMPORARY_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Encoded file format and format-specific settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -438,163 +435,6 @@ fn configure_metadata<E: ImageEncoder>(
             })?;
     }
     Ok(())
-}
-
-fn write_transactionally<F>(
-    destination: &Path,
-    overwrite: bool,
-    write: F,
-) -> Result<u64, ExportError>
-where
-    F: FnOnce(&mut dyn Write) -> Result<(), ExportError>,
-{
-    if !overwrite && path_entry_exists(destination)? {
-        return Err(ExportError::AlreadyExists {
-            path: destination.to_owned(),
-        });
-    }
-
-    let mut temporary = TemporaryOutput::create(destination)?;
-    let temporary_path = temporary.path.clone();
-    {
-        let mut writer = BufWriter::new(temporary.file_mut());
-        write(&mut writer)?;
-        writer
-            .flush()
-            .map_err(|source| ExportError::DestinationIo {
-                operation: "flush temporary",
-                path: temporary_path,
-                source,
-            })?;
-    }
-    temporary
-        .file_mut()
-        .sync_all()
-        .map_err(|source| ExportError::DestinationIo {
-            operation: "synchronize temporary",
-            path: temporary.path.clone(),
-            source,
-        })?;
-    let bytes_written = temporary
-        .file_mut()
-        .metadata()
-        .map_err(|source| ExportError::DestinationIo {
-            operation: "inspect temporary",
-            path: temporary.path.clone(),
-            source,
-        })?
-        .len();
-    temporary.commit(destination, overwrite)?;
-    Ok(bytes_written)
-}
-
-fn path_entry_exists(path: &Path) -> Result<bool, ExportError> {
-    match fs::symlink_metadata(path) {
-        Ok(_) => Ok(true),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(source) => Err(ExportError::DestinationIo {
-            operation: "inspect destination",
-            path: path.to_owned(),
-            source,
-        }),
-    }
-}
-
-#[derive(Debug)]
-struct TemporaryOutput {
-    path: PathBuf,
-    file: Option<File>,
-}
-
-impl TemporaryOutput {
-    fn create(destination: &Path) -> Result<Self, ExportError> {
-        let parent = destination.parent().unwrap_or_else(|| Path::new("."));
-        let name = destination
-            .file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or("export");
-        for _ in 0..1_024 {
-            let sequence = TEMPORARY_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-            let path = parent.join(format!(
-                ".{name}.rohditor-{}-{sequence}.tmp",
-                std::process::id()
-            ));
-            match OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(file) => {
-                    return Ok(Self {
-                        path,
-                        file: Some(file),
-                    });
-                }
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-                Err(source) => {
-                    return Err(ExportError::DestinationIo {
-                        operation: "create temporary",
-                        path,
-                        source,
-                    });
-                }
-            }
-        }
-        Err(ExportError::DestinationIo {
-            operation: "create unique temporary",
-            path: destination.to_owned(),
-            source: io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "temporary filename attempts were exhausted",
-            ),
-        })
-    }
-
-    fn file_mut(&mut self) -> &mut File {
-        self.file
-            .as_mut()
-            .expect("temporary output owns its file before commit")
-    }
-
-    fn commit(mut self, destination: &Path, overwrite: bool) -> Result<(), ExportError> {
-        drop(self.file.take());
-        if overwrite {
-            fs::rename(&self.path, destination).map_err(|source| ExportError::DestinationIo {
-                operation: "atomically replace destination",
-                path: destination.to_owned(),
-                source,
-            })?;
-        } else {
-            match fs::hard_link(&self.path, destination) {
-                Ok(()) => {
-                    if fs::remove_file(&self.path).is_ok() {
-                        self.path.clear();
-                    }
-                }
-                Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
-                    return Err(ExportError::AlreadyExists {
-                        path: destination.to_owned(),
-                    });
-                }
-                Err(source) => {
-                    return Err(ExportError::DestinationIo {
-                        operation: "atomically install destination",
-                        path: destination.to_owned(),
-                        source,
-                    });
-                }
-            }
-        }
-        if overwrite {
-            self.path.clear();
-        }
-        Ok(())
-    }
-}
-
-impl Drop for TemporaryOutput {
-    fn drop(&mut self) {
-        drop(self.file.take());
-        if !self.path.as_os_str().is_empty() {
-            let _cleanup_result = fs::remove_file(&self.path);
-        }
-    }
 }
 
 fn srgb_icc_profile() -> Vec<u8> {

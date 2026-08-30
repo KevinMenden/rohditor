@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use image::{ColorType, ImageDecoder, ImageReader};
 use rohditor_core::{
     DisplayRgbImage, DisplayTransfer, DitherMode, ExportFormat, ExportImage, ExportMetadataPolicy,
-    ExportSettings, PngBitDepth, export_image,
+    ExportSettings, PngBitDepth, export_image, paths_refer_to_same_file, write_output_bytes,
 };
 use rohditor_raw::{
     CameraColorMatrix, CaptureMetadata, CfaPattern, LevelPattern, PhotometricInterpretation,
@@ -195,6 +195,49 @@ fn padded_rows_are_rejected_without_creating_a_destination() -> Result<(), Box<d
     Ok(())
 }
 
+#[test]
+fn encoded_bytes_use_explicit_transactional_replacement() -> Result<(), Box<dyn Error>> {
+    let outputs = TempDirectory::new("encoded-bytes")?;
+    let destination = outputs.path().join("preview.jpg");
+    fs::write(&destination, b"complete old preview")?;
+
+    assert!(write_output_bytes(&destination, b"new preview", false).is_err());
+    assert_eq!(fs::read(&destination)?, b"complete old preview");
+
+    let bytes_written = write_output_bytes(&destination, b"new preview", true)?;
+    assert_eq!(bytes_written, 11);
+    assert_eq!(fs::read(&destination)?, b"new preview");
+    assert_eq!(fs::read_dir(outputs.path())?.count(), 2);
+    Ok(())
+}
+
+#[test]
+fn same_file_detection_follows_hard_and_symbolic_links() -> Result<(), Box<dyn Error>> {
+    let outputs = TempDirectory::new("same-file")?;
+    let source = outputs.path().join("source.raw");
+    let hard_link = outputs.path().join("hard-link.jpg");
+    let distinct = outputs.path().join("distinct.jpg");
+    fs::write(&source, b"RAW")?;
+    fs::hard_link(&source, &hard_link)?;
+    fs::write(&distinct, b"JPEG")?;
+
+    assert!(paths_refer_to_same_file(&source, &source)?);
+    assert!(paths_refer_to_same_file(&source, &hard_link)?);
+    assert!(!paths_refer_to_same_file(&source, &distinct)?);
+    assert!(!paths_refer_to_same_file(
+        &source,
+        &outputs.path().join("missing.jpg")
+    )?);
+
+    #[cfg(unix)]
+    {
+        let symbolic_link = outputs.path().join("symbolic-link.jpg");
+        std::os::unix::fs::symlink(&source, &symbolic_link)?;
+        assert!(paths_refer_to_same_file(&source, &symbolic_link)?);
+    }
+    Ok(())
+}
+
 fn rgb8_pattern(width: usize, height: usize) -> Result<DisplayRgbImage<u8>, Box<dyn Error>> {
     let samples = (0..width * height)
         .flat_map(|index| {
@@ -272,6 +315,7 @@ fn source_info() -> RawFileInfo {
         clean_make: "Sony".to_owned(),
         clean_model: "ILCE-6400".to_owned(),
         source_size_bytes: 42,
+        source_identity: None,
         width: 2,
         height: 2,
         components_per_pixel: 1,

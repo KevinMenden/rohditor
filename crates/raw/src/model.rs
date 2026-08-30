@@ -164,6 +164,7 @@ pub struct RawFileInfo {
     pub clean_make: String,
     pub clean_model: String,
     pub source_size_bytes: u64,
+    pub source_identity: Option<SourceIdentity>,
     pub width: usize,
     pub height: usize,
     pub components_per_pixel: usize,
@@ -183,6 +184,19 @@ pub struct RawFileInfo {
     pub orientation: RawOrientation,
     pub capture: CaptureMetadata,
     pub embedded_preview: Option<EmbeddedPreviewInfo>,
+}
+
+/// Stable-enough identity facts captured when a source is opened.
+///
+/// Device and inode are populated on Unix. Size and modification time retain a
+/// portable fingerprint for diagnostics and cache keys without exposing the
+/// private source path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceIdentity {
+    pub size_bytes: u64,
+    pub modified_unix_nanos: Option<u128>,
+    pub filesystem_device: Option<u64>,
+    pub filesystem_inode: Option<u64>,
 }
 
 /// An encoded loading preview, normally preserving the bytes stored in the RAW.
