@@ -1,10 +1,11 @@
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use half::f16;
 use rohditor_core::{
-    DemosaicedBase, EditRecipe, LINEAR_REC2020_TO_XYZ_D65, LinearRgbSpace, Matrix3, OrientationMap,
-    WhiteBalance, XYZ_D65_TO_LINEAR_SRGB,
+    CancellationToken, DemosaicedBase, EditRecipe, LINEAR_REC2020_TO_XYZ_D65, LinearRgbSpace,
+    Matrix3, OrientationMap, WhiteBalance, XYZ_D65_TO_LINEAR_SRGB,
 };
 use rohditor_raw::RawOrientation;
 
@@ -38,6 +39,14 @@ impl GpuPreviewSource {
     pub const fn white_balance(&self) -> WhiteBalance {
         self.white_balance
     }
+
+    /// Estimated bytes occupied by the retained RGBA16Float source texture.
+    #[must_use]
+    pub fn estimated_bytes(&self) -> usize {
+        (self.width as usize)
+            .saturating_mul(self.height as usize)
+            .saturating_mul(8)
+    }
 }
 
 /// CPU-packed half-float upload payload for one immutable linear preview base.
@@ -56,6 +65,14 @@ pub struct GpuPreviewUpload {
 impl GpuPreviewUpload {
     /// Pack a typed linear Rec.2020 base as RGBA16Float texels.
     pub fn from_demosaiced_base(base: &DemosaicedBase) -> Result<Self, GpuPreviewError> {
+        Self::from_demosaiced_base_cancellable(base, &CancellationToken::new())
+    }
+
+    /// Pack a base while observing the desktop preview's cancellation token.
+    pub fn from_demosaiced_base_cancellable(
+        base: &DemosaicedBase,
+        cancellation: &CancellationToken,
+    ) -> Result<Self, GpuPreviewError> {
         let image = base.image();
         if image.space() != LinearRgbSpace::Rec2020D65 {
             return Err(GpuPreviewError::InvalidInput {
@@ -68,6 +85,7 @@ impl GpuPreviewUpload {
             image.width(),
             image.height(),
             image.row_stride(),
+            cancellation,
         )?;
         Ok(Self {
             texels,
@@ -102,6 +120,8 @@ pub struct GpuPreviewFrame {
     source_dimensions: (u32, u32),
     output_dimensions: (u32, u32),
     submission_time: Duration,
+    queue_completion_nanos: Arc<AtomicU64>,
+    textures_reused: bool,
 }
 
 impl GpuPreviewFrame {
@@ -124,6 +144,33 @@ impl GpuPreviewFrame {
     #[must_use]
     pub const fn submission_time(&self) -> Duration {
         self.submission_time
+    }
+
+    /// Wall time until the shared queue reports all work submitted before this
+    /// preview as complete. This includes queueing delay and is an intentionally
+    /// conservative fallback when timestamp queries are unavailable.
+    #[must_use]
+    pub fn queue_completion_time(&self) -> Option<Duration> {
+        let nanos = self.queue_completion_nanos.load(Ordering::Acquire);
+        (nanos != 0).then(|| Duration::from_nanos(nanos))
+    }
+
+    /// Whether this dispatch reused both output textures from the prior frame.
+    #[must_use]
+    pub const fn textures_reused(&self) -> bool {
+        self.textures_reused
+    }
+
+    /// Estimated bytes occupied by the working and display textures.
+    #[must_use]
+    pub fn estimated_bytes(&self) -> usize {
+        let working = (self.source_dimensions.0 as usize)
+            .saturating_mul(self.source_dimensions.1 as usize)
+            .saturating_mul(8);
+        let display = (self.output_dimensions.0 as usize)
+            .saturating_mul(self.output_dimensions.1 as usize)
+            .saturating_mul(4);
+        working.saturating_add(display)
     }
 
     fn can_reuse(&self, source_dimensions: (u32, u32), output_dimensions: (u32, u32)) -> bool {
@@ -374,10 +421,14 @@ impl GpuPreviewProcessor {
         }
         let source_dimensions = (source.width, source.height);
         let output_dimensions = (output_width, output_height);
-        let mut frame = match reusable {
-            Some(frame) if frame.can_reuse(source_dimensions, output_dimensions) => frame,
-            _ => self.create_frame(source_dimensions, output_dimensions),
+        let (mut frame, textures_reused) = match reusable {
+            Some(frame) if frame.can_reuse(source_dimensions, output_dimensions) => (frame, true),
+            _ => (
+                self.create_frame(source_dimensions, output_dimensions),
+                false,
+            ),
         };
+        frame.textures_reused = textures_reused;
 
         let parameters =
             build_parameters(source_dimensions, output_dimensions, orientation, recipe);
@@ -422,6 +473,13 @@ impl GpuPreviewProcessor {
         }
         self.queue.submit([encoder.finish()]);
         frame.submission_time = submitted.elapsed();
+        let completion = Arc::new(AtomicU64::new(0));
+        let completion_writer = Arc::clone(&completion);
+        self.queue.on_submitted_work_done(move || {
+            let elapsed_nanos = submitted.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
+            completion_writer.store(elapsed_nanos.max(1), Ordering::Release);
+        });
+        frame.queue_completion_nanos = completion;
         Ok(frame)
     }
 
@@ -528,6 +586,19 @@ impl GpuPreviewProcessor {
         })
     }
 
+    /// Block until already-submitted queue work completes.
+    ///
+    /// The desktop UI does not call this method; it is intended for controlled
+    /// benchmarks and diagnostics that need a completed wall-time sample.
+    pub fn wait_for_queue(&self) -> Result<(), GpuPreviewError> {
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|error| GpuPreviewError::Synchronization {
+                reason: format!("{error:?}"),
+            })?;
+        Ok(())
+    }
+
     fn create_frame(
         &self,
         source_dimensions: (u32, u32),
@@ -565,6 +636,8 @@ impl GpuPreviewProcessor {
             source_dimensions,
             output_dimensions,
             submission_time: Duration::ZERO,
+            queue_completion_nanos: Arc::new(AtomicU64::new(0)),
+            textures_reused: false,
         }
     }
 }
@@ -606,6 +679,7 @@ fn pack_rgba16f(
     width: usize,
     height: usize,
     row_stride: usize,
+    cancellation: &CancellationToken,
 ) -> Result<Vec<u16>, GpuPreviewError> {
     let width_samples = width
         .checked_mul(3)
@@ -624,6 +698,9 @@ fn pack_rgba16f(
         })?;
     let mut packed = Vec::with_capacity(texels);
     for row in data.chunks(row_stride).take(height) {
+        if cancellation.is_cancelled() {
+            return Err(GpuPreviewError::Cancelled);
+        }
         if row.len() < width_samples {
             return Err(GpuPreviewError::InvalidInput {
                 reason: "linear base row stride is shorter than its active RGB samples".to_owned(),
@@ -724,7 +801,8 @@ mod tests {
             0.0, 0.5, 1.0, 0.25, 0.75, 0.125, 99.0, 99.0, 99.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 99.0,
             99.0, 99.0,
         ];
-        let packed = pack_rgba16f(&data, 2, 2, 9).expect("valid padded rows");
+        let packed =
+            pack_rgba16f(&data, 2, 2, 9, &CancellationToken::new()).expect("valid padded rows");
         assert_eq!(packed.len(), 16);
         assert_eq!(f16::from_bits(packed[0]).to_f32(), 0.0);
         assert_eq!(f16::from_bits(packed[4]).to_f32(), 0.25);
@@ -793,6 +871,7 @@ mod tests {
         let first = processor
             .render(&source, &initial_recipe, None)
             .expect("initial GPU preview should render");
+        assert!(!first.textures_reused());
         let adjusted_recipe = EditRecipe {
             exposure_ev: 1.1,
             contrast: 0.3,
@@ -802,6 +881,7 @@ mod tests {
         let second = processor
             .render(&source, &adjusted_recipe, Some(first))
             .expect("resident source should render downstream edits");
+        assert!(second.textures_reused());
         assert_gpu_frame_matches_cpu(&processor, &base, &adjusted_recipe, &second);
     }
 
@@ -833,6 +913,76 @@ mod tests {
             .prepare_preview_base(&frame, &recipe, PreviewOptions::default())
             .expect("private preview base should develop");
         assert_gpu_matches_cpu(&processor, &base, &recipe);
+    }
+
+    #[test]
+    #[ignore = "requires the private Sony ARW corpus and a Vulkan-capable GPU"]
+    fn private_arw_cached_gpu_adjustment_performance_is_reported() {
+        let Some(processor) = gpu_test_processor() else {
+            return;
+        };
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testdata/private/DSC00851.ARW");
+        if !path.is_file() {
+            eprintln!(
+                "skipping private GPU measurement because {} is unavailable",
+                path.display()
+            );
+            return;
+        }
+        let decoder = RawlerDecoder::default();
+        let mut session = decoder.open(&path).expect("private ARW should open");
+        let frame = session.decode().expect("private ARW should decode");
+        let base = CpuPipeline
+            .prepare_preview_base(&frame, &EditRecipe::default(), PreviewOptions::default())
+            .expect("private preview base should develop");
+        let source = processor
+            .upload_base(&base)
+            .expect("private base should upload");
+        let mut gpu_frame = processor
+            .render(&source, &EditRecipe::default(), None)
+            .expect("initial GPU preview should render");
+        processor
+            .wait_for_queue()
+            .expect("initial GPU preview should complete");
+        let mut samples = Vec::new();
+
+        for index in 1..=40 {
+            let recipe = EditRecipe {
+                exposure_ev: index as f32 / 20.0 - 1.0,
+                contrast: index as f32 / 80.0,
+                saturation: 0.75 + index as f32 / 80.0,
+                ..EditRecipe::default()
+            };
+            gpu_frame = processor
+                .render(&source, &recipe, Some(gpu_frame))
+                .expect("cached GPU adjustment should render");
+            processor
+                .wait_for_queue()
+                .expect("cached GPU adjustment should complete");
+            assert!(gpu_frame.textures_reused());
+            samples.push(
+                gpu_frame
+                    .queue_completion_time()
+                    .expect("queue callback should publish a completion time"),
+            );
+        }
+
+        samples.sort_unstable();
+        let median = samples[samples.len() / 2];
+        let worst = samples.last().copied().unwrap_or(Duration::ZERO);
+        let resident_bytes = source
+            .estimated_bytes()
+            .saturating_add(gpu_frame.estimated_bytes());
+        eprintln!(
+            "Phase 6 GPU cache measurement: {}x{}, completion median={:.3} ms, max={:.3} ms, encode+submit={:.3} ms, textures={:.1} MiB",
+            gpu_frame.output_dimensions().0,
+            gpu_frame.output_dimensions().1,
+            median.as_secs_f64() * 1_000.0,
+            worst.as_secs_f64() * 1_000.0,
+            gpu_frame.submission_time().as_secs_f64() * 1_000.0,
+            resident_bytes as f64 / 1_048_576.0,
+        );
     }
 
     fn gpu_test_processor() -> Option<GpuPreviewProcessor> {

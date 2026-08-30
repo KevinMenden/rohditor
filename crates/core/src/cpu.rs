@@ -9,9 +9,9 @@ use crate::color::{
 };
 use crate::image::{allocate_zeroed_f32, allocate_zeroed_u8, allocate_zeroed_u16};
 use crate::{
-    BayerPattern, CfaColor, CropPolicy, DemosaicAlgorithm, DisplayRgbImage, DisplayTransfer,
-    DitherMode, EditRecipe, ImageRegion, LinearRgbImage, LinearRgbSpace, MosaicImage,
-    OrientationMap, OutputPolicy, PipelineError, WhiteBalance,
+    BayerPattern, CancellationToken, CfaColor, CropPolicy, DemosaicAlgorithm, DisplayRgbImage,
+    DisplayTransfer, DitherMode, EditRecipe, ImageRegion, LinearRgbImage, LinearRgbSpace,
+    MosaicImage, OrientationMap, OutputPolicy, PipelineError, WhiteBalance,
 };
 
 const CONTRAST_PIVOT: f32 = 0.18;
@@ -70,7 +70,7 @@ pub fn normalize_raw(
     frame: &RawFrame,
     crop_policy: CropPolicy,
 ) -> Result<MosaicImage<f32>, PipelineError> {
-    normalize_raw_impl(frame, crop_policy, None)
+    normalize_raw_impl(frame, crop_policy, None, &CancellationToken::new())
 }
 
 /// Normalize a resolution-limited Bayer mosaic for interactive development.
@@ -84,14 +84,30 @@ pub fn normalize_raw_preview(
     crop_policy: CropPolicy,
     max_long_edge: usize,
 ) -> Result<MosaicImage<f32>, PipelineError> {
-    normalize_raw_impl(frame, crop_policy, Some(max_long_edge))
+    normalize_raw_impl(
+        frame,
+        crop_policy,
+        Some(max_long_edge),
+        &CancellationToken::new(),
+    )
+}
+
+pub(crate) fn normalize_raw_preview_cancellable(
+    frame: &RawFrame,
+    crop_policy: CropPolicy,
+    max_long_edge: usize,
+    cancellation: &CancellationToken,
+) -> Result<MosaicImage<f32>, PipelineError> {
+    normalize_raw_impl(frame, crop_policy, Some(max_long_edge), cancellation)
 }
 
 fn normalize_raw_impl(
     frame: &RawFrame,
     crop_policy: CropPolicy,
     max_long_edge: Option<usize>,
+    cancellation: &CancellationToken,
 ) -> Result<MosaicImage<f32>, PipelineError> {
+    cancellation.checkpoint()?;
     validate_raw_layout(frame)?;
     let (pattern, crop) = development_geometry(&frame.info, crop_policy)?;
     validate_levels(&frame.info, pattern)?;
@@ -100,6 +116,15 @@ fn normalize_raw_impl(
         Some(max_long_edge) => preview_dimensions(crop.width, crop.height, max_long_edge)?,
         None => (crop.width, crop.height),
     };
+    let span = tracing::info_span!(
+        "cpu.normalize",
+        source_width = frame.info.width,
+        source_height = frame.info.height,
+        output_width,
+        output_height,
+        preview = max_long_edge.is_some()
+    );
+    let _guard = span.enter();
 
     let elements = output_width.checked_mul(output_height).ok_or_else(|| {
         invalid_dimensions(
@@ -113,7 +138,8 @@ fn normalize_raw_impl(
     normalized
         .par_chunks_mut(output_width)
         .enumerate()
-        .for_each(|(output_y, output_row)| {
+        .try_for_each(|(output_y, output_row)| -> Result<(), PipelineError> {
+            cancellation.checkpoint()?;
             let crop_y = phase_preserving_sample(output_y, output_height, crop.height);
             let sensor_y = crop.y + crop_y;
             for (output_x, destination) in output_row.iter_mut().enumerate() {
@@ -126,7 +152,9 @@ fn normalize_raw_impl(
                 let white = white_level(&frame.info, black_index, color);
                 *destination = (f32::from(sample) - black) / (white - black);
             }
-        });
+            Ok(())
+        })?;
+    cancellation.checkpoint()?;
 
     MosaicImage::new(
         output_width,
@@ -231,6 +259,23 @@ pub fn demosaic(
     gains: WhiteBalanceGains,
     algorithm: DemosaicAlgorithm,
 ) -> Result<LinearRgbImage<f32>, PipelineError> {
+    demosaic_cancellable(mosaic, gains, algorithm, &CancellationToken::new())
+}
+
+pub(crate) fn demosaic_cancellable(
+    mosaic: &MosaicImage<f32>,
+    gains: WhiteBalanceGains,
+    algorithm: DemosaicAlgorithm,
+    cancellation: &CancellationToken,
+) -> Result<LinearRgbImage<f32>, PipelineError> {
+    let span = tracing::info_span!(
+        "cpu.demosaic",
+        width = mosaic.width(),
+        height = mosaic.height(),
+        algorithm = ?algorithm
+    );
+    let _guard = span.enter();
+    cancellation.checkpoint()?;
     gains.validate()?;
     if mosaic.width() < 2 || mosaic.height() < 2 {
         return Err(invalid_dimensions(
@@ -241,7 +286,7 @@ pub fn demosaic(
         ));
     }
     match algorithm {
-        DemosaicAlgorithm::Bilinear => demosaic_bilinear(mosaic, gains),
+        DemosaicAlgorithm::Bilinear => demosaic_bilinear(mosaic, gains, cancellation),
     }
 }
 
@@ -250,17 +295,38 @@ pub(crate) fn apply_camera_color_transform(
     image: &mut LinearRgbImage<f32>,
     transform: &CameraColorTransform,
 ) -> Result<(), PipelineError> {
+    apply_camera_color_transform_cancellable(image, transform, &CancellationToken::new())
+}
+
+pub(crate) fn apply_camera_color_transform_cancellable(
+    image: &mut LinearRgbImage<f32>,
+    transform: &CameraColorTransform,
+    cancellation: &CancellationToken,
+) -> Result<(), PipelineError> {
+    let span = tracing::info_span!(
+        "cpu.color_conversion",
+        width = image.width(),
+        height = image.height(),
+        target = "linear Rec.2020/D65"
+    );
+    let _guard = span.enter();
+    cancellation.checkpoint()?;
     require_space(image, LinearRgbSpace::CameraNative)?;
     let width_samples = image.width() * 3;
     let row_stride = image.row_stride();
-    image.data_mut().par_chunks_mut(row_stride).for_each(|row| {
-        for pixel in row[..width_samples].chunks_exact_mut(3) {
-            let converted = transform
-                .camera_to_linear_rec2020
-                .transform([pixel[0], pixel[1], pixel[2]]);
-            pixel.copy_from_slice(&converted);
-        }
-    });
+    image.data_mut().par_chunks_mut(row_stride).try_for_each(
+        |row| -> Result<(), PipelineError> {
+            cancellation.checkpoint()?;
+            for pixel in row[..width_samples].chunks_exact_mut(3) {
+                let converted = transform
+                    .camera_to_linear_rec2020
+                    .transform([pixel[0], pixel[1], pixel[2]]);
+                pixel.copy_from_slice(&converted);
+            }
+            Ok(())
+        },
+    )?;
+    cancellation.checkpoint()?;
     image.set_space(LinearRgbSpace::Rec2020D65);
     Ok(())
 }
@@ -273,34 +339,57 @@ pub fn apply_adjustments(
     image: &mut LinearRgbImage<f32>,
     recipe: &EditRecipe,
 ) -> Result<(), PipelineError> {
+    apply_adjustments_cancellable(image, recipe, &CancellationToken::new())
+}
+
+pub(crate) fn apply_adjustments_cancellable(
+    image: &mut LinearRgbImage<f32>,
+    recipe: &EditRecipe,
+    cancellation: &CancellationToken,
+) -> Result<(), PipelineError> {
+    let span = tracing::info_span!(
+        "cpu.adjustments",
+        width = image.width(),
+        height = image.height(),
+        exposure_ev = recipe.exposure_ev,
+        contrast = recipe.contrast,
+        saturation = recipe.saturation
+    );
+    let _guard = span.enter();
+    cancellation.checkpoint()?;
     require_space(image, LinearRgbSpace::Rec2020D65)?;
     recipe.validate()?;
     let exposure_gain = recipe.exposure_ev.exp2();
     let contrast_gain = recipe.contrast.exp2();
     let width_samples = image.width() * 3;
     let row_stride = image.row_stride();
-    image.data_mut().par_chunks_mut(row_stride).for_each(|row| {
-        for pixel in row[..width_samples].chunks_exact_mut(3) {
-            if recipe.exposure_ev != 0.0 {
-                for value in pixel.iter_mut() {
-                    *value *= exposure_gain;
+    image.data_mut().par_chunks_mut(row_stride).try_for_each(
+        |row| -> Result<(), PipelineError> {
+            cancellation.checkpoint()?;
+            for pixel in row[..width_samples].chunks_exact_mut(3) {
+                if recipe.exposure_ev != 0.0 {
+                    for value in pixel.iter_mut() {
+                        *value *= exposure_gain;
+                    }
+                }
+                if recipe.contrast != 0.0 {
+                    for value in pixel.iter_mut() {
+                        *value = CONTRAST_PIVOT + (*value - CONTRAST_PIVOT) * contrast_gain;
+                    }
+                }
+                if recipe.saturation != 1.0 {
+                    let luminance = pixel[0] * REC2020_LUMINANCE[0]
+                        + pixel[1] * REC2020_LUMINANCE[1]
+                        + pixel[2] * REC2020_LUMINANCE[2];
+                    for value in pixel.iter_mut() {
+                        *value = luminance + recipe.saturation * (*value - luminance);
+                    }
                 }
             }
-            if recipe.contrast != 0.0 {
-                for value in pixel.iter_mut() {
-                    *value = CONTRAST_PIVOT + (*value - CONTRAST_PIVOT) * contrast_gain;
-                }
-            }
-            if recipe.saturation != 1.0 {
-                let luminance = pixel[0] * REC2020_LUMINANCE[0]
-                    + pixel[1] * REC2020_LUMINANCE[1]
-                    + pixel[2] * REC2020_LUMINANCE[2];
-                for value in pixel.iter_mut() {
-                    *value = luminance + recipe.saturation * (*value - luminance);
-                }
-            }
-        }
-    });
+            Ok(())
+        },
+    )?;
+    cancellation.checkpoint()?;
     Ok(())
 }
 
@@ -322,6 +411,46 @@ pub fn render_display_srgb8_dithered(
     output_policy: OutputPolicy,
     dithering: DitherMode,
 ) -> Result<DisplayRgbImage<u8>, PipelineError> {
+    render_display_srgb8_dithered_cancellable(
+        image,
+        orientation,
+        output_policy,
+        dithering,
+        &CancellationToken::new(),
+    )
+}
+
+pub(crate) fn render_display_srgb8_cancellable(
+    image: &LinearRgbImage<f32>,
+    orientation: RawOrientation,
+    output_policy: OutputPolicy,
+    cancellation: &CancellationToken,
+) -> Result<DisplayRgbImage<u8>, PipelineError> {
+    render_display_srgb8_dithered_cancellable(
+        image,
+        orientation,
+        output_policy,
+        DitherMode::None,
+        cancellation,
+    )
+}
+
+fn render_display_srgb8_dithered_cancellable(
+    image: &LinearRgbImage<f32>,
+    orientation: RawOrientation,
+    output_policy: OutputPolicy,
+    dithering: DitherMode,
+    cancellation: &CancellationToken,
+) -> Result<DisplayRgbImage<u8>, PipelineError> {
+    let span = tracing::info_span!(
+        "cpu.output_conversion",
+        width = image.width(),
+        height = image.height(),
+        bit_depth = 8,
+        orientation = %orientation
+    );
+    let _guard = span.enter();
+    cancellation.checkpoint()?;
     require_space(image, LinearRgbSpace::Rec2020D65)?;
     let orientation_map = OrientationMap::new(image.width(), image.height(), orientation)?;
     let (output_width, output_height) = orientation_map.output_dimensions();
@@ -338,10 +467,9 @@ pub fn render_display_srgb8_dithered(
     })?;
     let mut output = allocate_zeroed_u8(elements)?;
     let rec2020_to_srgb = LINEAR_REC2020_TO_XYZ_D65.then(XYZ_D65_TO_LINEAR_SRGB);
-    output
-        .par_chunks_mut(row_stride)
-        .enumerate()
-        .for_each(|(output_y, output_row)| {
+    output.par_chunks_mut(row_stride).enumerate().try_for_each(
+        |(output_y, output_row)| -> Result<(), PipelineError> {
+            cancellation.checkpoint()?;
             for (output_x, destination) in output_row.chunks_exact_mut(3).enumerate() {
                 let (source_x, source_y) =
                     orientation_map.source_coordinate_in_bounds(output_x, output_y);
@@ -358,7 +486,10 @@ pub fn render_display_srgb8_dithered(
                     *output = (encoded * 255.0 + dither).round().clamp(0.0, 255.0) as u8;
                 }
             }
-        });
+            Ok(())
+        },
+    )?;
+    cancellation.checkpoint()?;
     DisplayRgbImage::new(
         output_width,
         output_height,
@@ -376,6 +507,14 @@ pub fn render_display_srgb16(
     output_policy: OutputPolicy,
     dithering: DitherMode,
 ) -> Result<DisplayRgbImage<u16>, PipelineError> {
+    let span = tracing::info_span!(
+        "cpu.output_conversion",
+        width = image.width(),
+        height = image.height(),
+        bit_depth = 16,
+        orientation = %orientation
+    );
+    let _guard = span.enter();
     require_space(image, LinearRgbSpace::Rec2020D65)?;
     let orientation_map = OrientationMap::new(image.width(), image.height(), orientation)?;
     let (output_width, output_height) = orientation_map.output_dimensions();
@@ -442,6 +581,7 @@ fn quantization_dither(mode: DitherMode, x: usize, y: usize) -> f32 {
 fn demosaic_bilinear(
     mosaic: &MosaicImage<f32>,
     gains: WhiteBalanceGains,
+    cancellation: &CancellationToken,
 ) -> Result<LinearRgbImage<f32>, PipelineError> {
     let row_stride = mosaic.width().checked_mul(3).ok_or_else(|| {
         invalid_dimensions(mosaic.width(), mosaic.height(), 0, "RGB stride overflowed")
@@ -455,10 +595,9 @@ fn demosaic_bilinear(
         )
     })?;
     let mut output = allocate_zeroed_f32(elements)?;
-    output
-        .par_chunks_mut(row_stride)
-        .enumerate()
-        .for_each(|(y, output_row)| {
+    output.par_chunks_mut(row_stride).enumerate().try_for_each(
+        |(y, output_row)| -> Result<(), PipelineError> {
+            cancellation.checkpoint()?;
             for (x, pixel) in output_row.chunks_exact_mut(3).enumerate() {
                 let site = mosaic.pattern().color_at(x, y);
                 let mut rgb = match site {
@@ -492,7 +631,10 @@ fn demosaic_bilinear(
                 }
                 pixel.copy_from_slice(&rgb);
             }
-        });
+            Ok(())
+        },
+    )?;
+    cancellation.checkpoint()?;
     LinearRgbImage::new(
         mosaic.width(),
         mosaic.height(),

@@ -17,8 +17,8 @@ reference workstation, not minimum system requirements.
 - Vulkan driver: Mesa RADV 26.2.1
 - Software fallback also visible: llvmpipe, Mesa 26.2.1
 
-The current workspace checks do not initialize Vulkan. GPU capability checks
-belong to Phase 5.
+The normal workspace checks do not initialize Vulkan. Opt-in GPU parity and
+performance checks exercise the host Vulkan adapter.
 
 ## Phase 2 CPU baseline
 
@@ -79,6 +79,18 @@ decoded; embedded-placeholder latency and decode timing are reported as
 separate UI states. See [`desktop.md`](desktop.md) for the worker and revision
 contract.
 
+## Phase 6 preview performance
+
+Measured on 2026-08-30 with release builds on the same workstation. The
+2560×1707 `DSC00851.ARW` CPU cache test measured 67.19 ms for its first developed
+preview and 32.12 ms median / 35.17 ms maximum across 24 cached downstream
+edits. The bounded CPU cache estimate stayed at 175.6 MiB. Forty cached GPU
+edits on the RX 9070 XT measured 0.159 ms median / 0.406 ms maximum conservative
+queue-completion latency, with 0.044 ms final encode/submit time and an 83.3 MiB
+resident texture estimate. See [`preview-performance.md`](preview-performance.md)
+for stage results, commands, measurement caveats, and the still-in-budget
+contention results from the complete ignored workspace suite.
+
 ## Target camera corpus
 
 - Camera: Sony alpha 6400
@@ -104,4 +116,3 @@ in-camera JPEGs remain optional references.
 
 - X11 behavior still needs a live validation pass; Wayland is validated.
 - The eventual Rohditor project license.
-- Live `wgpu` format/limit validation, deferred until the GPU phase.

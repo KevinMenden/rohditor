@@ -45,6 +45,12 @@ The explicit `readback_display` API exists only for tests and diagnostics. It
 copies the display texture to a padded map-read buffer and must not be used in
 the viewport path.
 
+When dimensions and orientation are unchanged, later edits reuse both working
+and display textures as well as the source texture. Phase 6 records whether
+that reuse occurred and estimates retained texture bytes. It also attaches a
+shared-queue completion callback to each dispatch. The callback is non-blocking
+in the desktop; only controlled benchmark tests use the explicit queue wait.
+
 ## Device selection and fallback
 
 The application receives the adapter, device, queue, renderer, and target
@@ -91,3 +97,8 @@ orientations. The second command also runs the private `DSC00851.ARW` parity
 test when the local corpus is present.
 If Vulkan exposes only a CPU rasterizer, the opt-in GPU tests report that they
 were skipped rather than treating software rendering as GPU validation.
+
+On the reference eframe device, timestamp queries are unavailable. The
+developer diagnostics therefore report encode/submit CPU time and conservative
+queue-completion wall latency, not an isolated shader timestamp. Current
+measurements are recorded in [`preview-performance.md`](preview-performance.md).

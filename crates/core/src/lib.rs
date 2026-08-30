@@ -4,6 +4,7 @@
 //! distinct public types. The CPU implementation in this crate is the behavior
 //! that later preview and GPU implementations must match.
 
+mod cancel;
 mod color;
 mod cpu;
 mod edit;
@@ -14,6 +15,7 @@ mod orientation;
 mod output;
 mod pipeline;
 
+pub use cancel::CancellationToken;
 pub use color::{
     CameraColorTransform, LINEAR_REC2020_TO_XYZ_D65, Matrix3, XYZ_D65_TO_LINEAR_REC2020,
     XYZ_D65_TO_LINEAR_SRGB, adapt_xyz_to_d65, camera_color_transform, clip_linear_srgb_for_output,
@@ -41,7 +43,8 @@ pub use image::{
 pub use orientation::OrientationMap;
 pub use output::{paths_refer_to_same_file, write_output_bytes};
 pub use pipeline::{
-    CPU_WORKING_SET_LIMIT_BYTES, CpuPipeline, CropPolicy, DEFAULT_PREVIEW_LONG_EDGE,
-    DemosaicAlgorithm, DemosaicedBase, ExportRenderResult, MemoryEstimate, OutputPolicy,
-    PreviewOptions, RenderOptions, RenderResult, StageTimings,
+    CPU_WORKING_SET_LIMIT_BYTES, CpuPipeline, CpuPreviewWorkspace, CropPolicy,
+    DEFAULT_PREVIEW_LONG_EDGE, DemosaicAlgorithm, DemosaicedBase, ExportRenderResult,
+    MemoryEstimate, NormalizedPreview, OutputPolicy, PreviewOptions, RenderOptions, RenderResult,
+    StageTimings,
 };

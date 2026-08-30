@@ -5,8 +5,8 @@ use std::time::Duration;
 use eframe::egui;
 use rohditor_core::{
     CONTRAST_RANGE, DitherMode, EXPOSURE_EV_RANGE, ExportFormat, ExportMetadataPolicy,
-    ExportSettings, JPEG_QUALITY_DEFAULT, PngBitDepth, SATURATION_RANGE,
-    WHITE_BALANCE_MULTIPLIER_RANGE, WhiteBalance, paths_refer_to_same_file,
+    ExportSettings, JPEG_QUALITY_DEFAULT, MemoryEstimate, PngBitDepth, SATURATION_RANGE,
+    StageTimings, WHITE_BALANCE_MULTIPLIER_RANGE, WhiteBalance, paths_refer_to_same_file,
 };
 use rohditor_gpu::{
     GpuCapabilities, GpuPreviewFrame, GpuPreviewProcessor, GpuPreviewSource, GpuPreviewUpload,
@@ -15,8 +15,11 @@ use rohditor_raw::{RawFileInfo, RawFrame};
 use tracing::{info, warn};
 
 use crate::ProcessorPreference;
-use crate::coordinator::{JobKind, RenderCoordinator, WorkerEvent, WorkerImage};
+use crate::coordinator::{
+    JobKind, PreviewBackend, RenderCoordinator, WorkerEvent, WorkerImage, WorkerPreviewDiagnostics,
+};
 use crate::document::{EditSession, PreviewTicket};
+use crate::preview_cache::PreviewCacheHits;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TextureKind {
@@ -81,6 +84,29 @@ struct GpuRuntime {
     processor: GpuPreviewProcessor,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct DocumentPreviewDiagnostics {
+    worker: WorkerPreviewDiagnostics,
+    gpu_upload_preparation: Option<Duration>,
+    gpu_submission: Option<Duration>,
+    gpu_queue_completion: Option<Duration>,
+    gpu_textures_reused: Option<bool>,
+    gpu_resident_bytes: usize,
+}
+
+impl DocumentPreviewDiagnostics {
+    const fn cpu(worker: WorkerPreviewDiagnostics) -> Self {
+        Self {
+            worker,
+            gpu_upload_preparation: None,
+            gpu_submission: None,
+            gpu_queue_completion: None,
+            gpu_textures_reused: None,
+            gpu_resident_bytes: 0,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct ViewState {
     fit: bool,
@@ -132,6 +158,7 @@ struct Document {
     preview_status: Option<(u64, String)>,
     export_status: Option<ExportActivity>,
     last_preview_time: Option<Duration>,
+    preview_diagnostics: Option<DocumentPreviewDiagnostics>,
     warning: Option<String>,
     error: Option<String>,
     notice: Option<String>,
@@ -153,6 +180,7 @@ impl Document {
             preview_status: None,
             export_status: None,
             last_preview_time: None,
+            preview_diagnostics: None,
             warning: None,
             error: None,
             notice: None,
@@ -244,6 +272,7 @@ pub(crate) struct RohditorApp {
     gpu: Option<GpuRuntime>,
     processor_note: Option<String>,
     startup_error: Option<String>,
+    show_diagnostics: bool,
 }
 
 impl RohditorApp {
@@ -280,6 +309,7 @@ impl RohditorApp {
             gpu,
             processor_note,
             startup_error: None,
+            show_diagnostics: false,
         };
         if let Some(path) = initial_path {
             application.open_path(&context.egui_ctx, path);
@@ -396,7 +426,7 @@ impl RohditorApp {
             WorkerEvent::PreviewReady {
                 ticket,
                 image,
-                timings,
+                diagnostics,
             } => {
                 if self.gpu.is_none()
                     && let Some(document) = self.document.as_mut()
@@ -404,17 +434,19 @@ impl RohditorApp {
                 {
                     install_texture(context, document, image, TextureKind::DevelopedCpu);
                     document.preview_status = None;
-                    document.last_preview_time = Some(timings.total);
+                    document.last_preview_time = Some(diagnostics.timings.total);
+                    document.preview_diagnostics =
+                        Some(DocumentPreviewDiagnostics::cpu(diagnostics));
                     document.error = None;
                 }
             }
             WorkerEvent::GpuUploadReady {
                 ticket,
                 upload,
-                base_timings,
+                diagnostics,
                 upload_preparation,
             } => {
-                self.install_gpu_upload(context, ticket, *upload, base_timings, upload_preparation);
+                self.install_gpu_upload(context, ticket, *upload, diagnostics, upload_preparation);
             }
             WorkerEvent::ExportReady {
                 document_id,
@@ -552,7 +584,7 @@ impl RohditorApp {
         context: &egui::Context,
         ticket: PreviewTicket,
         upload: GpuPreviewUpload,
-        base_timings: rohditor_core::StageTimings,
+        diagnostics: WorkerPreviewDiagnostics,
         upload_preparation: Duration,
     ) {
         let Some(document) = self.document.as_ref().filter(|document| {
@@ -593,13 +625,25 @@ impl RohditorApp {
         match result {
             Ok((source, frame, texture_id)) => {
                 let output_size = gpu_output_size(frame.output_dimensions());
-                let elapsed = base_timings.total + upload_preparation + frame.submission_time();
+                let elapsed =
+                    diagnostics.timings.total + upload_preparation + frame.submission_time();
+                let gpu_resident_bytes = source
+                    .estimated_bytes()
+                    .saturating_add(frame.estimated_bytes());
+                let preview_diagnostics = DocumentPreviewDiagnostics {
+                    worker: diagnostics,
+                    gpu_upload_preparation: Some(upload_preparation),
+                    gpu_submission: Some(frame.submission_time()),
+                    gpu_queue_completion: frame.queue_completion_time(),
+                    gpu_textures_reused: Some(frame.textures_reused()),
+                    gpu_resident_bytes,
+                };
                 info!(
                     document_id = ticket.document_id,
                     revision = ticket.revision,
                     width = frame.output_dimensions().0,
                     height = frame.output_dimensions().1,
-                    base_ms = base_timings.total.as_millis(),
+                    base_ms = diagnostics.timings.total.as_millis(),
                     upload_prepare_ms = upload_preparation.as_millis(),
                     submission_us = frame.submission_time().as_micros(),
                     "GPU preview complete"
@@ -621,6 +665,7 @@ impl RohditorApp {
                     document.texture_kind = Some(TextureKind::DevelopedGpu);
                     document.preview_status = None;
                     document.last_preview_time = Some(elapsed);
+                    document.preview_diagnostics = Some(preview_diagnostics);
                     document.error = None;
                     document.warning = None;
                 }
@@ -649,6 +694,9 @@ impl RohditorApp {
         let texture_id = preview.texture_id;
         let recipe = document.edits.recipe().clone();
         let revision = document.edits.revision();
+        let previous_worker_diagnostics = document
+            .preview_diagnostics
+            .map(|diagnostics| diagnostics.worker);
         document.preview_status = Some((
             revision,
             "Applying edits to resident GPU preview".to_owned(),
@@ -670,6 +718,39 @@ impl RohditorApp {
         match result {
             Ok(frame) => {
                 let output_size = gpu_output_size(frame.output_dimensions());
+                let submission = frame.submission_time();
+                let mut worker = previous_worker_diagnostics.unwrap_or(WorkerPreviewDiagnostics {
+                    backend: PreviewBackend::GpuBase,
+                    cache_hits: PreviewCacheHits::default(),
+                    timings: StageTimings::default(),
+                    memory: MemoryEstimate::default(),
+                    cache_resident_bytes: 0,
+                    workspace_reused: false,
+                });
+                worker.backend = PreviewBackend::GpuBase;
+                worker.cache_hits = PreviewCacheHits {
+                    decoded: true,
+                    normalized: true,
+                    demosaiced: true,
+                    adjusted: false,
+                };
+                worker.timings = StageTimings {
+                    adjustments: submission,
+                    total: submission,
+                    ..StageTimings::default()
+                };
+                worker.workspace_reused = false;
+                let preview_diagnostics = DocumentPreviewDiagnostics {
+                    worker,
+                    gpu_upload_preparation: None,
+                    gpu_submission: Some(submission),
+                    gpu_queue_completion: frame.queue_completion_time(),
+                    gpu_textures_reused: Some(frame.textures_reused()),
+                    gpu_resident_bytes: preview
+                        .source
+                        .estimated_bytes()
+                        .saturating_add(frame.estimated_bytes()),
+                };
                 info!(
                     document_id,
                     revision,
@@ -694,10 +775,8 @@ impl RohditorApp {
                     });
                     document.texture_kind = Some(TextureKind::DevelopedGpu);
                     document.preview_status = None;
-                    document.last_preview_time = document
-                        .gpu_preview
-                        .as_ref()
-                        .map(|preview| preview.frame.submission_time());
+                    document.last_preview_time = Some(submission);
+                    document.preview_diagnostics = Some(preview_diagnostics);
                     document.error = None;
                 }
                 context.request_repaint();
@@ -777,6 +856,27 @@ impl RohditorApp {
                 .renderer
                 .write()
                 .free_texture(&texture_id);
+        }
+    }
+
+    fn refresh_gpu_queue_completion(&mut self, context: &egui::Context) {
+        let Some(document) = self.document.as_mut() else {
+            return;
+        };
+        let Some(preview) = document.gpu_preview.as_ref() else {
+            return;
+        };
+        let Some(diagnostics) = document.preview_diagnostics.as_mut() else {
+            return;
+        };
+        if diagnostics.gpu_queue_completion.is_some() {
+            return;
+        }
+        if let Some(completion) = preview.frame.queue_completion_time() {
+            diagnostics.gpu_queue_completion = Some(completion);
+            document.last_preview_time = Some(completion);
+        } else {
+            context.request_repaint_after(Duration::from_millis(16));
         }
     }
 
@@ -889,6 +989,8 @@ impl RohditorApp {
                 close = ui
                     .add_enabled(self.document.is_some(), egui::Button::new("Close"))
                     .clicked();
+                ui.separator();
+                ui.toggle_value(&mut self.show_diagnostics, "Diagnostics");
                 ui.separator();
                 if let Some(document) = self.document.as_mut() {
                     if ui
@@ -1126,6 +1228,156 @@ impl RohditorApp {
             });
         });
     }
+
+    fn show_developer_diagnostics(&mut self, context: &egui::Context) {
+        if !self.show_diagnostics {
+            return;
+        }
+        let queue = self.coordinator.preview_queue_stats();
+        let preview = self
+            .document
+            .as_ref()
+            .and_then(|document| document.preview_diagnostics);
+        let processor = self.processor_description();
+        let gpu_device = self.gpu.as_ref().map(|runtime| {
+            let capabilities = runtime.processor.capabilities();
+            (
+                capabilities.adapter_name.clone(),
+                capabilities.backend.clone(),
+                capabilities.timestamp_queries,
+            )
+        });
+        let mut open = self.show_diagnostics;
+        egui::Window::new("Developer diagnostics")
+            .open(&mut open)
+            .default_width(390.0)
+            .resizable(true)
+            .show(context, |ui| {
+                ui.label(format!("Processor: {processor}"));
+                if let Some((adapter, backend, timestamp_queries)) = &gpu_device {
+                    ui.weak(format!(
+                        "{adapter} · {backend} · timestamp queries: {timestamp_queries}"
+                    ));
+                }
+
+                ui.add_space(6.0);
+                ui.strong("Preview queue");
+                egui::Grid::new("preview_queue_diagnostics")
+                    .num_columns(2)
+                    .show(ui, |ui| {
+                        diagnostic_row(ui, "Requested", queue.requested);
+                        diagnostic_row(ui, "Coalesced", queue.coalesced);
+                        diagnostic_row(ui, "Cancel requests", queue.cancellation_requests);
+                        diagnostic_row(ui, "Cancelled", queue.cancelled);
+                        diagnostic_row(ui, "Completed", queue.completed);
+                        diagnostic_row(ui, "Failed", queue.failed);
+                        diagnostic_row(ui, "Active", queue.active);
+                        diagnostic_row(ui, "Pending", queue.pending);
+                    });
+
+                let Some(preview) = preview else {
+                    ui.add_space(6.0);
+                    ui.weak("No developed preview diagnostics yet.");
+                    return;
+                };
+                ui.add_space(8.0);
+                ui.strong(format!("Last {} preview", preview.worker.backend.label()));
+                egui::Grid::new("preview_cache_diagnostics")
+                    .num_columns(2)
+                    .show(ui, |ui| {
+                        diagnostic_row(
+                            ui,
+                            "DecodedRaw",
+                            cache_result(preview.worker.cache_hits.decoded),
+                        );
+                        diagnostic_row(
+                            ui,
+                            "NormalizedMosaic",
+                            cache_result(preview.worker.cache_hits.normalized),
+                        );
+                        diagnostic_row(
+                            ui,
+                            "DemosaicedBase",
+                            cache_result(preview.worker.cache_hits.demosaiced),
+                        );
+                        diagnostic_row(
+                            ui,
+                            "AdjustedPreview",
+                            cache_result(preview.worker.cache_hits.adjusted),
+                        );
+                        diagnostic_row(
+                            ui,
+                            "CPU working buffer",
+                            if preview.worker.workspace_reused {
+                                "reused"
+                            } else {
+                                "allocated or unused"
+                            },
+                        );
+                    });
+
+                ui.add_space(8.0);
+                ui.strong("CPU stage wall times");
+                egui::Grid::new("preview_stage_diagnostics")
+                    .num_columns(2)
+                    .show(ui, |ui| {
+                        duration_row(ui, "Metadata", preview.worker.timings.metadata);
+                        duration_row(ui, "Normalization", preview.worker.timings.normalization);
+                        duration_row(ui, "Demosaic", preview.worker.timings.demosaic);
+                        duration_row(ui, "Color conversion", preview.worker.timings.color_conversion);
+                        duration_row(ui, "Adjustments", preview.worker.timings.adjustments);
+                        duration_row(ui, "Output conversion", preview.worker.timings.output_conversion);
+                        duration_row(ui, "Total", preview.worker.timings.total);
+                    });
+                ui.label(format!(
+                    "CPU cache: {} · estimated render peak: {}",
+                    format_bytes(preview.worker.cache_resident_bytes),
+                    format_bytes(preview.worker.memory.estimated_peak_bytes)
+                ));
+
+                if preview.gpu_submission.is_some() {
+                    ui.add_space(8.0);
+                    ui.strong("GPU preview");
+                    egui::Grid::new("gpu_preview_diagnostics")
+                        .num_columns(2)
+                        .show(ui, |ui| {
+                            optional_duration_row(
+                                ui,
+                                "CPU upload packing",
+                                preview.gpu_upload_preparation,
+                            );
+                            optional_duration_row(
+                                ui,
+                                "Encode + submit",
+                                preview.gpu_submission,
+                            );
+                            optional_duration_row(
+                                ui,
+                                "Queue completion",
+                                preview.gpu_queue_completion,
+                            );
+                            diagnostic_row(
+                                ui,
+                                "Output textures",
+                                match preview.gpu_textures_reused {
+                                    Some(true) => "reused",
+                                    Some(false) => "allocated",
+                                    None => "n/a",
+                                },
+                            );
+                            diagnostic_row(
+                                ui,
+                                "Resident textures",
+                                format_bytes(preview.gpu_resident_bytes),
+                            );
+                        });
+                    ui.weak(
+                        "Queue completion is conservative wall latency; it includes shared-queue delay when timestamp queries are unavailable.",
+                    );
+                }
+            });
+        self.show_diagnostics = open;
+    }
 }
 
 fn initialize_gpu_runtime(
@@ -1211,13 +1463,50 @@ fn gpu_output_size((width, height): (u32, u32)) -> egui::Vec2 {
     egui::vec2(width as f32, height as f32)
 }
 
+fn diagnostic_row(ui: &mut egui::Ui, label: &str, value: impl std::fmt::Display) {
+    ui.label(label);
+    ui.monospace(value.to_string());
+    ui.end_row();
+}
+
+fn duration_row(ui: &mut egui::Ui, label: &str, duration: Duration) {
+    diagnostic_row(ui, label, format_duration(duration));
+}
+
+fn optional_duration_row(ui: &mut egui::Ui, label: &str, duration: Option<Duration>) {
+    diagnostic_row(
+        ui,
+        label,
+        duration.map_or_else(|| "pending".to_owned(), format_duration),
+    );
+}
+
+fn format_duration(duration: Duration) -> String {
+    if duration >= Duration::from_millis(1) {
+        format!("{:.2} ms", duration.as_secs_f64() * 1_000.0)
+    } else {
+        format!("{} µs", duration.as_micros())
+    }
+}
+
+fn format_bytes(bytes: usize) -> String {
+    const MEBIBYTE: f64 = 1_048_576.0;
+    format!("{:.1} MiB", bytes as f64 / MEBIBYTE)
+}
+
+const fn cache_result(hit: bool) -> &'static str {
+    if hit { "hit" } else { "miss" }
+}
+
 impl eframe::App for RohditorApp {
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
         self.process_worker_events(context);
+        self.refresh_gpu_queue_completion(context);
         self.show_top_bar(context);
         self.show_status_bar(context);
         self.show_adjustment_panel(context);
         self.show_viewport(context);
+        self.show_developer_diagnostics(context);
     }
 }
 

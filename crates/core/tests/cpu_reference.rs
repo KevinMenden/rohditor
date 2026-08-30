@@ -1,10 +1,12 @@
 use std::error::Error;
 use std::sync::Arc;
+use std::time::Duration;
 
 use rayon::ThreadPoolBuilder;
 use rohditor_core::{
-    CpuPipeline, CropPolicy, DitherMode, EditRecipe, ExportImage, LinearRgbSpace, OutputBitDepth,
-    PreviewOptions, RenderOptions, WhiteBalance, camera_color_transform,
+    CancellationToken, CpuPipeline, CropPolicy, DitherMode, EditRecipe, ExportImage,
+    LinearRgbSpace, OutputBitDepth, PipelineError, PreviewOptions, RenderOptions, WhiteBalance,
+    camera_color_transform,
 };
 use rohditor_raw::{
     CameraColorMatrix, CaptureMetadata, CfaPattern, ImageRect, LevelPattern,
@@ -125,6 +127,42 @@ fn reusable_preview_base_matches_direct_render_and_rejects_stale_white_balance()
             .is_err()
     );
     Ok(())
+}
+
+#[test]
+fn split_normalized_and_demosaiced_stages_match_the_combined_preview_base()
+-> Result<(), Box<dyn Error>> {
+    let frame = synthetic_rggb_frame();
+    let options = PreviewOptions {
+        max_long_edge: 3,
+        ..PreviewOptions::default()
+    };
+    let recipe = EditRecipe::default();
+    let normalized = CpuPipeline.prepare_preview_normalized(&frame, options)?;
+    let split = CpuPipeline.prepare_preview_base_from_normalized(
+        &normalized,
+        &recipe,
+        options.render.demosaic,
+    )?;
+    let combined = CpuPipeline.prepare_preview_base(&frame, &recipe, options)?;
+
+    assert_eq!(split.image(), combined.image());
+    assert_eq!(split.timings().normalization, Duration::ZERO);
+    assert!(normalized.buffer_bytes() > 0);
+    Ok(())
+}
+
+#[test]
+fn preview_stages_return_the_typed_cancellation_error() {
+    let frame = synthetic_rggb_frame();
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+
+    let error = CpuPipeline
+        .prepare_preview_normalized_cancellable(&frame, PreviewOptions::default(), &cancellation)
+        .expect_err("cancelled work must stop before normalization");
+
+    assert!(matches!(error, PipelineError::Cancelled));
 }
 
 #[test]

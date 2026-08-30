@@ -1,6 +1,7 @@
 mod app;
 mod coordinator;
 mod document;
+mod preview_cache;
 
 use clap::{Parser, ValueEnum};
 use eframe::egui;
@@ -49,7 +50,7 @@ struct Arguments {
     #[arg(long, value_enum, default_value_t)]
     renderer: RendererPreference,
 
-    /// Interactive preview processor. Exports remain CPU-only in Phase 5.
+    /// Interactive preview processor. Full-resolution exports remain CPU-only.
     #[arg(long, value_enum, default_value_t)]
     processor: ProcessorPreference,
 

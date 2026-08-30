@@ -36,12 +36,18 @@ blue CFA sub-grids are mapped independently so every output coordinate retains
 the correct Bayer phase and original sensor coordinate is still used for
 black/white-level lookup.
 
-`CpuPipeline::prepare_preview_base` exposes the typed `DemosaicedBase` boundary:
+`CpuPipeline::prepare_preview_normalized` first exposes a reusable typed
+`NormalizedPreview`. `prepare_preview_base_from_normalized` applies white
+balance, demosaic, and camera color conversion without repeating normalization.
+`CpuPipeline::prepare_preview_base` remains the combined convenience boundary:
 linear Rec.2020/D65 pixels after normalization, white balance, demosaic, and
 camera color conversion, but before exposure, contrast, saturation, orientation,
 and display conversion. `render_preview_from_base` applies those downstream
-stages without rebuilding the base. The desktop keeps the latest matching base,
-and Phase 5 can upload the same typed image once for GPU adjustments.
+stages without rebuilding the base. Cancellable variants accept a shared
+`CancellationToken` and check it at row/stage boundaries. The desktop retains a
+`CpuPreviewWorkspace`, copying the immutable base into one reusable allocation
+for each downstream edit. Phase 5 uploads the same typed base once for GPU
+adjustments.
 
 The current reduction is deterministic phase-preserving point selection. It is
 appropriate for the responsive Phase 4 baseline but is not a final antialiased
@@ -116,5 +122,6 @@ that these timings vary materially with cache and machine load.
   16-bit display buffer. PNG16 encoding also needs a temporary endian-conversion
   buffer that is outside this core estimate.
 - Preview reduction currently uses phase-preserving point selection rather than
-  an antialiased CFA-aware filter. Buffer reuse, stage caching, cancellation,
-  and tiling remain later work.
+  an antialiased CFA-aware filter. Full-resolution tiling remains later work;
+  Phase 6 implements bounded preview caches, buffer reuse, and cooperative
+  cancellation.
