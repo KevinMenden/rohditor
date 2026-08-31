@@ -61,11 +61,11 @@ Status: MVP implemented and validated on the current Sony ILCE-6400 corpus.
 ### Basic editing controls
 
 - [x] **Light:** exposure, contrast, highlights, shadows, whites, blacks, auto
-      tone, and a four-region tone curve.
+      tone, and a visual four-region tone curve editor.
 - [x] **Color:** temperature/tint and manual white balance, saturation,
       vibrance, HSL mixer, and three-way color grading.
 - [x] **Histogram:** RGB/luminance display with clipped shadow/highlight counts.
-- [ ] **Color:** white-balance picker.
+- [x] **Color:** white-balance picker.
 - [ ] **Presence:** texture, clarity, and dehaze.
 - [ ] **Detail:** capture/output sharpening, luminance and color noise reduction,
       moiré removal, and defringe.

@@ -104,6 +104,7 @@ pub(crate) struct DocumentPanelModel {
     pub warning: Option<String>,
     pub notice: Option<String>,
     pub histogram: Option<Histogram>,
+    pub white_balance_picker_active: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -120,6 +121,7 @@ pub(crate) struct AdjustmentInteraction {
 #[derive(Debug, Default)]
 pub(crate) struct AdjustmentPanelOutput {
     pub white_balance_mode: Option<WhiteBalanceMode>,
+    pub white_balance_picker_active: Option<bool>,
     pub interactions: Vec<AdjustmentInteraction>,
     pub auto_tone: bool,
     pub reset_all: bool,
@@ -235,45 +237,132 @@ fn show_tone_curve_controls(
     output: &mut AdjustmentPanelOutput,
 ) {
     widgets::section_header(ui, "Tone curve");
-    for (label, target, value) in [
-        (
-            "Shadows",
-            AdjustmentTarget::ToneCurveShadows,
-            &mut document.values.tone_curve_shadows,
-        ),
-        (
-            "Darks",
-            AdjustmentTarget::ToneCurveDarks,
-            &mut document.values.tone_curve_darks,
-        ),
-        (
-            "Lights",
-            AdjustmentTarget::ToneCurveLights,
-            &mut document.values.tone_curve_lights,
-        ),
-        (
-            "Highlights",
-            AdjustmentTarget::ToneCurveHighlights,
-            &mut document.values.tone_curve_highlights,
-        ),
-    ] {
-        record_slider(
-            ui,
-            &mut output.interactions,
-            target,
-            value,
-            AdjustmentSpec {
-                label,
-                minimum: document.ranges.tone_curve.minimum,
-                maximum: document.ranges.tone_curve.maximum,
-                neutral: document.ranges.tone_curve.neutral,
-                decimals: 0,
-                step: 0.01,
-                suffix: "%",
-                scale: ValueScale::OffsetPercent,
-            },
+    let mut values = [
+        document.values.tone_curve_shadows,
+        document.values.tone_curve_darks,
+        document.values.tone_curve_lights,
+        document.values.tone_curve_highlights,
+    ];
+    let neutral = document.ranges.tone_curve.neutral;
+    let minimum = document.ranges.tone_curve.minimum;
+    let maximum = document.ranges.tone_curve.maximum;
+    let graph_size = egui::vec2(ui.available_width(), 156.0);
+    let (outer_rect, _) = ui.allocate_exact_size(graph_size, egui::Sense::hover());
+    let rect = outer_rect.shrink(1.0);
+    let painter = ui.painter();
+    painter.rect(
+        rect,
+        metrics::RADIUS,
+        colors::FIELD,
+        egui::Stroke::new(1.0, colors::BORDER),
+        egui::StrokeKind::Inside,
+    );
+    for fraction in [0.25_f32, 0.5, 0.75] {
+        let x = egui::lerp(rect.left()..=rect.right(), fraction);
+        let y = egui::lerp(rect.bottom()..=rect.top(), fraction);
+        painter.vline(
+            x,
+            rect.top()..=rect.bottom(),
+            egui::Stroke::new(1.0, colors::BORDER.gamma_multiply(0.55)),
+        );
+        painter.hline(
+            rect.left()..=rect.right(),
+            y,
+            egui::Stroke::new(1.0, colors::BORDER.gamma_multiply(0.55)),
         );
     }
+    painter.line_segment(
+        [rect.left_bottom(), rect.right_top()],
+        egui::Stroke::new(1.0, colors::TEXT_DISABLED),
+    );
+    let curve_points = (0..=64)
+        .map(|index| {
+            let input = index as f32 / 64.0;
+            curve_graph_position(rect, input, tone_curve_graph_value(input, values))
+        })
+        .collect::<Vec<_>>();
+    painter.add(egui::Shape::line(
+        curve_points,
+        egui::Stroke::new(2.0, colors::ACCENT_HOVER),
+    ));
+
+    const CONTROL_INPUTS: [f32; 4] = [0.12, 0.35, 0.65, 0.88];
+    let targets = [
+        AdjustmentTarget::ToneCurveShadows,
+        AdjustmentTarget::ToneCurveDarks,
+        AdjustmentTarget::ToneCurveLights,
+        AdjustmentTarget::ToneCurveHighlights,
+    ];
+    for index in 0..CONTROL_INPUTS.len() {
+        let input = CONTROL_INPUTS[index];
+        let point = curve_graph_position(rect, input, tone_curve_graph_value(input, values));
+        let handle_rect = egui::Rect::from_center_size(point, egui::vec2(18.0, 18.0));
+        let response = ui.interact(
+            handle_rect,
+            ui.make_persistent_id(("tone_curve_point", index)),
+            egui::Sense::drag(),
+        );
+        let was = values[index];
+        let reset = response.double_clicked();
+        if reset {
+            values[index] = neutral;
+        } else if response.dragged()
+            && let Some(pointer) = response.interact_pointer_pos()
+        {
+            let output_value = ((rect.bottom() - pointer.y) / rect.height()).clamp(0.0, 1.0);
+            values[index] = (output_value - input).clamp(minimum, maximum);
+        }
+        let value_changed = (values[index] - was).abs() > f32::EPSILON;
+        if response.drag_started() || value_changed || response.drag_stopped() || reset {
+            output.interactions.push(AdjustmentInteraction {
+                target: targets[index],
+                value: values[index],
+                changed: value_changed,
+                drag_started: response.drag_started(),
+                dragged: response.dragged(),
+                drag_stopped: response.drag_stopped(),
+                reset,
+            });
+        }
+        let visuals = ui.style().interact(&response);
+        painter.circle_filled(point, 5.0, visuals.fg_stroke.color);
+        painter.circle_stroke(point, 6.0, egui::Stroke::new(1.0, colors::FIELD));
+    }
+    ui.label(
+        egui::RichText::new("Drag points · double-click a point to reset")
+            .small()
+            .color(colors::TEXT_MUTED),
+    );
+    ui.label(
+        egui::RichText::new("Shadows · Darks · Lights · Highlights")
+            .small()
+            .color(colors::TEXT_MUTED),
+    );
+    document.values.tone_curve_shadows = values[0];
+    document.values.tone_curve_darks = values[1];
+    document.values.tone_curve_lights = values[2];
+    document.values.tone_curve_highlights = values[3];
+}
+
+fn tone_curve_graph_value(input: f32, values: [f32; 4]) -> f32 {
+    let shadows = 1.0 - smoothstep(0.0, 0.45, input);
+    let darks = smoothstep(0.0, 0.12, input) * (1.0 - smoothstep(0.35, 0.55, input));
+    let lights = smoothstep(0.45, 0.65, input) * (1.0 - smoothstep(0.88, 1.0, input));
+    let highlights = smoothstep(0.60, 1.0, input);
+    (input + values[0] * shadows + values[1] * darks + values[2] * lights + values[3] * highlights)
+        .clamp(0.0, 1.0)
+}
+
+fn curve_graph_position(rect: egui::Rect, input: f32, output: f32) -> egui::Pos2 {
+    egui::pos2(
+        egui::lerp(rect.left()..=rect.right(), input),
+        egui::lerp(rect.bottom()..=rect.top(), output),
+    )
+}
+
+fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
+    let normalized = ((value - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    normalized * normalized * (3.0 - 2.0 * normalized)
 }
 
 fn empty_panel(ui: &mut egui::Ui) {
@@ -557,6 +646,25 @@ fn show_color_controls(
             .small()
             .color(colors::TEXT_MUTED),
     );
+    let picker_label = if document.white_balance_picker_active {
+        "Cancel picker"
+    } else {
+        "Pick neutral"
+    };
+    if ui
+        .small_button(picker_label)
+        .on_hover_text("Click a neutral or gray area in the image")
+        .clicked()
+    {
+        output.white_balance_picker_active = Some(!document.white_balance_picker_active);
+    }
+    if document.white_balance_picker_active {
+        ui.label(
+            egui::RichText::new("Click a neutral area in the image")
+                .small()
+                .color(colors::ACCENT_HOVER),
+        );
+    }
     ui.add_space(4.0);
 
     if document.values.white_balance_mode == WhiteBalanceMode::TemperatureTint {
@@ -907,5 +1015,20 @@ mod tests {
         assert_eq!(settings.png_depth, PngDepth::Eight);
         assert!(settings.safe_metadata);
         assert!(!settings.overwrite);
+    }
+
+    #[test]
+    fn tone_curve_graph_is_identity_at_neutral() {
+        for input in [0.0, 0.12, 0.5, 0.88, 1.0] {
+            assert!((tone_curve_graph_value(input, [0.0; 4]) - input).abs() < 1.0e-6);
+        }
+    }
+
+    #[test]
+    fn tone_curve_graph_moves_the_selected_tonal_region() {
+        let lifted = tone_curve_graph_value(0.15, [0.1, 0.0, 0.0, 0.0]);
+        let lowered = tone_curve_graph_value(0.85, [0.0, 0.0, 0.0, -0.1]);
+        assert!(lifted > 0.15);
+        assert!(lowered < 0.85);
     }
 }
