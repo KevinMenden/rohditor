@@ -1,8 +1,9 @@
-# Phases 4 through 6 desktop application
+# Phases 4 through 7 desktop application
 
 Phase 4 provides the minimal `eframe` editor around the CPU reference pipeline.
 Phase 5 adds a downstream GPU preview processor while retaining that CPU path.
 Phase 6 makes preview work bounded, cancellable, cached, and observable.
+Phase 7 adds a Rohditor-owned visual system and responsive editor layout.
 The desktop crate owns widgets and document coordination; the core and RAW
 crates remain independent of `egui`.
 
@@ -32,6 +33,10 @@ rohditor-desktop --processor auto  # shared hardware wgpu processor, otherwise C
 rohditor-desktop --processor gpu   # require a compatible shared wgpu processor
 rohditor-desktop --processor cpu   # CPU preview only; no Rohditor GPU resources
 ```
+
+Pass `--diagnostics` to open the developer diagnostics window at startup. This
+is useful for repeatable smoke captures and support reports; it does not change
+the selected preview processor.
 
 In `Auto`, a wgpu renderer supplies its existing adapter, device, and queue to
 the GPU processor. A CPU rasterizer, incompatible texture formats, or a later
@@ -110,6 +115,15 @@ it is not copied back to CPU before the viewport samples it. See
 Fit, 100%, wheel zoom, and drag panning transform only the displayed texture.
 They do not enqueue RAW development.
 
+The custom presentation layer lives in `apps/desktop/src/ui`. A sparse toolbar,
+responsive Files rail, grouped Develop panel, dominant dark viewport, and
+compact status strip all consume presentation-only view models. The Files rail
+disappears below 1120 points so the 900×600 minimum window retains a useful
+viewport. Source and zoom overlays are contextual; histogram, clipping, and
+before/after controls are honest visual shells until their analysis/preview
+paths exist. See [`ui-design-system.md`](ui-design-system.md) for the tokens,
+widget rules, module boundary, and manual visual checklist.
+
 ## Edits and history
 
 The right panel exposes:
@@ -139,10 +153,12 @@ context.
 
 ## Verification and current limits
 
-Unit tests cover revision advancement, drag coalescing, reset/undo/redo, stale
-ticket rejection, preview-result coalescing, CPU-to-GPU base handoff, EXIF
-orientation mapping, and UI to core export-setting conversion. Core tests cover
-phase-preserving preview scaling. Opt-in Vulkan tests compare GPU output against
+Unit tests cover revision advancement, presentation-event drag grouping,
+adjustment value formatting/parsing, responsive breakpoints, viewport geometry,
+theme installation, reset/undo/redo, stale ticket rejection, preview-result
+coalescing, CPU-to-GPU base handoff, EXIF orientation mapping, and UI to core
+export-setting conversion. Core tests cover phase-preserving preview scaling.
+Opt-in Vulkan tests compare GPU output against
 the CPU reference with a rotated synthetic fixture and `DSC00851.ARW`; the
 acceptance tolerance is at most two 8-bit sRGB codes per channel. The opt-in
 private worker test performs real asynchronous open, 2560-edge preview, and

@@ -20,58 +20,16 @@ use crate::coordinator::{
 };
 use crate::document::{EditSession, PreviewTicket};
 use crate::preview_cache::PreviewCacheHits;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TextureKind {
-    Embedded,
-    DevelopedCpu,
-    DevelopedGpu,
-}
-
-impl TextureKind {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Embedded => "Embedded preview (developing RAW…)",
-            Self::DevelopedCpu => "CPU-developed RAW preview",
-            Self::DevelopedGpu => "GPU-developed RAW preview",
-        }
-    }
-}
-
-#[derive(Clone)]
-enum DocumentTexture {
-    Cpu(egui::TextureHandle),
-    Gpu {
-        id: egui::TextureId,
-        size: egui::Vec2,
-    },
-}
-
-impl DocumentTexture {
-    fn size_vec2(&self) -> egui::Vec2 {
-        match self {
-            Self::Cpu(texture) => texture.size_vec2(),
-            Self::Gpu { size, .. } => *size,
-        }
-    }
-
-    fn paint(&self, ui: &mut egui::Ui, rect: egui::Rect) {
-        match self {
-            Self::Cpu(texture) => {
-                egui::Image::new(texture)
-                    .fit_to_exact_size(rect.size())
-                    .texture_options(egui::TextureOptions::LINEAR)
-                    .paint_at(ui, rect);
-            }
-            Self::Gpu { id, size } => {
-                egui::Image::from_texture((*id, *size))
-                    .fit_to_exact_size(rect.size())
-                    .texture_options(egui::TextureOptions::LINEAR)
-                    .paint_at(ui, rect);
-            }
-        }
-    }
-}
+use crate::ui::adjustment_panel::{
+    self, AdjustmentInteraction, AdjustmentRange, AdjustmentRanges, AdjustmentTarget,
+    AdjustmentValues, DocumentPanelModel, ExportKind, ExportUiSettings, PngDepth,
+};
+use crate::ui::diagnostics::{
+    self, CacheModel, DiagnosticsModel, GpuModel, PreviewModel, QueueModel, TimingModel,
+};
+use crate::ui::theme;
+use crate::ui::toolbar::{self, FilePanelModel, StatusBarModel, ToolbarModel};
+use crate::ui::viewport::{self, PreviewSource, PreviewTexture, ViewState, ViewportModel};
 
 struct GpuDocumentPreview {
     source: GpuPreviewSource,
@@ -108,36 +66,6 @@ impl DocumentPreviewDiagnostics {
 }
 
 #[derive(Debug)]
-struct ViewState {
-    fit: bool,
-    zoom: f32,
-    pan: egui::Vec2,
-}
-
-impl Default for ViewState {
-    fn default() -> Self {
-        Self {
-            fit: true,
-            zoom: 1.0,
-            pan: egui::Vec2::ZERO,
-        }
-    }
-}
-
-impl ViewState {
-    fn fit(&mut self) {
-        self.fit = true;
-        self.pan = egui::Vec2::ZERO;
-    }
-
-    fn actual_size(&mut self) {
-        self.fit = false;
-        self.zoom = 1.0;
-        self.pan = egui::Vec2::ZERO;
-    }
-}
-
-#[derive(Debug)]
 struct ExportActivity {
     id: u64,
     recipe_revision: u64,
@@ -150,8 +78,8 @@ struct Document {
     info: Option<RawFileInfo>,
     frame: Option<Arc<RawFrame>>,
     edits: EditSession,
-    texture: Option<DocumentTexture>,
-    texture_kind: Option<TextureKind>,
+    texture: Option<PreviewTexture>,
+    preview_source: Option<PreviewSource>,
     gpu_preview: Option<GpuDocumentPreview>,
     view: ViewState,
     open_status: Option<String>,
@@ -173,7 +101,7 @@ impl Document {
             frame: None,
             edits: EditSession::default(),
             texture: None,
-            texture_kind: None,
+            preview_source: None,
             gpu_preview: None,
             view: ViewState::default(),
             open_status: Some("Opening RAW file".to_owned()),
@@ -199,35 +127,6 @@ impl Document {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ExportKind {
-    Jpeg,
-    Png,
-}
-
-#[derive(Debug, Clone)]
-struct ExportUiSettings {
-    kind: ExportKind,
-    jpeg_quality: u8,
-    png_depth: PngBitDepth,
-    dither: bool,
-    safe_metadata: bool,
-    overwrite: bool,
-}
-
-impl Default for ExportUiSettings {
-    fn default() -> Self {
-        Self {
-            kind: ExportKind::Jpeg,
-            jpeg_quality: JPEG_QUALITY_DEFAULT,
-            png_depth: PngBitDepth::Eight,
-            dither: false,
-            safe_metadata: true,
-            overwrite: false,
-        }
-    }
-}
-
 impl ExportUiSettings {
     fn core(&self) -> ExportSettings {
         ExportSettings {
@@ -236,7 +135,10 @@ impl ExportUiSettings {
                     quality: self.jpeg_quality,
                 },
                 ExportKind::Png => ExportFormat::Png {
-                    bit_depth: self.png_depth,
+                    bit_depth: match self.png_depth {
+                        PngDepth::Eight => PngBitDepth::Eight,
+                        PngDepth::Sixteen => PngBitDepth::Sixteen,
+                    },
                 },
             },
             dithering: if self.dither {
@@ -280,8 +182,9 @@ impl RohditorApp {
         context: &eframe::CreationContext<'_>,
         initial_path: Option<PathBuf>,
         processor_preference: ProcessorPreference,
+        show_diagnostics: bool,
     ) -> std::io::Result<Self> {
-        context.egui_ctx.set_visuals(egui::Visuals::dark());
+        theme::apply(&context.egui_ctx);
         let ui_renderer = if context.wgpu_render_state.is_some() {
             "wgpu"
         } else if context.gl.is_some() {
@@ -303,13 +206,13 @@ impl RohditorApp {
             document: None,
             next_document_id: 1,
             next_export_id: 1,
-            export_settings: ExportUiSettings::default(),
+            export_settings: ExportUiSettings::with_jpeg_quality(JPEG_QUALITY_DEFAULT),
             ui_renderer,
             processor_preference,
             gpu,
             processor_note,
             startup_error: None,
-            show_diagnostics: false,
+            show_diagnostics,
         };
         if let Some(path) = initial_path {
             application.open_path(&context.egui_ctx, path);
@@ -401,11 +304,11 @@ impl RohditorApp {
             WorkerEvent::PlaceholderReady { document_id, image } => {
                 if let Some(document) = self.document.as_mut().filter(|doc| doc.id == document_id)
                     && !matches!(
-                        document.texture_kind,
-                        Some(TextureKind::DevelopedCpu | TextureKind::DevelopedGpu)
+                        document.preview_source,
+                        Some(PreviewSource::DevelopedCpu | PreviewSource::DevelopedGpu)
                     )
                 {
-                    install_texture(context, document, image, TextureKind::Embedded);
+                    install_texture(context, document, image, PreviewSource::Embedded);
                 }
             }
             WorkerEvent::RawReady { document_id, frame } => {
@@ -432,7 +335,7 @@ impl RohditorApp {
                     && let Some(document) = self.document.as_mut()
                     && ticket.is_current(document.id, document.edits.revision())
                 {
-                    install_texture(context, document, image, TextureKind::DevelopedCpu);
+                    install_texture(context, document, image, PreviewSource::DevelopedCpu);
                     document.preview_status = None;
                     document.last_preview_time = Some(diagnostics.timings.total);
                     document.preview_diagnostics =
@@ -658,11 +561,11 @@ impl RohditorApp {
                         frame,
                         texture_id,
                     });
-                    document.texture = Some(DocumentTexture::Gpu {
+                    document.texture = Some(PreviewTexture::Gpu {
                         id: texture_id,
                         size: output_size,
                     });
-                    document.texture_kind = Some(TextureKind::DevelopedGpu);
+                    document.preview_source = Some(PreviewSource::DevelopedGpu);
                     document.preview_status = None;
                     document.last_preview_time = Some(elapsed);
                     document.preview_diagnostics = Some(preview_diagnostics);
@@ -769,11 +672,11 @@ impl RohditorApp {
                         frame,
                         texture_id,
                     });
-                    document.texture = Some(DocumentTexture::Gpu {
+                    document.texture = Some(PreviewTexture::Gpu {
                         id: texture_id,
                         size: output_size,
                     });
-                    document.texture_kind = Some(TextureKind::DevelopedGpu);
+                    document.preview_source = Some(PreviewSource::DevelopedGpu);
                     document.preview_status = None;
                     document.last_preview_time = Some(submission);
                     document.preview_diagnostics = Some(preview_diagnostics);
@@ -827,9 +730,9 @@ impl RohditorApp {
         if let Some(texture_id) = texture_id {
             self.free_gpu_texture(texture_id);
         }
-        if matches!(document.texture, Some(DocumentTexture::Gpu { .. })) {
+        if matches!(document.texture, Some(PreviewTexture::Gpu { .. })) {
             document.texture = None;
-            document.texture_kind = None;
+            document.preview_source = None;
         }
     }
 
@@ -841,11 +744,11 @@ impl RohditorApp {
             .filter(|document| document.id == document_id)
             && matches!(
                 document.texture,
-                Some(DocumentTexture::Gpu { id, .. }) if id == texture_id
+                Some(PreviewTexture::Gpu { id, .. }) if id == texture_id
             )
         {
             document.texture = None;
-            document.texture_kind = None;
+            document.preview_source = None;
         }
     }
 
@@ -980,253 +883,211 @@ impl RohditorApp {
     }
 
     fn show_top_bar(&mut self, context: &egui::Context) {
-        let mut open = false;
-        let mut close = false;
-        let mut changed_document = None;
-        egui::TopBottomPanel::top("top_bar").show(context, |ui| {
-            ui.horizontal(|ui| {
-                open = ui.button("Open RAW…").clicked();
-                close = ui
-                    .add_enabled(self.document.is_some(), egui::Button::new("Close"))
-                    .clicked();
-                ui.separator();
-                ui.toggle_value(&mut self.show_diagnostics, "Diagnostics");
-                ui.separator();
-                if let Some(document) = self.document.as_mut() {
-                    if ui
-                        .add_enabled(document.edits.can_undo(), egui::Button::new("Undo"))
-                        .clicked()
-                        && document.edits.undo()
-                    {
-                        changed_document = Some(document.id);
-                    }
-                    if ui
-                        .add_enabled(document.edits.can_redo(), egui::Button::new("Redo"))
-                        .clicked()
-                        && document.edits.redo()
-                    {
-                        changed_document = Some(document.id);
-                    }
-                    if ui.button("Reset edits").clicked() && document.edits.reset() {
-                        changed_document = Some(document.id);
-                    }
-                    ui.separator();
-                    if ui.button("Fit").clicked() {
-                        document.view.fit();
-                    }
-                    if ui.button("100%").clicked() {
-                        document.view.actual_size();
-                    }
-                    let zoom_label = if document.view.fit {
-                        "Fit".to_owned()
-                    } else {
-                        format!("{:.0}%", document.view.zoom * 100.0)
-                    };
-                    ui.label(zoom_label);
-                }
-            });
-        });
-        if open {
-            self.open_dialog(context);
+        let model = ToolbarModel {
+            document_name: self.document.as_ref().map(Document::file_name),
+            can_undo: self
+                .document
+                .as_ref()
+                .is_some_and(|document| document.edits.can_undo()),
+            can_redo: self
+                .document
+                .as_ref()
+                .is_some_and(|document| document.edits.can_redo()),
+            fit_selected: self
+                .document
+                .as_ref()
+                .is_none_or(|document| document.view.is_fit()),
+            actual_size_selected: self
+                .document
+                .as_ref()
+                .is_some_and(|document| document.view.is_actual_size()),
+            zoom_label: self
+                .document
+                .as_ref()
+                .map_or_else(|| "FIT".to_owned(), |document| document.view.zoom_label()),
+            diagnostics_open: self.show_diagnostics,
+            export_ready: self.document.as_ref().is_some_and(|document| {
+                document.frame.is_some() && document.export_status.is_none()
+            }),
+        };
+        let actions = toolbar::show_top(context, &model);
+        if actions.toggle_diagnostics {
+            self.show_diagnostics = !self.show_diagnostics;
         }
-        if close {
+        if actions.open {
+            self.open_dialog(context);
+        } else if actions.close {
             self.close_document(context);
+        }
+
+        let now = context.input(|input| input.time);
+        let mut changed_document = None;
+        if let Some(document) = self.document.as_mut() {
+            let mut changed = false;
+            if actions.undo {
+                changed |= document.edits.undo();
+            }
+            if actions.redo {
+                changed |= document.edits.redo();
+            }
+            if actions.reset {
+                changed |= document.edits.reset();
+            }
+            if changed {
+                document.notice = None;
+                changed_document = Some(document.id);
+            }
+            if actions.fit {
+                document.view.fit(now);
+            }
+            if actions.actual_size {
+                document.view.actual_size(now);
+            }
         }
         if let Some(document_id) = changed_document {
             self.queue_preview(context, document_id);
+        }
+        if actions.export {
+            self.request_export();
+        }
+    }
+
+    fn show_file_panel(&mut self, context: &egui::Context) {
+        let model = FilePanelModel {
+            file_name: self.document.as_ref().map(Document::file_name),
+            camera: self.document.as_ref().and_then(|document| {
+                document
+                    .info
+                    .as_ref()
+                    .map(|info| format!("{} {}", info.clean_make, info.clean_model))
+            }),
+            dimensions: self
+                .document
+                .as_ref()
+                .and_then(|document| document.info.as_ref())
+                .map(|info| (info.width, info.height)),
+            source_state: self
+                .document
+                .as_ref()
+                .and_then(|document| document.preview_source)
+                .map(|source| source.short_label().to_owned()),
+        };
+        let output = toolbar::show_file_panel(context, &model);
+        if output.open {
+            self.open_dialog(context);
+        } else if output.close {
+            self.close_document(context);
         }
     }
 
     fn show_adjustment_panel(&mut self, context: &egui::Context) {
+        let model = self.document.as_ref().map(document_panel_model);
+        let output = adjustment_panel::show(context, model, &mut self.export_settings);
         let mut changed_document = None;
-        let mut export = false;
-        egui::SidePanel::right("adjustments")
-            .default_width(310.0)
-            .min_width(270.0)
-            .show(context, |ui| {
-                ui.heading("Adjustments");
-                ui.separator();
-                let Some(document) = self.document.as_mut() else {
-                    ui.label("Open a Sony ARW file to begin.");
-                    ui.add_space(8.0);
-                    ui.weak("RAW decoding and image development run on the background CPU worker.");
-                    return;
-                };
+        if let Some(document) = self.document.as_mut() {
+            if output.dismiss_error {
+                document.error = None;
+            }
+            if output.dismiss_warning {
+                document.warning = None;
+            }
 
-                ui.strong(document.file_name());
-                if let Some(info) = &document.info {
-                    ui.label(format!("{} {}", info.clean_make, info.clean_model));
-                    ui.label(format!("Sensor: {} × {}", info.width, info.height));
-                }
-                ui.label(format!("Recipe revision: {}", document.edits.revision()));
-                ui.add_space(10.0);
-
-                if show_recipe_controls(ui, &mut document.edits) {
-                    changed_document = Some(document.id);
-                    document.notice = None;
-                }
-
-                ui.add_space(12.0);
-                ui.separator();
-                ui.heading("Export");
-                show_export_settings(ui, &mut self.export_settings);
-                let ready = document.frame.is_some() && document.export_status.is_none();
-                export = ui
-                    .add_enabled(ready, egui::Button::new("Export…"))
-                    .clicked();
-                if document.frame.is_none() {
-                    ui.weak("Export becomes available after RAW decoding.");
-                }
-
-                if let Some(message) = &document.error {
-                    ui.add_space(10.0);
-                    ui.colored_label(egui::Color32::LIGHT_RED, message);
-                    if ui.small_button("Dismiss error").clicked() {
-                        document.error = None;
-                    }
-                }
-                if let Some(message) = &document.warning {
-                    ui.add_space(10.0);
-                    ui.colored_label(egui::Color32::YELLOW, message);
-                    if ui.small_button("Dismiss warning").clicked() {
-                        document.warning = None;
-                    }
-                }
-                if let Some(message) = &document.notice {
-                    ui.add_space(10.0);
-                    ui.colored_label(egui::Color32::LIGHT_GREEN, message);
-                }
-            });
+            let mut changed = false;
+            if let Some(manual) = output.manual_white_balance {
+                changed |= set_manual_white_balance(&mut document.edits, manual);
+            }
+            for interaction in output.interactions {
+                changed |= apply_adjustment_interaction(&mut document.edits, interaction);
+            }
+            if output.reset_all {
+                changed |= document.edits.reset();
+            }
+            if changed {
+                document.notice = None;
+                changed_document = Some(document.id);
+            }
+        }
         if let Some(document_id) = changed_document {
             self.queue_preview(context, document_id);
         }
-        if export {
+        if output.export {
             self.request_export();
         }
     }
 
     fn show_viewport(&mut self, context: &egui::Context) {
-        egui::CentralPanel::default()
-            .frame(egui::Frame::central_panel(&context.style()).fill(egui::Color32::from_gray(18)))
-            .show(context, |ui| {
-                let viewport = ui.max_rect();
-                let response = ui.allocate_rect(viewport, egui::Sense::drag());
-                let Some(document) = self.document.as_mut() else {
-                    ui.centered_and_justified(|ui| {
-                        ui.label("Open a Sony ARW file to develop a photo");
-                    });
-                    return;
-                };
-                let Some(texture) = document.texture.clone() else {
-                    ui.centered_and_justified(|ui| {
-                        if document.open_status.is_some() || document.preview_status.is_some() {
-                            ui.horizontal(|ui| {
-                                ui.spinner();
-                                ui.label("Preparing preview…");
-                            });
-                        } else {
-                            ui.label("No preview is available");
-                        }
-                    });
-                    return;
-                };
-
-                let image_size = texture.size_vec2();
-                let fit_scale = (viewport.width() / image_size.x)
-                    .min(viewport.height() / image_size.y)
-                    .max(0.01);
-                if response.dragged_by(egui::PointerButton::Primary) {
-                    if document.view.fit {
-                        document.view.fit = false;
-                        document.view.zoom = fit_scale;
-                    }
-                    document.view.pan += response.drag_delta();
-                }
-                if response.hovered() {
-                    let scroll = context.input(|input| input.smooth_scroll_delta.y);
-                    if scroll.abs() > f32::EPSILON {
-                        let current = if document.view.fit {
-                            fit_scale
-                        } else {
-                            document.view.zoom
-                        };
-                        document.view.fit = false;
-                        document.view.zoom = (current * (scroll * 0.002).exp()).clamp(0.03, 16.0);
-                    }
-                }
-
-                let scale = if document.view.fit {
-                    fit_scale
-                } else {
-                    document.view.zoom
-                };
-                let size = image_size * scale;
-                let image_rect =
-                    egui::Rect::from_center_size(viewport.center() + document.view.pan, size);
-                texture.paint(ui, image_rect);
-
-                if let Some(kind) = document.texture_kind {
-                    let badge = egui::Rect::from_min_size(
-                        viewport.left_top() + egui::vec2(10.0, 10.0),
-                        egui::vec2(245.0, 28.0),
-                    );
-                    ui.painter()
-                        .rect_filled(badge, 4.0, egui::Color32::from_black_alpha(190));
-                    ui.painter().text(
-                        badge.center(),
-                        egui::Align2::CENTER_CENTER,
-                        kind.label(),
-                        egui::FontId::proportional(13.0),
-                        egui::Color32::WHITE,
-                    );
-                }
-            });
+        let output = if let Some(document) = self.document.as_mut() {
+            let preparing = document.open_status.is_some() || document.preview_status.is_some();
+            viewport::show(
+                context,
+                ViewportModel {
+                    has_document: true,
+                    preparing,
+                    texture: document.texture.as_ref(),
+                    source: document.preview_source,
+                },
+                &mut document.view,
+            )
+        } else {
+            let mut empty_view = ViewState::default();
+            viewport::show(
+                context,
+                ViewportModel {
+                    has_document: false,
+                    preparing: false,
+                    texture: None,
+                    source: None,
+                },
+                &mut empty_view,
+            )
+        };
+        if output.open {
+            self.open_dialog(context);
+        }
     }
 
     fn show_status_bar(&mut self, context: &egui::Context) {
-        egui::TopBottomPanel::bottom("status_bar").show(context, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(format!(
-                    "UI renderer: {}  ·  Processor: {}",
-                    self.ui_renderer,
-                    self.processor_description()
+        let mut activities = Vec::new();
+        let mut busy = false;
+        if let Some(note) = &self.processor_note {
+            activities.push(note.clone());
+        }
+        if let Some(document) = &self.document {
+            if let Some(status) = &document.open_status {
+                activities.push(status.clone());
+                busy = true;
+            } else if let Some((revision, status)) = &document.preview_status {
+                activities.push(format!("{status} · revision {revision}"));
+                busy = true;
+            }
+            if let Some(export) = &document.export_status {
+                activities.push(format!(
+                    "{} · recipe revision {}",
+                    export.detail, export.recipe_revision
                 ));
-                if let Some(note) = &self.processor_note {
-                    ui.separator();
-                    ui.weak(note);
-                }
-                if let Some(document) = &self.document {
-                    if let Some(status) = &document.open_status {
-                        ui.separator();
-                        ui.spinner();
-                        ui.label(status);
-                    } else if let Some((revision, status)) = &document.preview_status {
-                        ui.separator();
-                        ui.spinner();
-                        ui.label(format!("{status} (revision {revision})"));
-                    } else if let Some(duration) = document.last_preview_time {
-                        ui.separator();
-                        ui.label(format!(
-                            "Preview revision {} in {:.0} ms",
-                            document.edits.revision(),
-                            duration.as_secs_f64() * 1_000.0
-                        ));
-                    }
-                    if let Some(export) = &document.export_status {
-                        ui.separator();
-                        ui.spinner();
-                        ui.label(format!(
-                            "{} (recipe revision {})",
-                            export.detail, export.recipe_revision
-                        ));
-                    }
-                }
-                if let Some(error) = &self.startup_error {
-                    ui.separator();
-                    ui.colored_label(egui::Color32::LIGHT_RED, error);
-                }
-            });
-        });
+                busy = true;
+            }
+        }
+        toolbar::show_status(
+            context,
+            &StatusBarModel {
+                processor: self.processor_description(),
+                ui_renderer: format!("{} UI", self.ui_renderer),
+                activity: (!activities.is_empty()).then(|| activities.join("  ·  ")),
+                busy,
+                preview_dimensions: self
+                    .document
+                    .as_ref()
+                    .and_then(|document| document.texture.as_ref())
+                    .map(PreviewTexture::dimensions),
+                preview_milliseconds: self
+                    .document
+                    .as_ref()
+                    .and_then(|document| document.last_preview_time)
+                    .map(|duration| duration.as_secs_f64() * 1_000.0),
+                startup_error: self.startup_error.clone(),
+            },
+        );
     }
 
     fn show_developer_diagnostics(&mut self, context: &egui::Context) {
@@ -1234,148 +1095,62 @@ impl RohditorApp {
             return;
         }
         let queue = self.coordinator.preview_queue_stats();
+        let gpu_device = self.gpu.as_ref().map(|runtime| {
+            let capabilities = runtime.processor.capabilities();
+            format!(
+                "{} · {} · timestamp queries: {}",
+                capabilities.adapter_name, capabilities.backend, capabilities.timestamp_queries
+            )
+        });
         let preview = self
             .document
             .as_ref()
-            .and_then(|document| document.preview_diagnostics);
-        let processor = self.processor_description();
-        let gpu_device = self.gpu.as_ref().map(|runtime| {
-            let capabilities = runtime.processor.capabilities();
-            (
-                capabilities.adapter_name.clone(),
-                capabilities.backend.clone(),
-                capabilities.timestamp_queries,
-            )
-        });
-        let mut open = self.show_diagnostics;
-        egui::Window::new("Developer diagnostics")
-            .open(&mut open)
-            .default_width(390.0)
-            .resizable(true)
-            .show(context, |ui| {
-                ui.label(format!("Processor: {processor}"));
-                if let Some((adapter, backend, timestamp_queries)) = &gpu_device {
-                    ui.weak(format!(
-                        "{adapter} · {backend} · timestamp queries: {timestamp_queries}"
-                    ));
-                }
-
-                ui.add_space(6.0);
-                ui.strong("Preview queue");
-                egui::Grid::new("preview_queue_diagnostics")
-                    .num_columns(2)
-                    .show(ui, |ui| {
-                        diagnostic_row(ui, "Requested", queue.requested);
-                        diagnostic_row(ui, "Coalesced", queue.coalesced);
-                        diagnostic_row(ui, "Cancel requests", queue.cancellation_requests);
-                        diagnostic_row(ui, "Cancelled", queue.cancelled);
-                        diagnostic_row(ui, "Completed", queue.completed);
-                        diagnostic_row(ui, "Failed", queue.failed);
-                        diagnostic_row(ui, "Active", queue.active);
-                        diagnostic_row(ui, "Pending", queue.pending);
-                    });
-
-                let Some(preview) = preview else {
-                    ui.add_space(6.0);
-                    ui.weak("No developed preview diagnostics yet.");
-                    return;
-                };
-                ui.add_space(8.0);
-                ui.strong(format!("Last {} preview", preview.worker.backend.label()));
-                egui::Grid::new("preview_cache_diagnostics")
-                    .num_columns(2)
-                    .show(ui, |ui| {
-                        diagnostic_row(
-                            ui,
-                            "DecodedRaw",
-                            cache_result(preview.worker.cache_hits.decoded),
-                        );
-                        diagnostic_row(
-                            ui,
-                            "NormalizedMosaic",
-                            cache_result(preview.worker.cache_hits.normalized),
-                        );
-                        diagnostic_row(
-                            ui,
-                            "DemosaicedBase",
-                            cache_result(preview.worker.cache_hits.demosaiced),
-                        );
-                        diagnostic_row(
-                            ui,
-                            "AdjustedPreview",
-                            cache_result(preview.worker.cache_hits.adjusted),
-                        );
-                        diagnostic_row(
-                            ui,
-                            "CPU working buffer",
-                            if preview.worker.workspace_reused {
-                                "reused"
-                            } else {
-                                "allocated or unused"
-                            },
-                        );
-                    });
-
-                ui.add_space(8.0);
-                ui.strong("CPU stage wall times");
-                egui::Grid::new("preview_stage_diagnostics")
-                    .num_columns(2)
-                    .show(ui, |ui| {
-                        duration_row(ui, "Metadata", preview.worker.timings.metadata);
-                        duration_row(ui, "Normalization", preview.worker.timings.normalization);
-                        duration_row(ui, "Demosaic", preview.worker.timings.demosaic);
-                        duration_row(ui, "Color conversion", preview.worker.timings.color_conversion);
-                        duration_row(ui, "Adjustments", preview.worker.timings.adjustments);
-                        duration_row(ui, "Output conversion", preview.worker.timings.output_conversion);
-                        duration_row(ui, "Total", preview.worker.timings.total);
-                    });
-                ui.label(format!(
-                    "CPU cache: {} · estimated render peak: {}",
-                    format_bytes(preview.worker.cache_resident_bytes),
-                    format_bytes(preview.worker.memory.estimated_peak_bytes)
-                ));
-
-                if preview.gpu_submission.is_some() {
-                    ui.add_space(8.0);
-                    ui.strong("GPU preview");
-                    egui::Grid::new("gpu_preview_diagnostics")
-                        .num_columns(2)
-                        .show(ui, |ui| {
-                            optional_duration_row(
-                                ui,
-                                "CPU upload packing",
-                                preview.gpu_upload_preparation,
-                            );
-                            optional_duration_row(
-                                ui,
-                                "Encode + submit",
-                                preview.gpu_submission,
-                            );
-                            optional_duration_row(
-                                ui,
-                                "Queue completion",
-                                preview.gpu_queue_completion,
-                            );
-                            diagnostic_row(
-                                ui,
-                                "Output textures",
-                                match preview.gpu_textures_reused {
-                                    Some(true) => "reused",
-                                    Some(false) => "allocated",
-                                    None => "n/a",
-                                },
-                            );
-                            diagnostic_row(
-                                ui,
-                                "Resident textures",
-                                format_bytes(preview.gpu_resident_bytes),
-                            );
-                        });
-                    ui.weak(
-                        "Queue completion is conservative wall latency; it includes shared-queue delay when timestamp queries are unavailable.",
-                    );
-                }
+            .and_then(|document| document.preview_diagnostics)
+            .map(|preview| PreviewModel {
+                backend: preview.worker.backend.label().to_owned(),
+                cache: CacheModel {
+                    decoded: preview.worker.cache_hits.decoded,
+                    normalized: preview.worker.cache_hits.normalized,
+                    demosaiced: preview.worker.cache_hits.demosaiced,
+                    adjusted: preview.worker.cache_hits.adjusted,
+                    workspace_reused: preview.worker.workspace_reused,
+                },
+                timings: TimingModel {
+                    metadata: preview.worker.timings.metadata,
+                    normalization: preview.worker.timings.normalization,
+                    demosaic: preview.worker.timings.demosaic,
+                    color_conversion: preview.worker.timings.color_conversion,
+                    adjustments: preview.worker.timings.adjustments,
+                    output_conversion: preview.worker.timings.output_conversion,
+                    total: preview.worker.timings.total,
+                },
+                cache_resident_bytes: preview.worker.cache_resident_bytes,
+                estimated_peak_bytes: preview.worker.memory.estimated_peak_bytes,
+                gpu: preview.gpu_submission.map(|submission| GpuModel {
+                    upload_preparation: preview.gpu_upload_preparation,
+                    submission: Some(submission),
+                    queue_completion: preview.gpu_queue_completion,
+                    textures_reused: preview.gpu_textures_reused,
+                    resident_bytes: preview.gpu_resident_bytes,
+                }),
             });
+        let model = DiagnosticsModel {
+            processor: self.processor_description(),
+            gpu_device,
+            queue: QueueModel {
+                requested: queue.requested,
+                coalesced: queue.coalesced,
+                cancellation_requests: queue.cancellation_requests,
+                cancelled: queue.cancelled,
+                completed: queue.completed,
+                failed: queue.failed,
+                active: queue.active,
+                pending: queue.pending,
+            },
+            preview,
+        };
+        let mut open = self.show_diagnostics;
+        diagnostics::show(context, &mut open, &model);
         self.show_diagnostics = open;
     }
 }
@@ -1463,39 +1238,130 @@ fn gpu_output_size((width, height): (u32, u32)) -> egui::Vec2 {
     egui::vec2(width as f32, height as f32)
 }
 
-fn diagnostic_row(ui: &mut egui::Ui, label: &str, value: impl std::fmt::Display) {
-    ui.label(label);
-    ui.monospace(value.to_string());
-    ui.end_row();
-}
-
-fn duration_row(ui: &mut egui::Ui, label: &str, duration: Duration) {
-    diagnostic_row(ui, label, format_duration(duration));
-}
-
-fn optional_duration_row(ui: &mut egui::Ui, label: &str, duration: Option<Duration>) {
-    diagnostic_row(
-        ui,
-        label,
-        duration.map_or_else(|| "pending".to_owned(), format_duration),
-    );
-}
-
-fn format_duration(duration: Duration) -> String {
-    if duration >= Duration::from_millis(1) {
-        format!("{:.2} ms", duration.as_secs_f64() * 1_000.0)
-    } else {
-        format!("{} µs", duration.as_micros())
+fn document_panel_model(document: &Document) -> DocumentPanelModel {
+    let (manual_white_balance, white_balance_red, white_balance_green, white_balance_blue) =
+        match document.edits.recipe().white_balance {
+            WhiteBalance::AsShot => (
+                false,
+                WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
+                WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
+                WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
+            ),
+            WhiteBalance::ManualMultipliers { red, green, blue } => (true, red, green, blue),
+        };
+    DocumentPanelModel {
+        file_name: document.file_name(),
+        camera: document
+            .info
+            .as_ref()
+            .map(|info| format!("{} {}", info.clean_make, info.clean_model)),
+        sensor_dimensions: document.info.as_ref().map(|info| (info.width, info.height)),
+        revision: document.edits.revision(),
+        has_adjustments: document.edits.recipe() != &rohditor_core::EditRecipe::default(),
+        values: AdjustmentValues {
+            manual_white_balance,
+            white_balance_red,
+            white_balance_green,
+            white_balance_blue,
+            exposure: document.edits.recipe().exposure_ev,
+            contrast: document.edits.recipe().contrast,
+            saturation: document.edits.recipe().saturation,
+        },
+        ranges: AdjustmentRanges {
+            white_balance: AdjustmentRange {
+                minimum: WHITE_BALANCE_MULTIPLIER_RANGE.minimum,
+                maximum: WHITE_BALANCE_MULTIPLIER_RANGE.maximum,
+                neutral: WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
+            },
+            exposure: AdjustmentRange {
+                minimum: EXPOSURE_EV_RANGE.minimum,
+                maximum: EXPOSURE_EV_RANGE.maximum,
+                neutral: EXPOSURE_EV_RANGE.neutral,
+            },
+            contrast: AdjustmentRange {
+                minimum: CONTRAST_RANGE.minimum,
+                maximum: CONTRAST_RANGE.maximum,
+                neutral: CONTRAST_RANGE.neutral,
+            },
+            saturation: AdjustmentRange {
+                minimum: SATURATION_RANGE.minimum,
+                maximum: SATURATION_RANGE.maximum,
+                neutral: SATURATION_RANGE.neutral,
+            },
+        },
+        export_ready: document.frame.is_some(),
+        export_in_progress: document.export_status.is_some(),
+        error: document.error.clone(),
+        warning: document.warning.clone(),
+        notice: document.notice.clone(),
     }
 }
 
-fn format_bytes(bytes: usize) -> String {
-    const MEBIBYTE: f64 = 1_048_576.0;
-    format!("{:.1} MiB", bytes as f64 / MEBIBYTE)
+fn set_manual_white_balance(edits: &mut EditSession, manual: bool) -> bool {
+    let mut next = edits.recipe().clone();
+    next.white_balance = if manual {
+        WhiteBalance::ManualMultipliers {
+            red: WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
+            green: WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
+            blue: WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
+        }
+    } else {
+        WhiteBalance::AsShot
+    };
+    edits.set_discrete(next)
 }
 
-const fn cache_result(hit: bool) -> &'static str {
-    if hit { "hit" } else { "miss" }
+fn apply_adjustment_interaction(
+    edits: &mut EditSession,
+    interaction: AdjustmentInteraction,
+) -> bool {
+    if interaction.drag_started {
+        edits.begin_gesture();
+    }
+
+    let mut next = edits.recipe().clone();
+    match interaction.target {
+        AdjustmentTarget::WhiteBalanceRed
+        | AdjustmentTarget::WhiteBalanceGreen
+        | AdjustmentTarget::WhiteBalanceBlue => {
+            let (mut red, mut green, mut blue) = match next.white_balance {
+                WhiteBalance::AsShot => (
+                    WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
+                    WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
+                    WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
+                ),
+                WhiteBalance::ManualMultipliers { red, green, blue } => (red, green, blue),
+            };
+            match interaction.target {
+                AdjustmentTarget::WhiteBalanceRed => red = interaction.value,
+                AdjustmentTarget::WhiteBalanceGreen => green = interaction.value,
+                AdjustmentTarget::WhiteBalanceBlue => blue = interaction.value,
+                AdjustmentTarget::Exposure
+                | AdjustmentTarget::Contrast
+                | AdjustmentTarget::Saturation => {}
+            }
+            next.white_balance = WhiteBalance::ManualMultipliers { red, green, blue };
+        }
+        AdjustmentTarget::Exposure => next.exposure_ev = interaction.value,
+        AdjustmentTarget::Contrast => next.contrast = interaction.value,
+        AdjustmentTarget::Saturation => next.saturation = interaction.value,
+    }
+
+    let changed = if interaction.reset {
+        edits.set_discrete(next)
+    } else if interaction.changed {
+        if interaction.dragged || interaction.drag_stopped || edits.gesture_active() {
+            edits.set_during_gesture(next)
+        } else {
+            edits.set_discrete(next)
+        }
+    } else {
+        false
+    };
+    if interaction.drag_stopped {
+        edits.finish_gesture();
+    }
+    changed
 }
 
 impl eframe::App for RohditorApp {
@@ -1504,188 +1370,35 @@ impl eframe::App for RohditorApp {
         self.refresh_gpu_queue_completion(context);
         self.show_top_bar(context);
         self.show_status_bar(context);
+        self.show_file_panel(context);
         self.show_adjustment_panel(context);
         self.show_viewport(context);
         self.show_developer_diagnostics(context);
     }
 }
 
-fn show_recipe_controls(ui: &mut egui::Ui, edits: &mut EditSession) -> bool {
-    let mut changed = false;
-    let mut manual_white_balance = matches!(
-        edits.recipe().white_balance,
-        WhiteBalance::ManualMultipliers { .. }
-    );
-    let response = ui.checkbox(&mut manual_white_balance, "Manual white balance");
-    if response.changed() {
-        let mut next = edits.recipe().clone();
-        next.white_balance = if manual_white_balance {
-            WhiteBalance::ManualMultipliers {
-                red: 1.0,
-                green: 1.0,
-                blue: 1.0,
-            }
-        } else {
-            WhiteBalance::AsShot
-        };
-        changed |= edits.set_discrete(next);
-    }
-    ui.weak("Relative to the camera's as-shot multipliers");
-
-    if let WhiteBalance::ManualMultipliers { red, green, blue } = edits.recipe().white_balance {
-        for (label, channel, value) in [("Red", 0, red), ("Green", 1, green), ("Blue", 2, blue)] {
-            let mut value = value;
-            let response = ui.add(
-                egui::Slider::new(
-                    &mut value,
-                    WHITE_BALANCE_MULTIPLIER_RANGE.minimum..=WHITE_BALANCE_MULTIPLIER_RANGE.maximum,
-                )
-                .text(label)
-                .fixed_decimals(2),
-            );
-            let mut next = edits.recipe().clone();
-            let WhiteBalance::ManualMultipliers {
-                red: mut next_red,
-                green: mut next_green,
-                blue: mut next_blue,
-            } = next.white_balance
-            else {
-                continue;
-            };
-            match channel {
-                0 => next_red = value,
-                1 => next_green = value,
-                _ => next_blue = value,
-            }
-            next.white_balance = WhiteBalance::ManualMultipliers {
-                red: next_red,
-                green: next_green,
-                blue: next_blue,
-            };
-            changed |= commit_slider_response(edits, &response, next);
-        }
-    }
-
-    let mut exposure = edits.recipe().exposure_ev;
-    let response = ui.add(
-        egui::Slider::new(
-            &mut exposure,
-            EXPOSURE_EV_RANGE.minimum..=EXPOSURE_EV_RANGE.maximum,
-        )
-        .text("Exposure (EV)")
-        .fixed_decimals(2),
-    );
-    let mut next = edits.recipe().clone();
-    next.exposure_ev = exposure;
-    changed |= commit_slider_response(edits, &response, next);
-
-    let mut contrast = edits.recipe().contrast;
-    let response = ui.add(
-        egui::Slider::new(
-            &mut contrast,
-            CONTRAST_RANGE.minimum..=CONTRAST_RANGE.maximum,
-        )
-        .text("Contrast")
-        .fixed_decimals(2),
-    );
-    let mut next = edits.recipe().clone();
-    next.contrast = contrast;
-    changed |= commit_slider_response(edits, &response, next);
-
-    let mut saturation = edits.recipe().saturation;
-    let response = ui.add(
-        egui::Slider::new(
-            &mut saturation,
-            SATURATION_RANGE.minimum..=SATURATION_RANGE.maximum,
-        )
-        .text("Saturation")
-        .fixed_decimals(2),
-    );
-    let mut next = edits.recipe().clone();
-    next.saturation = saturation;
-    changed |= commit_slider_response(edits, &response, next);
-
-    if ui.button("Reset adjustments").clicked() {
-        changed |= edits.reset();
-    }
-    changed
-}
-
-fn commit_slider_response(
-    edits: &mut EditSession,
-    response: &egui::Response,
-    next: rohditor_core::EditRecipe,
-) -> bool {
-    if response.drag_started() {
-        edits.begin_gesture();
-    }
-    let changed = if response.changed() {
-        if response.dragged() || response.drag_stopped() || edits.gesture_active() {
-            edits.set_during_gesture(next)
-        } else {
-            edits.set_discrete(next)
-        }
-    } else {
-        false
-    };
-    if response.drag_stopped() {
-        edits.finish_gesture();
-    }
-    changed
-}
-
-fn show_export_settings(ui: &mut egui::Ui, settings: &mut ExportUiSettings) {
-    egui::ComboBox::from_label("Format")
-        .selected_text(match settings.kind {
-            ExportKind::Jpeg => "JPEG",
-            ExportKind::Png => "PNG",
-        })
-        .show_ui(ui, |ui| {
-            ui.selectable_value(&mut settings.kind, ExportKind::Jpeg, "JPEG");
-            ui.selectable_value(&mut settings.kind, ExportKind::Png, "PNG");
-        });
-    match settings.kind {
-        ExportKind::Jpeg => {
-            ui.add(egui::Slider::new(&mut settings.jpeg_quality, 1..=100).text("JPEG quality"));
-        }
-        ExportKind::Png => {
-            egui::ComboBox::from_label("PNG depth")
-                .selected_text(match settings.png_depth {
-                    PngBitDepth::Eight => "8-bit",
-                    PngBitDepth::Sixteen => "16-bit",
-                })
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut settings.png_depth, PngBitDepth::Eight, "8-bit");
-                    ui.selectable_value(&mut settings.png_depth, PngBitDepth::Sixteen, "16-bit");
-                });
-        }
-    }
-    ui.checkbox(&mut settings.dither, "Ordered output dithering");
-    ui.checkbox(&mut settings.safe_metadata, "Include safe EXIF metadata");
-    ui.checkbox(&mut settings.overwrite, "Allow replacing an existing file");
-}
-
 fn install_texture(
     context: &egui::Context,
     document: &mut Document,
     image: WorkerImage,
-    kind: TextureKind,
+    source: PreviewSource,
 ) {
     let texture_name = format!("document-{}-preview", document.id);
     match document.texture.as_mut() {
-        Some(DocumentTexture::Cpu(texture)) => {
+        Some(PreviewTexture::Cpu(texture)) => {
             texture.set(image.color, egui::TextureOptions::LINEAR);
         }
         _ => {
-            document.texture = Some(DocumentTexture::Cpu(context.load_texture(
+            document.texture = Some(PreviewTexture::Cpu(context.load_texture(
                 texture_name,
                 image.color,
                 egui::TextureOptions::LINEAR,
             )));
-            document.view.fit();
+            let now = context.input(|input| input.time);
+            document.view.fit(now);
         }
     }
-    document.texture_kind = Some(kind);
+    document.preview_source = Some(source);
 }
 
 fn source_stem(path: &Path) -> String {
@@ -1712,7 +1425,7 @@ mod tests {
         let settings = ExportUiSettings {
             kind: ExportKind::Png,
             jpeg_quality: 42,
-            png_depth: PngBitDepth::Sixteen,
+            png_depth: PngDepth::Sixteen,
             dither: true,
             safe_metadata: false,
             overwrite: true,
@@ -1737,5 +1450,47 @@ mod tests {
             "DSC00001"
         );
         assert_eq!(source_stem(Path::new(".hidden")), ".hidden");
+    }
+
+    #[test]
+    fn presentation_slider_events_preserve_one_undo_step_per_drag() {
+        let mut edits = EditSession::default();
+        for interaction in [
+            AdjustmentInteraction {
+                target: AdjustmentTarget::Exposure,
+                value: 0.25,
+                changed: true,
+                drag_started: true,
+                dragged: true,
+                drag_stopped: false,
+                reset: false,
+            },
+            AdjustmentInteraction {
+                target: AdjustmentTarget::Exposure,
+                value: 0.75,
+                changed: true,
+                drag_started: false,
+                dragged: true,
+                drag_stopped: false,
+                reset: false,
+            },
+            AdjustmentInteraction {
+                target: AdjustmentTarget::Exposure,
+                value: 0.75,
+                changed: false,
+                drag_started: false,
+                dragged: false,
+                drag_stopped: true,
+                reset: false,
+            },
+        ] {
+            let _ = apply_adjustment_interaction(&mut edits, interaction);
+        }
+
+        assert_eq!(edits.revision(), 2);
+        assert_eq!(edits.recipe().exposure_ev, 0.75);
+        assert!(edits.undo());
+        assert_eq!(edits.recipe().exposure_ev, EXPOSURE_EV_RANGE.neutral);
+        assert!(!edits.undo());
     }
 }

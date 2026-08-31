@@ -238,6 +238,7 @@ rohditor/
 │   │           ├── icons.rs
 │   │           ├── widgets.rs
 │   │           ├── adjustment_panel.rs
+│   │           ├── diagnostics.rs
 │   │           ├── toolbar.rs
 │   │           └── viewport.rs
 │   └── cli/
@@ -765,6 +766,32 @@ without blocking a functionally complete editor.
   normal and narrow window layouts, zoom/pan, placeholder-to-developed
   replacement, and visible diagnostics/error states.
 
+**Phase 7 status (2026-08-31): complete.** The desktop now installs a dedicated
+Rohditor theme with owned palette, typography, density, surfaces, borders,
+radii, interaction states, and vector control icons. Presentation code is split
+across `ui/theme.rs`, `icons.rs`, `widgets.rs`, `toolbar.rs`,
+`adjustment_panel.rs`, `diagnostics.rs`, and `viewport.rs`; these modules receive
+view models and interaction records rather than RAW frames, worker commands, or
+GPU processors.
+`app.rs` remains the translation boundary into `EditSession`, preserving
+revision increments, newest-wins preview requests, one undo entry per drag, and
+export snapshots.
+
+The main layout now has a sparse toolbar, responsive Files rail, dominant
+viewport, grouped Develop panel, and compact status strip. All develop values
+use the shared two-row adjustment control with editable numeric units, a full
+rail, neutral marker, and conditional reset. Source and zoom badges are
+contextual. Histogram/clipping and before/after are honest disabled shells, and
+the direct egui-wgpu texture path is unchanged. A `--diagnostics` launch option
+supports repeatable support and visual checks.
+
+The recorded Plasma/KWin Wayland check covered BreezeDark and BreezeLight,
+1280×800 and 900×600 layouts, a real 2560×1707 GPU-developed A6400 preview,
+diagnostics, and a visible unsupported-input error. Focus/value formatting,
+slider history, breakpoints, theme override, viewport fit/zoom/pan, and overlay
+state have focused regressions. Results and visual conventions are documented
+in `docs/ui-design-system.md`.
+
 ### Phase 8: MVP stabilization
 
 #### Tasks
@@ -779,6 +806,13 @@ without blocking a functionally complete editor.
 8. Add a diagnostics export containing versions, adapter data, stage timings, and errors but no image contents.
 9. Document build, run, CLI, supported camera modes, known color limitations, and troubleshooting instructions.
 10. Produce a release build and record binary size, initial-load performance, export time, and peak memory.
+11. Add installable Linux application metadata: a stable Wayland application
+    ID, `.desktop` entry, and proper icon so compositors do not show eframe's
+    fallback identity.
+12. After the backend matrix pins current behavior, split the GPU-preview
+    lifecycle/event translation in `app.rs` and the scheduler/worker internals
+    in `coordinator.rs` into focused modules. Preserve their existing command,
+    cancellation, cache, and direct-texture contracts during that refactor.
 
 #### MVP definition of done
 
@@ -897,7 +931,7 @@ These must be answered through input samples or implementation measurements rath
 
 ## 16. Immediate next action
 
-Phases 0 through 6 are complete, and Gate A is approved for the current corpus.
-The next implementation session should begin Phase 7: build the Rohditor visual
-design system and reusable desktop UI components before MVP stabilization,
-unless it is intentionally scheduled as the first post-MVP visual release.
+Phases 0 through 7 are complete, and Gate A is approved for the current corpus.
+The next implementation session should begin Phase 8 MVP stabilization: run the
+complete GUI/CLI backend matrix, harden diagnostics and malformed-input bounds,
+document release behavior, and produce the first measured release candidate.

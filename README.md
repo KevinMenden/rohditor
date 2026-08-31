@@ -2,9 +2,9 @@
 
 Rohditor is a Linux-first RAW photo editor being built for Sony `ILCE-6400`
 files. Decoder validation, the deterministic CPU reference pipeline, formal
-export layer, desktop editor, first GPU preview path, and the caching/performance
-pass (Phases 1 through 6) are complete. The next milestone is the Rohditor
-visual design system described in [`plan.md`](plan.md).
+export layer, desktop editor, first GPU preview path, caching/performance pass,
+and Rohditor desktop design system (Phases 1 through 7) are complete. The next
+milestone is MVP stabilization described in [`plan.md`](plan.md).
 
 ## Current capabilities
 
@@ -23,6 +23,9 @@ visual design system described in [`plan.md`](plan.md).
   loading preview, 2560-edge developed CPU or GPU preview, global adjustment
   controls, zoom/pan/fit, revision-safe background work, undo/redo, and
   background export.
+- A dedicated dark visual system with compact photo-editor controls, responsive
+  file/develop panels, contextual viewport overlays, vector icons, and shared
+  widget conventions rather than stock egui presentation.
 - A bounded newest-wins preview scheduler with cooperative CPU cancellation,
   explicit decoded/normalized/demosaiced/adjusted cache keys, reusable CPU/GPU
   buffers, structured stage traces, and an in-app developer diagnostics window.
@@ -38,7 +41,9 @@ The desktop worker and GPU-preview contracts are documented in
 [`docs/gpu-preview.md`](docs/gpu-preview.md). The Phase 2 color baseline is in
 [`docs/cpu-pipeline.md`](docs/cpu-pipeline.md), and the export contract is in
 [`docs/export.md`](docs/export.md). Phase 6 measurements and their scope are in
-[`docs/preview-performance.md`](docs/preview-performance.md).
+[`docs/preview-performance.md`](docs/preview-performance.md). Phase 7 visual
+tokens and component conventions are in
+[`docs/ui-design-system.md`](docs/ui-design-system.md).
 
 ## Prerequisites
 
@@ -82,6 +87,8 @@ rohditor-desktop --processor auto  # use a shared hardware wgpu device, otherwis
 rohditor-desktop --processor gpu   # require a compatible shared wgpu device
 rohditor-desktop --processor cpu   # never create image-processing GPU resources
 ```
+
+Add `--diagnostics` to open the developer diagnostics window immediately.
 
 Use the **Diagnostics** toggle in the top bar to inspect cache hits, queue and
 cancellation counters, CPU stage timings, retained-memory estimates, and GPU
