@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "crops": [
+    {
+      "source": "DSC00851.ARW",
+      "name": "moss-fine-detail",
+      "category": "low-ISO fine detail; foliage",
+      "x": 2250,
+      "y": 2800,
+      "width": 512,
+      "height": 512
+    },
+    {
+      "source": "DSC00851.ARW",
+      "name": "leaf-curved-edge",
+      "category": "curved edges; saturated boundary",
+      "x": 1700,
+      "y": 2050,
+      "width": 512,
+      "height": 512
+    },
+    {
+      "source": "DSC01166.ARW",
+      "name": "deer-fur-high-iso",
+      "category": "high ISO; fine detail",
+      "x": 4350,
+      "y": 2600,
+      "width": 512,
+      "height": 512
+    },
+    {
+      "source": "DSC01166.ARW",
+      "name": "antler-diagonals",
+      "category": "diagonal and curved edges; high ISO",
+      "x": 3400,
+      "y": 900,
+      "width": 512,
+      "height": 512
+    },
+    {
+      "source": "DSC02382.ARW",
+      "name": "frosted-twigs",
+      "category": "repeating texture and moire risk; foliage",
+      "x": 850,
+      "y": 900,
+      "width": 512,
+      "height": 512
+    },
+    {
+      "source": "DSC02382.ARW",
+      "name": "sun-through-branches",
+      "category": "highlight clipping; saturated boundary",
+      "x": 2700,
+      "y": 550,
+      "width": 512,
+      "height": 512
+    },
+    {
+      "source": "DSC03270.ARW",
+      "name": "rope-weave",
+      "category": "repeating texture and moire risk; diagonal edges",
+      "x": 3450,
+      "y": 2850,
+      "width": 512,
+      "height": 512
+    },
+    {
+      "source": "DSC03270.ARW",
+      "name": "polished-metal-edge",
+      "category": "saturated boundaries; highlight clipping",
+      "x": 4050,
+      "y": 1050,
+      "width": 512,
+      "height": 512
+    },
+    {
+      "source": "DSC03687.ARW",
+      "name": "butterfly-wing-high-iso",
+      "category": "high ISO; saturated boundary; fine detail",
+      "x": 2750,
+      "y": 1900,
+      "width": 512,
+      "height": 512
+    },
+    {
+      "source": "DSC03821.ARW",
+      "name": "backlit-grass",
+      "category": "highlight clipping; fine diagonal detail",
+      "x": 2300,
+      "y": 2250,
+      "width": 512,
+      "height": 512
+    }
+  ]
+}

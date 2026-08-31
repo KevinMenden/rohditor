@@ -6,6 +6,7 @@ mod ui;
 
 use clap::{Parser, ValueEnum};
 use eframe::egui;
+use rohditor_core::DemosaicAlgorithm;
 use std::path::PathBuf;
 use tracing::warn;
 use tracing_subscriber::EnvFilter;
@@ -38,6 +39,23 @@ pub(crate) enum ProcessorPreference {
     Cpu,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+enum DemosaicPreference {
+    #[default]
+    Bilinear,
+    #[value(name = "mhc")]
+    MalvarHeCutler,
+}
+
+impl From<DemosaicPreference> for DemosaicAlgorithm {
+    fn from(value: DemosaicPreference) -> Self {
+        match value {
+            DemosaicPreference::Bilinear => Self::Bilinear,
+            DemosaicPreference::MalvarHeCutler => Self::MalvarHeCutler,
+        }
+    }
+}
+
 impl ProcessorPreference {
     pub(crate) const fn label(self) -> &'static str {
         match self {
@@ -59,6 +77,10 @@ struct Arguments {
     #[arg(long, value_enum, default_value_t)]
     processor: ProcessorPreference,
 
+    /// Preview and export demosaic algorithm for development comparisons.
+    #[arg(long, value_enum, default_value_t)]
+    demosaic: DemosaicPreference,
+
     /// Sony RAW file to open at startup.
     file: Option<PathBuf>,
 
@@ -75,6 +97,7 @@ fn main() -> eframe::Result {
             eframe::Renderer::Wgpu,
             arguments.file.clone(),
             arguments.processor,
+            arguments.demosaic.into(),
             arguments.diagnostics,
         ) {
             Ok(()) => Ok(()),
@@ -85,6 +108,7 @@ fn main() -> eframe::Result {
                     eframe::Renderer::Glow,
                     arguments.file,
                     arguments.processor,
+                    arguments.demosaic.into(),
                     arguments.diagnostics,
                 )
             }
@@ -93,12 +117,14 @@ fn main() -> eframe::Result {
             eframe::Renderer::Wgpu,
             arguments.file,
             arguments.processor,
+            arguments.demosaic.into(),
             arguments.diagnostics,
         ),
         RendererPreference::Glow => launch(
             eframe::Renderer::Glow,
             arguments.file,
             arguments.processor,
+            arguments.demosaic.into(),
             arguments.diagnostics,
         ),
     }
@@ -108,6 +134,7 @@ fn launch(
     renderer: eframe::Renderer,
     initial_path: Option<PathBuf>,
     processor: ProcessorPreference,
+    demosaic: DemosaicAlgorithm,
     show_diagnostics: bool,
 ) -> eframe::Result {
     let mut options = eframe::NativeOptions {
@@ -128,6 +155,7 @@ fn launch(
                 context,
                 initial_path.clone(),
                 processor,
+                demosaic,
                 show_diagnostics,
             )?))
         }),
@@ -174,7 +202,9 @@ fn init_tracing() {
 mod tests {
     use clap::Parser;
 
-    use super::{APPLICATION_ID, Arguments, ProcessorPreference, RendererPreference};
+    use super::{
+        APPLICATION_ID, Arguments, DemosaicPreference, ProcessorPreference, RendererPreference,
+    };
 
     #[test]
     fn processor_and_renderer_preferences_are_exposed_as_cli_choices() {
@@ -184,11 +214,14 @@ mod tests {
             "glow",
             "--processor",
             "cpu",
+            "--demosaic",
+            "mhc",
             "--diagnostics",
         ])
         .expect("valid desktop preferences should parse");
         assert_eq!(arguments.renderer, RendererPreference::Glow);
         assert_eq!(arguments.processor, ProcessorPreference::Cpu);
+        assert_eq!(arguments.demosaic, DemosaicPreference::MalvarHeCutler);
         assert!(arguments.diagnostics);
     }
 

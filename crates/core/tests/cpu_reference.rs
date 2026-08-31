@@ -42,6 +42,7 @@ fn synthetic_pipeline_is_identical_with_one_and_multiple_rayon_threads()
     assert!(single.image.data().iter().any(|value| *value > 0));
     assert_eq!(single.memory.decoded_raw_bytes, 96);
     assert_eq!(single.memory.normalized_mosaic_bytes, 96);
+    assert_eq!(single.memory.resample_intermediate_bytes, 0);
     assert_eq!(single.memory.linear_rgb_bytes, 288);
     assert_eq!(single.memory.display_rgb_bytes, 72);
     assert_eq!(single.memory.estimated_peak_bytes, 480);
@@ -49,7 +50,7 @@ fn synthetic_pipeline_is_identical_with_one_and_multiple_rayon_threads()
 }
 
 #[test]
-fn preview_pipeline_is_resolution_limited_before_rgb_development() -> Result<(), Box<dyn Error>> {
+fn preview_pipeline_reconstructs_full_crop_before_area_reduction() -> Result<(), Box<dyn Error>> {
     let frame = synthetic_rggb_frame();
     let result = CpuPipeline.render_preview(
         &frame,
@@ -62,10 +63,12 @@ fn preview_pipeline_is_resolution_limited_before_rgb_development() -> Result<(),
 
     // The recommended crop is 6x4 and the fixture is rotated 270 degrees.
     assert_eq!((result.image.width(), result.image.height()), (2, 3));
-    assert_eq!(result.memory.normalized_mosaic_bytes, 24);
+    assert_eq!(result.memory.normalized_mosaic_bytes, 96);
+    assert_eq!(result.memory.resample_intermediate_bytes, 144);
     assert_eq!(result.memory.linear_rgb_bytes, 72);
     assert_eq!(result.memory.display_rgb_bytes, 18);
     assert_eq!(result.memory.decoded_raw_bytes, 96);
+    assert_eq!(result.memory.estimated_peak_bytes, 528);
     Ok(())
 }
 
@@ -110,7 +113,7 @@ fn reusable_preview_base_matches_direct_render_and_rejects_stale_white_balance()
     assert_eq!(reused.image, direct.image);
     assert_eq!(
         reused.memory.estimated_peak_bytes,
-        direct.memory.estimated_peak_bytes + direct.memory.linear_rgb_bytes
+        direct.memory.estimated_peak_bytes
     );
 
     let stale = EditRecipe {
@@ -130,7 +133,7 @@ fn reusable_preview_base_matches_direct_render_and_rejects_stale_white_balance()
 }
 
 #[test]
-fn split_normalized_and_demosaiced_stages_match_the_combined_preview_base()
+fn split_reconstruction_and_color_stages_match_the_combined_preview_base()
 -> Result<(), Box<dyn Error>> {
     let frame = synthetic_rggb_frame();
     let options = PreviewOptions {
@@ -138,17 +141,16 @@ fn split_normalized_and_demosaiced_stages_match_the_combined_preview_base()
         ..PreviewOptions::default()
     };
     let recipe = EditRecipe::default();
-    let normalized = CpuPipeline.prepare_preview_normalized(&frame, options)?;
-    let split = CpuPipeline.prepare_preview_base_from_normalized(
-        &normalized,
-        &recipe,
-        options.render.demosaic,
-    )?;
+    let reconstructed = CpuPipeline.prepare_preview_reconstruction(&frame, options)?;
+    let split = CpuPipeline.prepare_preview_base_from_reconstruction(&reconstructed, &recipe)?;
     let combined = CpuPipeline.prepare_preview_base(&frame, &recipe, options)?;
 
     assert_eq!(split.image(), combined.image());
     assert_eq!(split.timings().normalization, Duration::ZERO);
-    assert!(normalized.buffer_bytes() > 0);
+    assert_eq!(split.timings().demosaic, Duration::ZERO);
+    assert_eq!(split.timings().resampling, Duration::ZERO);
+    assert!(reconstructed.buffer_bytes() > 0);
+    assert_eq!(reconstructed.image().space(), LinearRgbSpace::CameraNative);
     Ok(())
 }
 
@@ -159,10 +161,42 @@ fn preview_stages_return_the_typed_cancellation_error() {
     cancellation.cancel();
 
     let error = CpuPipeline
-        .prepare_preview_normalized_cancellable(&frame, PreviewOptions::default(), &cancellation)
+        .prepare_preview_reconstruction_cancellable(
+            &frame,
+            PreviewOptions::default(),
+            &cancellation,
+        )
         .expect_err("cancelled work must stop before normalization");
 
     assert!(matches!(error, PipelineError::Cancelled));
+}
+
+#[test]
+fn source_scale_preview_matches_full_output_dimensions_and_is_cancellable()
+-> Result<(), Box<dyn Error>> {
+    let frame = synthetic_rggb_frame();
+    let recipe = EditRecipe::default();
+    let rendered = CpuPipeline.render_source_scale_preview_cancellable(
+        &frame,
+        &recipe,
+        RenderOptions::default(),
+        &CancellationToken::new(),
+    )?;
+    assert_eq!((rendered.image.width(), rendered.image.height()), (4, 6));
+    assert_eq!(rendered.memory.resample_intermediate_bytes, 0);
+
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    let error = CpuPipeline
+        .render_source_scale_preview_cancellable(
+            &frame,
+            &recipe,
+            RenderOptions::default(),
+            &cancellation,
+        )
+        .expect_err("cancelled source-scale work must stop");
+    assert!(matches!(error, PipelineError::Cancelled));
+    Ok(())
 }
 
 #[test]

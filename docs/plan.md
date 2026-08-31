@@ -167,7 +167,12 @@ No stage may silently clamp scene-linear values to `[0, 1]`. Clipping or gamut m
 
 **Decision:** Interactive previews are resolution-limited and cached. MVP exports are rendered at full resolution on the CPU. The stage API must carry image regions/halos so tiled CPU and GPU export can be added later.
 
-**Why:** A 61 MP RGB `f32` image occupies roughly 732 MB before extra buffers. Keeping several full-resolution intermediates for every slider movement is wasteful. GPU acceleration provides its largest immediate benefit when a preview remains resident on the GPU. CPU export is initially simpler, deterministic, and guarantees fallback behavior.
+**Why:** The target A6400 crop is 24 MP, so one 6000x4000 RGB `f32` image
+occupies roughly 275 MiB before extra buffers. Keeping several full-resolution
+intermediates for every slider movement is still wasteful. GPU acceleration
+provides its largest immediate benefit when a preview remains resident on the
+GPU. CPU export is initially simpler, deterministic, and guarantees fallback
+behavior.
 
 ### D-013: Do not block the UI thread
 
@@ -223,7 +228,11 @@ rohditor/
 ├── Cargo.toml
 ├── Cargo.lock
 ├── rust-toolchain.toml
-├── plan.md
+├── docs/
+│   ├── plan.md
+│   ├── architecture.md
+│   ├── color-pipeline.md
+│   └── phase-9-image-quality.md
 ├── apps/
 │   ├── desktop/
 │   │   ├── Cargo.toml
@@ -271,12 +280,14 @@ rohditor/
 ├── testdata/
 │   ├── synthetic/
 │   └── private/
-└── docs/
-    ├── architecture.md
-    └── color-pipeline.md
 ```
 
-The additional documents should be created only when implementation begins to exceed this plan. `plan.md` remains the project roadmap and decision record.
+This file is the completed MVP plan and decision record. Future work must be
+captured in a self-contained document under `docs/` rather than added as a new
+phase or feature backlog here. Each feature document should state its scope,
+non-goals, current constraints, implementation steps, tests, acceptance gates,
+and status. [`phase-9-image-quality.md`](phase-9-image-quality.md) is the first
+example of that convention.
 
 ## 6. Core interfaces and data ownership
 
@@ -842,6 +853,9 @@ Unit-test:
 - CFA indexing at image borders.
 - Every supported Bayer layout.
 - Demosaicing on small hand-checkable mosaics.
+- Published MHC coefficients, measured-site preservation, and generated
+  slanted-edge/zone-plate/color-boundary reconstruction quality.
+- Antialiased preview reduction and true source-pixel detail geometry.
 - Matrix direction, white point, and chromatic adaptation.
 - Exposure identity and known EV gains.
 - Contrast neutral behavior and pivot behavior.
@@ -903,43 +917,22 @@ A visual match alone is insufficient. Conversely, GPU output does not need to be
 - Benchmark before adding manual SIMD, unsafe code, shader pass fusion, or custom allocators.
 - Track dimensions and byte counts with checked arithmetic before allocation.
 
-## 14. Post-MVP roadmap
+## 14. Future work documentation
 
-Suggested order after the MVP:
+Phases 0 through 8 are complete, Gate A is approved for the current corpus, and
+the MVP release candidate has passed the current CPU, GPU, and desktop
+validation matrix. This document intentionally stops at the MVP boundary.
 
-1. Higher-quality selectable demosaic algorithm with CPU reference.
-2. GPU normalization and GPU demosaic.
-3. Better highlight reconstruction and filmic output transform.
-4. JSON/RON sidecar save/load with recipe migration.
-5. Proper temperature-in-Kelvin/tint UI and dual-illuminant camera profiles.
-6. Monitor ICC support and soft proofing using a Rust color-management library.
-7. Histogram analysis, clipping warnings, and channel inspection beyond the
-   Phase 7 UI shell.
-8. Sharpening and noise reduction.
-9. Lens profiles, distortion, vignetting, and chromatic-aberration correction.
-10. Tiled full-resolution GPU export.
-11. Crop/rotate/perspective tools.
-12. Local masks and adjustments; reevaluate whether a processing graph is now justified.
-13. Batch export and reusable presets.
-14. Optional catalog only if the personal workflow actually needs it.
+Every future feature or quality effort gets its own document under `docs/`. A
+feature document should be small enough to review independently and include:
 
-## 15. Open decisions
+- objective, user value, scope, and explicit non-goals;
+- current implementation constraints and relevant existing contracts;
+- a bounded implementation sequence with ownership boundaries;
+- tests, measurements, visual checks, and acceptance criteria;
+- risks, licensing/dependency decisions, and rollback or fallback behavior;
+- a dated status and links to any implementation or validation notes.
 
-These must be answered through input samples or implementation measurements rather than guessed now:
-
-- Whether Wayland, X11, or both must be supported.
-- Which license to apply to Rohditor's own source code.
-- Whether matching a preferred Sony Creative Look is eventually important.
-- The desired default contrast/tone curve.
-- Whether sidecar persistence is needed immediately after the MVP.
-- Whether 16-bit TIFF should be the next export format.
-- Which higher-quality demosaic algorithm gives the preferred quality/performance tradeoff.
-- Whether full-resolution export exceeds acceptable RAM or time budgets on the target workstation.
-
-## 16. Immediate next action
-
-Phases 0 through 8 are complete, and Gate A is approved for the current corpus.
-The first measured MVP release candidate has passed the current CPU, GPU, and
-desktop validation matrix. The next implementation session should choose a
-post-MVP roadmap item from section 14, beginning with the user's highest-value
-editing capability rather than broadening the MVP further.
+Do not add future phases, a general feature backlog, or unresolved feature
+decisions to this MVP plan. The next selected effort is documented in
+[`phase-9-image-quality.md`](phase-9-image-quality.md).

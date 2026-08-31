@@ -7,6 +7,7 @@
 mod cancel;
 mod color;
 mod cpu;
+mod demosaic;
 mod edit;
 mod error;
 mod export;
@@ -14,6 +15,7 @@ mod image;
 mod orientation;
 mod output;
 mod pipeline;
+mod resample;
 
 pub use cancel::CancellationToken;
 pub use color::{
@@ -22,10 +24,10 @@ pub use color::{
     convert_rec2020_to_display_srgb, linear_srgb_to_srgb, srgb_to_linear_srgb,
 };
 pub use cpu::{
-    WhiteBalanceGains, apply_adjustments, demosaic, normalize_raw, normalize_raw_preview,
-    render_display_srgb8, render_display_srgb8_dithered, render_display_srgb16,
-    white_balance_gains,
+    apply_adjustments, normalize_raw, normalize_raw_preview, render_display_srgb8,
+    render_display_srgb8_dithered, render_display_srgb16, white_balance_gains,
 };
+pub use demosaic::{DemosaicAlgorithm, MALVAR_HE_CUTLER_HALO, WhiteBalanceGains, demosaic};
 pub use edit::{
     CONTRAST_RANGE, EDIT_RECIPE_SCHEMA_VERSION, EXPOSURE_EV_RANGE, EditRecipe, ParameterRange,
     SATURATION_RANGE, WHITE_BALANCE_MULTIPLIER_RANGE, WhiteBalance,
@@ -44,7 +46,6 @@ pub use orientation::OrientationMap;
 pub use output::{paths_refer_to_same_file, write_output_bytes};
 pub use pipeline::{
     CPU_WORKING_SET_LIMIT_BYTES, CpuPipeline, CpuPreviewWorkspace, CropPolicy,
-    DEFAULT_PREVIEW_LONG_EDGE, DemosaicAlgorithm, DemosaicedBase, ExportRenderResult,
-    MemoryEstimate, NormalizedPreview, OutputPolicy, PreviewOptions, RenderOptions, RenderResult,
-    StageTimings,
+    DEFAULT_PREVIEW_LONG_EDGE, DemosaicedBase, ExportRenderResult, MemoryEstimate, OutputPolicy,
+    PreviewOptions, ReconstructedPreview, RenderOptions, RenderResult, StageTimings,
 };

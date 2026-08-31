@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use eframe::egui;
+use rohditor_core::DemosaicAlgorithm;
 
 use super::theme::{self, colors};
 use super::widgets;
@@ -48,24 +49,46 @@ impl PreviewTexture {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PreviewSource {
     Embedded,
-    DevelopedCpu,
-    DevelopedGpu,
+    FastCpu,
+    FastGpu,
+    HighQualityCpu,
+    HighQualityGpu,
+    OneToOneCpu,
 }
 
 impl PreviewSource {
+    pub(crate) const fn developed(algorithm: DemosaicAlgorithm, gpu: bool) -> Self {
+        match (algorithm, gpu) {
+            (DemosaicAlgorithm::Bilinear, false) => Self::FastCpu,
+            (DemosaicAlgorithm::Bilinear, true) => Self::FastGpu,
+            (DemosaicAlgorithm::MalvarHeCutler, false) => Self::HighQualityCpu,
+            (DemosaicAlgorithm::MalvarHeCutler, true) => Self::HighQualityGpu,
+        }
+    }
+
+    pub(crate) const fn is_developed(self) -> bool {
+        !matches!(self, Self::Embedded)
+    }
+
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Embedded => "EMBEDDED PREVIEW · DEVELOPING RAW",
-            Self::DevelopedCpu => "DEVELOPED RAW · CPU",
-            Self::DevelopedGpu => "DEVELOPED RAW · GPU",
+            Self::FastCpu => "FAST ANTIALIASED PREVIEW · CPU",
+            Self::FastGpu => "FAST ANTIALIASED PREVIEW · GPU",
+            Self::HighQualityCpu => "HIGH-QUALITY ANTIALIASED PREVIEW · CPU",
+            Self::HighQualityGpu => "HIGH-QUALITY ANTIALIASED PREVIEW · GPU",
+            Self::OneToOneCpu => "1:1 SOURCE-SCALE DEVELOPED · CPU",
         }
     }
 
     pub(crate) const fn short_label(self) -> &'static str {
         match self {
             Self::Embedded => "Embedded preview",
-            Self::DevelopedCpu => "Developed · CPU",
-            Self::DevelopedGpu => "Developed · GPU",
+            Self::FastCpu => "Fast preview · CPU",
+            Self::FastGpu => "Fast preview · GPU",
+            Self::HighQualityCpu => "High-quality preview · CPU",
+            Self::HighQualityGpu => "High-quality preview · GPU",
+            Self::OneToOneCpu => "1:1 source-scale · CPU",
         }
     }
 }
@@ -114,6 +137,8 @@ impl ViewState {
     pub(crate) fn zoom_label(&self) -> String {
         if self.fit {
             "FIT".to_owned()
+        } else if self.is_actual_size() {
+            "SOURCE 100%".to_owned()
         } else {
             format!("{:.0}%", self.zoom * 100.0)
         }
@@ -327,7 +352,7 @@ mod tests {
         assert_eq!(state.zoom_label(), "FIT");
         state.actual_size(4.0);
         assert!(!state.is_fit());
-        assert_eq!(state.zoom_label(), "100%");
+        assert_eq!(state.zoom_label(), "SOURCE 100%");
     }
 
     #[test]

@@ -9,59 +9,13 @@ use crate::color::{
 };
 use crate::image::{allocate_zeroed_f32, allocate_zeroed_u8, allocate_zeroed_u16};
 use crate::{
-    BayerPattern, CancellationToken, CfaColor, CropPolicy, DemosaicAlgorithm, DisplayRgbImage,
-    DisplayTransfer, DitherMode, EditRecipe, ImageRegion, LinearRgbImage, LinearRgbSpace,
-    MosaicImage, OrientationMap, OutputPolicy, PipelineError, WhiteBalance,
+    BayerPattern, CancellationToken, CfaColor, CropPolicy, DisplayRgbImage, DisplayTransfer,
+    DitherMode, EditRecipe, ImageRegion, LinearRgbImage, LinearRgbSpace, MosaicImage,
+    OrientationMap, OutputPolicy, PipelineError, WhiteBalance, WhiteBalanceGains,
 };
 
 const CONTRAST_PIVOT: f32 = 0.18;
 const REC2020_LUMINANCE: [f32; 3] = [0.2627, 0.6780, 0.0593];
-const CROSS_OFFSETS: [(isize, isize); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
-const DIAGONAL_OFFSETS: [(isize, isize); 4] = [(-1, -1), (1, -1), (-1, 1), (1, 1)];
-const HORIZONTAL_OFFSETS: [(isize, isize); 2] = [(-1, 0), (1, 0)];
-const VERTICAL_OFFSETS: [(isize, isize); 2] = [(0, -1), (0, 1)];
-
-/// Effective multipliers applied to camera-native R, G, and B samples.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct WhiteBalanceGains {
-    pub red: f32,
-    pub green: f32,
-    pub blue: f32,
-}
-
-impl WhiteBalanceGains {
-    #[must_use]
-    pub const fn identity() -> Self {
-        Self {
-            red: 1.0,
-            green: 1.0,
-            blue: 1.0,
-        }
-    }
-
-    fn for_color(self, color: CfaColor) -> f32 {
-        match color {
-            CfaColor::Red => self.red,
-            CfaColor::Green => self.green,
-            CfaColor::Blue => self.blue,
-        }
-    }
-
-    fn validate(self) -> Result<(), PipelineError> {
-        if [self.red, self.green, self.blue]
-            .into_iter()
-            .all(|value| value.is_finite() && value > 0.0)
-        {
-            Ok(())
-        } else {
-            Err(PipelineError::InvalidMetadata {
-                field: "as_shot_white_balance",
-                reason: "effective R, G, and B gains must be finite and positive".to_owned(),
-            })
-        }
-    }
-}
-
 /// Crop the decoded sensor frame and normalize samples as `(sample-black)/(white-black)`.
 ///
 /// Negative values and values above one are intentionally retained for later
@@ -71,6 +25,14 @@ pub fn normalize_raw(
     crop_policy: CropPolicy,
 ) -> Result<MosaicImage<f32>, PipelineError> {
     normalize_raw_impl(frame, crop_policy, None, &CancellationToken::new())
+}
+
+pub(crate) fn normalize_raw_cancellable(
+    frame: &RawFrame,
+    crop_policy: CropPolicy,
+    cancellation: &CancellationToken,
+) -> Result<MosaicImage<f32>, PipelineError> {
+    normalize_raw_impl(frame, crop_policy, None, cancellation)
 }
 
 /// Normalize a resolution-limited Bayer mosaic for interactive development.
@@ -90,15 +52,6 @@ pub fn normalize_raw_preview(
         Some(max_long_edge),
         &CancellationToken::new(),
     )
-}
-
-pub(crate) fn normalize_raw_preview_cancellable(
-    frame: &RawFrame,
-    crop_policy: CropPolicy,
-    max_long_edge: usize,
-    cancellation: &CancellationToken,
-) -> Result<MosaicImage<f32>, PipelineError> {
-    normalize_raw_impl(frame, crop_policy, Some(max_long_edge), cancellation)
 }
 
 fn normalize_raw_impl(
@@ -165,7 +118,7 @@ fn normalize_raw_impl(
     )
 }
 
-fn preview_dimensions(
+pub(crate) fn preview_dimensions(
     width: usize,
     height: usize,
     max_long_edge: usize,
@@ -253,51 +206,6 @@ pub fn white_balance_gains(
     Ok(gains)
 }
 
-/// Bilinearly interpolate a normalized Bayer mosaic into camera-native linear RGB.
-pub fn demosaic(
-    mosaic: &MosaicImage<f32>,
-    gains: WhiteBalanceGains,
-    algorithm: DemosaicAlgorithm,
-) -> Result<LinearRgbImage<f32>, PipelineError> {
-    demosaic_cancellable(mosaic, gains, algorithm, &CancellationToken::new())
-}
-
-pub(crate) fn demosaic_cancellable(
-    mosaic: &MosaicImage<f32>,
-    gains: WhiteBalanceGains,
-    algorithm: DemosaicAlgorithm,
-    cancellation: &CancellationToken,
-) -> Result<LinearRgbImage<f32>, PipelineError> {
-    let span = tracing::info_span!(
-        "cpu.demosaic",
-        width = mosaic.width(),
-        height = mosaic.height(),
-        algorithm = ?algorithm
-    );
-    let _guard = span.enter();
-    cancellation.checkpoint()?;
-    gains.validate()?;
-    if mosaic.width() < 2 || mosaic.height() < 2 {
-        return Err(invalid_dimensions(
-            mosaic.width(),
-            mosaic.height(),
-            mosaic.row_stride(),
-            "bilinear demosaicing requires at least 2x2 samples",
-        ));
-    }
-    match algorithm {
-        DemosaicAlgorithm::Bilinear => demosaic_bilinear(mosaic, gains, cancellation),
-    }
-}
-
-/// Transform a camera-native image into the linear Rec.2020/D65 working space.
-pub(crate) fn apply_camera_color_transform(
-    image: &mut LinearRgbImage<f32>,
-    transform: &CameraColorTransform,
-) -> Result<(), PipelineError> {
-    apply_camera_color_transform_cancellable(image, transform, &CancellationToken::new())
-}
-
 pub(crate) fn apply_camera_color_transform_cancellable(
     image: &mut LinearRgbImage<f32>,
     transform: &CameraColorTransform,
@@ -329,6 +237,30 @@ pub(crate) fn apply_camera_color_transform_cancellable(
     cancellation.checkpoint()?;
     image.set_space(LinearRgbSpace::Rec2020D65);
     Ok(())
+}
+
+pub(crate) fn apply_white_balance_cancellable(
+    image: &mut LinearRgbImage<f32>,
+    gains: WhiteBalanceGains,
+    cancellation: &CancellationToken,
+) -> Result<(), PipelineError> {
+    cancellation.checkpoint()?;
+    gains.validate()?;
+    require_space(image, LinearRgbSpace::CameraNative)?;
+    let width_samples = image.width() * 3;
+    let row_stride = image.row_stride();
+    image.data_mut().par_chunks_mut(row_stride).try_for_each(
+        |row| -> Result<(), PipelineError> {
+            cancellation.checkpoint()?;
+            for pixel in row[..width_samples].chunks_exact_mut(3) {
+                pixel[0] *= gains.red;
+                pixel[1] *= gains.green;
+                pixel[2] *= gains.blue;
+            }
+            Ok(())
+        },
+    )?;
+    cancellation.checkpoint()
 }
 
 /// Apply global scene-linear adjustments in their documented fixed order.
@@ -578,99 +510,6 @@ fn quantization_dither(mode: DitherMode, x: usize, y: usize) -> f32 {
     }
 }
 
-fn demosaic_bilinear(
-    mosaic: &MosaicImage<f32>,
-    gains: WhiteBalanceGains,
-    cancellation: &CancellationToken,
-) -> Result<LinearRgbImage<f32>, PipelineError> {
-    let row_stride = mosaic.width().checked_mul(3).ok_or_else(|| {
-        invalid_dimensions(mosaic.width(), mosaic.height(), 0, "RGB stride overflowed")
-    })?;
-    let elements = row_stride.checked_mul(mosaic.height()).ok_or_else(|| {
-        invalid_dimensions(
-            mosaic.width(),
-            mosaic.height(),
-            row_stride,
-            "RGB sample count overflowed",
-        )
-    })?;
-    let mut output = allocate_zeroed_f32(elements)?;
-    output.par_chunks_mut(row_stride).enumerate().try_for_each(
-        |(y, output_row)| -> Result<(), PipelineError> {
-            cancellation.checkpoint()?;
-            for (x, pixel) in output_row.chunks_exact_mut(3).enumerate() {
-                let site = mosaic.pattern().color_at(x, y);
-                let mut rgb = match site {
-                    CfaColor::Red => [
-                        *mosaic.sample(x, y),
-                        average_offsets(mosaic, x, y, &CROSS_OFFSETS),
-                        average_offsets(mosaic, x, y, &DIAGONAL_OFFSETS),
-                    ],
-                    CfaColor::Blue => [
-                        average_offsets(mosaic, x, y, &DIAGONAL_OFFSETS),
-                        average_offsets(mosaic, x, y, &CROSS_OFFSETS),
-                        *mosaic.sample(x, y),
-                    ],
-                    CfaColor::Green => {
-                        let red_horizontal =
-                            mosaic.pattern().color_at(x.wrapping_add(1), y) == CfaColor::Red;
-                        let (red_offsets, blue_offsets) = if red_horizontal {
-                            (&HORIZONTAL_OFFSETS[..], &VERTICAL_OFFSETS[..])
-                        } else {
-                            (&VERTICAL_OFFSETS[..], &HORIZONTAL_OFFSETS[..])
-                        };
-                        [
-                            average_offsets(mosaic, x, y, red_offsets),
-                            *mosaic.sample(x, y),
-                            average_offsets(mosaic, x, y, blue_offsets),
-                        ]
-                    }
-                };
-                for color in [CfaColor::Red, CfaColor::Green, CfaColor::Blue] {
-                    rgb[color.channel_index()] *= gains.for_color(color);
-                }
-                pixel.copy_from_slice(&rgb);
-            }
-            Ok(())
-        },
-    )?;
-    cancellation.checkpoint()?;
-    LinearRgbImage::new(
-        mosaic.width(),
-        mosaic.height(),
-        row_stride,
-        LinearRgbSpace::CameraNative,
-        output,
-    )
-}
-
-fn average_offsets(
-    mosaic: &MosaicImage<f32>,
-    x: usize,
-    y: usize,
-    offsets: &[(isize, isize)],
-) -> f32 {
-    let mut sum = 0.0;
-    let mut count = 0_u8;
-    for &(offset_x, offset_y) in offsets {
-        let Some(neighbor_x) = x.checked_add_signed(offset_x) else {
-            continue;
-        };
-        let Some(neighbor_y) = y.checked_add_signed(offset_y) else {
-            continue;
-        };
-        if neighbor_x < mosaic.width() && neighbor_y < mosaic.height() {
-            sum += *mosaic.sample(neighbor_x, neighbor_y);
-            count += 1;
-        }
-    }
-    if count == 0 {
-        *mosaic.sample(x, y)
-    } else {
-        sum / f32::from(count)
-    }
-}
-
 fn validate_raw_layout(frame: &RawFrame) -> Result<(), PipelineError> {
     if frame.info.components_per_pixel != 1 {
         return Err(PipelineError::InvalidMetadata {
@@ -883,6 +722,7 @@ mod tests {
     use rohditor_raw::{CameraColorMatrix, CaptureMetadata, CfaPattern, LevelPattern, RawFileInfo};
 
     use super::*;
+    use crate::{DemosaicAlgorithm, demosaic};
 
     fn test_info(width: usize, height: usize, pattern: &str) -> RawFileInfo {
         RawFileInfo {

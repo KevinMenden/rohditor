@@ -11,8 +11,9 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use image::RgbImage;
 use rohditor_core::{
-    CancellationToken, CpuPipeline, EditRecipe, ExportReport, ExportSettings, MemoryEstimate,
-    OrientationMap, PipelineError, PreviewOptions, StageTimings, export_image,
+    CancellationToken, CpuPipeline, DemosaicAlgorithm, EditRecipe, ExportReport, ExportSettings,
+    MemoryEstimate, OrientationMap, PipelineError, PreviewOptions, RenderOptions, StageTimings,
+    export_image,
 };
 use rohditor_gpu::{GpuPreviewError, GpuPreviewUpload};
 use rohditor_raw::{RawDecoder, RawFileInfo, RawFrame, RawOrientation, RawSession, RawlerDecoder};
@@ -41,6 +42,13 @@ pub(crate) enum PreviewBackend {
     GpuBase,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum PreviewResolution {
+    #[default]
+    Fit,
+    SourceScale,
+}
+
 impl PreviewBackend {
     pub(crate) const fn label(self) -> &'static str {
         match self {
@@ -65,6 +73,8 @@ pub(crate) struct PreviewQueueStats {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct WorkerPreviewDiagnostics {
     pub backend: PreviewBackend,
+    pub resolution: PreviewResolution,
+    pub algorithm: DemosaicAlgorithm,
     pub cache_hits: PreviewCacheHits,
     pub timings: StageTimings,
     pub memory: MemoryEstimate,
@@ -153,6 +163,7 @@ pub(crate) enum WorkerEvent {
     },
     PreviewReady {
         ticket: PreviewTicket,
+        resolution: PreviewResolution,
         image: WorkerImage,
         diagnostics: WorkerPreviewDiagnostics,
     },
@@ -192,6 +203,7 @@ struct PreviewJob {
     frame: Arc<RawFrame>,
     recipe: EditRecipe,
     backend: PreviewBackend,
+    resolution: PreviewResolution,
 }
 
 #[derive(Debug)]
@@ -203,6 +215,7 @@ struct ExportJob {
     frame: Arc<RawFrame>,
     recipe: EditRecipe,
     settings: ExportSettings,
+    render_options: RenderOptions,
 }
 
 #[derive(Debug)]
@@ -222,13 +235,17 @@ pub(crate) struct RenderCoordinator {
 }
 
 impl RenderCoordinator {
-    pub(crate) fn new(context: egui::Context) -> Result<Self, String> {
-        Self::new_with_decoder(context, Arc::new(RawlerDecoder::default()))
+    pub(crate) fn new(
+        context: egui::Context,
+        preview_options: PreviewOptions,
+    ) -> Result<Self, String> {
+        Self::new_with_decoder(context, Arc::new(RawlerDecoder::default()), preview_options)
     }
 
     fn new_with_decoder(
         context: egui::Context,
         decoder: Arc<dyn RawDecoder>,
+        preview_options: PreviewOptions,
     ) -> Result<Self, String> {
         let (request_sender, request_receiver) = mpsc::channel();
         let (event_sender, event_receiver) = mpsc::channel();
@@ -246,6 +263,7 @@ impl RenderCoordinator {
                         context,
                         decoder,
                         worker_previews,
+                        preview_options,
                     );
                 }));
                 if let Err(payload) = result {
@@ -286,6 +304,25 @@ impl RenderCoordinator {
                 frame,
                 recipe,
                 backend: PreviewBackend::Cpu,
+                resolution: PreviewResolution::Fit,
+            },
+            &self.requests,
+        )
+    }
+
+    pub(crate) fn source_scale_preview(
+        &self,
+        ticket: PreviewTicket,
+        frame: Arc<RawFrame>,
+        recipe: EditRecipe,
+    ) -> Result<(), String> {
+        self.previews.queue(
+            PreviewJob {
+                ticket,
+                frame,
+                recipe,
+                backend: PreviewBackend::Cpu,
+                resolution: PreviewResolution::SourceScale,
             },
             &self.requests,
         )
@@ -303,6 +340,7 @@ impl RenderCoordinator {
                 frame,
                 recipe,
                 backend: PreviewBackend::GpuBase,
+                resolution: PreviewResolution::Fit,
             },
             &self.requests,
         )
@@ -318,6 +356,7 @@ impl RenderCoordinator {
         frame: Arc<RawFrame>,
         recipe: EditRecipe,
         settings: ExportSettings,
+        render_options: RenderOptions,
     ) -> Result<(), String> {
         self.send(WorkerRequest::Export(ExportJob {
             document_id,
@@ -327,6 +366,7 @@ impl RenderCoordinator {
             frame,
             recipe,
             settings,
+            render_options,
         }))
     }
 
@@ -374,6 +414,7 @@ fn worker_loop(
     context: egui::Context,
     decoder: Arc<dyn RawDecoder>,
     previews: Arc<PreviewMailbox>,
+    preview_options: PreviewOptions,
 ) {
     let mut abandoned = HashSet::new();
     let mut preview_cache = PreviewCache::default();
@@ -396,21 +437,34 @@ fn worker_loop(
                 let completion = if abandoned.contains(&ticket.document_id) {
                     PreviewCompletion::Cancelled
                 } else {
-                    match scheduled.job.backend {
-                        PreviewBackend::Cpu => process_preview(
+                    if scheduled.job.resolution == PreviewResolution::SourceScale {
+                        process_source_scale_preview(
                             scheduled.job,
                             &sender,
                             &context,
                             &scheduled.cancellation,
                             &mut preview_cache,
-                        ),
-                        PreviewBackend::GpuBase => process_gpu_base(
-                            scheduled.job,
-                            &sender,
-                            &context,
-                            &scheduled.cancellation,
-                            &mut preview_cache,
-                        ),
+                            preview_options.render,
+                        )
+                    } else {
+                        match scheduled.job.backend {
+                            PreviewBackend::Cpu => process_preview(
+                                scheduled.job,
+                                &sender,
+                                &context,
+                                &scheduled.cancellation,
+                                &mut preview_cache,
+                                preview_options,
+                            ),
+                            PreviewBackend::GpuBase => process_gpu_base(
+                                scheduled.job,
+                                &sender,
+                                &context,
+                                &scheduled.cancellation,
+                                &mut preview_cache,
+                                preview_options,
+                            ),
+                        }
                     }
                 };
                 previews.finish(ticket, completion);
@@ -608,6 +662,7 @@ fn process_preview(
     context: &egui::Context,
     cancellation: &CancellationToken,
     preview_cache: &mut PreviewCache,
+    options: PreviewOptions,
 ) -> PreviewCompletion {
     let span = info_span!(
         "desktop.preview",
@@ -615,7 +670,6 @@ fn process_preview(
         revision = job.ticket.revision
     );
     let _guard = span.enter();
-    let options = PreviewOptions::default();
     let keys = PreviewCacheKeys::new(job.ticket.document_id, &job.frame, &job.recipe, options);
     let cache_hits = preview_cache.prepare(&keys, &job.frame);
     send_progress(
@@ -629,8 +683,8 @@ fn process_preview(
             "Restoring cached adjusted CPU preview"
         } else if cache_hits.demosaiced {
             "Applying edits to cached demosaiced CPU base"
-        } else if cache_hits.normalized {
-            "Demosaicing cached normalized CPU preview"
+        } else if cache_hits.reconstructed {
+            "Applying color to cached reconstructed CPU preview"
         } else {
             "Developing 2560 px CPU preview"
         },
@@ -651,6 +705,7 @@ fn process_preview(
                     context,
                     WorkerEvent::PreviewReady {
                         ticket: job.ticket,
+                        resolution: job.resolution,
                         image,
                         diagnostics,
                     },
@@ -689,12 +744,105 @@ fn process_preview(
     }
 }
 
+fn process_source_scale_preview(
+    job: PreviewJob,
+    sender: &mpsc::Sender<WorkerEvent>,
+    context: &egui::Context,
+    cancellation: &CancellationToken,
+    preview_cache: &mut PreviewCache,
+    options: RenderOptions,
+) -> PreviewCompletion {
+    let span = info_span!(
+        "desktop.source_scale_preview",
+        document_id = job.ticket.document_id,
+        revision = job.ticket.revision
+    );
+    let _guard = span.enter();
+    preview_cache.clear_document(job.ticket.document_id);
+    send_progress(
+        sender,
+        context,
+        job.ticket.document_id,
+        JobKind::Preview,
+        Some(job.ticket.revision),
+        None,
+        "Developing full-resolution 1:1 inspection",
+    );
+    match CpuPipeline.render_source_scale_preview_cancellable(
+        &job.frame,
+        &job.recipe,
+        options,
+        cancellation,
+    ) {
+        Ok(result) => {
+            let diagnostics = WorkerPreviewDiagnostics {
+                backend: PreviewBackend::Cpu,
+                resolution: PreviewResolution::SourceScale,
+                algorithm: options.demosaic,
+                cache_hits: PreviewCacheHits {
+                    decoded: true,
+                    ..PreviewCacheHits::default()
+                },
+                timings: result.timings,
+                memory: result.memory,
+                cache_resident_bytes: 0,
+                workspace_reused: false,
+            };
+            match WorkerImage::from_display(result.image) {
+                Ok(image) => {
+                    log_preview_diagnostics(job.ticket, image.width, image.height, diagnostics);
+                    send_event(
+                        sender,
+                        context,
+                        WorkerEvent::PreviewReady {
+                            ticket: job.ticket,
+                            resolution: PreviewResolution::SourceScale,
+                            image,
+                            diagnostics,
+                        },
+                    );
+                    PreviewCompletion::Completed
+                }
+                Err(error) => {
+                    send_failure(
+                        sender,
+                        context,
+                        job.ticket.document_id,
+                        JobKind::Preview,
+                        Some(job.ticket.revision),
+                        None,
+                        format!("Could not prepare the 1:1 image for display: {error}"),
+                    );
+                    PreviewCompletion::Failed
+                }
+            }
+        }
+        Err(PipelineError::Cancelled) => {
+            info!("source-scale preview cancelled after being superseded");
+            PreviewCompletion::Cancelled
+        }
+        Err(error) => {
+            send_failure(
+                sender,
+                context,
+                job.ticket.document_id,
+                JobKind::Preview,
+                Some(job.ticket.revision),
+                None,
+                format!("Source-scale preview development failed: {error}"),
+            );
+            PreviewCompletion::Failed
+        }
+    }
+}
+
 fn process_gpu_base(
     job: PreviewJob,
     sender: &mpsc::Sender<WorkerEvent>,
     context: &egui::Context,
     cancellation: &CancellationToken,
     preview_cache: &mut PreviewCache,
+    options: PreviewOptions,
 ) -> PreviewCompletion {
     let span = info_span!(
         "desktop.gpu_base",
@@ -702,7 +850,6 @@ fn process_gpu_base(
         revision = job.ticket.revision
     );
     let _guard = span.enter();
-    let options = PreviewOptions::default();
     let keys = PreviewCacheKeys::new(job.ticket.document_id, &job.frame, &job.recipe, options);
     let cache_hits = preview_cache.prepare(&keys, &job.frame);
     send_progress(
@@ -714,8 +861,8 @@ fn process_gpu_base(
         None,
         if cache_hits.demosaiced {
             "Packing cached linear base for GPU preview"
-        } else if cache_hits.normalized {
-            "Demosaicing cached normalized GPU preview base"
+        } else if cache_hits.reconstructed {
+            "Applying color to cached reconstructed GPU preview base"
         } else {
             "Preparing linear 2560 px GPU preview base"
         },
@@ -785,6 +932,8 @@ fn process_gpu_base(
     let memory = gpu_base_memory(&job.frame, base, cache_resident_bytes);
     let diagnostics = WorkerPreviewDiagnostics {
         backend: PreviewBackend::GpuBase,
+        resolution: PreviewResolution::Fit,
+        algorithm: options.render.demosaic,
         cache_hits,
         timings,
         memory,
@@ -825,6 +974,8 @@ fn develop_preview(
             image,
             WorkerPreviewDiagnostics {
                 backend: PreviewBackend::Cpu,
+                resolution: PreviewResolution::Fit,
+                algorithm: options.render.demosaic,
                 cache_hits,
                 timings,
                 memory,
@@ -855,6 +1006,8 @@ fn develop_preview(
     preview_cache.insert_adjusted(keys, result.image.clone(), memory);
     let diagnostics = WorkerPreviewDiagnostics {
         backend: PreviewBackend::Cpu,
+        resolution: PreviewResolution::Fit,
+        algorithm: options.render.demosaic,
         cache_hits,
         timings,
         memory,
@@ -873,23 +1026,22 @@ fn ensure_preview_base(
     preview_cache: &mut PreviewCache,
 ) -> Result<StageTimings, PipelineError> {
     let mut timings = StageTimings::default();
-    if !cache_hits.normalized {
-        let normalized = CpuPipeline.prepare_preview_normalized_cancellable(
+    if !cache_hits.reconstructed {
+        let reconstructed = CpuPipeline.prepare_preview_reconstruction_cancellable(
             &job.frame,
             options,
             cancellation,
         )?;
-        add_stage_timings(&mut timings, normalized.timings());
-        preview_cache.insert_normalized(keys, normalized);
+        add_stage_timings(&mut timings, reconstructed.timings());
+        preview_cache.insert_reconstructed(keys, reconstructed);
     }
     if !cache_hits.demosaiced {
-        let normalized = preview_cache
-            .normalized(keys)
-            .ok_or_else(|| cache_invariant("normalized preview was unavailable before demosaic"))?;
-        let base = CpuPipeline.prepare_preview_base_from_normalized_cancellable(
-            normalized,
+        let reconstructed = preview_cache.reconstructed(keys).ok_or_else(|| {
+            cache_invariant("reconstructed preview was unavailable before color conversion")
+        })?;
+        let base = CpuPipeline.prepare_preview_base_from_reconstruction_cancellable(
+            reconstructed,
             &job.recipe,
-            options.render.demosaic,
             cancellation,
         )?;
         add_stage_timings(&mut timings, base.timings());
@@ -903,6 +1055,7 @@ fn add_stage_timings(target: &mut StageTimings, additional: StageTimings) {
     target.metadata += additional.metadata;
     target.normalization += additional.normalization;
     target.demosaic += additional.demosaic;
+    target.resampling += additional.resampling;
     target.color_conversion += additional.color_conversion;
     target.adjustments += additional.adjustments;
     target.output_conversion += additional.output_conversion;
@@ -916,14 +1069,11 @@ fn gpu_base_memory(
 ) -> MemoryEstimate {
     MemoryEstimate {
         decoded_raw_bytes: frame.mosaic.len().saturating_mul(size_of::<u16>()),
-        normalized_mosaic_bytes: base
-            .image()
-            .width()
-            .saturating_mul(base.image().height())
-            .saturating_mul(size_of::<f32>()),
+        normalized_mosaic_bytes: base.normalized_mosaic_bytes(),
+        resample_intermediate_bytes: base.resample_intermediate_bytes(),
         linear_rgb_bytes: base.buffer_bytes(),
         display_rgb_bytes: 0,
-        estimated_peak_bytes: cache_resident_bytes,
+        estimated_peak_bytes: cache_resident_bytes.max(base.preparation_peak_bytes()),
     }
 }
 
@@ -937,16 +1087,18 @@ fn log_preview_diagnostics(
         document_id = ticket.document_id,
         revision = ticket.revision,
         backend = diagnostics.backend.label(),
+        algorithm = ?diagnostics.algorithm,
         width,
         height,
         cache_decoded = diagnostics.cache_hits.decoded,
-        cache_normalized = diagnostics.cache_hits.normalized,
+        cache_reconstructed = diagnostics.cache_hits.reconstructed,
         cache_demosaiced = diagnostics.cache_hits.demosaiced,
         cache_adjusted = diagnostics.cache_hits.adjusted,
         workspace_reused = diagnostics.workspace_reused,
         metadata_us = diagnostics.timings.metadata.as_micros(),
         normalization_us = diagnostics.timings.normalization.as_micros(),
         demosaic_us = diagnostics.timings.demosaic.as_micros(),
+        resampling_us = diagnostics.timings.resampling.as_micros(),
         color_us = diagnostics.timings.color_conversion.as_micros(),
         adjustments_us = diagnostics.timings.adjustments.as_micros(),
         output_us = diagnostics.timings.output_conversion.as_micros(),
@@ -987,7 +1139,7 @@ fn process_export(job: ExportJob, sender: &mpsc::Sender<WorkerEvent>, context: &
     let rendered = match CpuPipeline.render_export(
         &job.frame,
         &job.recipe,
-        Default::default(),
+        job.render_options,
         job.settings.format.bit_depth(),
         job.settings.dithering,
     ) {
@@ -1225,6 +1377,7 @@ mod tests {
             frame: Arc::clone(&frame),
             recipe: EditRecipe::default(),
             backend: PreviewBackend::Cpu,
+            resolution: PreviewResolution::Fit,
         };
         let mailbox = PreviewMailbox::default();
         let (sender, receiver) = mpsc::channel();
@@ -1261,6 +1414,7 @@ mod tests {
             frame: Arc::clone(&frame),
             recipe: EditRecipe::default(),
             backend: PreviewBackend::Cpu,
+            resolution: PreviewResolution::Fit,
         };
         let mailbox = PreviewMailbox::default();
         let (sender, receiver) = mpsc::channel();
@@ -1300,6 +1454,7 @@ mod tests {
             frame: Arc::clone(&frame),
             recipe: EditRecipe::default(),
             backend: PreviewBackend::Cpu,
+            resolution: PreviewResolution::Fit,
         };
         let initial_keys =
             PreviewCacheKeys::new(initial.ticket.document_id, &frame, &initial.recipe, options);
@@ -1325,6 +1480,7 @@ mod tests {
                 ..EditRecipe::default()
             },
             backend: PreviewBackend::Cpu,
+            resolution: PreviewResolution::Fit,
         };
         let adjusted_keys = PreviewCacheKeys::new(
             adjusted.ticket.document_id,
@@ -1334,7 +1490,7 @@ mod tests {
         );
         let adjusted_hits = cache.prepare(&adjusted_keys, &adjusted.frame);
         assert!(adjusted_hits.decoded);
-        assert!(adjusted_hits.normalized);
+        assert!(adjusted_hits.reconstructed);
         assert!(adjusted_hits.demosaiced);
         assert!(!adjusted_hits.adjusted);
         let second = develop_preview(
@@ -1350,6 +1506,7 @@ mod tests {
         assert_ne!(first.0, second.0);
         assert_eq!(second.1.timings.normalization, Duration::ZERO);
         assert_eq!(second.1.timings.demosaic, Duration::ZERO);
+        assert_eq!(second.1.timings.resampling, Duration::ZERO);
         assert_eq!(second.1.timings.color_conversion, Duration::ZERO);
         assert!(second.1.workspace_reused);
 
@@ -1361,7 +1518,7 @@ mod tests {
             PreviewCacheKeys::new(9, &adjusted.frame, &invalid_schema_recipe, options);
         let invalid_schema_hits = cache.prepare(&invalid_schema_keys, &adjusted.frame);
         assert!(invalid_schema_hits.decoded);
-        assert!(invalid_schema_hits.normalized);
+        assert!(invalid_schema_hits.reconstructed);
         assert!(!invalid_schema_hits.demosaiced);
         assert!(!invalid_schema_hits.adjusted);
 
@@ -1377,9 +1534,46 @@ mod tests {
             PreviewCacheKeys::new(9, &adjusted.frame, &white_balance_recipe, options);
         let white_balance_hits = cache.prepare(&white_balance_keys, &adjusted.frame);
         assert!(white_balance_hits.decoded);
-        assert!(white_balance_hits.normalized);
+        assert!(white_balance_hits.reconstructed);
         assert!(!white_balance_hits.demosaiced);
         assert!(!white_balance_hits.adjusted);
+        let white_balance_job = PreviewJob {
+            ticket: PreviewTicket {
+                document_id: 9,
+                revision: 2,
+            },
+            frame: Arc::clone(&adjusted.frame),
+            recipe: white_balance_recipe,
+            backend: PreviewBackend::Cpu,
+            resolution: PreviewResolution::Fit,
+        };
+        let white_balanced = develop_preview(
+            &white_balance_job,
+            options,
+            &white_balance_keys,
+            white_balance_hits,
+            &CancellationToken::new(),
+            &mut cache,
+        )
+        .expect("white balance should reuse reconstructed camera RGB");
+        assert_eq!(white_balanced.1.timings.normalization, Duration::ZERO);
+        assert_eq!(white_balanced.1.timings.demosaic, Duration::ZERO);
+        assert_eq!(white_balanced.1.timings.resampling, Duration::ZERO);
+
+        let mhc_options = PreviewOptions {
+            render: rohditor_core::RenderOptions {
+                demosaic: rohditor_core::DemosaicAlgorithm::MalvarHeCutler,
+                ..options.render
+            },
+            ..options
+        };
+        let mhc_keys =
+            PreviewCacheKeys::new(9, &adjusted.frame, &white_balance_job.recipe, mhc_options);
+        let mhc_hits = cache.prepare(&mhc_keys, &adjusted.frame);
+        assert!(mhc_hits.decoded);
+        assert!(!mhc_hits.reconstructed);
+        assert!(!mhc_hits.demosaiced);
+        assert!(!mhc_hits.adjusted);
     }
 
     #[test]
@@ -1393,6 +1587,7 @@ mod tests {
             frame: Arc::new(fake_frame()),
             recipe: EditRecipe::default(),
             backend: PreviewBackend::GpuBase,
+            resolution: PreviewResolution::Fit,
         };
 
         let completion = process_gpu_base(
@@ -1401,6 +1596,7 @@ mod tests {
             &egui::Context::default(),
             &CancellationToken::new(),
             &mut PreviewCache::default(),
+            PreviewOptions::default(),
         );
         assert_eq!(completion, PreviewCompletion::Completed);
         let events = receiver.try_iter().collect::<Vec<_>>();
@@ -1423,6 +1619,46 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, WorkerEvent::PreviewReady { .. }))
         );
+    }
+
+    #[test]
+    fn source_scale_request_returns_full_crop_and_marks_one_to_one_diagnostics() {
+        let (sender, receiver) = mpsc::channel();
+        let job = PreviewJob {
+            ticket: PreviewTicket {
+                document_id: 13,
+                revision: 4,
+            },
+            frame: Arc::new(fake_frame()),
+            recipe: EditRecipe::default(),
+            backend: PreviewBackend::Cpu,
+            resolution: PreviewResolution::SourceScale,
+        };
+        let completion = process_source_scale_preview(
+            job,
+            &sender,
+            &egui::Context::default(),
+            &CancellationToken::new(),
+            &mut PreviewCache::default(),
+            RenderOptions::default(),
+        );
+        assert_eq!(completion, PreviewCompletion::Completed);
+        let event = receiver
+            .try_iter()
+            .find_map(|event| match event {
+                WorkerEvent::PreviewReady {
+                    resolution,
+                    image,
+                    diagnostics,
+                    ..
+                } => Some((resolution, image, diagnostics)),
+                _ => None,
+            })
+            .expect("source-scale preview should complete");
+        assert_eq!(event.0, PreviewResolution::SourceScale);
+        assert_eq!((event.1.width, event.1.height), (4, 4));
+        assert_eq!(event.2.resolution, PreviewResolution::SourceScale);
+        assert_eq!(event.2.cache_resident_bytes, 0);
     }
 
     #[test]
@@ -1618,7 +1854,8 @@ mod tests {
         }
 
         let coordinator =
-            RenderCoordinator::new(egui::Context::default()).map_err(std::io::Error::other)?;
+            RenderCoordinator::new(egui::Context::default(), PreviewOptions::default())
+                .map_err(std::io::Error::other)?;
         coordinator
             .open(17, source)
             .map_err(std::io::Error::other)?;
@@ -1671,6 +1908,7 @@ mod tests {
                     },
                     ..ExportSettings::default()
                 },
+                RenderOptions::default(),
             )
             .map_err(std::io::Error::other)?;
 
@@ -1738,6 +1976,7 @@ mod tests {
             frame: Arc::clone(&frame),
             recipe: EditRecipe::default(),
             backend: PreviewBackend::Cpu,
+            resolution: PreviewResolution::Fit,
         };
         let initial_keys =
             PreviewCacheKeys::new(initial.ticket.document_id, &frame, &initial.recipe, options);
@@ -1770,10 +2009,11 @@ mod tests {
                 frame: Arc::clone(&frame),
                 recipe,
                 backend: PreviewBackend::Cpu,
+                resolution: PreviewResolution::Fit,
             };
             let keys = PreviewCacheKeys::new(job.ticket.document_id, &frame, &job.recipe, options);
             let hits = cache.prepare(&keys, &frame);
-            assert!(hits.decoded && hits.normalized && hits.demosaiced && !hits.adjusted);
+            assert!(hits.decoded && hits.reconstructed && hits.demosaiced && !hits.adjusted);
             let started = Instant::now();
             let (_, diagnostics) = develop_preview(
                 &job,
@@ -1786,6 +2026,7 @@ mod tests {
             cached_wall.push(started.elapsed());
             assert_eq!(diagnostics.timings.normalization, Duration::ZERO);
             assert_eq!(diagnostics.timings.demosaic, Duration::ZERO);
+            assert_eq!(diagnostics.timings.resampling, Duration::ZERO);
             assert_eq!(diagnostics.timings.color_conversion, Duration::ZERO);
             assert!(diagnostics.workspace_reused);
             assert_eq!(cache.resident_bytes(), stable_cache_bytes);

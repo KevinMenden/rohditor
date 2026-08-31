@@ -38,6 +38,13 @@ pub enum PipelineError {
     #[error("invalid edit recipe field {field}: {reason}")]
     InvalidRecipe { field: &'static str, reason: String },
 
+    #[error("{stage} received a non-finite sample at ({x}, {y})")]
+    NonFiniteImageData {
+        stage: &'static str,
+        x: usize,
+        y: usize,
+    },
+
     #[error("image stage requires {expected}, but received {actual}")]
     WrongImageState {
         expected: &'static str,

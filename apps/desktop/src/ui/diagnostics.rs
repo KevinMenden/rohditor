@@ -18,7 +18,7 @@ pub(crate) struct QueueModel {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct CacheModel {
     pub decoded: bool,
-    pub normalized: bool,
+    pub reconstructed: bool,
     pub demosaiced: bool,
     pub adjusted: bool,
     pub workspace_reused: bool,
@@ -29,6 +29,7 @@ pub(crate) struct TimingModel {
     pub metadata: Duration,
     pub normalization: Duration,
     pub demosaic: Duration,
+    pub resampling: Duration,
     pub color_conversion: Duration,
     pub adjustments: Duration,
     pub output_conversion: Duration,
@@ -47,6 +48,8 @@ pub(crate) struct GpuModel {
 #[derive(Debug, Clone)]
 pub(crate) struct PreviewModel {
     pub backend: String,
+    pub algorithm: String,
+    pub source_state: String,
     pub cache: CacheModel,
     pub timings: TimingModel,
     pub cache_resident_bytes: usize,
@@ -129,14 +132,18 @@ pub(crate) fn show(
             };
             ui.add_space(8.0);
             ui.strong(format!("Last {} preview", preview.backend));
+            ui.weak(format!(
+                "{} source · {} demosaic",
+                preview.source_state, preview.algorithm
+            ));
             egui::Grid::new("preview_cache_diagnostics")
                 .num_columns(2)
                 .show(ui, |ui| {
                     diagnostic_row(ui, "DecodedRaw", cache_result(preview.cache.decoded));
                     diagnostic_row(
                         ui,
-                        "NormalizedMosaic",
-                        cache_result(preview.cache.normalized),
+                        "CameraRgbBase",
+                        cache_result(preview.cache.reconstructed),
                     );
                     diagnostic_row(
                         ui,
@@ -167,6 +174,7 @@ pub(crate) fn show(
                     duration_row(ui, "Metadata", preview.timings.metadata);
                     duration_row(ui, "Normalization", preview.timings.normalization);
                     duration_row(ui, "Demosaic", preview.timings.demosaic);
+                    duration_row(ui, "Area reduction", preview.timings.resampling);
                     duration_row(ui, "Color conversion", preview.timings.color_conversion);
                     duration_row(ui, "Adjustments", preview.timings.adjustments);
                     duration_row(ui, "Output conversion", preview.timings.output_conversion);
@@ -214,7 +222,7 @@ pub(crate) fn show(
 /// the JSON is portable and readable without Rust-specific encodings.
 pub(crate) fn report(model: &DiagnosticsModel) -> DiagnosticsReport<'_> {
     DiagnosticsReport {
-        format_version: 1,
+        format_version: 2,
         application: ApplicationReport {
             name: "Rohditor",
             version: env!("CARGO_PKG_VERSION"),
@@ -280,6 +288,8 @@ impl From<QueueModel> for QueueReport {
 #[derive(Debug, Serialize)]
 pub(crate) struct PreviewReport<'a> {
     pub backend: &'a str,
+    pub algorithm: &'a str,
+    pub source_state: &'a str,
     pub cache: CacheReport,
     pub timings_ms: TimingReport,
     pub cache_resident_bytes: usize,
@@ -291,6 +301,8 @@ impl<'a> From<&'a PreviewModel> for PreviewReport<'a> {
     fn from(value: &'a PreviewModel) -> Self {
         Self {
             backend: &value.backend,
+            algorithm: &value.algorithm,
+            source_state: &value.source_state,
             cache: CacheReport::from(value.cache),
             timings_ms: TimingReport::from(value.timings),
             cache_resident_bytes: value.cache_resident_bytes,
@@ -303,7 +315,7 @@ impl<'a> From<&'a PreviewModel> for PreviewReport<'a> {
 #[derive(Debug, Serialize)]
 pub(crate) struct CacheReport {
     pub decoded: bool,
-    pub normalized: bool,
+    pub reconstructed: bool,
     pub demosaiced: bool,
     pub adjusted: bool,
     pub workspace_reused: bool,
@@ -313,7 +325,7 @@ impl From<CacheModel> for CacheReport {
     fn from(value: CacheModel) -> Self {
         Self {
             decoded: value.decoded,
-            normalized: value.normalized,
+            reconstructed: value.reconstructed,
             demosaiced: value.demosaiced,
             adjusted: value.adjusted,
             workspace_reused: value.workspace_reused,
@@ -326,6 +338,7 @@ pub(crate) struct TimingReport {
     pub metadata: f64,
     pub normalization: f64,
     pub demosaic: f64,
+    pub resampling: f64,
     pub color_conversion: f64,
     pub adjustments: f64,
     pub output_conversion: f64,
@@ -338,6 +351,7 @@ impl From<TimingModel> for TimingReport {
             metadata: duration_milliseconds(value.metadata),
             normalization: duration_milliseconds(value.normalization),
             demosaic: duration_milliseconds(value.demosaic),
+            resampling: duration_milliseconds(value.resampling),
             color_conversion: duration_milliseconds(value.color_conversion),
             adjustments: duration_milliseconds(value.adjustments),
             output_conversion: duration_milliseconds(value.output_conversion),
