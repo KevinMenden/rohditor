@@ -1,0 +1,3 @@
+II*
+This deliberately truncated TIFF header is safe to redistribute and must never
+produce a decoded image or an uncaught decoder panic.

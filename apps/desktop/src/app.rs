@@ -1,3 +1,5 @@
+use std::fs::File;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -8,15 +10,12 @@ use rohditor_core::{
     ExportSettings, JPEG_QUALITY_DEFAULT, MemoryEstimate, PngBitDepth, SATURATION_RANGE,
     StageTimings, WHITE_BALANCE_MULTIPLIER_RANGE, WhiteBalance, paths_refer_to_same_file,
 };
-use rohditor_gpu::{
-    GpuCapabilities, GpuPreviewFrame, GpuPreviewProcessor, GpuPreviewSource, GpuPreviewUpload,
-};
 use rohditor_raw::{RawFileInfo, RawFrame};
 use tracing::{info, warn};
 
 use crate::ProcessorPreference;
 use crate::coordinator::{
-    JobKind, PreviewBackend, RenderCoordinator, WorkerEvent, WorkerImage, WorkerPreviewDiagnostics,
+    PreviewBackend, RenderCoordinator, WorkerImage, WorkerPreviewDiagnostics,
 };
 use crate::document::{EditSession, PreviewTicket};
 use crate::preview_cache::PreviewCacheHits;
@@ -25,22 +24,23 @@ use crate::ui::adjustment_panel::{
     AdjustmentValues, DocumentPanelModel, ExportKind, ExportUiSettings, PngDepth,
 };
 use crate::ui::diagnostics::{
-    self, CacheModel, DiagnosticsModel, GpuModel, PreviewModel, QueueModel, TimingModel,
+    self, CacheModel, DiagnosticsMessages, DiagnosticsModel, GpuModel, PreviewModel, QueueModel,
+    TimingModel,
 };
 use crate::ui::theme;
 use crate::ui::toolbar::{self, FilePanelModel, StatusBarModel, ToolbarModel};
 use crate::ui::viewport::{self, PreviewSource, PreviewTexture, ViewState, ViewportModel};
+use rohditor_gpu::GpuPreviewUpload;
 
-struct GpuDocumentPreview {
-    source: GpuPreviewSource,
-    frame: GpuPreviewFrame,
-    texture_id: egui::TextureId,
-}
+#[path = "app/events.rs"]
+mod events;
+#[path = "app/gpu.rs"]
+mod gpu;
 
-struct GpuRuntime {
-    render_state: eframe::egui_wgpu::RenderState,
-    processor: GpuPreviewProcessor,
-}
+use gpu::{
+    GpuDocumentPreview, GpuRuntime, gpu_output_size, initialize_gpu_runtime,
+    register_or_update_gpu_texture,
+};
 
 #[derive(Debug, Clone, Copy)]
 struct DocumentPreviewDiagnostics {
@@ -192,7 +192,15 @@ impl RohditorApp {
         } else {
             "unknown"
         };
-        let (gpu, processor_note) = initialize_gpu_runtime(context, processor_preference)?;
+        let (gpu, processor_note, startup_error) =
+            match initialize_gpu_runtime(context, processor_preference) {
+                Ok((gpu, processor_note)) => (gpu, processor_note, None),
+                Err(error) => (
+                    None,
+                    None,
+                    Some(format!("GPU preview is required but unavailable: {error}")),
+                ),
+            };
         info!(
             ui_renderer,
             processor = if gpu.is_some() { "GPU" } else { "CPU" },
@@ -211,7 +219,7 @@ impl RohditorApp {
             processor_preference,
             gpu,
             processor_note,
-            startup_error: None,
+            startup_error,
             show_diagnostics,
         };
         if let Some(path) = initial_path {
@@ -235,6 +243,14 @@ impl RohditorApp {
         let document_id = self.next_document_id;
         self.next_document_id = self.next_document_id.saturating_add(1);
         self.document = Some(Document::opening(document_id, path.clone()));
+        if self.gpu_required_but_unavailable() {
+            if let Some(document) = self.document.as_mut() {
+                document.open_status = None;
+                document.error = self.startup_error.clone();
+            }
+            self.update_window_title(context);
+            return;
+        }
         if let Err(error) = self.coordinator.open(document_id, path)
             && let Some(document) = self.document.as_mut()
         {
@@ -260,177 +276,14 @@ impl RohditorApp {
         context.send_viewport_cmd(egui::ViewportCommand::Title(title));
     }
 
-    fn process_worker_events(&mut self, context: &egui::Context) {
-        let events = self.coordinator.try_events().collect::<Vec<_>>();
-        for event in events {
-            self.process_worker_event(context, event);
-        }
-    }
-
-    fn process_worker_event(&mut self, context: &egui::Context, event: WorkerEvent) {
-        match event {
-            WorkerEvent::Progress {
-                document_id,
-                job,
-                revision,
-                export_id,
-                detail,
-            } => {
-                let Some(document) = self.document.as_mut().filter(|doc| doc.id == document_id)
-                else {
-                    return;
-                };
-                match job {
-                    JobKind::Open => document.open_status = Some(detail),
-                    JobKind::Preview => {
-                        if revision == Some(document.edits.revision()) {
-                            document.preview_status = Some((document.edits.revision(), detail));
-                        }
-                    }
-                    JobKind::Export => {
-                        if let Some(activity) = document.export_status.as_mut()
-                            && export_id == Some(activity.id)
-                        {
-                            activity.detail = detail;
-                        }
-                    }
-                }
-            }
-            WorkerEvent::MetadataReady { document_id, info } => {
-                if let Some(document) = self.document.as_mut().filter(|doc| doc.id == document_id) {
-                    document.info = Some(*info);
-                }
-            }
-            WorkerEvent::PlaceholderReady { document_id, image } => {
-                if let Some(document) = self.document.as_mut().filter(|doc| doc.id == document_id)
-                    && !matches!(
-                        document.preview_source,
-                        Some(PreviewSource::DevelopedCpu | PreviewSource::DevelopedGpu)
-                    )
-                {
-                    install_texture(context, document, image, PreviewSource::Embedded);
-                }
-            }
-            WorkerEvent::RawReady { document_id, frame } => {
-                let should_preview = if let Some(document) =
-                    self.document.as_mut().filter(|doc| doc.id == document_id)
-                {
-                    document.info = Some(frame.info.clone());
-                    document.frame = Some(frame);
-                    document.open_status = None;
-                    true
-                } else {
-                    false
-                };
-                if should_preview {
-                    self.queue_preview(context, document_id);
-                }
-            }
-            WorkerEvent::PreviewReady {
-                ticket,
-                image,
-                diagnostics,
-            } => {
-                if self.gpu.is_none()
-                    && let Some(document) = self.document.as_mut()
-                    && ticket.is_current(document.id, document.edits.revision())
-                {
-                    install_texture(context, document, image, PreviewSource::DevelopedCpu);
-                    document.preview_status = None;
-                    document.last_preview_time = Some(diagnostics.timings.total);
-                    document.preview_diagnostics =
-                        Some(DocumentPreviewDiagnostics::cpu(diagnostics));
-                    document.error = None;
-                }
-            }
-            WorkerEvent::GpuUploadReady {
-                ticket,
-                upload,
-                diagnostics,
-                upload_preparation,
-            } => {
-                self.install_gpu_upload(context, ticket, *upload, diagnostics, upload_preparation);
-            }
-            WorkerEvent::ExportReady {
-                document_id,
-                export_id,
-                recipe_revision,
-                destination,
-                report,
-                elapsed,
-            } => {
-                if let Some(document) = self.document.as_mut().filter(|doc| doc.id == document_id)
-                    && document.export_status.as_ref().map(|job| job.id) == Some(export_id)
-                {
-                    document.export_status = None;
-                    document.error = None;
-                    document.notice = Some(format!(
-                        "Exported revision {recipe_revision} as {}-bit {}×{} ({} bytes) to {} in {:.2} s.",
-                        report.bit_depth.bits(),
-                        report.width,
-                        report.height,
-                        report.bytes_written,
-                        destination.display(),
-                        elapsed.as_secs_f64()
-                    ));
-                }
-            }
-            WorkerEvent::Warning {
-                document_id,
-                message,
-            } => {
-                if let Some(document) = self.document.as_mut().filter(|doc| doc.id == document_id) {
-                    document.warning = Some(message);
-                }
-            }
-            WorkerEvent::Failed {
-                document_id,
-                job,
-                revision,
-                export_id,
-                message,
-            } => {
-                let Some(document) = self.document.as_mut().filter(|doc| doc.id == document_id)
-                else {
-                    return;
-                };
-                let current = match job {
-                    JobKind::Open => {
-                        document.open_status = None;
-                        true
-                    }
-                    JobKind::Preview => {
-                        let current = revision == Some(document.edits.revision());
-                        if current {
-                            document.preview_status = None;
-                        }
-                        current
-                    }
-                    JobKind::Export => {
-                        let current =
-                            document.export_status.as_ref().map(|job| job.id) == export_id;
-                        if current {
-                            document.export_status = None;
-                        }
-                        current
-                    }
-                };
-                if current {
-                    document.error = Some(message);
-                }
-            }
-            WorkerEvent::WorkerStopped { message } => {
-                if let Some(document) = self.document.as_mut() {
-                    document.open_status = None;
-                    document.preview_status = None;
-                    document.export_status = None;
-                    document.error = Some(message);
-                }
-            }
-        }
-    }
-
     fn queue_preview(&mut self, context: &egui::Context, document_id: u64) {
+        if self.gpu_required_but_unavailable() {
+            if let Some(document) = self.document.as_mut().filter(|doc| doc.id == document_id) {
+                document.preview_status = None;
+                document.error = self.startup_error.clone();
+            }
+            return;
+        }
         let request = self
             .document
             .as_ref()
@@ -474,11 +327,21 @@ impl RohditorApp {
         if let Some(document) = self.document.as_mut() {
             document.preview_status = Some((ticket.revision, "Queued CPU preview".to_owned()));
         }
-        if let Err(error) = self.coordinator.preview(ticket, frame, recipe)
-            && let Some(document) = self.document.as_mut()
-        {
-            document.preview_status = None;
-            document.error = Some(error);
+        match self.coordinator.preview(ticket, frame, recipe) {
+            Ok(()) => {
+                info!(
+                    document_id,
+                    revision = ticket.revision,
+                    processor_preference = ?self.processor_preference,
+                    "CPU preview queued"
+                );
+            }
+            Err(error) => {
+                if let Some(document) = self.document.as_mut() {
+                    document.preview_status = None;
+                    document.error = Some(error);
+                }
+            }
         }
     }
 
@@ -795,6 +658,10 @@ impl RohditorApp {
         }
     }
 
+    fn gpu_required_but_unavailable(&self) -> bool {
+        self.processor_preference == ProcessorPreference::Gpu && self.gpu.is_none()
+    }
+
     fn request_export(&mut self) {
         let Some(document) = self.document.as_ref() else {
             return;
@@ -1090,10 +957,28 @@ impl RohditorApp {
         );
     }
 
+    fn background_work_is_active(&self) -> bool {
+        self.document.as_ref().is_some_and(|document| {
+            document.open_status.is_some()
+                || document.preview_status.is_some()
+                || document.export_status.is_some()
+        })
+    }
+
     fn show_developer_diagnostics(&mut self, context: &egui::Context) {
         if !self.show_diagnostics {
             return;
         }
+        let model = self.diagnostics_model();
+        let mut open = self.show_diagnostics;
+        let output = diagnostics::show(context, &mut open, &model);
+        self.show_diagnostics = open;
+        if output.export_requested {
+            self.request_diagnostics_export(&model);
+        }
+    }
+
+    fn diagnostics_model(&self) -> DiagnosticsModel {
         let queue = self.coordinator.preview_queue_stats();
         let gpu_device = self.gpu.as_ref().map(|runtime| {
             let capabilities = runtime.processor.capabilities();
@@ -1134,8 +1019,9 @@ impl RohditorApp {
                     resident_bytes: preview.gpu_resident_bytes,
                 }),
             });
-        let model = DiagnosticsModel {
+        DiagnosticsModel {
             processor: self.processor_description(),
+            ui_renderer: self.ui_renderer.to_owned(),
             gpu_device,
             queue: QueueModel {
                 requested: queue.requested,
@@ -1148,94 +1034,78 @@ impl RohditorApp {
                 pending: queue.pending,
             },
             preview,
+            messages: DiagnosticsMessages {
+                processor_note: self.processor_note.clone(),
+                startup_error: self.startup_error.clone(),
+                warning: self
+                    .document
+                    .as_ref()
+                    .and_then(|document| document.warning.clone()),
+                error: self
+                    .document
+                    .as_ref()
+                    .and_then(|document| document.error.clone()),
+            },
+        }
+    }
+
+    fn request_diagnostics_export(&mut self, model: &DiagnosticsModel) {
+        let Some(mut destination) = rfd::FileDialog::new()
+            .set_title("Save Rohditor diagnostics")
+            .set_file_name("rohditor-diagnostics.json")
+            .add_filter("JSON report", &["json"])
+            .save_file()
+        else {
+            return;
         };
-        let mut open = self.show_diagnostics;
-        diagnostics::show(context, &mut open, &model);
-        self.show_diagnostics = open;
-    }
-}
+        if destination.extension().is_none() {
+            destination.set_extension("json");
+        }
 
-fn initialize_gpu_runtime(
-    context: &eframe::CreationContext<'_>,
-    preference: ProcessorPreference,
-) -> std::io::Result<(Option<GpuRuntime>, Option<String>)> {
-    match preference {
-        ProcessorPreference::Cpu => Ok((None, None)),
-        ProcessorPreference::Auto => match create_gpu_runtime(context) {
-            Ok(runtime) => Ok((Some(runtime), None)),
-            Err(error) => Ok((
-                None,
-                Some(format!("GPU unavailable; using CPU preview ({error})")),
-            )),
-        },
-        ProcessorPreference::Gpu => create_gpu_runtime(context)
-            .map(|runtime| (Some(runtime), None))
-            .map_err(std::io::Error::other),
+        let report = diagnostics::report(model);
+        let result = File::options()
+            .write(true)
+            .create_new(true)
+            .open(&destination)
+            .map(BufWriter::new)
+            .map_err(|error| {
+                format!(
+                    "Could not create diagnostics report {}: {error}",
+                    destination.display()
+                )
+            })
+            .and_then(|mut writer| {
+                serde_json::to_writer_pretty(&mut writer, &report).map_err(|error| {
+                    format!(
+                        "Could not encode diagnostics report {}: {error}",
+                        destination.display()
+                    )
+                })?;
+                writer.flush().map_err(|error| {
+                    format!(
+                        "Could not finish diagnostics report {}: {error}",
+                        destination.display()
+                    )
+                })
+            });
+        match result {
+            Ok(()) => {
+                if let Some(document) = self.document.as_mut() {
+                    document.notice = Some(format!(
+                        "Saved support-safe diagnostics report to {}.",
+                        destination.display()
+                    ));
+                }
+            }
+            Err(error) => {
+                if let Some(document) = self.document.as_mut() {
+                    document.error = Some(error);
+                } else {
+                    self.startup_error = Some(error);
+                }
+            }
+        }
     }
-}
-
-fn create_gpu_runtime(context: &eframe::CreationContext<'_>) -> Result<GpuRuntime, String> {
-    let render_state = context.wgpu_render_state.clone().ok_or_else(|| {
-        "the selected UI renderer does not expose a shared wgpu device".to_owned()
-    })?;
-    let capabilities = GpuCapabilities::detect(
-        &render_state.adapter,
-        &render_state.device,
-        render_state.target_format,
-    );
-    if !capabilities.is_hardware_adapter() {
-        return Err(format!(
-            "wgpu selected the {} CPU adapter; GPU processing is intentionally disabled",
-            capabilities.adapter_name
-        ));
-    }
-    let processor = GpuPreviewProcessor::new(
-        &render_state.adapter,
-        &render_state.device,
-        &render_state.queue,
-        render_state.target_format,
-    )
-    .map_err(|error| error.to_string())?;
-    let capabilities = processor.capabilities();
-    info!(
-        adapter = capabilities.adapter_name,
-        backend = capabilities.backend,
-        device_type = capabilities.device_type,
-        target_format = capabilities.target_format,
-        timestamp_queries = capabilities.timestamp_queries,
-        "GPU preview processor initialized from eframe's shared wgpu state"
-    );
-    Ok(GpuRuntime {
-        render_state,
-        processor,
-    })
-}
-
-fn register_or_update_gpu_texture(
-    runtime: &GpuRuntime,
-    existing: Option<egui::TextureId>,
-    frame: &GpuPreviewFrame,
-) -> egui::TextureId {
-    let mut renderer = runtime.render_state.renderer.write();
-    if let Some(texture_id) = existing {
-        renderer.update_egui_texture_from_wgpu_texture(
-            &runtime.render_state.device,
-            frame.display_view(),
-            wgpu::FilterMode::Linear,
-            texture_id,
-        );
-        texture_id
-    } else {
-        renderer.register_native_texture(
-            &runtime.render_state.device,
-            frame.display_view(),
-            wgpu::FilterMode::Linear,
-        )
-    }
-}
-
-fn gpu_output_size((width, height): (u32, u32)) -> egui::Vec2 {
-    egui::vec2(width as f32, height as f32)
 }
 
 fn document_panel_model(document: &Document) -> DocumentPanelModel {
@@ -1374,6 +1244,13 @@ impl eframe::App for RohditorApp {
         self.show_adjustment_panel(context);
         self.show_viewport(context);
         self.show_developer_diagnostics(context);
+        // eframe normally wakes the event loop from the worker's
+        // `request_repaint` callback. Keep a short polling repaint while work
+        // is visible as a fallback for compositor/renderer combinations where
+        // that wake-up is delayed (observed with glow on Wayland).
+        if self.background_work_is_active() {
+            context.request_repaint_after(Duration::from_millis(16));
+        }
     }
 }
 

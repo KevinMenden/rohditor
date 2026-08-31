@@ -12,6 +12,10 @@ use tracing_subscriber::EnvFilter;
 
 use crate::app::RohditorApp;
 
+/// Stable Freedesktop/Wayland identity. Keep this equal to the installed
+/// desktop-file basename and icon name.
+const APPLICATION_ID: &str = "io.github.kevin.rohditor";
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 enum RendererPreference {
     /// Prefer wgpu and retry with glow if initialization fails.
@@ -106,14 +110,16 @@ fn launch(
     processor: ProcessorPreference,
     show_diagnostics: bool,
 ) -> eframe::Result {
-    let options = eframe::NativeOptions {
+    let mut options = eframe::NativeOptions {
         renderer,
         viewport: egui::ViewportBuilder::default()
             .with_title("Rohditor")
+            .with_app_id(APPLICATION_ID)
             .with_inner_size([1_280.0, 800.0])
             .with_min_inner_size([900.0, 600.0]),
         ..eframe::NativeOptions::default()
     };
+    configure_glow_fallback_event_loop(&mut options, renderer);
     eframe::run_native(
         "rohditor",
         options,
@@ -126,6 +132,31 @@ fn launch(
             )?))
         }),
     )
+}
+
+/// eframe's glow event loop did not reliably wake for worker repaint requests
+/// on the reference Plasma Wayland session. The normal renderer is native
+/// Wayland wgpu; make the legacy glow fallback use XWayland when it is already
+/// available so CPU fallback stays responsive.
+#[cfg(target_os = "linux")]
+fn configure_glow_fallback_event_loop(
+    options: &mut eframe::NativeOptions,
+    renderer: eframe::Renderer,
+) {
+    if matches!(renderer, eframe::Renderer::Glow) && std::env::var_os("DISPLAY").is_some() {
+        use winit::platform::x11::EventLoopBuilderExtX11 as _;
+
+        options.event_loop_builder = Some(Box::new(|builder| {
+            let _ = builder.with_x11();
+        }));
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn configure_glow_fallback_event_loop(
+    _options: &mut eframe::NativeOptions,
+    _renderer: eframe::Renderer,
+) {
 }
 
 fn init_tracing() {
@@ -143,7 +174,7 @@ fn init_tracing() {
 mod tests {
     use clap::Parser;
 
-    use super::{Arguments, ProcessorPreference, RendererPreference};
+    use super::{APPLICATION_ID, Arguments, ProcessorPreference, RendererPreference};
 
     #[test]
     fn processor_and_renderer_preferences_are_exposed_as_cli_choices() {
@@ -159,5 +190,13 @@ mod tests {
         assert_eq!(arguments.renderer, RendererPreference::Glow);
         assert_eq!(arguments.processor, ProcessorPreference::Cpu);
         assert!(arguments.diagnostics);
+    }
+
+    #[test]
+    fn wayland_identity_matches_the_distributed_desktop_file() {
+        assert_eq!(APPLICATION_ID, "io.github.kevin.rohditor");
+        let desktop_entry = include_str!("../../../assets/io.github.kevin.rohditor.desktop");
+        assert!(desktop_entry.contains("Icon=io.github.kevin.rohditor\n"));
+        assert!(desktop_entry.contains("StartupWMClass=io.github.kevin.rohditor\n"));
     }
 }

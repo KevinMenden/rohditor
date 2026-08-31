@@ -794,6 +794,13 @@ in `docs/ui-design-system.md`.
 
 ### Phase 8: MVP stabilization
 
+**Status (2026-08-31): complete.** The release CPU/CLI/GPU matrix passed on
+the current six-file Sony corpus, with the real RX 9070 XT Vulkan parity suite
+serialized for driver stability. The desktop now has support-safe diagnostics
+export, bounded corrupt-input fixtures, stable Wayland/Freedesktop metadata,
+an install helper, release measurements, and focused scheduler/GPU/event
+modules. See [`docs/mvp-stabilization.md`](docs/mvp-stabilization.md).
+
 #### Tasks
 
 1. Test all private samples through GUI and CLI in CPU mode.
@@ -931,7 +938,8 @@ These must be answered through input samples or implementation measurements rath
 
 ## 16. Immediate next action
 
-Phases 0 through 7 are complete, and Gate A is approved for the current corpus.
-The next implementation session should begin Phase 8 MVP stabilization: run the
-complete GUI/CLI backend matrix, harden diagnostics and malformed-input bounds,
-document release behavior, and produce the first measured release candidate.
+Phases 0 through 8 are complete, and Gate A is approved for the current corpus.
+The first measured MVP release candidate has passed the current CPU, GPU, and
+desktop validation matrix. The next implementation session should choose a
+post-MVP roadmap item from section 14, beginning with the user's highest-value
+editing capability rather than broadening the MVP further.

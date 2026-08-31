@@ -768,7 +768,7 @@ fn orientation_code(orientation: RawOrientation) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
     use rohditor_core::{CpuPipeline, PreviewOptions};
     use rohditor_raw::{
@@ -813,6 +813,7 @@ mod tests {
     #[test]
     #[ignore = "requires a locally available Vulkan-capable GPU; run cargo test -p rohditor-gpu -- --ignored"]
     fn gpu_preview_matches_cpu_reference_for_every_exif_orientation() {
+        let _gpu_test_guard = gpu_test_guard();
         let Some(processor) = gpu_test_processor() else {
             return;
         };
@@ -850,6 +851,7 @@ mod tests {
     #[test]
     #[ignore = "requires a locally available Vulkan-capable GPU; run cargo test -p rohditor-gpu -- --ignored"]
     fn resident_gpu_source_accepts_downstream_edits_without_a_reupload() {
+        let _gpu_test_guard = gpu_test_guard();
         let Some(processor) = gpu_test_processor() else {
             return;
         };
@@ -888,6 +890,7 @@ mod tests {
     #[test]
     #[ignore = "requires the private Sony ARW corpus and a Vulkan-capable GPU"]
     fn private_arw_gpu_preview_matches_cpu_reference_within_two_srgb_codes() {
+        let _gpu_test_guard = gpu_test_guard();
         let Some(processor) = gpu_test_processor() else {
             return;
         };
@@ -918,6 +921,7 @@ mod tests {
     #[test]
     #[ignore = "requires the private Sony ARW corpus and a Vulkan-capable GPU"]
     fn private_arw_cached_gpu_adjustment_performance_is_reported() {
+        let _gpu_test_guard = gpu_test_guard();
         let Some(processor) = gpu_test_processor() else {
             return;
         };
@@ -983,6 +987,18 @@ mod tests {
             gpu_frame.submission_time().as_secs_f64() * 1_000.0,
             resident_bytes as f64 / 1_048_576.0,
         );
+    }
+
+    /// The reference RADV stack is reliable for these tests one device at a
+    /// time, but concurrent device creation can destabilize the driver. Keep
+    /// this guard local to opt-in hardware tests; production preview work is
+    /// still asynchronous and uses the shared eframe device.
+    fn gpu_test_guard() -> MutexGuard<'static, ()> {
+        static GPU_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        GPU_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn gpu_test_processor() -> Option<GpuPreviewProcessor> {

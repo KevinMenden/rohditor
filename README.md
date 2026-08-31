@@ -3,8 +3,9 @@
 Rohditor is a Linux-first RAW photo editor being built for Sony `ILCE-6400`
 files. Decoder validation, the deterministic CPU reference pipeline, formal
 export layer, desktop editor, first GPU preview path, caching/performance pass,
-and Rohditor desktop design system (Phases 1 through 7) are complete. The next
-milestone is MVP stabilization described in [`plan.md`](plan.md).
+and Rohditor desktop design system through MVP stabilization (Phases 1 through
+8) are complete. The release matrix and current limits are in
+[`docs/mvp-stabilization.md`](docs/mvp-stabilization.md).
 
 ## Current capabilities
 
@@ -43,7 +44,9 @@ The desktop worker and GPU-preview contracts are documented in
 [`docs/export.md`](docs/export.md). Phase 6 measurements and their scope are in
 [`docs/preview-performance.md`](docs/preview-performance.md). Phase 7 visual
 tokens and component conventions are in
-[`docs/ui-design-system.md`](docs/ui-design-system.md).
+[`docs/ui-design-system.md`](docs/ui-design-system.md). Phase 8 release and
+installation guidance is in
+[`docs/mvp-stabilization.md`](docs/mvp-stabilization.md).
 
 ## Prerequisites
 

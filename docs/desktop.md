@@ -1,9 +1,11 @@
-# Phases 4 through 7 desktop application
+# Phases 4 through 8 desktop application
 
 Phase 4 provides the minimal `eframe` editor around the CPU reference pipeline.
 Phase 5 adds a downstream GPU preview processor while retaining that CPU path.
 Phase 6 makes preview work bounded, cancellable, cached, and observable.
 Phase 7 adds a Rohditor-owned visual system and responsive editor layout.
+Phase 8 hardens the backend matrix, diagnostics, desktop identity, and the
+asynchronous desktop-module boundaries.
 The desktop crate owns widgets and document coordination; the core and RAW
 crates remain independent of `egui`.
 
@@ -36,13 +38,18 @@ rohditor-desktop --processor cpu   # CPU preview only; no Rohditor GPU resources
 
 Pass `--diagnostics` to open the developer diagnostics window at startup. This
 is useful for repeatable smoke captures and support reports; it does not change
-the selected preview processor.
+the selected preview processor. **Save report…** writes support-safe JSON with
+versions, adapter facts, queue/cache/timing data, and displayed errors, but no
+source path or image contents. It refuses to overwrite an existing report.
 
 In `Auto`, a wgpu renderer supplies its existing adapter, device, and queue to
 the GPU processor. A CPU rasterizer, incompatible texture formats, or a later
 GPU preview failure produces a visible CPU fallback reason. `GPU` reports an
 initialization/rendering error rather than silently changing processors. `glow`
-does not expose shared wgpu state, so it supports CPU preview only.
+does not expose shared wgpu state, so it supports CPU preview only. On Linux
+with an available X server, glow is forced to XWayland because the reference
+eframe glow/Wayland event loop did not reliably wake for worker events; the
+default wgpu renderer remains native Wayland.
 
 ## Document and worker model
 
@@ -164,9 +171,10 @@ acceptance tolerance is at most two 8-bit sRGB codes per channel. The opt-in
 private worker test performs real asynchronous open, 2560-edge preview, and
 snapshot export with `DSC00851.ARW`.
 
-On the reference Plasma Wayland desktop, both glow and Vulkan/wgpu displayed a
-real A6400 preview correctly. The wgpu run selected the RX 9070 XT through
-RADV. GPU parity checks run against that Vulkan path. The **Diagnostics** window
+On the reference Plasma Wayland desktop, Vulkan/wgpu displayed real CPU and GPU
+A6400 previews correctly. The glow CPU fallback is validated through XWayland.
+The wgpu run selected the RX 9070 XT through RADV. GPU parity checks run against
+that Vulkan path. The **Diagnostics** window
 shows the four cache outcomes, CPU stage wall times, deterministic cache/render
 memory estimates, scheduler counters, CPU workspace reuse, GPU texture reuse,
 and GPU encode/submit plus queue-completion latency. Structured `tracing` events
@@ -177,4 +185,6 @@ Phase 6 release measurements put cached CPU and GPU edits well inside their
 timestamp queries on the reference system, so GPU queue-completion time is a
 conservative wall-latency measurement rather than isolated shader execution.
 See [`preview-performance.md`](preview-performance.md) for commands, numbers,
-memory scope, and tuning decisions.
+memory scope, and tuning decisions. See
+[`mvp-stabilization.md`](mvp-stabilization.md) for the full release matrix,
+install procedure, diagnostic-report contract, and current MVP limits.
