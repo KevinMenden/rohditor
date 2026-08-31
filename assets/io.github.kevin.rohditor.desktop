@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Rohditor
+Comment=Linux-first Sony RAW photo editor
+Exec=rohditor-desktop %f
+Icon=io.github.kevin.rohditor
+Terminal=false
+Categories=Graphics;Photography;
+MimeType=image/x-sony-arw;image/x-raw;
+StartupNotify=true
+StartupWMClass=io.github.kevin.rohditor

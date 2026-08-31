@@ -10,11 +10,11 @@ static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 fn unsupported_content_is_rejected_by_every_decoder_operation() -> Result<(), Box<dyn Error>> {
-    let input = TempInput::new("unsupported.bin", b"this is not a camera RAW file")?;
+    let input = fixture("not-a-raw.ARW");
 
-    assert_all_operations_fail(input.path());
+    assert_all_operations_fail(&input);
     assert!(matches!(
-        RawlerDecoder::default().probe(input.path()),
+        RawlerDecoder::default().probe(&input),
         Err(RawError::Unsupported { .. } | RawError::Corrupt { .. })
     ));
     Ok(())
@@ -22,14 +22,16 @@ fn unsupported_content_is_rejected_by_every_decoder_operation() -> Result<(), Bo
 
 #[test]
 fn incomplete_tiff_is_rejected_by_every_decoder_operation() -> Result<(), Box<dyn Error>> {
-    // Valid little-endian TIFF marker and root-IFD offset, followed by a cut-off IFD.
-    let input = TempInput::new(
-        "truncated.arw",
-        &[0x49, 0x49, 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, 0x01, 0x00],
-    )?;
+    let input = fixture("truncated-tiff.ARW");
 
-    assert_all_operations_fail(input.path());
+    assert_all_operations_fail(&input);
     Ok(())
+}
+
+fn fixture(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/synthetic/corrupt")
+        .join(name)
 }
 
 #[test]

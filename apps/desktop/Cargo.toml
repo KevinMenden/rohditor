@@ -13,9 +13,12 @@ clap.workspace = true
 eframe.workspace = true
 image.workspace = true
 rfd.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 rohditor-core = { path = "../../crates/core" }
 rohditor-gpu = { path = "../../crates/gpu" }
 rohditor-raw = { path = "../../crates/raw" }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 wgpu.workspace = true
+winit.workspace = true
