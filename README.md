@@ -44,9 +44,13 @@ The desktop worker and GPU-preview contracts are documented in
 [`docs/export.md`](docs/export.md). Phase 6 measurements and their scope are in
 [`docs/preview-performance.md`](docs/preview-performance.md). Phase 7 visual
 tokens and component conventions are in
-[`docs/ui-design-system.md`](docs/ui-design-system.md). Phase 8 release and
-installation guidance is in
-[`docs/mvp-stabilization.md`](docs/mvp-stabilization.md).
+[`docs/ui-design-system.md`](docs/ui-design-system.md). The completed MVP
+architecture and validation plan are in [`docs/plan.md`](docs/plan.md). Phase 8
+release and installation guidance is in
+[`docs/mvp-stabilization.md`](docs/mvp-stabilization.md). The selected next
+milestone—MHC demosaic, antialiased preview reconstruction, true 1:1 inspection,
+and a wider RAW-quality audit—is planned in
+[`docs/phase-9-image-quality.md`](docs/phase-9-image-quality.md).
 
 ## Prerequisites
 

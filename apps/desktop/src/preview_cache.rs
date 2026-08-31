@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use rohditor_core::{
     CpuPreviewWorkspace, CropPolicy, DemosaicAlgorithm, DemosaicedBase, DisplayRgbImage,
-    EditRecipe, MemoryEstimate, NormalizedPreview, OutputPolicy, PreviewOptions, WhiteBalance,
+    EditRecipe, MemoryEstimate, OutputPolicy, PreviewOptions, ReconstructedPreview, WhiteBalance,
 };
 use rohditor_raw::{RawFrame, RawOrientation, SourceIdentity};
 
@@ -11,7 +11,7 @@ use rohditor_raw::{RawFrame, RawOrientation, SourceIdentity};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PreviewCacheKeys {
     decoded: DecodedRawKey,
-    normalized: NormalizedMosaicKey,
+    reconstructed: ReconstructedCameraRgbKey,
     demosaiced: DemosaicedBaseKey,
     adjusted: AdjustedPreviewKey,
 }
@@ -31,17 +31,17 @@ impl PreviewCacheKeys {
             row_stride: frame.row_stride,
             samples: frame.mosaic.len(),
         };
-        let normalized = NormalizedMosaicKey {
+        let reconstructed = ReconstructedCameraRgbKey {
             decoded: decoded.clone(),
             crop_policy: options.render.crop_policy,
             max_long_edge: options.max_long_edge,
-            normalization_version: 1,
+            algorithm: options.render.demosaic,
+            reconstruction_version: 2,
         };
         let demosaiced = DemosaicedBaseKey {
-            normalized: normalized.clone(),
+            reconstructed: reconstructed.clone(),
             recipe_schema_version: recipe.schema_version,
             white_balance: WhiteBalanceKey::from(recipe.white_balance),
-            algorithm: options.render.demosaic,
         };
         let adjusted = AdjustedPreviewKey {
             demosaiced: demosaiced.clone(),
@@ -55,7 +55,7 @@ impl PreviewCacheKeys {
         };
         Self {
             decoded,
-            normalized,
+            reconstructed,
             demosaiced,
             adjusted,
         }
@@ -73,19 +73,19 @@ struct DecodedRawKey {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct NormalizedMosaicKey {
+struct ReconstructedCameraRgbKey {
     decoded: DecodedRawKey,
     crop_policy: CropPolicy,
     max_long_edge: usize,
-    normalization_version: u8,
+    algorithm: DemosaicAlgorithm,
+    reconstruction_version: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DemosaicedBaseKey {
-    normalized: NormalizedMosaicKey,
+    reconstructed: ReconstructedCameraRgbKey,
     recipe_schema_version: u32,
     white_balance: WhiteBalanceKey,
-    algorithm: DemosaicAlgorithm,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,7 +124,7 @@ struct AdjustedPreviewKey {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct PreviewCacheHits {
     pub decoded: bool,
-    pub normalized: bool,
+    pub reconstructed: bool,
     pub demosaiced: bool,
     pub adjusted: bool,
 }
@@ -136,9 +136,9 @@ struct DecodedEntry {
 }
 
 #[derive(Debug)]
-struct NormalizedEntry {
-    key: NormalizedMosaicKey,
-    preview: NormalizedPreview,
+struct ReconstructedEntry {
+    key: ReconstructedCameraRgbKey,
+    preview: ReconstructedPreview,
 }
 
 #[derive(Debug)]
@@ -159,7 +159,7 @@ pub(crate) struct AdjustedPreviewEntry {
 #[derive(Debug, Default)]
 pub(crate) struct PreviewCache {
     decoded: Option<DecodedEntry>,
-    normalized: Option<NormalizedEntry>,
+    reconstructed: Option<ReconstructedEntry>,
     demosaiced: Option<DemosaicedEntry>,
     adjusted: Option<AdjustedPreviewEntry>,
     workspace: CpuPreviewWorkspace,
@@ -182,17 +182,17 @@ impl PreviewCache {
                 key: keys.decoded.clone(),
                 frame: Arc::clone(frame),
             });
-            self.normalized = None;
+            self.reconstructed = None;
             self.demosaiced = None;
             self.adjusted = None;
         }
 
-        let normalized = self
-            .normalized
+        let reconstructed = self
+            .reconstructed
             .as_ref()
-            .is_some_and(|entry| entry.key == keys.normalized);
-        if !normalized {
-            self.normalized = None;
+            .is_some_and(|entry| entry.key == keys.reconstructed);
+        if !reconstructed {
+            self.reconstructed = None;
             self.demosaiced = None;
             self.adjusted = None;
         }
@@ -216,26 +216,26 @@ impl PreviewCache {
 
         PreviewCacheHits {
             decoded,
-            normalized,
+            reconstructed,
             demosaiced,
             adjusted,
         }
     }
 
-    pub(crate) fn normalized(&self, keys: &PreviewCacheKeys) -> Option<&NormalizedPreview> {
-        self.normalized
+    pub(crate) fn reconstructed(&self, keys: &PreviewCacheKeys) -> Option<&ReconstructedPreview> {
+        self.reconstructed
             .as_ref()
-            .filter(|entry| entry.key == keys.normalized)
+            .filter(|entry| entry.key == keys.reconstructed)
             .map(|entry| &entry.preview)
     }
 
-    pub(crate) fn insert_normalized(
+    pub(crate) fn insert_reconstructed(
         &mut self,
         keys: &PreviewCacheKeys,
-        preview: NormalizedPreview,
+        preview: ReconstructedPreview,
     ) {
-        self.normalized = Some(NormalizedEntry {
-            key: keys.normalized.clone(),
+        self.reconstructed = Some(ReconstructedEntry {
+            key: keys.reconstructed.clone(),
             preview,
         });
         self.demosaiced = None;
@@ -312,8 +312,8 @@ impl PreviewCache {
         let decoded = self.decoded.as_ref().map_or(0, |entry| {
             entry.frame.mosaic.len().saturating_mul(size_of::<u16>())
         });
-        let normalized = self
-            .normalized
+        let reconstructed = self
+            .reconstructed
             .as_ref()
             .map_or(0, |entry| entry.preview.buffer_bytes());
         let demosaiced = self
@@ -325,7 +325,7 @@ impl PreviewCache {
             .as_ref()
             .map_or(0, |entry| entry.image.data().len());
         decoded
-            .saturating_add(normalized)
+            .saturating_add(reconstructed)
             .saturating_add(demosaiced)
             .saturating_add(adjusted)
             .saturating_add(self.workspace.buffer_bytes())

@@ -5,7 +5,7 @@
 
 use eframe::egui;
 
-use crate::coordinator::{JobKind, WorkerEvent};
+use crate::coordinator::{JobKind, PreviewResolution, WorkerEvent};
 use crate::ui::viewport::PreviewSource;
 
 use super::{DocumentPreviewDiagnostics, RohditorApp, install_texture};
@@ -56,7 +56,7 @@ impl RohditorApp {
                 if let Some(document) = self.document.as_mut().filter(|doc| doc.id == document_id)
                     && !matches!(
                         document.preview_source,
-                        Some(PreviewSource::DevelopedCpu | PreviewSource::DevelopedGpu)
+                        Some(source) if source.is_developed()
                     )
                 {
                     install_texture(context, document, image, PreviewSource::Embedded);
@@ -79,14 +79,27 @@ impl RohditorApp {
             }
             WorkerEvent::PreviewReady {
                 ticket,
+                resolution,
                 image,
                 diagnostics,
             } => {
-                if self.gpu.is_none()
-                    && let Some(document) = self.document.as_mut()
+                if let Some(document) = self.document.as_mut()
                     && ticket.is_current(document.id, document.edits.revision())
+                    && document.source_scale_requested
+                        == (resolution == PreviewResolution::SourceScale)
+                    && (self.gpu.is_none() || resolution == PreviewResolution::SourceScale)
                 {
-                    install_texture(context, document, image, PreviewSource::DevelopedCpu);
+                    let source = if resolution == PreviewResolution::SourceScale {
+                        PreviewSource::OneToOneCpu
+                    } else {
+                        PreviewSource::developed(diagnostics.algorithm, false)
+                    };
+                    install_texture(context, document, image, source);
+                    if resolution == PreviewResolution::SourceScale {
+                        document.view.actual_size(context.input(|input| input.time));
+                    } else {
+                        document.view.fit(context.input(|input| input.time));
+                    }
                     document.preview_status = None;
                     document.last_preview_time = Some(diagnostics.timings.total);
                     document.preview_diagnostics =

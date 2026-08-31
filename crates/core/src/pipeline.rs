@@ -5,15 +5,17 @@ use rohditor_raw::{RawFileInfo, RawFrame, RawOrientation};
 
 use crate::color::{CameraColorTransform, camera_color_transform};
 use crate::cpu::{
-    apply_adjustments_cancellable, apply_camera_color_transform,
-    apply_camera_color_transform_cancellable, demosaic_cancellable,
-    normalize_raw_preview_cancellable, render_display_srgb8_cancellable,
+    apply_adjustments_cancellable, apply_camera_color_transform_cancellable,
+    apply_white_balance_cancellable, normalize_raw_cancellable, preview_dimensions,
+    render_display_srgb8_cancellable,
 };
+use crate::demosaic::demosaic_cancellable;
+use crate::resample::resize_area_cancellable;
 use crate::{
-    CancellationToken, DisplayRgbImage, DitherMode, EditRecipe, ExportImage, LinearRgbImage,
-    MosaicImage, OutputBitDepth, PipelineError, WhiteBalance, apply_adjustments, demosaic,
-    normalize_raw, normalize_raw_preview, render_display_srgb8, render_display_srgb8_dithered,
-    render_display_srgb16, white_balance_gains,
+    CancellationToken, DemosaicAlgorithm, DisplayRgbImage, DitherMode, EditRecipe, ExportImage,
+    LinearRgbImage, OutputBitDepth, PipelineError, WhiteBalance, WhiteBalanceGains,
+    apply_adjustments, render_display_srgb8, render_display_srgb8_dithered, render_display_srgb16,
+    white_balance_gains,
 };
 
 /// Default longest edge of an interactively developed preview.
@@ -28,13 +30,6 @@ pub enum CropPolicy {
     ActiveArea,
     #[default]
     Recommended,
-}
-
-/// Selectable CPU demosaic algorithms. The first reference is deliberately simple.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum DemosaicAlgorithm {
-    #[default]
-    Bilinear,
 }
 
 /// Explicit output clipping/gamut policy.
@@ -74,6 +69,7 @@ pub struct StageTimings {
     pub metadata: Duration,
     pub normalization: Duration,
     pub demosaic: Duration,
+    pub resampling: Duration,
     pub color_conversion: Duration,
     pub adjustments: Duration,
     pub output_conversion: Duration,
@@ -85,27 +81,34 @@ pub struct StageTimings {
 pub struct MemoryEstimate {
     pub decoded_raw_bytes: usize,
     pub normalized_mosaic_bytes: usize,
+    pub resample_intermediate_bytes: usize,
     pub linear_rgb_bytes: usize,
     pub display_rgb_bytes: usize,
     pub estimated_peak_bytes: usize,
 }
 
-/// Resolution-limited, normalized sensor mosaic retained between preview base
-/// rebuilds. White balance and demosaic selection have not been applied yet.
+/// Reduced, unbalanced camera-native RGB retained between preview base rebuilds.
+///
+/// The full crop has already been normalized, demosaiced, and antialiased down
+/// to the fixed preview dimensions. White balance, camera color conversion, and
+/// downstream edits have not been applied yet.
 #[derive(Debug, Clone)]
-pub struct NormalizedPreview {
-    mosaic: MosaicImage<f32>,
+pub struct ReconstructedPreview {
+    image: LinearRgbImage<f32>,
     info: RawFileInfo,
     camera_transform: CameraColorTransform,
     timings: StageTimings,
     decoded_raw_bytes: usize,
+    normalized_mosaic_bytes: usize,
+    resample_intermediate_bytes: usize,
+    preparation_peak_bytes: usize,
 }
 
-impl NormalizedPreview {
-    /// Normalized CFA samples, mainly exposed for diagnostics and benchmarks.
+impl ReconstructedPreview {
+    /// Reduced unbalanced camera-native RGB samples.
     #[must_use]
-    pub const fn image(&self) -> &MosaicImage<f32> {
-        &self.mosaic
+    pub const fn image(&self) -> &LinearRgbImage<f32> {
+        &self.image
     }
 
     #[must_use]
@@ -113,10 +116,25 @@ impl NormalizedPreview {
         self.timings
     }
 
-    /// Bytes held by the normalized image buffer itself.
+    #[must_use]
+    pub const fn normalized_mosaic_bytes(&self) -> usize {
+        self.normalized_mosaic_bytes
+    }
+
+    #[must_use]
+    pub const fn resample_intermediate_bytes(&self) -> usize {
+        self.resample_intermediate_bytes
+    }
+
+    #[must_use]
+    pub const fn preparation_peak_bytes(&self) -> usize {
+        self.preparation_peak_bytes
+    }
+
+    /// Bytes held by the reduced camera-RGB buffer itself.
     #[must_use]
     pub fn buffer_bytes(&self) -> usize {
-        self.mosaic.data().len().saturating_mul(size_of::<f32>())
+        self.image.data().len().saturating_mul(size_of::<f32>())
     }
 }
 
@@ -149,6 +167,9 @@ pub struct DemosaicedBase {
     white_balance: WhiteBalance,
     timings: StageTimings,
     decoded_raw_bytes: usize,
+    normalized_mosaic_bytes: usize,
+    resample_intermediate_bytes: usize,
+    preparation_peak_bytes: usize,
 }
 
 impl DemosaicedBase {
@@ -171,6 +192,21 @@ impl DemosaicedBase {
     #[must_use]
     pub const fn timings(&self) -> StageTimings {
         self.timings
+    }
+
+    #[must_use]
+    pub const fn normalized_mosaic_bytes(&self) -> usize {
+        self.normalized_mosaic_bytes
+    }
+
+    #[must_use]
+    pub const fn resample_intermediate_bytes(&self) -> usize {
+        self.resample_intermediate_bytes
+    }
+
+    #[must_use]
+    pub const fn preparation_peak_bytes(&self) -> usize {
+        self.preparation_peak_bytes
     }
 
     /// Bytes held by the scene-linear RGB image buffer itself.
@@ -237,7 +273,7 @@ impl CpuPipeline {
         options: RenderOptions,
     ) -> Result<RenderResult, PipelineError> {
         let total_started = Instant::now();
-        let base = prepare_base(frame, recipe, options, BaseResolution::Full)?;
+        let base = prepare_base(frame, recipe, options)?;
         let mut result = render_base(base, recipe, options.output_policy)?;
         result.timings.total = total_started.elapsed();
         Ok(result)
@@ -270,64 +306,63 @@ impl CpuPipeline {
         options: PreviewOptions,
         cancellation: &CancellationToken,
     ) -> Result<DemosaicedBase, PipelineError> {
-        let normalized =
-            self.prepare_preview_normalized_cancellable(frame, options, cancellation)?;
-        let mut base = self.prepare_preview_base_from_normalized_cancellable(
-            &normalized,
+        let reconstructed =
+            self.prepare_preview_reconstruction_cancellable(frame, options, cancellation)?;
+        let mut base = self.prepare_preview_base_from_reconstruction_cancellable(
+            &reconstructed,
             recipe,
-            options.render.demosaic,
             cancellation,
         )?;
-        base.timings.metadata += normalized.timings.metadata;
-        base.timings.normalization = normalized.timings.normalization;
-        base.timings.total += normalized.timings.total;
+        base.timings.metadata += reconstructed.timings.metadata;
+        base.timings.normalization = reconstructed.timings.normalization;
+        base.timings.demosaic = reconstructed.timings.demosaic;
+        base.timings.resampling = reconstructed.timings.resampling;
+        base.timings.total += reconstructed.timings.total;
         Ok(base)
     }
 
-    /// Normalize a resolution-limited sensor mosaic for reuse across white
-    /// balance and demosaic changes.
-    pub fn prepare_preview_normalized(
+    /// Reconstruct and antialias a camera-native preview base for reuse across
+    /// white-balance and downstream edit changes.
+    pub fn prepare_preview_reconstruction(
         &self,
         frame: &RawFrame,
         options: PreviewOptions,
-    ) -> Result<NormalizedPreview, PipelineError> {
-        self.prepare_preview_normalized_cancellable(frame, options, &CancellationToken::new())
+    ) -> Result<ReconstructedPreview, PipelineError> {
+        self.prepare_preview_reconstruction_cancellable(frame, options, &CancellationToken::new())
     }
 
-    /// Cancellable form of [`Self::prepare_preview_normalized`].
-    pub fn prepare_preview_normalized_cancellable(
+    /// Cancellable form of [`Self::prepare_preview_reconstruction`].
+    pub fn prepare_preview_reconstruction_cancellable(
         &self,
         frame: &RawFrame,
         options: PreviewOptions,
         cancellation: &CancellationToken,
-    ) -> Result<NormalizedPreview, PipelineError> {
-        prepare_normalized_preview(frame, options, cancellation)
+    ) -> Result<ReconstructedPreview, PipelineError> {
+        prepare_reconstructed_preview(frame, options, cancellation)
     }
 
-    /// Demosaic and color-convert a retained normalized preview.
-    pub fn prepare_preview_base_from_normalized(
+    /// Apply white balance and camera color conversion to a retained
+    /// reconstructed preview.
+    pub fn prepare_preview_base_from_reconstruction(
         &self,
-        normalized: &NormalizedPreview,
+        reconstructed: &ReconstructedPreview,
         recipe: &EditRecipe,
-        algorithm: DemosaicAlgorithm,
     ) -> Result<DemosaicedBase, PipelineError> {
-        self.prepare_preview_base_from_normalized_cancellable(
-            normalized,
+        self.prepare_preview_base_from_reconstruction_cancellable(
+            reconstructed,
             recipe,
-            algorithm,
             &CancellationToken::new(),
         )
     }
 
-    /// Cancellable form of [`Self::prepare_preview_base_from_normalized`].
-    pub fn prepare_preview_base_from_normalized_cancellable(
+    /// Cancellable form of [`Self::prepare_preview_base_from_reconstruction`].
+    pub fn prepare_preview_base_from_reconstruction_cancellable(
         &self,
-        normalized: &NormalizedPreview,
+        reconstructed: &ReconstructedPreview,
         recipe: &EditRecipe,
-        algorithm: DemosaicAlgorithm,
         cancellation: &CancellationToken,
     ) -> Result<DemosaicedBase, PipelineError> {
-        prepare_demosaiced_preview(normalized, recipe, algorithm, cancellation)
+        prepare_demosaiced_preview(reconstructed, recipe, cancellation)
     }
 
     /// Apply downstream edits and output conversion to a reusable preview base.
@@ -386,16 +421,15 @@ impl CpuPipeline {
             .len()
             .checked_mul(size_of::<f32>())
             .ok_or_else(|| dimension_overflow(base.image.width(), base.image.height()))?;
-        let retained_peak = memory_estimate(base, size_of::<u8>())?
-            .estimated_peak_bytes
-            .checked_add(retained_base_bytes)
-            .ok_or_else(|| dimension_overflow(base.image.width(), base.image.height()))?;
-        validate_working_set(retained_peak)?;
         let mut memory = memory_estimate(base, size_of::<u8>())?;
-        memory.estimated_peak_bytes = memory
-            .estimated_peak_bytes
+        let retained_peak = base
+            .decoded_raw_bytes
             .checked_add(retained_base_bytes)
+            .and_then(|bytes| bytes.checked_add(retained_base_bytes))
+            .and_then(|bytes| bytes.checked_add(memory.display_rgb_bytes))
             .ok_or_else(|| dimension_overflow(base.image.width(), base.image.height()))?;
+        memory.estimated_peak_bytes = memory.estimated_peak_bytes.max(retained_peak);
+        validate_working_set(memory.estimated_peak_bytes)?;
 
         let working = workspace.reset_from(base);
         cancellation.checkpoint()?;
@@ -420,8 +454,8 @@ impl CpuPipeline {
         })
     }
 
-    /// Render an sRGB8 preview from a CFA-phase-preserving, resolution-limited
-    /// sensor mosaic.
+    /// Render an sRGB8 preview after full-crop demosaic and antialiased linear
+    /// reduction.
     pub fn render_preview(
         &self,
         frame: &RawFrame,
@@ -435,6 +469,45 @@ impl CpuPipeline {
         Ok(result)
     }
 
+    /// Render a cancellable full-resolution 8-bit display image for temporary
+    /// one-source-pixel inspection in the desktop viewport.
+    ///
+    /// Unlike the retained preview-base path, this mutates one full-resolution
+    /// linear buffer in place and releases it after output conversion. This
+    /// keeps source-scale inspection within the Phase 9 transient-memory
+    /// budget without making a 24 MP linear cache resident.
+    pub fn render_source_scale_preview_cancellable(
+        &self,
+        frame: &RawFrame,
+        recipe: &EditRecipe,
+        options: RenderOptions,
+        cancellation: &CancellationToken,
+    ) -> Result<RenderResult, PipelineError> {
+        let total_started = Instant::now();
+        let mut base = prepare_base_cancellable(frame, recipe, options, cancellation)?;
+        let memory = memory_estimate(&base, size_of::<u8>())?;
+        let adjustments_started = Instant::now();
+        apply_adjustments_cancellable(&mut base.image, recipe, cancellation)?;
+        base.timings.adjustments = adjustments_started.elapsed();
+        let orientation = recipe
+            .orientation_override
+            .unwrap_or(base.source_orientation);
+        let output_started = Instant::now();
+        let image = render_display_srgb8_cancellable(
+            &base.image,
+            orientation,
+            options.output_policy,
+            cancellation,
+        )?;
+        base.timings.output_conversion = output_started.elapsed();
+        base.timings.total = total_started.elapsed();
+        Ok(RenderResult {
+            image,
+            timings: base.timings,
+            memory,
+        })
+    }
+
     /// Render full-resolution output samples for a subsequent file export.
     pub fn render_export(
         &self,
@@ -445,7 +518,7 @@ impl CpuPipeline {
         dithering: DitherMode,
     ) -> Result<ExportRenderResult, PipelineError> {
         let total_started = Instant::now();
-        let mut base = prepare_base(frame, recipe, options, BaseResolution::Full)?;
+        let mut base = prepare_base(frame, recipe, options)?;
         let memory = memory_estimate(&base, bit_depth.bytes_per_sample())?;
         let adjustments_started = Instant::now();
         apply_adjustments(&mut base.image, recipe)?;
@@ -480,21 +553,21 @@ impl CpuPipeline {
     }
 }
 
-fn prepare_normalized_preview(
+fn prepare_reconstructed_preview(
     frame: &RawFrame,
     options: PreviewOptions,
     cancellation: &CancellationToken,
-) -> Result<NormalizedPreview, PipelineError> {
+) -> Result<ReconstructedPreview, PipelineError> {
     let total_started = Instant::now();
     cancellation.checkpoint()?;
-    validate_base_working_set(frame, BaseResolution::Preview(options.max_long_edge))?;
+    validate_preview_working_set(frame, options.max_long_edge)?;
 
     let metadata_started = Instant::now();
     let metadata_span = tracing::info_span!(
         "cpu.metadata",
         width = frame.info.width,
         height = frame.info.height,
-        purpose = "preview normalization"
+        purpose = "preview reconstruction"
     );
     let metadata_guard = metadata_span.enter();
     let camera_transform = camera_color_transform(&frame.info)?;
@@ -502,38 +575,87 @@ fn prepare_normalized_preview(
     drop(metadata_guard);
 
     let normalization_started = Instant::now();
-    let mosaic = normalize_raw_preview_cancellable(
-        frame,
-        options.render.crop_policy,
-        options.max_long_edge,
-        cancellation,
-    )?;
+    let mosaic = normalize_raw_cancellable(frame, options.render.crop_policy, cancellation)?;
     let normalization = normalization_started.elapsed();
     let decoded_raw_bytes = frame
         .mosaic
         .len()
         .checked_mul(size_of::<u16>())
         .ok_or_else(|| dimension_overflow(frame.info.width, frame.info.height))?;
+    let source_width = mosaic.width();
+    let source_height = mosaic.height();
+    let normalized_mosaic_bytes = mosaic
+        .data()
+        .len()
+        .checked_mul(size_of::<f32>())
+        .ok_or_else(|| dimension_overflow(source_width, source_height))?;
+
+    let demosaic_started = Instant::now();
+    let full_linear = demosaic_cancellable(
+        &mosaic,
+        WhiteBalanceGains::identity(),
+        options.render.demosaic,
+        cancellation,
+    )?;
+    let demosaic = demosaic_started.elapsed();
+    drop(mosaic);
+
+    let (target_width, target_height) =
+        preview_dimensions(source_width, source_height, options.max_long_edge)?;
+    let unchanged_dimensions = source_width == target_width && source_height == target_height;
+    let resample_intermediate_bytes = if unchanged_dimensions {
+        0
+    } else {
+        target_width
+            .checked_mul(source_height)
+            .and_then(|pixels| pixels.checked_mul(3 * size_of::<f32>()))
+            .ok_or_else(|| dimension_overflow(target_width, source_height))?
+    };
+    let reduced_linear_bytes = target_width
+        .checked_mul(target_height)
+        .and_then(|pixels| pixels.checked_mul(3 * size_of::<f32>()))
+        .ok_or_else(|| dimension_overflow(target_width, target_height))?;
+    let full_linear_bytes = source_width
+        .checked_mul(source_height)
+        .and_then(|pixels| pixels.checked_mul(3 * size_of::<f32>()))
+        .ok_or_else(|| dimension_overflow(source_width, source_height))?;
+    let preparation_peak_bytes = preview_preparation_peak(
+        decoded_raw_bytes,
+        normalized_mosaic_bytes,
+        full_linear_bytes,
+        resample_intermediate_bytes,
+        reduced_linear_bytes,
+        unchanged_dimensions,
+    )?;
+    validate_working_set(preparation_peak_bytes)?;
+
+    let resampling_started = Instant::now();
+    let image = resize_area_cancellable(full_linear, target_width, target_height, cancellation)?;
+    let resampling = resampling_started.elapsed();
     let timings = StageTimings {
         metadata,
         normalization,
+        demosaic,
+        resampling,
         total: total_started.elapsed(),
         ..StageTimings::default()
     };
 
-    Ok(NormalizedPreview {
-        mosaic,
+    Ok(ReconstructedPreview {
+        image,
         info: frame.info.clone(),
         camera_transform,
         timings,
         decoded_raw_bytes,
+        normalized_mosaic_bytes,
+        resample_intermediate_bytes,
+        preparation_peak_bytes,
     })
 }
 
 fn prepare_demosaiced_preview(
-    normalized: &NormalizedPreview,
+    reconstructed: &ReconstructedPreview,
     recipe: &EditRecipe,
-    algorithm: DemosaicAlgorithm,
     cancellation: &CancellationToken,
 ) -> Result<DemosaicedBase, PipelineError> {
     let total_started = Instant::now();
@@ -541,30 +663,27 @@ fn prepare_demosaiced_preview(
     let metadata_started = Instant::now();
     let metadata_span = tracing::info_span!(
         "cpu.metadata",
-        width = normalized.mosaic.width(),
-        height = normalized.mosaic.height(),
+        width = reconstructed.image.width(),
+        height = reconstructed.image.height(),
         purpose = "preview white balance"
     );
     let metadata_guard = metadata_span.enter();
     recipe.validate()?;
-    let gains = white_balance_gains(&normalized.info, recipe.white_balance)?;
+    let gains = white_balance_gains(&reconstructed.info, recipe.white_balance)?;
     let metadata = metadata_started.elapsed();
     drop(metadata_guard);
 
-    let demosaic_started = Instant::now();
-    let mut image = demosaic_cancellable(&normalized.mosaic, gains, algorithm, cancellation)?;
-    let demosaic = demosaic_started.elapsed();
-
     let color_started = Instant::now();
+    let mut image = reconstructed.image.clone();
+    apply_white_balance_cancellable(&mut image, gains, cancellation)?;
     apply_camera_color_transform_cancellable(
         &mut image,
-        &normalized.camera_transform,
+        &reconstructed.camera_transform,
         cancellation,
     )?;
     let color_conversion = color_started.elapsed();
     let timings = StageTimings {
         metadata,
-        demosaic,
         color_conversion,
         total: total_started.elapsed(),
         ..StageTimings::default()
@@ -572,27 +691,33 @@ fn prepare_demosaiced_preview(
 
     Ok(DemosaicedBase {
         image,
-        source_orientation: normalized.info.orientation,
+        source_orientation: reconstructed.info.orientation,
         white_balance: recipe.white_balance,
         timings,
-        decoded_raw_bytes: normalized.decoded_raw_bytes,
+        decoded_raw_bytes: reconstructed.decoded_raw_bytes,
+        normalized_mosaic_bytes: reconstructed.normalized_mosaic_bytes,
+        resample_intermediate_bytes: reconstructed.resample_intermediate_bytes,
+        preparation_peak_bytes: reconstructed.preparation_peak_bytes,
     })
-}
-
-#[derive(Debug, Clone, Copy)]
-enum BaseResolution {
-    Full,
-    Preview(usize),
 }
 
 fn prepare_base(
     frame: &RawFrame,
     recipe: &EditRecipe,
     options: RenderOptions,
-    resolution: BaseResolution,
+) -> Result<DemosaicedBase, PipelineError> {
+    prepare_base_cancellable(frame, recipe, options, &CancellationToken::new())
+}
+
+fn prepare_base_cancellable(
+    frame: &RawFrame,
+    recipe: &EditRecipe,
+    options: RenderOptions,
+    cancellation: &CancellationToken,
 ) -> Result<DemosaicedBase, PipelineError> {
     let total_started = Instant::now();
-    validate_base_working_set(frame, resolution)?;
+    cancellation.checkpoint()?;
+    validate_base_working_set(frame)?;
     let metadata_started = Instant::now();
     let metadata_span = tracing::info_span!(
         "cpu.metadata",
@@ -608,21 +733,21 @@ fn prepare_base(
     drop(metadata_guard);
 
     let normalization_started = Instant::now();
-    let normalized = match resolution {
-        BaseResolution::Full => normalize_raw(frame, options.crop_policy)?,
-        BaseResolution::Preview(max_long_edge) => {
-            normalize_raw_preview(frame, options.crop_policy, max_long_edge)?
-        }
-    };
+    let normalized = normalize_raw_cancellable(frame, options.crop_policy, cancellation)?;
     let normalization = normalization_started.elapsed();
+    let normalized_mosaic_bytes = normalized
+        .data()
+        .len()
+        .checked_mul(size_of::<f32>())
+        .ok_or_else(|| dimension_overflow(normalized.width(), normalized.height()))?;
 
     let demosaic_started = Instant::now();
-    let mut linear = demosaic(&normalized, gains, options.demosaic)?;
+    let mut linear = demosaic_cancellable(&normalized, gains, options.demosaic, cancellation)?;
     let demosaic = demosaic_started.elapsed();
     drop(normalized);
 
     let color_started = Instant::now();
-    apply_camera_color_transform(&mut linear, &camera_transform)?;
+    apply_camera_color_transform_cancellable(&mut linear, &camera_transform, cancellation)?;
     let color_conversion = color_started.elapsed();
 
     let decoded_raw_bytes = frame
@@ -630,6 +755,15 @@ fn prepare_base(
         .len()
         .checked_mul(size_of::<u16>())
         .ok_or_else(|| dimension_overflow(frame.info.width, frame.info.height))?;
+    let linear_rgb_bytes = linear
+        .data()
+        .len()
+        .checked_mul(size_of::<f32>())
+        .ok_or_else(|| dimension_overflow(linear.width(), linear.height()))?;
+    let preparation_peak_bytes = decoded_raw_bytes
+        .checked_add(normalized_mosaic_bytes)
+        .and_then(|bytes| bytes.checked_add(linear_rgb_bytes))
+        .ok_or_else(|| dimension_overflow(linear.width(), linear.height()))?;
 
     let mut timings = StageTimings {
         metadata,
@@ -646,6 +780,9 @@ fn prepare_base(
         white_balance: recipe.white_balance,
         timings,
         decoded_raw_bytes,
+        normalized_mosaic_bytes,
+        resample_intermediate_bytes: 0,
+        preparation_peak_bytes,
     })
 }
 
@@ -683,6 +820,7 @@ fn render_base(
     base.timings.total = base.timings.metadata
         + base.timings.normalization
         + base.timings.demosaic
+        + base.timings.resampling
         + base.timings.color_conversion
         + base.timings.adjustments
         + base.timings.output_conversion;
@@ -704,9 +842,8 @@ fn memory_estimate(
         .checked_mul(height)
         .ok_or_else(|| dimension_overflow(width, height))?;
     let decoded_raw_bytes = base.decoded_raw_bytes;
-    let normalized_mosaic_bytes = pixels
-        .checked_mul(size_of::<f32>())
-        .ok_or_else(|| dimension_overflow(width, height))?;
+    let normalized_mosaic_bytes = base.normalized_mosaic_bytes;
+    let resample_intermediate_bytes = base.resample_intermediate_bytes;
     let linear_rgb_bytes = pixels
         .checked_mul(3)
         .and_then(|elements| elements.checked_mul(size_of::<f32>()))
@@ -714,10 +851,6 @@ fn memory_estimate(
     let display_rgb_bytes = pixels
         .checked_mul(3)
         .and_then(|elements| elements.checked_mul(display_sample_bytes))
-        .ok_or_else(|| dimension_overflow(width, height))?;
-    let demosaic_peak = decoded_raw_bytes
-        .checked_add(normalized_mosaic_bytes)
-        .and_then(|bytes| bytes.checked_add(linear_rgb_bytes))
         .ok_or_else(|| dimension_overflow(width, height))?;
     let output_peak = decoded_raw_bytes
         .checked_add(linear_rgb_bytes)
@@ -727,46 +860,91 @@ fn memory_estimate(
     let estimate = MemoryEstimate {
         decoded_raw_bytes,
         normalized_mosaic_bytes,
+        resample_intermediate_bytes,
         linear_rgb_bytes,
         display_rgb_bytes,
-        estimated_peak_bytes: demosaic_peak.max(output_peak),
+        estimated_peak_bytes: base.preparation_peak_bytes.max(output_peak),
     };
     validate_working_set(estimate.estimated_peak_bytes)?;
     Ok(estimate)
 }
 
-fn validate_base_working_set(
-    frame: &RawFrame,
-    resolution: BaseResolution,
-) -> Result<(), PipelineError> {
+fn validate_base_working_set(frame: &RawFrame) -> Result<(), PipelineError> {
     let full_pixels = frame
         .info
         .width
         .checked_mul(frame.info.height)
         .ok_or_else(|| dimension_overflow(frame.info.width, frame.info.height))?;
-    let pixels = match resolution {
-        BaseResolution::Full => full_pixels,
-        BaseResolution::Preview(max_long_edge)
-            if max_long_edge < frame.info.width.max(frame.info.height) =>
-        {
-            full_pixels.min(
-                max_long_edge
-                    .checked_mul(max_long_edge)
-                    .ok_or_else(|| dimension_overflow(max_long_edge, max_long_edge))?,
-            )
-        }
-        BaseResolution::Preview(_) => full_pixels,
-    };
     let decoded_raw_bytes = frame
         .mosaic
         .len()
         .checked_mul(size_of::<u16>())
         .ok_or_else(|| dimension_overflow(frame.info.width, frame.info.height))?;
-    let working_bytes = pixels
+    let working_bytes = full_pixels
         .checked_mul(size_of::<f32>() * 4)
         .and_then(|bytes| bytes.checked_add(decoded_raw_bytes))
         .ok_or_else(|| dimension_overflow(frame.info.width, frame.info.height))?;
     validate_working_set(working_bytes)
+}
+
+fn validate_preview_working_set(
+    frame: &RawFrame,
+    max_long_edge: usize,
+) -> Result<(), PipelineError> {
+    let full_width = frame.info.width;
+    let full_height = frame.info.height;
+    let full_pixels = full_width
+        .checked_mul(full_height)
+        .ok_or_else(|| dimension_overflow(full_width, full_height))?;
+    let decoded_raw_bytes = frame
+        .mosaic
+        .len()
+        .checked_mul(size_of::<u16>())
+        .ok_or_else(|| dimension_overflow(full_width, full_height))?;
+    let normalized_bytes = full_pixels
+        .checked_mul(size_of::<f32>())
+        .ok_or_else(|| dimension_overflow(full_width, full_height))?;
+    let full_linear_bytes = full_pixels
+        .checked_mul(3 * size_of::<f32>())
+        .ok_or_else(|| dimension_overflow(full_width, full_height))?;
+    let (target_width, _) = preview_dimensions(full_width, full_height, max_long_edge)?;
+    let intermediate_bytes = target_width
+        .checked_mul(full_height)
+        .and_then(|pixels| pixels.checked_mul(3 * size_of::<f32>()))
+        .ok_or_else(|| dimension_overflow(target_width, full_height))?;
+    let conservative_peak = decoded_raw_bytes
+        .checked_add(full_linear_bytes)
+        .and_then(|bytes| bytes.checked_add(normalized_bytes.max(intermediate_bytes)))
+        .ok_or_else(|| dimension_overflow(full_width, full_height))?;
+    validate_working_set(conservative_peak)
+}
+
+fn preview_preparation_peak(
+    decoded_raw_bytes: usize,
+    normalized_mosaic_bytes: usize,
+    full_linear_bytes: usize,
+    resample_intermediate_bytes: usize,
+    reduced_linear_bytes: usize,
+    unchanged_dimensions: bool,
+) -> Result<usize, PipelineError> {
+    let demosaic_peak = decoded_raw_bytes
+        .checked_add(normalized_mosaic_bytes)
+        .and_then(|bytes| bytes.checked_add(full_linear_bytes));
+    let horizontal_peak = decoded_raw_bytes
+        .checked_add(full_linear_bytes)
+        .and_then(|bytes| bytes.checked_add(resample_intermediate_bytes));
+    let vertical_peak = decoded_raw_bytes
+        .checked_add(resample_intermediate_bytes)
+        .and_then(|bytes| bytes.checked_add(reduced_linear_bytes));
+    let demosaic_peak = demosaic_peak.ok_or_else(|| dimension_overflow(0, 0))?;
+    let peak = if unchanged_dimensions {
+        demosaic_peak
+    } else {
+        let horizontal_peak = horizontal_peak.ok_or_else(|| dimension_overflow(0, 0))?;
+        let vertical_peak = vertical_peak.ok_or_else(|| dimension_overflow(0, 0))?;
+        demosaic_peak.max(horizontal_peak).max(vertical_peak)
+    };
+    Ok(peak)
 }
 
 fn validate_working_set(estimated_bytes: usize) -> Result<(), PipelineError> {

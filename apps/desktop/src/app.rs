@@ -6,16 +6,17 @@ use std::time::Duration;
 
 use eframe::egui;
 use rohditor_core::{
-    CONTRAST_RANGE, DitherMode, EXPOSURE_EV_RANGE, ExportFormat, ExportMetadataPolicy,
-    ExportSettings, JPEG_QUALITY_DEFAULT, MemoryEstimate, PngBitDepth, SATURATION_RANGE,
-    StageTimings, WHITE_BALANCE_MULTIPLIER_RANGE, WhiteBalance, paths_refer_to_same_file,
+    CONTRAST_RANGE, DemosaicAlgorithm, DitherMode, EXPOSURE_EV_RANGE, ExportFormat,
+    ExportMetadataPolicy, ExportSettings, JPEG_QUALITY_DEFAULT, MemoryEstimate, PngBitDepth,
+    PreviewOptions, RenderOptions, SATURATION_RANGE, StageTimings, WHITE_BALANCE_MULTIPLIER_RANGE,
+    WhiteBalance, paths_refer_to_same_file,
 };
 use rohditor_raw::{RawFileInfo, RawFrame};
 use tracing::{info, warn};
 
 use crate::ProcessorPreference;
 use crate::coordinator::{
-    PreviewBackend, RenderCoordinator, WorkerImage, WorkerPreviewDiagnostics,
+    PreviewBackend, PreviewResolution, RenderCoordinator, WorkerImage, WorkerPreviewDiagnostics,
 };
 use crate::document::{EditSession, PreviewTicket};
 use crate::preview_cache::PreviewCacheHits;
@@ -80,6 +81,7 @@ struct Document {
     edits: EditSession,
     texture: Option<PreviewTexture>,
     preview_source: Option<PreviewSource>,
+    source_scale_requested: bool,
     gpu_preview: Option<GpuDocumentPreview>,
     view: ViewState,
     open_status: Option<String>,
@@ -102,6 +104,7 @@ impl Document {
             edits: EditSession::default(),
             texture: None,
             preview_source: None,
+            source_scale_requested: false,
             gpu_preview: None,
             view: ViewState::default(),
             open_status: Some("Opening RAW file".to_owned()),
@@ -169,6 +172,7 @@ pub(crate) struct RohditorApp {
     next_document_id: u64,
     next_export_id: u64,
     export_settings: ExportUiSettings,
+    render_options: RenderOptions,
     ui_renderer: &'static str,
     processor_preference: ProcessorPreference,
     gpu: Option<GpuRuntime>,
@@ -182,6 +186,7 @@ impl RohditorApp {
         context: &eframe::CreationContext<'_>,
         initial_path: Option<PathBuf>,
         processor_preference: ProcessorPreference,
+        demosaic: DemosaicAlgorithm,
         show_diagnostics: bool,
     ) -> std::io::Result<Self> {
         theme::apply(&context.egui_ctx);
@@ -207,14 +212,25 @@ impl RohditorApp {
             processor_preference = ?processor_preference,
             "desktop application started"
         );
-        let coordinator =
-            RenderCoordinator::new(context.egui_ctx.clone()).map_err(std::io::Error::other)?;
+        let render_options = RenderOptions {
+            demosaic,
+            ..RenderOptions::default()
+        };
+        let coordinator = RenderCoordinator::new(
+            context.egui_ctx.clone(),
+            PreviewOptions {
+                render: render_options,
+                ..PreviewOptions::default()
+            },
+        )
+        .map_err(std::io::Error::other)?;
         let mut application = Self {
             coordinator,
             document: None,
             next_document_id: 1,
             next_export_id: 1,
             export_settings: ExportUiSettings::with_jpeg_quality(JPEG_QUALITY_DEFAULT),
+            render_options,
             ui_renderer,
             processor_preference,
             gpu,
@@ -300,6 +316,25 @@ impl RohditorApp {
         let Some((ticket, frame, recipe)) = request else {
             return;
         };
+        let source_scale_requested = self
+            .document
+            .as_ref()
+            .is_some_and(|document| document.source_scale_requested);
+        if source_scale_requested {
+            if let Some(document) = self.document.as_mut() {
+                document.preview_status = Some((
+                    ticket.revision,
+                    "Queued full-resolution 1:1 inspection".to_owned(),
+                ));
+            }
+            if let Err(error) = self.coordinator.source_scale_preview(ticket, frame, recipe)
+                && let Some(document) = self.document.as_mut()
+            {
+                document.preview_status = None;
+                document.error = Some(error);
+            }
+            return;
+        }
         if self.gpu.is_some() {
             let gpu_base_is_current = self
                 .document
@@ -355,6 +390,7 @@ impl RohditorApp {
     ) {
         let Some(document) = self.document.as_ref().filter(|document| {
             document.id == ticket.document_id
+                && !document.source_scale_requested
                 && document.edits.recipe().white_balance == upload.white_balance()
         }) else {
             return;
@@ -428,7 +464,8 @@ impl RohditorApp {
                         id: texture_id,
                         size: output_size,
                     });
-                    document.preview_source = Some(PreviewSource::DevelopedGpu);
+                    document.preview_source =
+                        Some(PreviewSource::developed(diagnostics.algorithm, true));
                     document.preview_status = None;
                     document.last_preview_time = Some(elapsed);
                     document.preview_diagnostics = Some(preview_diagnostics);
@@ -487,6 +524,8 @@ impl RohditorApp {
                 let submission = frame.submission_time();
                 let mut worker = previous_worker_diagnostics.unwrap_or(WorkerPreviewDiagnostics {
                     backend: PreviewBackend::GpuBase,
+                    resolution: PreviewResolution::Fit,
+                    algorithm: self.render_options.demosaic,
                     cache_hits: PreviewCacheHits::default(),
                     timings: StageTimings::default(),
                     memory: MemoryEstimate::default(),
@@ -496,7 +535,7 @@ impl RohditorApp {
                 worker.backend = PreviewBackend::GpuBase;
                 worker.cache_hits = PreviewCacheHits {
                     decoded: true,
-                    normalized: true,
+                    reconstructed: true,
                     demosaiced: true,
                     adjusted: false,
                 };
@@ -539,7 +578,8 @@ impl RohditorApp {
                         id: texture_id,
                         size: output_size,
                     });
-                    document.preview_source = Some(PreviewSource::DevelopedGpu);
+                    document.preview_source =
+                        Some(PreviewSource::developed(worker.algorithm, true));
                     document.preview_status = None;
                     document.last_preview_time = Some(submission);
                     document.preview_diagnostics = Some(preview_diagnostics);
@@ -742,6 +782,7 @@ impl RohditorApp {
             frame,
             recipe,
             settings,
+            self.render_options,
         ) && let Some(document) = self.document.as_mut()
         {
             document.export_status = None;
@@ -789,6 +830,7 @@ impl RohditorApp {
 
         let now = context.input(|input| input.time);
         let mut changed_document = None;
+        let mut view_changed_document = None;
         if let Some(document) = self.document.as_mut() {
             let mut changed = false;
             if actions.undo {
@@ -805,13 +847,25 @@ impl RohditorApp {
                 changed_document = Some(document.id);
             }
             if actions.fit {
+                let changed_mode = document.source_scale_requested;
+                document.source_scale_requested = false;
                 document.view.fit(now);
+                if changed_mode {
+                    view_changed_document = Some(document.id);
+                }
             }
             if actions.actual_size {
+                let changed_mode = !document.source_scale_requested;
+                document.source_scale_requested = true;
                 document.view.actual_size(now);
+                if changed_mode {
+                    view_changed_document = Some(document.id);
+                }
             }
         }
         if let Some(document_id) = changed_document {
+            self.queue_preview(context, document_id);
+        } else if let Some(document_id) = view_changed_document {
             self.queue_preview(context, document_id);
         }
         if actions.export {
@@ -993,9 +1047,18 @@ impl RohditorApp {
             .and_then(|document| document.preview_diagnostics)
             .map(|preview| PreviewModel {
                 backend: preview.worker.backend.label().to_owned(),
+                algorithm: preview.worker.algorithm.stable_name().to_owned(),
+                source_state: match preview.worker.resolution {
+                    PreviewResolution::SourceScale => "1:1",
+                    PreviewResolution::Fit => match preview.worker.algorithm {
+                        DemosaicAlgorithm::Bilinear => "fast",
+                        DemosaicAlgorithm::MalvarHeCutler => "high-quality",
+                    },
+                }
+                .to_owned(),
                 cache: CacheModel {
                     decoded: preview.worker.cache_hits.decoded,
-                    normalized: preview.worker.cache_hits.normalized,
+                    reconstructed: preview.worker.cache_hits.reconstructed,
                     demosaiced: preview.worker.cache_hits.demosaiced,
                     adjusted: preview.worker.cache_hits.adjusted,
                     workspace_reused: preview.worker.workspace_reused,
@@ -1004,6 +1067,7 @@ impl RohditorApp {
                     metadata: preview.worker.timings.metadata,
                     normalization: preview.worker.timings.normalization,
                     demosaic: preview.worker.timings.demosaic,
+                    resampling: preview.worker.timings.resampling,
                     color_conversion: preview.worker.timings.color_conversion,
                     adjustments: preview.worker.timings.adjustments,
                     output_conversion: preview.worker.timings.output_conversion,

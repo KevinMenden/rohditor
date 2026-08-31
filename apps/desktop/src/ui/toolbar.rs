@@ -120,11 +120,11 @@ pub(crate) fn show_top(context: &egui::Context, model: &ToolbarModel) -> Toolbar
                         let _ = before_after;
                         output.actual_size = widgets::toolbar_button(
                             ui,
-                            if narrow { "1:1" } else { "100%" },
+                            if narrow { "1:1" } else { "Source 1:1" },
                             model.actual_size_selected,
                             true,
                         )
-                        .on_hover_text("Show one image pixel per screen point")
+                        .on_hover_text("Develop and show one source pixel per screen point")
                         .clicked();
                         output.fit = widgets::toolbar_button(ui, "Fit", model.fit_selected, true)
                             .on_hover_text("Fit the whole photo in the viewport")
