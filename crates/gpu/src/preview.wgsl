@@ -2,6 +2,15 @@ struct PreviewParameters {
     exposure_gain: f32,
     contrast_gain: f32,
     saturation: f32,
+    vibrance: f32,
+    highlights: f32,
+    shadows: f32,
+    whites: f32,
+    blacks: f32,
+    tone_shadows: f32,
+    tone_darks: f32,
+    tone_lights: f32,
+    tone_highlights: f32,
     orientation: u32,
     source_width: u32,
     source_height: u32,
@@ -59,6 +68,58 @@ fn linear_srgb_to_srgb(value: f32) -> f32 {
     return 1.055 * pow(clipped, 1.0 / 2.4) - 0.055;
 }
 
+fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
+    let normalized = clamp((value - edge0) / (edge1 - edge0), 0.0, 1.0);
+    return normalized * normalized * (3.0 - 2.0 * normalized);
+}
+
+fn apply_light_tone(pixel: vec3<f32>) -> vec3<f32> {
+    let current = dot(pixel, vec3<f32>(0.2627, 0.6780, 0.0593));
+    let normalized = clamp(current, 0.0, 1.0);
+    let shadow_weight = 1.0 - smoothstep(0.0, 0.55, normalized);
+    let highlight_weight = smoothstep(0.45, 1.0, normalized);
+    let black_weight = 1.0 - smoothstep(0.0, 0.30, normalized);
+    let white_weight = smoothstep(0.70, 1.0, normalized);
+    let delta = parameters.shadows * 0.25 * shadow_weight
+        + parameters.highlights * 0.25 * highlight_weight
+        + parameters.blacks * 0.15 * black_weight
+        + parameters.whites * 0.15 * white_weight;
+    if delta == 0.0 {
+        return pixel;
+    }
+    let adjusted_luminance = current + delta;
+    if abs(current) > 0.000001 {
+        return pixel * (adjusted_luminance / current);
+    }
+    return pixel + vec3<f32>(delta);
+}
+
+fn apply_tone_curve(pixel: vec3<f32>) -> vec3<f32> {
+    let current = dot(pixel, vec3<f32>(0.2627, 0.6780, 0.0593));
+    let normalized = clamp(current, 0.0, 1.0);
+    let shadows = 1.0 - smoothstep(0.0, 0.45, normalized);
+    let darks = smoothstep(0.0, 0.12, normalized) * (1.0 - smoothstep(0.35, 0.55, normalized));
+    let lights = smoothstep(0.45, 0.65, normalized) * (1.0 - smoothstep(0.88, 1.0, normalized));
+    let highlights = smoothstep(0.60, 1.0, normalized);
+    let delta = parameters.tone_shadows * shadows
+        + parameters.tone_darks * darks
+        + parameters.tone_lights * lights
+        + parameters.tone_highlights * highlights;
+    if delta == 0.0 {
+        return pixel;
+    }
+    let adjusted_luminance = current + delta;
+    if abs(current) > 0.000001 {
+        return pixel * (adjusted_luminance / current);
+    }
+    return pixel + vec3<f32>(delta);
+}
+
+fn color_saturation(pixel: vec3<f32>, luminance: f32) -> f32 {
+    let chroma = max(abs(pixel.r - luminance), max(abs(pixel.g - luminance), abs(pixel.b - luminance)));
+    return clamp(chroma / max(abs(luminance), 0.000001), 0.0, 1.0);
+}
+
 @compute @workgroup_size(16, 16, 1)
 fn develop_preview(@builtin(global_invocation_id) invocation: vec3<u32>) {
     let output = invocation.xy;
@@ -70,8 +131,11 @@ fn develop_preview(@builtin(global_invocation_id) invocation: vec3<u32>) {
     let base = textureLoad(source_base, vec2<i32>(source), 0).rgb;
     let exposed = base * parameters.exposure_gain;
     let contrasted = vec3<f32>(0.18) + (exposed - vec3<f32>(0.18)) * parameters.contrast_gain;
-    let luminance = dot(contrasted, vec3<f32>(0.2627, 0.6780, 0.0593));
-    let adjusted = vec3<f32>(luminance) + parameters.saturation * (contrasted - vec3<f32>(luminance));
+    let toned = apply_tone_curve(apply_light_tone(contrasted));
+    let luminance = dot(toned, vec3<f32>(0.2627, 0.6780, 0.0593));
+    let saturation = parameters.saturation
+        * (1.0 + parameters.vibrance * (1.0 - color_saturation(toned, luminance)));
+    let adjusted = vec3<f32>(luminance) + saturation * (toned - vec3<f32>(luminance));
 
     // Retain the linear working result for future GPU stages while producing
     // the display texture in the same dispatch. This avoids an extra full-frame

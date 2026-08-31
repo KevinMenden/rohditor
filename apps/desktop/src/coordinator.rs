@@ -12,8 +12,8 @@ use eframe::egui;
 use image::RgbImage;
 use rohditor_core::{
     CancellationToken, CpuPipeline, DemosaicAlgorithm, EditRecipe, ExportReport, ExportSettings,
-    MemoryEstimate, OrientationMap, PipelineError, PreviewOptions, RenderOptions, StageTimings,
-    export_image,
+    Histogram, MemoryEstimate, OrientationMap, PipelineError, PreviewOptions, RenderOptions,
+    StageTimings, export_image,
 };
 use rohditor_gpu::{GpuPreviewError, GpuPreviewUpload};
 use rohditor_raw::{RawDecoder, RawFileInfo, RawFrame, RawOrientation, RawSession, RawlerDecoder};
@@ -165,6 +165,7 @@ pub(crate) enum WorkerEvent {
         ticket: PreviewTicket,
         resolution: PreviewResolution,
         image: WorkerImage,
+        histogram: Box<Histogram>,
         diagnostics: WorkerPreviewDiagnostics,
     },
     GpuUploadReady {
@@ -222,7 +223,7 @@ struct ExportJob {
 enum WorkerRequest {
     Open { document_id: u64, path: PathBuf },
     PreviewAvailable,
-    Export(ExportJob),
+    Export(Box<ExportJob>),
     AbandonDocument(u64),
     Shutdown,
 }
@@ -358,7 +359,7 @@ impl RenderCoordinator {
         settings: ExportSettings,
         render_options: RenderOptions,
     ) -> Result<(), String> {
-        self.send(WorkerRequest::Export(ExportJob {
+        self.send(WorkerRequest::Export(Box::new(ExportJob {
             document_id,
             export_id,
             recipe_revision,
@@ -367,7 +368,7 @@ impl RenderCoordinator {
             recipe,
             settings,
             render_options,
-        }))
+        })))
     }
 
     pub(crate) fn abandon(&self, document_id: u64) {
@@ -475,7 +476,7 @@ fn worker_loop(
             }
             WorkerRequest::Export(job) => {
                 if !abandoned.contains(&job.document_id) {
-                    process_export(job, &sender, &context);
+                    process_export(*job, &sender, &context);
                 }
             }
             WorkerRequest::AbandonDocument(document_id) => {
@@ -701,7 +702,7 @@ fn process_preview(
         cancellation,
         preview_cache,
     ) {
-        Ok((display, diagnostics)) => match WorkerImage::from_display(display) {
+        Ok((display, histogram, diagnostics)) => match WorkerImage::from_display(display) {
             Ok(image) => {
                 log_preview_diagnostics(job.ticket, image.width, image.height, diagnostics);
                 send_event(
@@ -711,6 +712,7 @@ fn process_preview(
                         ticket: job.ticket,
                         resolution: job.resolution,
                         image,
+                        histogram: Box::new(histogram),
                         diagnostics,
                     },
                 );
@@ -802,6 +804,7 @@ fn process_source_scale_preview(
                             ticket: job.ticket,
                             resolution: PreviewResolution::SourceScale,
                             image,
+                            histogram: Box::new(result.histogram),
                             diagnostics,
                         },
                     );
@@ -965,10 +968,18 @@ fn develop_preview(
     cache_hits: PreviewCacheHits,
     cancellation: &CancellationToken,
     preview_cache: &mut PreviewCache,
-) -> Result<(rohditor_core::DisplayRgbImage<u8>, WorkerPreviewDiagnostics), PipelineError> {
+) -> Result<
+    (
+        rohditor_core::DisplayRgbImage<u8>,
+        Histogram,
+        WorkerPreviewDiagnostics,
+    ),
+    PipelineError,
+> {
     if let Some(cached) = preview_cache.adjusted(keys) {
         let copy_started = Instant::now();
         let image = cached.image.clone();
+        let histogram = Histogram::from_display_rgb8(&image);
         let memory = cached.memory;
         let timings = StageTimings {
             total: copy_started.elapsed(),
@@ -976,6 +987,7 @@ fn develop_preview(
         };
         return Ok((
             image,
+            histogram,
             WorkerPreviewDiagnostics {
                 backend: PreviewBackend::Cpu,
                 resolution: PreviewResolution::Fit,
@@ -1018,7 +1030,7 @@ fn develop_preview(
         cache_resident_bytes: preview_cache.resident_bytes(),
         workspace_reused,
     };
-    Ok((result.image, diagnostics))
+    Ok((result.image, result.histogram, diagnostics))
 }
 
 fn ensure_preview_base(
@@ -1479,9 +1491,10 @@ mod tests {
                 revision: 1,
             },
             frame,
-            recipe: EditRecipe {
-                exposure_ev: 1.0,
-                ..EditRecipe::default()
+            recipe: {
+                let mut recipe = EditRecipe::default();
+                recipe.light.exposure_ev = 1.0;
+                recipe
             },
             backend: PreviewBackend::Cpu,
             resolution: PreviewResolution::Fit,
@@ -1508,16 +1521,14 @@ mod tests {
         .expect("downstream edit should reuse its base");
 
         assert_ne!(first.0, second.0);
-        assert_eq!(second.1.timings.normalization, Duration::ZERO);
-        assert_eq!(second.1.timings.demosaic, Duration::ZERO);
-        assert_eq!(second.1.timings.resampling, Duration::ZERO);
-        assert_eq!(second.1.timings.color_conversion, Duration::ZERO);
-        assert!(second.1.workspace_reused);
+        assert_eq!(second.2.timings.normalization, Duration::ZERO);
+        assert_eq!(second.2.timings.demosaic, Duration::ZERO);
+        assert_eq!(second.2.timings.resampling, Duration::ZERO);
+        assert_eq!(second.2.timings.color_conversion, Duration::ZERO);
+        assert!(second.2.workspace_reused);
 
-        let invalid_schema_recipe = EditRecipe {
-            schema_version: u32::MAX,
-            ..adjusted.recipe.clone()
-        };
+        let mut invalid_schema_recipe = adjusted.recipe.clone();
+        invalid_schema_recipe.schema_version = u32::MAX;
         let invalid_schema_keys =
             PreviewCacheKeys::new(9, &adjusted.frame, &invalid_schema_recipe, options);
         let invalid_schema_hits = cache.prepare(&invalid_schema_keys, &adjusted.frame);
@@ -1526,13 +1537,11 @@ mod tests {
         assert!(!invalid_schema_hits.demosaiced);
         assert!(!invalid_schema_hits.adjusted);
 
-        let white_balance_recipe = EditRecipe {
-            white_balance: WhiteBalance::ManualMultipliers {
-                red: 1.1,
-                green: 1.0,
-                blue: 0.9,
-            },
-            ..EditRecipe::default()
+        let mut white_balance_recipe = EditRecipe::default();
+        white_balance_recipe.color.white_balance = WhiteBalance::ManualMultipliers {
+            red: 1.1,
+            green: 1.0,
+            blue: 0.9,
         };
         let white_balance_keys =
             PreviewCacheKeys::new(9, &adjusted.frame, &white_balance_recipe, options);
@@ -1560,9 +1569,9 @@ mod tests {
             &mut cache,
         )
         .expect("white balance should reuse reconstructed camera RGB");
-        assert_eq!(white_balanced.1.timings.normalization, Duration::ZERO);
-        assert_eq!(white_balanced.1.timings.demosaic, Duration::ZERO);
-        assert_eq!(white_balanced.1.timings.resampling, Duration::ZERO);
+        assert_eq!(white_balanced.2.timings.normalization, Duration::ZERO);
+        assert_eq!(white_balanced.2.timings.demosaic, Duration::ZERO);
+        assert_eq!(white_balanced.2.timings.resampling, Duration::ZERO);
 
         let alternate_options = PreviewOptions {
             render: rohditor_core::RenderOptions {
@@ -1990,7 +1999,7 @@ mod tests {
             PreviewCacheKeys::new(initial.ticket.document_id, &frame, &initial.recipe, options);
         let initial_hits = cache.prepare(&initial_keys, &frame);
         let initial_started = Instant::now();
-        let (initial_image, initial_diagnostics) = develop_preview(
+        let (initial_image, _, initial_diagnostics) = develop_preview(
             &initial,
             options,
             &initial_keys,
@@ -2003,12 +2012,10 @@ mod tests {
         let mut cached_wall = Vec::new();
 
         for revision in 1..=24 {
-            let recipe = EditRecipe {
-                exposure_ev: (revision as f32 / 24.0) * 2.0 - 1.0,
-                contrast: revision as f32 / 48.0,
-                saturation: 0.8 + revision as f32 / 60.0,
-                ..EditRecipe::default()
-            };
+            let mut recipe = EditRecipe::default();
+            recipe.light.exposure_ev = (revision as f32 / 24.0) * 2.0 - 1.0;
+            recipe.light.contrast = revision as f32 / 48.0;
+            recipe.color.saturation = 0.8 + revision as f32 / 60.0;
             let job = PreviewJob {
                 ticket: PreviewTicket {
                     document_id: 71,
@@ -2023,7 +2030,7 @@ mod tests {
             let hits = cache.prepare(&keys, &frame);
             assert!(hits.decoded && hits.reconstructed && hits.demosaiced && !hits.adjusted);
             let started = Instant::now();
-            let (_, diagnostics) = develop_preview(
+            let (_, _, diagnostics) = develop_preview(
                 &job,
                 options,
                 &keys,

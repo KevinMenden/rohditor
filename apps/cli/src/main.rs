@@ -8,11 +8,12 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use rohditor_core::{
-    CONTRAST_RANGE, CpuPipeline, CropPolicy, DemosaicAlgorithm, DisplayRgbImage, DisplayTransfer,
-    DitherMode, EXPOSURE_EV_RANGE, EditRecipe, ExportFormat, ExportImage, ExportMetadataPolicy,
-    ExportSettings, JPEG_QUALITY_DEFAULT, JPEG_QUALITY_MAX, JPEG_QUALITY_MIN, OutputPolicy,
-    PngBitDepth, RenderOptions, SATURATION_RANGE, StageTimings, WhiteBalance, export_image,
-    paths_refer_to_same_file, write_output_bytes,
+    BLACKS_RANGE, CONTRAST_RANGE, CpuPipeline, CropPolicy, DemosaicAlgorithm, DisplayRgbImage,
+    DisplayTransfer, DitherMode, EXPOSURE_EV_RANGE, EditRecipe, ExportFormat, ExportImage,
+    ExportMetadataPolicy, ExportSettings, HIGHLIGHTS_RANGE, JPEG_QUALITY_DEFAULT, JPEG_QUALITY_MAX,
+    JPEG_QUALITY_MIN, OutputPolicy, PngBitDepth, RenderOptions, SATURATION_RANGE, SHADOWS_RANGE,
+    StageTimings, TINT_RANGE, TONE_CURVE_RANGE, VIBRANCE_RANGE, WHITES_RANGE, WhiteBalance,
+    export_image, paths_refer_to_same_file, write_output_bytes,
 };
 use rohditor_raw::{
     EncodedPreviewFormat, ImageRect, PhotometricInterpretation, RawDecoder, RawFileInfo,
@@ -82,13 +83,57 @@ enum Command {
         #[arg(long, default_value_t = CONTRAST_RANGE.neutral, allow_hyphen_values = true)]
         contrast: f32,
 
+        /// Recover or increase highlight luminance (-1 to +1).
+        #[arg(long, default_value_t = HIGHLIGHTS_RANGE.neutral, allow_hyphen_values = true)]
+        highlights: f32,
+
+        /// Recover or increase shadow luminance (-1 to +1).
+        #[arg(long, default_value_t = SHADOWS_RANGE.neutral, allow_hyphen_values = true)]
+        shadows: f32,
+
+        /// Adjust the brightest white tones (-1 to +1).
+        #[arg(long, default_value_t = WHITES_RANGE.neutral, allow_hyphen_values = true)]
+        whites: f32,
+
+        /// Adjust the darkest black tones (-1 to +1).
+        #[arg(long, default_value_t = BLACKS_RANGE.neutral, allow_hyphen_values = true)]
+        blacks: f32,
+
+        /// Lift or lower the tone-curve shadow region (-0.25 to +0.25).
+        #[arg(long, default_value_t = TONE_CURVE_RANGE.neutral, allow_hyphen_values = true)]
+        tone_shadows: f32,
+
+        /// Lift or lower the tone-curve dark region (-0.25 to +0.25).
+        #[arg(long, default_value_t = TONE_CURVE_RANGE.neutral, allow_hyphen_values = true)]
+        tone_darks: f32,
+
+        /// Lift or lower the tone-curve light region (-0.25 to +0.25).
+        #[arg(long, default_value_t = TONE_CURVE_RANGE.neutral, allow_hyphen_values = true)]
+        tone_lights: f32,
+
+        /// Lift or lower the tone-curve highlight region (-0.25 to +0.25).
+        #[arg(long, default_value_t = TONE_CURVE_RANGE.neutral, allow_hyphen_values = true)]
+        tone_highlights: f32,
+
         /// Rec.2020 luminance-relative saturation (0 to 2; 1 is neutral).
         #[arg(long, default_value_t = SATURATION_RANGE.neutral)]
         saturation: f32,
 
+        /// Increase or reduce saturation preferentially in less-saturated colors (-1 to +1).
+        #[arg(long, default_value_t = VIBRANCE_RANGE.neutral, allow_hyphen_values = true)]
+        vibrance: f32,
+
         /// R,G,B multipliers relative to the as-shot white balance.
         #[arg(long, value_name = "RED,GREEN,BLUE")]
         white_balance: Option<RgbMultipliers>,
+
+        /// White-balance temperature in Kelvin (2000 to 12000). Use with --tint.
+        #[arg(long, allow_hyphen_values = true)]
+        temperature: Option<f32>,
+
+        /// Green/magenta tint (-1 to +1); implies temperature white balance.
+        #[arg(long, default_value_t = TINT_RANGE.neutral, allow_hyphen_values = true)]
+        tint: f32,
 
         /// Sensor crop policy.
         #[arg(long, value_enum, default_value_t = CliCropPolicy::Recommended)]
@@ -332,8 +377,19 @@ fn main() -> Result<()> {
             output,
             exposure,
             contrast,
+            highlights,
+            shadows,
+            whites,
+            blacks,
+            tone_shadows,
+            tone_darks,
+            tone_lights,
+            tone_highlights,
             saturation,
+            vibrance,
             white_balance,
+            temperature,
+            tint,
             crop,
             demosaic,
             orientation,
@@ -348,8 +404,19 @@ fn main() -> Result<()> {
             DevelopArguments {
                 exposure,
                 contrast,
+                highlights,
+                shadows,
+                whites,
+                blacks,
+                tone_shadows,
+                tone_darks,
+                tone_lights,
+                tone_highlights,
                 saturation,
+                vibrance,
                 white_balance,
+                temperature,
+                tint,
                 crop,
                 demosaic,
                 orientation,
@@ -495,8 +562,19 @@ struct LibRawMismatch {
 struct DevelopArguments {
     exposure: f32,
     contrast: f32,
+    highlights: f32,
+    shadows: f32,
+    whites: f32,
+    blacks: f32,
+    tone_shadows: f32,
+    tone_darks: f32,
+    tone_lights: f32,
+    tone_highlights: f32,
     saturation: f32,
+    vibrance: f32,
     white_balance: Option<RgbMultipliers>,
+    temperature: Option<f32>,
+    tint: f32,
     crop: CliCropPolicy,
     demosaic: CliDemosaic,
     orientation: Option<CliOrientation>,
@@ -610,23 +688,45 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
         );
     }
 
-    let white_balance = arguments
-        .white_balance
-        .map_or(WhiteBalance::AsShot, |value| {
-            WhiteBalance::ManualMultipliers {
-                red: value.red,
-                green: value.green,
-                blue: value.blue,
+    if arguments.white_balance.is_some()
+        && (arguments.temperature.is_some() || arguments.tint != 0.0)
+    {
+        bail!("--white-balance cannot be combined with --temperature or --tint");
+    }
+    let white_balance = match (
+        arguments.white_balance,
+        arguments.temperature,
+        arguments.tint,
+    ) {
+        (Some(value), None, 0.0) => WhiteBalance::ManualMultipliers {
+            red: value.red,
+            green: value.green,
+            blue: value.blue,
+        },
+        (None, temperature, tint) if temperature.is_some() || tint != 0.0 => {
+            WhiteBalance::TemperatureTint {
+                temperature: temperature.unwrap_or(rohditor_core::TEMPERATURE_RANGE.neutral),
+                tint,
             }
-        });
-    let recipe = EditRecipe {
-        white_balance,
-        exposure_ev: arguments.exposure,
-        contrast: arguments.contrast,
-        saturation: arguments.saturation,
-        orientation_override: arguments.orientation.map(Into::into),
-        ..EditRecipe::default()
+        }
+        (None, None, 0.0) => WhiteBalance::AsShot,
+        _ => unreachable!("white balance conflict was rejected above"),
     };
+    let mut recipe = EditRecipe::default();
+    recipe.color.white_balance = white_balance;
+    recipe.light.exposure_ev = arguments.exposure;
+    recipe.light.contrast = arguments.contrast;
+    recipe.light.highlights = arguments.highlights;
+    recipe.light.shadows = arguments.shadows;
+    recipe.light.whites = arguments.whites;
+    recipe.light.blacks = arguments.blacks;
+    recipe.light.tone_curve.shadows = arguments.tone_shadows;
+    recipe.light.tone_curve.darks = arguments.tone_darks;
+    recipe.light.tone_curve.lights = arguments.tone_lights;
+    recipe.light.tone_curve.highlights = arguments.tone_highlights;
+    recipe.color.saturation = arguments.saturation;
+    recipe.color.vibrance = arguments.vibrance;
+    recipe.geometry.orientation_override = arguments.orientation.map(Into::into);
     recipe
         .validate()
         .context("could not validate the development recipe")?;
@@ -722,10 +822,8 @@ fn quality_crops(
         demosaic: algorithm,
         output_policy: OutputPolicy::ClipToSrgb,
     };
-    let recipe = EditRecipe {
-        orientation_override: Some(RawOrientation::Normal),
-        ..EditRecipe::default()
-    };
+    let mut recipe = EditRecipe::default();
+    recipe.geometry.orientation_override = Some(RawOrientation::Normal);
     let settings = ExportSettings {
         format: ExportFormat::Png {
             bit_depth: PngBitDepth::Eight,
@@ -1449,8 +1547,19 @@ mod tests {
         let base = DevelopArguments {
             exposure: 0.0,
             contrast: 0.0,
+            highlights: 0.0,
+            shadows: 0.0,
+            whites: 0.0,
+            blacks: 0.0,
+            tone_shadows: 0.0,
+            tone_darks: 0.0,
+            tone_lights: 0.0,
+            tone_highlights: 0.0,
             saturation: 1.0,
+            vibrance: 0.0,
             white_balance: None,
+            temperature: None,
+            tint: 0.0,
             crop: CliCropPolicy::Recommended,
             demosaic: CliDemosaic::Bilinear,
             orientation: None,

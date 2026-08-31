@@ -31,7 +31,7 @@ The desktop supports `--processor auto|gpu|cpu`, `--renderer auto|wgpu|glow`,
 and an optional input path. The CLI also supports embedded-preview extraction,
 quality-crop generation, and LibRaw verification.
 
-See [project guidelines](docs/guidelines.md) and [implementation status](docs/status.md).
+Project guidelines live in [AGENTS.md](AGENTS.md); the implementation checklist is below.
 
 # Implementation status
 
@@ -43,8 +43,8 @@ Status: MVP implemented and validated on the current Sony ILCE-6400 corpus.
 - [x] Content-based Sony ARW decoding, metadata, embedded JPEG extraction, and
       typed malformed-input errors.
 - [x] CPU pipeline: crop, black/white normalization, MHC or bilinear Bayer
-      demosaic, white balance, camera color conversion, global edits,
-      orientation, and sRGB output.
+      demosaic, white balance, camera color conversion, light/color edits,
+      orientation, histogram analysis, and sRGB output.
 - [x] Antialiased fixed-size previews, cancellable source-scale 1:1 inspection,
       caching, newest-wins scheduling, undo/redo, and background export.
 - [x] Optional wgpu/WGSL GPU preview with CPU fallback and CPU/GPU parity tests.
@@ -58,11 +58,31 @@ Status: MVP implemented and validated on the current Sony ILCE-6400 corpus.
 
 ## Missing or deliberately deferred
 
+### Basic editing controls
+
+- [x] **Light:** exposure, contrast, highlights, shadows, whites, blacks, auto
+      tone, and a four-region tone curve.
+- [x] **Color:** temperature/tint and manual white balance, saturation,
+      vibrance, HSL mixer, and three-way color grading.
+- [x] **Histogram:** RGB/luminance display with clipped shadow/highlight counts.
+- [ ] **Color:** white-balance picker.
+- [ ] **Presence:** texture, clarity, and dehaze.
+- [ ] **Detail:** capture/output sharpening, luminance and color noise reduction,
+      moiré removal, and defringe.
+- [ ] **Geometry:** user crop and aspect ratios, straighten, rotate/flip, and
+      perspective/transform correction.
+- [ ] **Optics:** lens profiles, distortion, vignetting, and chromatic-aberration
+      correction.
+- [ ] **Local editing:** masks, brush, linear/radial gradients, and selective
+      versions of the light/color/detail controls.
+- [ ] **Retouching/effects:** heal/clone, red-eye removal, vignette, and grain.
+
+### Other deferred work
+
 - [ ] Select and document the project license; distribution remains disabled.
 - [ ] Catalog/library features: folders, ratings, tags, search, and batch work.
-- [ ] Local edits: masks, brushes, gradients, crops, and perspective tools.
-- [ ] Advanced image quality: tone curve/highlight recovery, camera profiles,
-      sensor cleanup, denoising, sharpening, and lens correction.
+- [ ] Camera profiles, highlight reconstruction, sensor cleanup, and advanced
+      rendering beyond the basic controls above.
 - [ ] Monitor ICC management and wide-gamut output/display support.
 - [ ] Full-resolution GPU export.
 - [ ] Broader camera, RAW format, and platform support.

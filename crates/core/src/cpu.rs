@@ -197,13 +197,58 @@ pub fn white_balance_gains(
         green: 1.0,
         blue: blue / green,
     };
-    if let WhiteBalance::ManualMultipliers { red, green, blue } = selection {
-        gains.red *= red;
-        gains.green *= green;
-        gains.blue *= blue;
+    match selection {
+        WhiteBalance::AsShot => {}
+        WhiteBalance::ManualMultipliers { red, green, blue } => {
+            gains.red *= red;
+            gains.green *= green;
+            gains.blue *= blue;
+        }
+        WhiteBalance::TemperatureTint { temperature, tint } => {
+            let [red, green, blue] = temperature_tint_gains(temperature, tint);
+            gains.red *= red;
+            gains.green *= green;
+            gains.blue *= blue;
+        }
     }
     gains.validate()?;
     Ok(gains)
+}
+
+fn temperature_tint_gains(temperature: f32, tint: f32) -> [f32; 3] {
+    let neutral = approximate_daylight_rgb(6500.0);
+    let daylight = approximate_daylight_rgb(temperature);
+    let tint_gain = 1.0 + tint * 0.15;
+    [
+        daylight[0] / neutral[0],
+        daylight[1] / neutral[1] / tint_gain,
+        daylight[2] / neutral[2],
+    ]
+}
+
+/// Approximate a daylight white point for the editor's temperature control.
+/// This is intentionally a small deterministic model; camera calibration and
+/// as-shot gains remain the source of the sensor-specific white balance.
+fn approximate_daylight_rgb(temperature: f32) -> [f32; 3] {
+    let temperature = (temperature / 100.0).clamp(20.0, 120.0);
+    let red = if temperature <= 66.0 {
+        1.0
+    } else {
+        (329.6987 * (temperature - 60.0).powf(-0.133_204_76) / 255.0).clamp(0.0, 1.0)
+    };
+    let green = if temperature <= 66.0 {
+        (0.390_081_58 * temperature.ln() - 0.631_841_4).clamp(0.0, 1.0)
+    } else {
+        (288.1222 * (temperature - 60.0).powf(-0.075_514_85) / 255.0).clamp(0.0, 1.0)
+    };
+    let blue = if temperature <= 19.0 {
+        0.0
+    } else if temperature <= 66.0 {
+        (0.543_206_8 * (temperature - 10.0).ln() - 1.196_254_1).clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    [red, green, blue]
 }
 
 pub(crate) fn apply_camera_color_transform_cancellable(
@@ -266,7 +311,9 @@ pub(crate) fn apply_white_balance_cancellable(
 /// Apply global scene-linear adjustments in their documented fixed order.
 ///
 /// Exposure is `2^EV`. Contrast is a linear slope of `2^contrast` around 18%
-/// gray. Saturation interpolates from Rec.2020 luminance using its Y coefficients.
+/// gray. The tonal controls move luminance while scaling the RGB triplet to
+/// preserve its hue. Saturation and vibrance then operate around Rec.2020
+/// luminance. No stage clips the scene-linear working image.
 pub fn apply_adjustments(
     image: &mut LinearRgbImage<f32>,
     recipe: &EditRecipe,
@@ -283,46 +330,220 @@ pub(crate) fn apply_adjustments_cancellable(
         "cpu.adjustments",
         width = image.width(),
         height = image.height(),
-        exposure_ev = recipe.exposure_ev,
-        contrast = recipe.contrast,
-        saturation = recipe.saturation
+        exposure_ev = recipe.light.exposure_ev,
+        contrast = recipe.light.contrast,
+        highlights = recipe.light.highlights,
+        shadows = recipe.light.shadows,
+        whites = recipe.light.whites,
+        blacks = recipe.light.blacks,
+        saturation = recipe.color.saturation,
+        vibrance = recipe.color.vibrance
     );
     let _guard = span.enter();
     cancellation.checkpoint()?;
     require_space(image, LinearRgbSpace::Rec2020D65)?;
     recipe.validate()?;
-    let exposure_gain = recipe.exposure_ev.exp2();
-    let contrast_gain = recipe.contrast.exp2();
+    let exposure_gain = recipe.light.exposure_ev.exp2();
+    let contrast_gain = recipe.light.contrast.exp2();
     let width_samples = image.width() * 3;
     let row_stride = image.row_stride();
+    let light = recipe.light.clone();
+    let color = recipe.color.clone();
     image.data_mut().par_chunks_mut(row_stride).try_for_each(
         |row| -> Result<(), PipelineError> {
             cancellation.checkpoint()?;
             for pixel in row[..width_samples].chunks_exact_mut(3) {
-                if recipe.exposure_ev != 0.0 {
+                if light.exposure_ev != 0.0 {
                     for value in pixel.iter_mut() {
                         *value *= exposure_gain;
                     }
                 }
-                if recipe.contrast != 0.0 {
+                if light.contrast != 0.0 {
                     for value in pixel.iter_mut() {
                         *value = CONTRAST_PIVOT + (*value - CONTRAST_PIVOT) * contrast_gain;
                     }
                 }
-                if recipe.saturation != 1.0 {
-                    let luminance = pixel[0] * REC2020_LUMINANCE[0]
-                        + pixel[1] * REC2020_LUMINANCE[1]
-                        + pixel[2] * REC2020_LUMINANCE[2];
+                apply_light_tone(pixel, &light);
+                apply_tone_curve(pixel, &light.tone_curve);
+                let luminance = luminance(pixel);
+                let saturation = color.saturation
+                    * (1.0 + color.vibrance * (1.0 - color_saturation(pixel, luminance)));
+                if (saturation - 1.0).abs() > f32::EPSILON {
                     for value in pixel.iter_mut() {
-                        *value = luminance + recipe.saturation * (*value - luminance);
+                        *value = luminance + saturation * (*value - luminance);
                     }
                 }
+                apply_hsl_adjustments(pixel, &color.hsl);
+                apply_color_grading(pixel, &color.grading);
             }
             Ok(())
         },
     )?;
     cancellation.checkpoint()?;
     Ok(())
+}
+
+fn apply_light_tone(pixel: &mut [f32], light: &crate::LightAdjustments) {
+    if light.highlights == 0.0 && light.shadows == 0.0 && light.whites == 0.0 && light.blacks == 0.0
+    {
+        return;
+    }
+    let current = luminance(pixel);
+    let normalized = current.clamp(0.0, 1.0);
+    let shadow_weight = 1.0 - smoothstep(0.0, 0.55, normalized);
+    let highlight_weight = smoothstep(0.45, 1.0, normalized);
+    let black_weight = 1.0 - smoothstep(0.0, 0.30, normalized);
+    let white_weight = smoothstep(0.70, 1.0, normalized);
+    let delta = light.shadows * 0.25 * shadow_weight
+        + light.highlights * 0.25 * highlight_weight
+        + light.blacks * 0.15 * black_weight
+        + light.whites * 0.15 * white_weight;
+    if delta == 0.0 {
+        return;
+    }
+    let target = current + delta;
+    if current.abs() > 1.0e-6 {
+        let scale = target / current;
+        for value in pixel.iter_mut() {
+            *value *= scale;
+        }
+    } else {
+        for value in pixel.iter_mut() {
+            *value += delta;
+        }
+    }
+}
+
+fn apply_tone_curve(pixel: &mut [f32], curve: &crate::ToneCurve) {
+    if curve.shadows == 0.0 && curve.darks == 0.0 && curve.lights == 0.0 && curve.highlights == 0.0
+    {
+        return;
+    }
+    let current = luminance(pixel);
+    let normalized = current.clamp(0.0, 1.0);
+    let shadows = 1.0 - smoothstep(0.0, 0.45, normalized);
+    let darks = smoothstep(0.0, 0.12, normalized) * (1.0 - smoothstep(0.35, 0.55, normalized));
+    let lights = smoothstep(0.45, 0.65, normalized) * (1.0 - smoothstep(0.88, 1.0, normalized));
+    let highlights = smoothstep(0.60, 1.0, normalized);
+    let delta = curve.shadows * shadows
+        + curve.darks * darks
+        + curve.lights * lights
+        + curve.highlights * highlights;
+    if delta == 0.0 {
+        return;
+    }
+    let target = current + delta;
+    if current.abs() > 1.0e-6 {
+        let scale = target / current;
+        for value in pixel.iter_mut() {
+            *value *= scale;
+        }
+    } else {
+        for value in pixel.iter_mut() {
+            *value += delta;
+        }
+    }
+}
+
+fn apply_hsl_adjustments(pixel: &mut [f32], adjustments: &crate::HslAdjustments) {
+    let [red, green, blue] = [pixel[0], pixel[1], pixel[2]];
+    let [mut hue, mut saturation, mut lightness] = rgb_to_hsl([red, green, blue]);
+    let mut hue_shift = 0.0;
+    let mut saturation_shift = 0.0;
+    let mut lightness_shift = 0.0;
+    for (index, channel) in adjustments.channels.iter().enumerate() {
+        let center = index as f32 / adjustments.channels.len() as f32;
+        let distance = (hue - center).abs().min(1.0 - (hue - center).abs());
+        let weight = (1.0 - distance * 4.0).clamp(0.0, 1.0);
+        hue_shift += channel.hue * 0.125 * weight;
+        saturation_shift += channel.saturation * 0.5 * weight;
+        lightness_shift += channel.luminance * 0.25 * weight;
+    }
+    if hue_shift == 0.0 && saturation_shift == 0.0 && lightness_shift == 0.0 {
+        return;
+    }
+    hue = (hue + hue_shift).rem_euclid(1.0);
+    saturation = (saturation + saturation_shift).clamp(0.0, 1.0);
+    lightness = (lightness + lightness_shift).clamp(0.0, 1.0);
+    let converted = hsl_to_rgb([hue, saturation, lightness]);
+    pixel.copy_from_slice(&converted);
+}
+
+fn apply_color_grading(pixel: &mut [f32], grading: &crate::ColorGradingAdjustments) {
+    if grading.shadows == [0.0; 3] && grading.midtones == [0.0; 3] && grading.highlights == [0.0; 3]
+    {
+        return;
+    }
+    let value = luminance(pixel).clamp(0.0, 1.0);
+    let shadows = 1.0 - smoothstep(0.0, 0.5, value);
+    let midtones = smoothstep(0.15, 0.45, value) * (1.0 - smoothstep(0.55, 0.85, value));
+    let highlights = smoothstep(0.5, 1.0, value);
+    for (index, channel) in pixel.iter_mut().enumerate() {
+        *channel += 0.1
+            * (grading.shadows[index] * shadows
+                + grading.midtones[index] * midtones
+                + grading.highlights[index] * highlights);
+    }
+}
+
+fn rgb_to_hsl([red, green, blue]: [f32; 3]) -> [f32; 3] {
+    let red = red.clamp(0.0, 1.0);
+    let green = green.clamp(0.0, 1.0);
+    let blue = blue.clamp(0.0, 1.0);
+    let maximum = red.max(green).max(blue);
+    let minimum = red.min(green).min(blue);
+    let lightness = (maximum + minimum) * 0.5;
+    let chroma = maximum - minimum;
+    if chroma <= f32::EPSILON {
+        return [0.0, 0.0, lightness];
+    }
+    let saturation = chroma / (1.0 - (2.0 * lightness - 1.0).abs());
+    let hue = if maximum == red {
+        ((green - blue) / chroma).rem_euclid(6.0) / 6.0
+    } else if maximum == green {
+        ((blue - red) / chroma + 2.0) / 6.0
+    } else {
+        ((red - green) / chroma + 4.0) / 6.0
+    };
+    [hue, saturation, lightness]
+}
+
+fn hsl_to_rgb([hue, saturation, lightness]: [f32; 3]) -> [f32; 3] {
+    if saturation <= f32::EPSILON {
+        return [lightness; 3];
+    }
+    let chroma = (1.0 - (2.0 * lightness - 1.0).abs()) * saturation;
+    let hue_prime = hue * 6.0;
+    let secondary = chroma * (1.0 - ((hue_prime.rem_euclid(2.0)) - 1.0).abs());
+    let (red, green, blue) = match hue_prime {
+        value if value < 1.0 => (chroma, secondary, 0.0),
+        value if value < 2.0 => (secondary, chroma, 0.0),
+        value if value < 3.0 => (0.0, chroma, secondary),
+        value if value < 4.0 => (0.0, secondary, chroma),
+        value if value < 5.0 => (secondary, 0.0, chroma),
+        _ => (chroma, 0.0, secondary),
+    };
+    let match_value = lightness - chroma * 0.5;
+    [red + match_value, green + match_value, blue + match_value]
+}
+
+fn luminance(pixel: &[f32]) -> f32 {
+    pixel[0] * REC2020_LUMINANCE[0]
+        + pixel[1] * REC2020_LUMINANCE[1]
+        + pixel[2] * REC2020_LUMINANCE[2]
+}
+
+fn color_saturation(pixel: &[f32], luminance: f32) -> f32 {
+    let chroma = pixel
+        .iter()
+        .map(|value| (value - luminance).abs())
+        .fold(0.0, f32::max);
+    (chroma / luminance.abs().max(1.0e-6)).clamp(0.0, 1.0)
+}
+
+fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
+    let normalized = ((value - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    normalized * normalized * (3.0 - 2.0 * normalized)
 }
 
 /// Convert linear Rec.2020 to clipped, transfer-encoded sRGB8 while physically
@@ -964,6 +1185,21 @@ mod tests {
     }
 
     #[test]
+    fn neutral_temperature_tint_preserves_as_shot_gains() {
+        let info = test_info(2, 2, "RGGB");
+        let as_shot = white_balance_gains(&info, WhiteBalance::AsShot).expect("as-shot balance");
+        let neutral = white_balance_gains(
+            &info,
+            WhiteBalance::TemperatureTint {
+                temperature: 6_500.0,
+                tint: 0.0,
+            },
+        )
+        .expect("neutral temperature balance");
+        assert_eq!(as_shot, neutral);
+    }
+
+    #[test]
     fn exposure_neutral_is_identity_and_known_ev_is_power_of_two() {
         let source = vec![0.1, 0.2, 0.3, 0.5, 0.6, 0.7];
         let mut neutral = LinearRgbImage::new(2, 1, 6, LinearRgbSpace::Rec2020D65, source.clone())
@@ -972,10 +1208,8 @@ mod tests {
         assert_eq!(neutral.data(), source);
 
         let mut raised = neutral;
-        let recipe = EditRecipe {
-            exposure_ev: 2.0,
-            ..EditRecipe::default()
-        };
+        let mut recipe = EditRecipe::default();
+        recipe.light.exposure_ev = 2.0;
         apply_adjustments(&mut raised, &recipe).expect("exposure adjustment");
         for (actual, original) in raised.data().iter().zip(source) {
             assert_eq!(*actual, original * 4.0);
@@ -995,16 +1229,76 @@ mod tests {
                 .collect(),
         )
         .expect("valid image");
-        let recipe = EditRecipe {
-            contrast: 1.0,
-            saturation: 2.0,
-            ..EditRecipe::default()
-        };
+        let mut recipe = EditRecipe::default();
+        recipe.light.contrast = 1.0;
+        recipe.color.saturation = 2.0;
         apply_adjustments(&mut image, &recipe).expect("valid adjustments");
         assert_eq!(image.pixel(0, 0), Some(&[CONTRAST_PIVOT; 3][..]));
         let gray = image.pixel(1, 0).expect("second pixel");
         assert!((gray[0] - gray[1]).abs() < 1.0e-6);
         assert!((gray[1] - gray[2]).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn tonal_controls_target_shadow_and_highlight_ranges() {
+        let source = vec![0.1, 0.1, 0.1, 0.9, 0.9, 0.9];
+        let mut shadows = LinearRgbImage::new(2, 1, 6, LinearRgbSpace::Rec2020D65, source.clone())
+            .expect("valid image");
+        let mut shadows_recipe = EditRecipe::default();
+        shadows_recipe.light.shadows = 1.0;
+        apply_adjustments(&mut shadows, &shadows_recipe).expect("shadow adjustment");
+        assert!(shadows.pixel(0, 0).expect("shadow pixel")[0] > source[0]);
+        assert!(shadows.pixel(1, 0).expect("highlight pixel")[0] < source[3] + 0.001);
+
+        let mut highlights =
+            LinearRgbImage::new(2, 1, 6, LinearRgbSpace::Rec2020D65, source).expect("valid image");
+        let mut highlights_recipe = EditRecipe::default();
+        highlights_recipe.light.highlights = -1.0;
+        apply_adjustments(&mut highlights, &highlights_recipe).expect("highlight adjustment");
+        assert!(highlights.pixel(1, 0).expect("highlight pixel")[0] < 0.9);
+        assert!(highlights.pixel(0, 0).expect("shadow pixel")[0] > 0.099);
+    }
+
+    #[test]
+    fn tone_curve_regions_adjust_luminance_without_changing_neutral_color() {
+        let mut image = LinearRgbImage::new(
+            2,
+            1,
+            6,
+            LinearRgbSpace::Rec2020D65,
+            vec![0.2, 0.2, 0.2, 0.8, 0.8, 0.8],
+        )
+        .expect("valid image");
+        let mut recipe = EditRecipe::default();
+        recipe.light.tone_curve.darks = 0.1;
+        recipe.light.tone_curve.highlights = -0.1;
+        apply_adjustments(&mut image, &recipe).expect("tone curve adjustment");
+        for pixel in image.data().chunks_exact(3) {
+            assert!((pixel[0] - pixel[1]).abs() < 1.0e-6);
+            assert!((pixel[1] - pixel[2]).abs() < 1.0e-6);
+        }
+        assert!(image.pixel(0, 0).expect("dark pixel")[0] > 0.2);
+        assert!(image.pixel(1, 0).expect("light pixel")[0] < 0.8);
+    }
+
+    #[test]
+    fn hsl_mixer_and_color_grading_change_only_the_requested_color_regions() {
+        let mut image = LinearRgbImage::new(
+            2,
+            1,
+            6,
+            LinearRgbSpace::Rec2020D65,
+            vec![0.9, 0.2, 0.2, 0.1, 0.1, 0.1],
+        )
+        .expect("valid image");
+        let mut recipe = EditRecipe::default();
+        recipe.color.hsl.channels[0].hue = 0.5;
+        recipe.color.grading.shadows[2] = 1.0;
+        apply_adjustments(&mut image, &recipe).expect("color adjustment");
+        let red = image.pixel(0, 0).expect("red pixel");
+        let shadow = image.pixel(1, 0).expect("shadow pixel");
+        assert!(red[1] > 0.2);
+        assert!(shadow[2] > 0.1);
     }
 
     #[test]

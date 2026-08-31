@@ -1,4 +1,5 @@
 use eframe::egui;
+use rohditor_core::Histogram;
 
 use super::theme::{self, colors, metrics};
 use super::widgets::{self, AdjustmentSpec, ValueScale};
@@ -8,9 +9,33 @@ pub(crate) enum AdjustmentTarget {
     WhiteBalanceRed,
     WhiteBalanceGreen,
     WhiteBalanceBlue,
+    WhiteBalanceTemperature,
+    WhiteBalanceTint,
     Exposure,
     Contrast,
+    Highlights,
+    Shadows,
+    Whites,
+    Blacks,
+    ToneCurveShadows,
+    ToneCurveDarks,
+    ToneCurveLights,
+    ToneCurveHighlights,
     Saturation,
+    Vibrance,
+    HslHue(usize),
+    HslSaturation(usize),
+    HslLuminance(usize),
+    GradingShadows(usize),
+    GradingMidtones(usize),
+    GradingHighlights(usize),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WhiteBalanceMode {
+    AsShot,
+    TemperatureTint,
+    ManualMultipliers,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -23,20 +48,45 @@ pub(crate) struct AdjustmentRange {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct AdjustmentRanges {
     pub white_balance: AdjustmentRange,
+    pub temperature: AdjustmentRange,
+    pub tint: AdjustmentRange,
     pub exposure: AdjustmentRange,
     pub contrast: AdjustmentRange,
+    pub highlights: AdjustmentRange,
+    pub shadows: AdjustmentRange,
+    pub whites: AdjustmentRange,
+    pub blacks: AdjustmentRange,
+    pub tone_curve: AdjustmentRange,
     pub saturation: AdjustmentRange,
+    pub vibrance: AdjustmentRange,
+    pub hsl_hue: AdjustmentRange,
+    pub hsl_saturation: AdjustmentRange,
+    pub hsl_luminance: AdjustmentRange,
+    pub grading: AdjustmentRange,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct AdjustmentValues {
-    pub manual_white_balance: bool,
+    pub white_balance_mode: WhiteBalanceMode,
     pub white_balance_red: f32,
     pub white_balance_green: f32,
     pub white_balance_blue: f32,
+    pub white_balance_temperature: f32,
+    pub white_balance_tint: f32,
     pub exposure: f32,
     pub contrast: f32,
+    pub highlights: f32,
+    pub shadows: f32,
+    pub whites: f32,
+    pub blacks: f32,
+    pub tone_curve_shadows: f32,
+    pub tone_curve_darks: f32,
+    pub tone_curve_lights: f32,
+    pub tone_curve_highlights: f32,
     pub saturation: f32,
+    pub vibrance: f32,
+    pub hsl: [[f32; 3]; 8],
+    pub grading: [[f32; 3]; 3],
 }
 
 #[derive(Debug, Clone)]
@@ -53,6 +103,7 @@ pub(crate) struct DocumentPanelModel {
     pub error: Option<String>,
     pub warning: Option<String>,
     pub notice: Option<String>,
+    pub histogram: Option<Histogram>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -68,8 +119,9 @@ pub(crate) struct AdjustmentInteraction {
 
 #[derive(Debug, Default)]
 pub(crate) struct AdjustmentPanelOutput {
-    pub manual_white_balance: Option<bool>,
+    pub white_balance_mode: Option<WhiteBalanceMode>,
     pub interactions: Vec<AdjustmentInteraction>,
+    pub auto_tone: bool,
     pub reset_all: bool,
     pub export: bool,
     pub dismiss_error: bool,
@@ -144,9 +196,12 @@ pub(crate) fn show(
 
                     document_summary(ui, &document);
                     show_messages(ui, &document, &mut output);
-                    histogram_shell(ui);
+                    histogram_panel(ui, document.histogram.as_ref());
                     show_light_controls(ui, &mut document, &mut output);
+                    show_tone_curve_controls(ui, &mut document, &mut output);
                     show_color_controls(ui, &mut document, &mut output);
+                    show_color_mixer_controls(ui, &mut document, &mut output);
+                    show_color_grading_controls(ui, &mut document, &mut output);
 
                     widgets::section_header(ui, "Export");
                     show_export_settings(ui, export_settings);
@@ -172,6 +227,53 @@ pub(crate) fn show(
                 });
         });
     output
+}
+
+fn show_tone_curve_controls(
+    ui: &mut egui::Ui,
+    document: &mut DocumentPanelModel,
+    output: &mut AdjustmentPanelOutput,
+) {
+    widgets::section_header(ui, "Tone curve");
+    for (label, target, value) in [
+        (
+            "Shadows",
+            AdjustmentTarget::ToneCurveShadows,
+            &mut document.values.tone_curve_shadows,
+        ),
+        (
+            "Darks",
+            AdjustmentTarget::ToneCurveDarks,
+            &mut document.values.tone_curve_darks,
+        ),
+        (
+            "Lights",
+            AdjustmentTarget::ToneCurveLights,
+            &mut document.values.tone_curve_lights,
+        ),
+        (
+            "Highlights",
+            AdjustmentTarget::ToneCurveHighlights,
+            &mut document.values.tone_curve_highlights,
+        ),
+    ] {
+        record_slider(
+            ui,
+            &mut output.interactions,
+            target,
+            value,
+            AdjustmentSpec {
+                label,
+                minimum: document.ranges.tone_curve.minimum,
+                maximum: document.ranges.tone_curve.maximum,
+                neutral: document.ranges.tone_curve.neutral,
+                decimals: 0,
+                step: 0.01,
+                suffix: "%",
+                scale: ValueScale::OffsetPercent,
+            },
+        );
+    }
 }
 
 fn empty_panel(ui: &mut egui::Ui) {
@@ -207,15 +309,28 @@ fn document_summary(ui: &mut egui::Ui, document: &DocumentPanelModel) {
     }
 }
 
-fn histogram_shell(ui: &mut egui::Ui) {
+fn histogram_panel(ui: &mut egui::Ui, histogram: Option<&Histogram>) {
     widgets::section_header(ui, "Histogram");
-    histogram_canvas(ui, "ANALYSIS SHELL");
+    let Some(histogram) = histogram else {
+        histogram_canvas(ui, "ANALYZING");
+        return;
+    };
+    histogram_canvas_data(ui, histogram);
     ui.horizontal(|ui| {
-        let shadows = widgets::toolbar_button(ui, "Shadows", false, false)
-            .on_disabled_hover_text("Shadow clipping analysis is planned after MVP");
-        let highlights = widgets::toolbar_button(ui, "Highlights", false, false)
-            .on_disabled_hover_text("Highlight clipping analysis is planned after MVP");
-        let _ = (shadows, highlights);
+        let shadow_count = histogram.shadow_clipped.into_iter().sum::<u64>();
+        let highlight_count = histogram.highlight_clipped.into_iter().sum::<u64>();
+        ui.label(
+            egui::RichText::new(format!("Shadows {shadow_count}"))
+                .small()
+                .color(colors::TEXT_MUTED),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(
+                egui::RichText::new(format!("Highlights {highlight_count}"))
+                    .small()
+                    .color(colors::TEXT_MUTED),
+            );
+        });
     });
 }
 
@@ -246,12 +361,79 @@ fn histogram_canvas(ui: &mut egui::Ui, caption: &str) {
     );
 }
 
+fn histogram_canvas_data(ui: &mut egui::Ui, histogram: &Histogram) {
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 74.0), egui::Sense::hover());
+    ui.painter().rect(
+        rect,
+        metrics::RADIUS,
+        colors::FIELD,
+        egui::Stroke::new(1.0, colors::BORDER),
+        egui::StrokeKind::Inside,
+    );
+    for fraction in [0.25_f32, 0.5, 0.75] {
+        let x = egui::lerp(rect.left()..=rect.right(), fraction);
+        ui.painter().vline(
+            x,
+            rect.top() + 1.0..=rect.bottom() - 1.0,
+            egui::Stroke::new(1.0, colors::BORDER.gamma_multiply(0.45)),
+        );
+    }
+    let maximum = histogram
+        .red
+        .iter()
+        .chain(histogram.green.iter())
+        .chain(histogram.blue.iter())
+        .chain(histogram.luminance.iter())
+        .copied()
+        .max()
+        .unwrap_or(0)
+        .max(1) as f32;
+    let width = rect.width() / 256.0;
+    for index in 0..256 {
+        let x0 = rect.left() + index as f32 * width;
+        let x1 = x0 + width.max(1.0);
+        let luminance = histogram.luminance[index] as f32 / maximum;
+        if luminance > 0.0 {
+            let y = egui::lerp(rect.bottom()..=rect.top(), luminance);
+            ui.painter().rect_filled(
+                egui::Rect::from_min_max(egui::pos2(x0, y), egui::pos2(x1, rect.bottom())),
+                0.0,
+                colors::TEXT.gamma_multiply(0.16),
+            );
+        }
+    }
+    for (bins, color) in [
+        (&histogram.red, colors::ACCENT),
+        (&histogram.green, egui::Color32::from_rgb(105, 190, 125)),
+        (&histogram.blue, egui::Color32::from_rgb(105, 145, 220)),
+    ] {
+        let points = bins
+            .iter()
+            .enumerate()
+            .map(|(index, count)| {
+                let x = rect.left() + (index as f32 + 0.5) * width;
+                let y = egui::lerp(rect.bottom()..=rect.top(), *count as f32 / maximum);
+                egui::pos2(x, y)
+            })
+            .collect::<Vec<_>>();
+        ui.painter().add(egui::Shape::line(
+            points,
+            egui::Stroke::new(1.0, color.gamma_multiply(0.8)),
+        ));
+    }
+}
+
 fn show_light_controls(
     ui: &mut egui::Ui,
     document: &mut DocumentPanelModel,
     output: &mut AdjustmentPanelOutput,
 ) {
     widgets::section_header(ui, "Light");
+    output.auto_tone = ui
+        .small_button("Auto tone")
+        .on_hover_text("Set a neutral exposure from the current histogram")
+        .clicked();
     record_slider(
         ui,
         &mut output.interactions,
@@ -284,6 +466,49 @@ fn show_light_controls(
             scale: ValueScale::OffsetPercent,
         },
     );
+    for (label, target, value, range) in [
+        (
+            "Highlights",
+            AdjustmentTarget::Highlights,
+            &mut document.values.highlights,
+            document.ranges.highlights,
+        ),
+        (
+            "Shadows",
+            AdjustmentTarget::Shadows,
+            &mut document.values.shadows,
+            document.ranges.shadows,
+        ),
+        (
+            "Whites",
+            AdjustmentTarget::Whites,
+            &mut document.values.whites,
+            document.ranges.whites,
+        ),
+        (
+            "Blacks",
+            AdjustmentTarget::Blacks,
+            &mut document.values.blacks,
+            document.ranges.blacks,
+        ),
+    ] {
+        record_slider(
+            ui,
+            &mut output.interactions,
+            target,
+            value,
+            AdjustmentSpec {
+                label,
+                minimum: range.minimum,
+                maximum: range.maximum,
+                neutral: range.neutral,
+                decimals: 0,
+                step: 0.01,
+                suffix: "%",
+                scale: ValueScale::OffsetPercent,
+            },
+        );
+    }
 }
 
 fn show_color_controls(
@@ -292,33 +517,82 @@ fn show_color_controls(
     output: &mut AdjustmentPanelOutput,
 ) {
     widgets::section_header(ui, "Color");
-    let mut manual = document.values.manual_white_balance;
+    let mut mode = document.values.white_balance_mode;
     widgets::dropdown(
         ui,
         "white_balance_mode",
         "White balance",
-        if manual {
-            "Manual multipliers"
-        } else {
-            "As shot"
+        match mode {
+            WhiteBalanceMode::AsShot => "As shot",
+            WhiteBalanceMode::TemperatureTint => "Temperature / tint",
+            WhiteBalanceMode::ManualMultipliers => "Manual multipliers",
         },
         |ui| {
-            ui.selectable_value(&mut manual, false, "As shot");
-            ui.selectable_value(&mut manual, true, "Manual multipliers");
+            ui.selectable_value(&mut mode, WhiteBalanceMode::AsShot, "As shot");
+            ui.selectable_value(
+                &mut mode,
+                WhiteBalanceMode::TemperatureTint,
+                "Temperature / tint",
+            );
+            ui.selectable_value(
+                &mut mode,
+                WhiteBalanceMode::ManualMultipliers,
+                "Manual multipliers",
+            );
         },
     );
-    if manual != document.values.manual_white_balance {
-        output.manual_white_balance = Some(manual);
-        document.values.manual_white_balance = manual;
+    if mode != document.values.white_balance_mode {
+        output.white_balance_mode = Some(mode);
+        document.values.white_balance_mode = mode;
     }
+    let white_balance_hint = match mode {
+        WhiteBalanceMode::AsShot => "Using the camera's as-shot white balance",
+        WhiteBalanceMode::TemperatureTint => "Temperature is in Kelvin; tint shifts green/magenta",
+        WhiteBalanceMode::ManualMultipliers => {
+            "Manual values are relative to the camera multipliers"
+        }
+    };
     ui.label(
-        egui::RichText::new("Manual values are relative to the camera multipliers")
+        egui::RichText::new(white_balance_hint)
             .small()
             .color(colors::TEXT_MUTED),
     );
     ui.add_space(4.0);
 
-    if document.values.manual_white_balance {
+    if document.values.white_balance_mode == WhiteBalanceMode::TemperatureTint {
+        record_slider(
+            ui,
+            &mut output.interactions,
+            AdjustmentTarget::WhiteBalanceTemperature,
+            &mut document.values.white_balance_temperature,
+            AdjustmentSpec {
+                label: "Temperature",
+                minimum: document.ranges.temperature.minimum,
+                maximum: document.ranges.temperature.maximum,
+                neutral: document.ranges.temperature.neutral,
+                decimals: 0,
+                step: 10.0,
+                suffix: " K",
+                scale: ValueScale::Raw,
+            },
+        );
+        record_slider(
+            ui,
+            &mut output.interactions,
+            AdjustmentTarget::WhiteBalanceTint,
+            &mut document.values.white_balance_tint,
+            AdjustmentSpec {
+                label: "Tint",
+                minimum: document.ranges.tint.minimum,
+                maximum: document.ranges.tint.maximum,
+                neutral: document.ranges.tint.neutral,
+                decimals: 0,
+                step: 0.01,
+                suffix: "%",
+                scale: ValueScale::OffsetPercent,
+            },
+        );
+    } else if document.values.white_balance_mode == WhiteBalanceMode::ManualMultipliers {
         for (label, target, value) in [
             (
                 "Red multiplier",
@@ -371,6 +645,22 @@ fn show_color_controls(
             scale: ValueScale::OffsetPercent,
         },
     );
+    record_slider(
+        ui,
+        &mut output.interactions,
+        AdjustmentTarget::Vibrance,
+        &mut document.values.vibrance,
+        AdjustmentSpec {
+            label: "Vibrance",
+            minimum: document.ranges.vibrance.minimum,
+            maximum: document.ranges.vibrance.maximum,
+            neutral: document.ranges.vibrance.neutral,
+            decimals: 0,
+            step: 0.01,
+            suffix: "%",
+            scale: ValueScale::OffsetPercent,
+        },
+    );
 
     output.reset_all = ui
         .add_enabled(
@@ -379,6 +669,122 @@ fn show_color_controls(
         )
         .on_hover_text("Restore the neutral recipe")
         .clicked();
+}
+
+fn show_color_mixer_controls(
+    ui: &mut egui::Ui,
+    document: &mut DocumentPanelModel,
+    output: &mut AdjustmentPanelOutput,
+) {
+    egui::CollapsingHeader::new("Color mixer")
+        .default_open(false)
+        .show(ui, |ui| {
+            for (index, label) in [
+                "Red", "Orange", "Yellow", "Green", "Aqua", "Blue", "Purple", "Magenta",
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                ui.label(egui::RichText::new(label).small().color(colors::TEXT_MUTED));
+                record_slider(
+                    ui,
+                    &mut output.interactions,
+                    AdjustmentTarget::HslHue(index),
+                    &mut document.values.hsl[index][0],
+                    AdjustmentSpec {
+                        label: "Hue",
+                        minimum: document.ranges.hsl_hue.minimum,
+                        maximum: document.ranges.hsl_hue.maximum,
+                        neutral: document.ranges.hsl_hue.neutral,
+                        decimals: 0,
+                        step: 0.01,
+                        suffix: "%",
+                        scale: ValueScale::OffsetPercent,
+                    },
+                );
+                record_slider(
+                    ui,
+                    &mut output.interactions,
+                    AdjustmentTarget::HslSaturation(index),
+                    &mut document.values.hsl[index][1],
+                    AdjustmentSpec {
+                        label: "Saturation",
+                        minimum: document.ranges.hsl_saturation.minimum,
+                        maximum: document.ranges.hsl_saturation.maximum,
+                        neutral: document.ranges.hsl_saturation.neutral,
+                        decimals: 0,
+                        step: 0.01,
+                        suffix: "%",
+                        scale: ValueScale::OffsetPercent,
+                    },
+                );
+                record_slider(
+                    ui,
+                    &mut output.interactions,
+                    AdjustmentTarget::HslLuminance(index),
+                    &mut document.values.hsl[index][2],
+                    AdjustmentSpec {
+                        label: "Luminance",
+                        minimum: document.ranges.hsl_luminance.minimum,
+                        maximum: document.ranges.hsl_luminance.maximum,
+                        neutral: document.ranges.hsl_luminance.neutral,
+                        decimals: 0,
+                        step: 0.01,
+                        suffix: "%",
+                        scale: ValueScale::OffsetPercent,
+                    },
+                );
+            }
+        });
+}
+
+fn show_color_grading_controls(
+    ui: &mut egui::Ui,
+    document: &mut DocumentPanelModel,
+    output: &mut AdjustmentPanelOutput,
+) {
+    egui::CollapsingHeader::new("Color grading")
+        .default_open(false)
+        .show(ui, |ui| {
+            for (group, label, target) in [
+                (0, "Shadows", AdjustmentTarget::GradingShadows(0)),
+                (1, "Midtones", AdjustmentTarget::GradingMidtones(0)),
+                (2, "Highlights", AdjustmentTarget::GradingHighlights(0)),
+            ] {
+                ui.label(egui::RichText::new(label).small().color(colors::TEXT_MUTED));
+                for channel in 0..3 {
+                    let target = match target {
+                        AdjustmentTarget::GradingShadows(_) => {
+                            AdjustmentTarget::GradingShadows(channel)
+                        }
+                        AdjustmentTarget::GradingMidtones(_) => {
+                            AdjustmentTarget::GradingMidtones(channel)
+                        }
+                        AdjustmentTarget::GradingHighlights(_) => {
+                            AdjustmentTarget::GradingHighlights(channel)
+                        }
+                        _ => unreachable!("color grading group is fixed"),
+                    };
+                    let label = ["Red", "Green", "Blue"][channel];
+                    record_slider(
+                        ui,
+                        &mut output.interactions,
+                        target,
+                        &mut document.values.grading[group][channel],
+                        AdjustmentSpec {
+                            label,
+                            minimum: document.ranges.grading.minimum,
+                            maximum: document.ranges.grading.maximum,
+                            neutral: document.ranges.grading.neutral,
+                            decimals: 0,
+                            step: 0.01,
+                            suffix: "%",
+                            scale: ValueScale::OffsetPercent,
+                        },
+                    );
+                }
+            }
+        });
 }
 
 fn record_slider(

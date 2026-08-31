@@ -41,14 +41,41 @@ impl PreviewCacheKeys {
         let demosaiced = DemosaicedBaseKey {
             reconstructed: reconstructed.clone(),
             recipe_schema_version: recipe.schema_version,
-            white_balance: WhiteBalanceKey::from(recipe.white_balance),
+            white_balance: WhiteBalanceKey::from(recipe.color.white_balance),
         };
         let adjusted = AdjustedPreviewKey {
             demosaiced: demosaiced.clone(),
-            exposure_bits: recipe.exposure_ev.to_bits(),
-            contrast_bits: recipe.contrast.to_bits(),
-            saturation_bits: recipe.saturation.to_bits(),
+            exposure_bits: recipe.light.exposure_ev.to_bits(),
+            contrast_bits: recipe.light.contrast.to_bits(),
+            highlights_bits: recipe.light.highlights.to_bits(),
+            shadows_bits: recipe.light.shadows.to_bits(),
+            whites_bits: recipe.light.whites.to_bits(),
+            blacks_bits: recipe.light.blacks.to_bits(),
+            tone_shadows_bits: recipe.light.tone_curve.shadows.to_bits(),
+            tone_darks_bits: recipe.light.tone_curve.darks.to_bits(),
+            tone_lights_bits: recipe.light.tone_curve.lights.to_bits(),
+            tone_highlights_bits: recipe.light.tone_curve.highlights.to_bits(),
+            saturation_bits: recipe.color.saturation.to_bits(),
+            vibrance_bits: recipe.color.vibrance.to_bits(),
+            hsl_bits: recipe
+                .color
+                .hsl
+                .channels
+                .iter()
+                .flat_map(|channel| [channel.hue, channel.saturation, channel.luminance])
+                .map(f32::to_bits)
+                .collect(),
+            grading_bits: recipe
+                .color
+                .grading
+                .shadows
+                .into_iter()
+                .chain(recipe.color.grading.midtones)
+                .chain(recipe.color.grading.highlights)
+                .map(f32::to_bits)
+                .collect(),
             orientation: recipe
+                .geometry
                 .orientation_override
                 .unwrap_or(frame.info.orientation),
             output_policy: options.render.output_policy,
@@ -96,6 +123,10 @@ enum WhiteBalanceKey {
         green_bits: u32,
         blue_bits: u32,
     },
+    TemperatureTint {
+        temperature_bits: u32,
+        tint_bits: u32,
+    },
 }
 
 impl From<WhiteBalance> for WhiteBalanceKey {
@@ -107,6 +138,10 @@ impl From<WhiteBalance> for WhiteBalanceKey {
                 green_bits: green.to_bits(),
                 blue_bits: blue.to_bits(),
             },
+            WhiteBalance::TemperatureTint { temperature, tint } => Self::TemperatureTint {
+                temperature_bits: temperature.to_bits(),
+                tint_bits: tint.to_bits(),
+            },
         }
     }
 }
@@ -116,7 +151,18 @@ struct AdjustedPreviewKey {
     demosaiced: DemosaicedBaseKey,
     exposure_bits: u32,
     contrast_bits: u32,
+    highlights_bits: u32,
+    shadows_bits: u32,
+    whites_bits: u32,
+    blacks_bits: u32,
+    tone_shadows_bits: u32,
+    tone_darks_bits: u32,
+    tone_lights_bits: u32,
+    tone_highlights_bits: u32,
     saturation_bits: u32,
+    vibrance_bits: u32,
+    hsl_bits: Vec<u32>,
+    grading_bits: Vec<u32>,
     orientation: RawOrientation,
     output_policy: OutputPolicy,
 }

@@ -4,8 +4,9 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::PipelineError;
 
-/// Schema version of the first non-destructive edit recipe.
-pub const EDIT_RECIPE_SCHEMA_VERSION: u32 = 1;
+/// Schema version of the current non-destructive edit recipe.
+pub const EDIT_RECIPE_SCHEMA_VERSION: u32 = 2;
+const LEGACY_EDIT_RECIPE_SCHEMA_VERSION: u32 = 1;
 
 /// Inclusive range and neutral value for one adjustment parameter.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -37,11 +38,73 @@ pub const SATURATION_RANGE: ParameterRange = ParameterRange {
     maximum: 2.0,
     neutral: 1.0,
 };
+pub const HIGHLIGHTS_RANGE: ParameterRange = ParameterRange {
+    minimum: -1.0,
+    maximum: 1.0,
+    neutral: 0.0,
+};
+pub const SHADOWS_RANGE: ParameterRange = ParameterRange {
+    minimum: -1.0,
+    maximum: 1.0,
+    neutral: 0.0,
+};
+pub const WHITES_RANGE: ParameterRange = ParameterRange {
+    minimum: -1.0,
+    maximum: 1.0,
+    neutral: 0.0,
+};
+pub const BLACKS_RANGE: ParameterRange = ParameterRange {
+    minimum: -1.0,
+    maximum: 1.0,
+    neutral: 0.0,
+};
+pub const VIBRANCE_RANGE: ParameterRange = ParameterRange {
+    minimum: -1.0,
+    maximum: 1.0,
+    neutral: 0.0,
+};
 pub const WHITE_BALANCE_MULTIPLIER_RANGE: ParameterRange = ParameterRange {
     minimum: 0.25,
     maximum: 4.0,
     neutral: 1.0,
 };
+pub const TEMPERATURE_RANGE: ParameterRange = ParameterRange {
+    minimum: 2_000.0,
+    maximum: 12_000.0,
+    neutral: 6_500.0,
+};
+pub const TINT_RANGE: ParameterRange = ParameterRange {
+    minimum: -1.0,
+    maximum: 1.0,
+    neutral: 0.0,
+};
+pub const TONE_CURVE_RANGE: ParameterRange = ParameterRange {
+    minimum: -0.25,
+    maximum: 0.25,
+    neutral: 0.0,
+};
+pub const HSL_HUE_RANGE: ParameterRange = ParameterRange {
+    minimum: -1.0,
+    maximum: 1.0,
+    neutral: 0.0,
+};
+pub const HSL_SATURATION_RANGE: ParameterRange = ParameterRange {
+    minimum: -1.0,
+    maximum: 1.0,
+    neutral: 0.0,
+};
+pub const HSL_LUMINANCE_RANGE: ParameterRange = ParameterRange {
+    minimum: -1.0,
+    maximum: 1.0,
+    neutral: 0.0,
+};
+pub const COLOR_GRADING_RANGE: ParameterRange = ParameterRange {
+    minimum: -1.0,
+    maximum: 1.0,
+    neutral: 0.0,
+};
+
+pub const HSL_CHANNEL_COUNT: usize = 8;
 
 /// White balance relative to the decoder's as-shot channel multipliers.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
@@ -54,28 +117,175 @@ pub enum WhiteBalance {
         green: f32,
         blue: f32,
     },
+    TemperatureTint {
+        temperature: f32,
+        tint: f32,
+    },
 }
 
-/// Serializable, non-destructive global edits for the Phase 2 CPU pipeline.
+/// Scene-light controls applied after camera color conversion.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LightAdjustments {
+    #[serde(default)]
+    pub exposure_ev: f32,
+    #[serde(default)]
+    pub contrast: f32,
+    #[serde(default)]
+    pub highlights: f32,
+    #[serde(default)]
+    pub shadows: f32,
+    #[serde(default)]
+    pub whites: f32,
+    #[serde(default)]
+    pub blacks: f32,
+    #[serde(default)]
+    pub tone_curve: ToneCurve,
+}
+
+/// Four broad point-curve regions. Values are scene-linear luminance offsets
+/// around the identity curve; keeping the points grouped makes a future free
+/// point-curve editor a compatible extension of the recipe.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToneCurve {
+    #[serde(default)]
+    pub shadows: f32,
+    #[serde(default)]
+    pub darks: f32,
+    #[serde(default)]
+    pub lights: f32,
+    #[serde(default)]
+    pub highlights: f32,
+}
+
+impl Default for ToneCurve {
+    fn default() -> Self {
+        Self {
+            shadows: TONE_CURVE_RANGE.neutral,
+            darks: TONE_CURVE_RANGE.neutral,
+            lights: TONE_CURVE_RANGE.neutral,
+            highlights: TONE_CURVE_RANGE.neutral,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct HslChannelAdjustments {
+    #[serde(default)]
+    pub hue: f32,
+    #[serde(default)]
+    pub saturation: f32,
+    #[serde(default)]
+    pub luminance: f32,
+}
+
+impl Default for HslChannelAdjustments {
+    fn default() -> Self {
+        Self {
+            hue: HSL_HUE_RANGE.neutral,
+            saturation: HSL_SATURATION_RANGE.neutral,
+            luminance: HSL_LUMINANCE_RANGE.neutral,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HslAdjustments {
+    #[serde(default = "default_hsl_channels")]
+    pub channels: [HslChannelAdjustments; HSL_CHANNEL_COUNT],
+}
+
+impl Default for HslAdjustments {
+    fn default() -> Self {
+        Self {
+            channels: default_hsl_channels(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ColorGradingAdjustments {
+    #[serde(default)]
+    pub shadows: [f32; 3],
+    #[serde(default)]
+    pub midtones: [f32; 3],
+    #[serde(default)]
+    pub highlights: [f32; 3],
+}
+
+impl Default for ColorGradingAdjustments {
+    fn default() -> Self {
+        Self {
+            shadows: [COLOR_GRADING_RANGE.neutral; 3],
+            midtones: [COLOR_GRADING_RANGE.neutral; 3],
+            highlights: [COLOR_GRADING_RANGE.neutral; 3],
+        }
+    }
+}
+
+impl Default for LightAdjustments {
+    fn default() -> Self {
+        Self {
+            exposure_ev: EXPOSURE_EV_RANGE.neutral,
+            contrast: CONTRAST_RANGE.neutral,
+            highlights: HIGHLIGHTS_RANGE.neutral,
+            shadows: SHADOWS_RANGE.neutral,
+            whites: WHITES_RANGE.neutral,
+            blacks: BLACKS_RANGE.neutral,
+            tone_curve: ToneCurve::default(),
+        }
+    }
+}
+
+/// Global color controls. White balance remains upstream of the camera matrix.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ColorAdjustments {
+    #[serde(default)]
+    pub white_balance: WhiteBalance,
+    #[serde(default = "neutral_saturation")]
+    pub saturation: f32,
+    #[serde(default)]
+    pub vibrance: f32,
+    #[serde(default)]
+    pub hsl: HslAdjustments,
+    #[serde(default)]
+    pub grading: ColorGradingAdjustments,
+}
+
+impl Default for ColorAdjustments {
+    fn default() -> Self {
+        Self {
+            white_balance: WhiteBalance::AsShot,
+            saturation: SATURATION_RANGE.neutral,
+            vibrance: VIBRANCE_RANGE.neutral,
+            hsl: HslAdjustments::default(),
+            grading: ColorGradingAdjustments::default(),
+        }
+    }
+}
+
+/// Geometry controls which affect the final display coordinate mapping.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct GeometryAdjustments {
+    #[serde(default)]
+    pub orientation_override: Option<RawOrientation>,
+}
+
+/// Serializable, non-destructive global edits.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct EditRecipe {
     pub schema_version: u32,
-    pub white_balance: WhiteBalance,
-    pub exposure_ev: f32,
-    pub contrast: f32,
-    pub saturation: f32,
-    pub orientation_override: Option<RawOrientation>,
+    pub light: LightAdjustments,
+    pub color: ColorAdjustments,
+    pub geometry: GeometryAdjustments,
 }
 
 impl Default for EditRecipe {
     fn default() -> Self {
         Self {
             schema_version: EDIT_RECIPE_SCHEMA_VERSION,
-            white_balance: WhiteBalance::AsShot,
-            exposure_ev: EXPOSURE_EV_RANGE.neutral,
-            contrast: CONTRAST_RANGE.neutral,
-            saturation: SATURATION_RANGE.neutral,
-            orientation_override: None,
+            light: LightAdjustments::default(),
+            color: ColorAdjustments::default(),
+            geometry: GeometryAdjustments::default(),
         }
     }
 }
@@ -91,21 +301,80 @@ impl EditRecipe {
                 ),
             });
         }
-        validate_parameter("exposure_ev", self.exposure_ev, EXPOSURE_EV_RANGE)?;
-        validate_parameter("contrast", self.contrast, CONTRAST_RANGE)?;
-        validate_parameter("saturation", self.saturation, SATURATION_RANGE)?;
-        if let WhiteBalance::ManualMultipliers { red, green, blue } = self.white_balance {
+        validate_parameter(
+            "light.exposure_ev",
+            self.light.exposure_ev,
+            EXPOSURE_EV_RANGE,
+        )?;
+        validate_parameter("light.contrast", self.light.contrast, CONTRAST_RANGE)?;
+        validate_parameter("light.highlights", self.light.highlights, HIGHLIGHTS_RANGE)?;
+        validate_parameter("light.shadows", self.light.shadows, SHADOWS_RANGE)?;
+        validate_parameter("light.whites", self.light.whites, WHITES_RANGE)?;
+        validate_parameter("light.blacks", self.light.blacks, BLACKS_RANGE)?;
+        validate_parameter(
+            "light.tone_curve.shadows",
+            self.light.tone_curve.shadows,
+            TONE_CURVE_RANGE,
+        )?;
+        validate_parameter(
+            "light.tone_curve.darks",
+            self.light.tone_curve.darks,
+            TONE_CURVE_RANGE,
+        )?;
+        validate_parameter(
+            "light.tone_curve.lights",
+            self.light.tone_curve.lights,
+            TONE_CURVE_RANGE,
+        )?;
+        validate_parameter(
+            "light.tone_curve.highlights",
+            self.light.tone_curve.highlights,
+            TONE_CURVE_RANGE,
+        )?;
+        validate_parameter("color.saturation", self.color.saturation, SATURATION_RANGE)?;
+        validate_parameter("color.vibrance", self.color.vibrance, VIBRANCE_RANGE)?;
+        for channel in self.color.hsl.channels {
+            validate_parameter("color.hsl.hue", channel.hue, HSL_HUE_RANGE)?;
+            validate_parameter(
+                "color.hsl.saturation",
+                channel.saturation,
+                HSL_SATURATION_RANGE,
+            )?;
+            validate_parameter(
+                "color.hsl.luminance",
+                channel.luminance,
+                HSL_LUMINANCE_RANGE,
+            )?;
+        }
+        for grade in [
+            self.color.grading.shadows,
+            self.color.grading.midtones,
+            self.color.grading.highlights,
+        ] {
+            for value in grade {
+                validate_parameter("color.grading", value, COLOR_GRADING_RANGE)?;
+            }
+        }
+        if let WhiteBalance::ManualMultipliers { red, green, blue } = self.color.white_balance {
             for (field, value) in [
-                ("white_balance.red", red),
-                ("white_balance.green", green),
-                ("white_balance.blue", blue),
+                ("color.white_balance.red", red),
+                ("color.white_balance.green", green),
+                ("color.white_balance.blue", blue),
             ] {
                 validate_parameter(field, value, WHITE_BALANCE_MULTIPLIER_RANGE)?;
             }
         }
-        if self.orientation_override == Some(RawOrientation::Unknown) {
+        if let WhiteBalance::TemperatureTint { temperature, tint } = self.color.white_balance {
+            validate_parameter(
+                "color.white_balance.temperature",
+                temperature,
+                TEMPERATURE_RANGE,
+            )?;
+            validate_parameter("color.white_balance.tint", tint, TINT_RANGE)?;
+        }
+        if self.geometry.orientation_override == Some(RawOrientation::Unknown) {
             return Err(PipelineError::InvalidRecipe {
-                field: "orientation_override",
+                field: "geometry.orientation_override",
                 reason: "unknown is metadata state, not a usable override".to_owned(),
             });
         }
@@ -117,15 +386,22 @@ impl EditRecipe {
 struct RecipeFields {
     schema_version: u32,
     #[serde(default)]
-    white_balance: WhiteBalance,
+    light: LightAdjustments,
     #[serde(default)]
-    exposure_ev: f32,
+    color: ColorAdjustments,
     #[serde(default)]
-    contrast: f32,
-    #[serde(default = "neutral_saturation")]
-    saturation: f32,
-    #[serde(default)]
-    orientation_override: Option<RawOrientation>,
+    geometry: GeometryAdjustments,
+    // v1 fields are accepted only to migrate old sidecars/recipes.
+    #[serde(default, alias = "white_balance")]
+    legacy_white_balance: Option<WhiteBalance>,
+    #[serde(default, alias = "exposure_ev")]
+    legacy_exposure_ev: Option<f32>,
+    #[serde(default, alias = "contrast")]
+    legacy_contrast: Option<f32>,
+    #[serde(default, alias = "saturation")]
+    legacy_saturation: Option<f32>,
+    #[serde(default, alias = "orientation_override")]
+    legacy_orientation_override: Option<RawOrientation>,
 }
 
 impl<'de> Deserialize<'de> for EditRecipe {
@@ -134,13 +410,28 @@ impl<'de> Deserialize<'de> for EditRecipe {
         D: Deserializer<'de>,
     {
         let fields = RecipeFields::deserialize(deserializer)?;
-        let recipe = Self {
-            schema_version: fields.schema_version,
-            white_balance: fields.white_balance,
-            exposure_ev: fields.exposure_ev,
-            contrast: fields.contrast,
-            saturation: fields.saturation,
-            orientation_override: fields.orientation_override,
+        let recipe = if fields.schema_version == LEGACY_EDIT_RECIPE_SCHEMA_VERSION {
+            let mut light = fields.light;
+            light.exposure_ev = fields.legacy_exposure_ev.unwrap_or(light.exposure_ev);
+            light.contrast = fields.legacy_contrast.unwrap_or(light.contrast);
+            let mut color = fields.color;
+            color.white_balance = fields.legacy_white_balance.unwrap_or(color.white_balance);
+            color.saturation = fields.legacy_saturation.unwrap_or(color.saturation);
+            Self {
+                schema_version: EDIT_RECIPE_SCHEMA_VERSION,
+                light,
+                color,
+                geometry: GeometryAdjustments {
+                    orientation_override: fields.legacy_orientation_override,
+                },
+            }
+        } else {
+            Self {
+                schema_version: fields.schema_version,
+                light: fields.light,
+                color: fields.color,
+                geometry: fields.geometry,
+            }
         };
         recipe.validate().map_err(D::Error::custom)?;
         Ok(recipe)
@@ -149,6 +440,10 @@ impl<'de> Deserialize<'de> for EditRecipe {
 
 const fn neutral_saturation() -> f32 {
     SATURATION_RANGE.neutral
+}
+
+fn default_hsl_channels() -> [HslChannelAdjustments; HSL_CHANNEL_COUNT] {
+    [HslChannelAdjustments::default(); HSL_CHANNEL_COUNT]
 }
 
 fn validate_parameter(
@@ -177,35 +472,47 @@ mod tests {
     fn neutral_recipe_has_documented_identity_values() {
         let recipe = EditRecipe::default();
         assert_eq!(recipe.schema_version, EDIT_RECIPE_SCHEMA_VERSION);
-        assert_eq!(recipe.white_balance, WhiteBalance::AsShot);
-        assert_eq!(recipe.exposure_ev, 0.0);
-        assert_eq!(recipe.contrast, 0.0);
-        assert_eq!(recipe.saturation, 1.0);
+        assert_eq!(recipe.color.white_balance, WhiteBalance::AsShot);
+        assert_eq!(recipe.light.exposure_ev, 0.0);
+        assert_eq!(recipe.light.contrast, 0.0);
+        assert_eq!(recipe.color.saturation, 1.0);
         assert!(recipe.validate().is_ok());
     }
 
     #[test]
     fn deserialization_rejects_unknown_schema_versions() {
         let json = r#"{
-            "schema_version": 2,
-            "white_balance": { "mode": "as_shot" },
-            "exposure_ev": 0.0,
-            "contrast": 0.0,
-            "saturation": 1.0,
-            "orientation_override": null
+            "schema_version": 3,
+            "light": {},
+            "color": {},
+            "geometry": {}
         }"#;
         assert!(serde_json::from_str::<EditRecipe>(json).is_err());
     }
 
     #[test]
+    fn legacy_recipe_is_migrated_into_current_groups() {
+        let json = r#"{
+            "schema_version": 1,
+            "white_balance": { "mode": "as_shot" },
+            "exposure_ev": 1.0,
+            "contrast": -0.25,
+            "saturation": 1.25,
+            "orientation_override": null
+        }"#;
+        let recipe = serde_json::from_str::<EditRecipe>(json).expect("v1 migration");
+        assert_eq!(recipe.schema_version, EDIT_RECIPE_SCHEMA_VERSION);
+        assert_eq!(recipe.light.exposure_ev, 1.0);
+        assert_eq!(recipe.color.saturation, 1.25);
+    }
+
+    #[test]
     fn recipe_ranges_reject_non_finite_and_out_of_range_values() {
-        let mut recipe = EditRecipe {
-            exposure_ev: f32::NAN,
-            ..EditRecipe::default()
-        };
+        let mut recipe = EditRecipe::default();
+        recipe.light.exposure_ev = f32::NAN;
         assert!(recipe.validate().is_err());
-        recipe.exposure_ev = 0.0;
-        recipe.white_balance = WhiteBalance::ManualMultipliers {
+        recipe.light.exposure_ev = 0.0;
+        recipe.color.white_balance = WhiteBalance::ManualMultipliers {
             red: 0.1,
             green: 1.0,
             blue: 1.0,
