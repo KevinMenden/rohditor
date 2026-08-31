@@ -23,9 +23,9 @@ pub const MALVAR_HE_CUTLER_HALO: Halo = Halo {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum DemosaicAlgorithm {
     /// Fast reference interpolation using nearest same-color neighbors.
-    #[default]
     Bilinear,
     /// Malvar-He-Cutler gradient-corrected linear interpolation.
+    #[default]
     MalvarHeCutler,
 }
 

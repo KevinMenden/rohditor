@@ -41,9 +41,9 @@ pub(crate) enum ProcessorPreference {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 enum DemosaicPreference {
-    #[default]
     Bilinear,
     #[value(name = "mhc")]
+    #[default]
     MalvarHeCutler,
 }
 
@@ -222,6 +222,10 @@ mod tests {
         assert_eq!(arguments.renderer, RendererPreference::Glow);
         assert_eq!(arguments.processor, ProcessorPreference::Cpu);
         assert_eq!(arguments.demosaic, DemosaicPreference::MalvarHeCutler);
+
+        let defaults = Arguments::try_parse_from(["rohditor-desktop"])
+            .expect("default desktop arguments parse");
+        assert_eq!(defaults.demosaic, DemosaicPreference::MalvarHeCutler);
         assert!(arguments.diagnostics);
     }
 

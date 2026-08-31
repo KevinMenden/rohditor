@@ -342,6 +342,7 @@ impl RohditorApp {
                 .and_then(|document| document.gpu_preview.as_ref())
                 .is_some_and(|preview| preview.source.white_balance() == recipe.white_balance);
             if gpu_base_is_current {
+                self.coordinator.cancel_preview(document_id);
                 self.render_gpu_preview(context, document_id);
                 return;
             }
