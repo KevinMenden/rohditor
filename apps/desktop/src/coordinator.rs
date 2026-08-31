@@ -378,6 +378,10 @@ impl RenderCoordinator {
         );
     }
 
+    pub(crate) fn cancel_preview(&self, document_id: u64) {
+        self.previews.abandon(document_id);
+    }
+
     pub(crate) fn try_events(&self) -> impl Iterator<Item = WorkerEvent> + '_ {
         self.events.try_iter()
     }
@@ -1560,20 +1564,24 @@ mod tests {
         assert_eq!(white_balanced.1.timings.demosaic, Duration::ZERO);
         assert_eq!(white_balanced.1.timings.resampling, Duration::ZERO);
 
-        let mhc_options = PreviewOptions {
+        let alternate_options = PreviewOptions {
             render: rohditor_core::RenderOptions {
-                demosaic: rohditor_core::DemosaicAlgorithm::MalvarHeCutler,
+                demosaic: rohditor_core::DemosaicAlgorithm::Bilinear,
                 ..options.render
             },
             ..options
         };
-        let mhc_keys =
-            PreviewCacheKeys::new(9, &adjusted.frame, &white_balance_job.recipe, mhc_options);
-        let mhc_hits = cache.prepare(&mhc_keys, &adjusted.frame);
-        assert!(mhc_hits.decoded);
-        assert!(!mhc_hits.reconstructed);
-        assert!(!mhc_hits.demosaiced);
-        assert!(!mhc_hits.adjusted);
+        let alternate_keys = PreviewCacheKeys::new(
+            9,
+            &adjusted.frame,
+            &white_balance_job.recipe,
+            alternate_options,
+        );
+        let alternate_hits = cache.prepare(&alternate_keys, &adjusted.frame);
+        assert!(alternate_hits.decoded);
+        assert!(!alternate_hits.reconstructed);
+        assert!(!alternate_hits.demosaiced);
+        assert!(!alternate_hits.adjusted);
     }
 
     #[test]

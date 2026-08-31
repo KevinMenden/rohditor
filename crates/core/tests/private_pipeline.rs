@@ -1,7 +1,9 @@
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
-use rohditor_core::{CpuPipeline, DemosaicAlgorithm, EditRecipe, PreviewOptions, RenderOptions};
+use rohditor_core::{
+    CancellationToken, CpuPipeline, DemosaicAlgorithm, EditRecipe, PreviewOptions, RenderOptions,
+};
 use rohditor_raw::{RawDecoder, RawOrientation, RawlerDecoder};
 
 const SAMPLES: [&str; 6] = [
@@ -105,6 +107,39 @@ fn neutral_recipe_develops_every_private_sample_deterministically() -> Result<()
         let repeated = pipeline.render(&decoder.decode(&first_path)?, &recipe, options)?;
         assert_eq!(first_hash, Some(fnv1a64(repeated.image.data())));
     }
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires the ignored Sony ARW corpus in testdata/private"]
+fn source_scale_inspection_meets_phase_9_latency_and_memory_budgets() -> Result<(), Box<dyn Error>>
+{
+    let frame = RawlerDecoder::default().decode(&private_corpus_directory().join(SAMPLES[0]))?;
+    let result = CpuPipeline.render_source_scale_preview_cancellable(
+        &frame,
+        &EditRecipe::default(),
+        RenderOptions::default(),
+        &CancellationToken::new(),
+    )?;
+    assert_eq!(
+        (result.image.width(), result.image.height()),
+        (6_000, 4_000)
+    );
+    assert!(
+        result.timings.total.as_secs_f64() < 2.0,
+        "source-scale development took {:.3} s",
+        result.timings.total.as_secs_f64()
+    );
+    assert!(
+        result.memory.estimated_peak_bytes < PHASE_9_PREVIEW_PEAK_LIMIT_BYTES,
+        "source-scale peak was {} MiB",
+        result.memory.estimated_peak_bytes.div_ceil(1024 * 1024)
+    );
+    println!(
+        "source-scale MHC: {:.1} ms, {} MiB peak",
+        result.timings.total.as_secs_f64() * 1_000.0,
+        result.memory.estimated_peak_bytes.div_ceil(1024 * 1024)
+    );
     Ok(())
 }
 
