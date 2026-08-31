@@ -97,6 +97,7 @@ pub(crate) struct WorkerImage {
     pub width: usize,
     pub height: usize,
     pub color: egui::ColorImage,
+    pub pixels: Vec<u8>,
 }
 
 impl WorkerImage {
@@ -136,6 +137,7 @@ impl WorkerImage {
             width,
             height,
             color,
+            pixels,
         })
     }
 }

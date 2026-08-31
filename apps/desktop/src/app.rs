@@ -83,6 +83,7 @@ struct Document {
     frame: Option<Arc<RawFrame>>,
     edits: EditSession,
     texture: Option<PreviewTexture>,
+    preview_pixels: Option<Vec<u8>>,
     preview_source: Option<PreviewSource>,
     histogram: Option<Histogram>,
     source_scale_requested: bool,
@@ -107,6 +108,7 @@ impl Document {
             frame: None,
             edits: EditSession::default(),
             texture: None,
+            preview_pixels: None,
             preview_source: None,
             histogram: None,
             source_scale_requested: false,
@@ -184,6 +186,7 @@ pub(crate) struct RohditorApp {
     processor_note: Option<String>,
     startup_error: Option<String>,
     show_diagnostics: bool,
+    white_balance_picker_active: bool,
 }
 
 impl RohditorApp {
@@ -242,6 +245,7 @@ impl RohditorApp {
             processor_note,
             startup_error,
             show_diagnostics,
+            white_balance_picker_active: false,
         };
         if let Some(path) = initial_path {
             application.open_path(&context.egui_ctx, path);
@@ -282,6 +286,7 @@ impl RohditorApp {
     }
 
     fn close_document(&mut self, context: &egui::Context) {
+        self.white_balance_picker_active = false;
         if let Some(mut document) = self.document.take() {
             self.release_gpu_preview(&mut document);
             self.coordinator.abandon(document.id);
@@ -475,6 +480,7 @@ impl RohditorApp {
                         frame,
                         texture_id,
                     });
+                    document.preview_pixels = None;
                     document.texture = Some(PreviewTexture::Gpu {
                         id: texture_id,
                         size: output_size,
@@ -591,6 +597,7 @@ impl RohditorApp {
                         frame,
                         texture_id,
                     });
+                    document.preview_pixels = None;
                     document.texture = Some(PreviewTexture::Gpu {
                         id: texture_id,
                         size: output_size,
@@ -930,8 +937,12 @@ impl RohditorApp {
     }
 
     fn show_adjustment_panel(&mut self, context: &egui::Context) {
-        let model = self.document.as_ref().map(document_panel_model);
+        let model = self
+            .document
+            .as_ref()
+            .map(|document| document_panel_model(document, self.white_balance_picker_active));
         let output = adjustment_panel::show(context, model, &mut self.export_settings);
+        let picker_state = output.white_balance_picker_active;
         let mut changed_document = None;
         if let Some(document) = self.document.as_mut() {
             if output.dismiss_error {
@@ -964,6 +975,9 @@ impl RohditorApp {
         if let Some(document_id) = changed_document {
             self.queue_preview(context, document_id);
         }
+        if let Some(active) = picker_state {
+            self.white_balance_picker_active = active;
+        }
         if output.export {
             self.request_export();
         }
@@ -979,6 +993,7 @@ impl RohditorApp {
                     preparing,
                     texture: document.texture.as_ref(),
                     source: document.preview_source,
+                    white_balance_picker_active: self.white_balance_picker_active,
                 },
                 &mut document.view,
             )
@@ -991,6 +1006,7 @@ impl RohditorApp {
                     preparing: false,
                     texture: None,
                     source: None,
+                    white_balance_picker_active: false,
                 },
                 &mut empty_view,
             )
@@ -998,6 +1014,93 @@ impl RohditorApp {
         if output.open {
             self.open_dialog(context);
         }
+        if let Some(normalized) = output.white_balance_pick {
+            self.apply_white_balance_pick(context, normalized);
+        }
+    }
+
+    fn apply_white_balance_pick(&mut self, context: &egui::Context, normalized: egui::Pos2) {
+        self.white_balance_picker_active = false;
+        let sample = match self.sample_preview_pixel(normalized) {
+            Ok(sample) => sample,
+            Err(error) => {
+                if let Some(document) = self.document.as_mut() {
+                    document.error = Some(error);
+                }
+                return;
+            }
+        };
+        let Some(balance) = white_balance_from_sample(sample) else {
+            if let Some(document) = self.document.as_mut() {
+                document.error = Some(
+                    "Could not pick white balance from a nearly black preview pixel".to_owned(),
+                );
+            }
+            return;
+        };
+        let mut changed_document = None;
+        if let Some(document) = self.document.as_mut() {
+            let mut next = document.edits.recipe().clone();
+            next.color.white_balance = balance;
+            if document.edits.set_discrete(next) {
+                document.notice = Some("White balance picked from the preview".to_owned());
+                document.error = None;
+                changed_document = Some(document.id);
+            }
+        }
+        if let Some(document_id) = changed_document {
+            self.queue_preview(context, document_id);
+        }
+    }
+
+    fn sample_preview_pixel(&self, normalized: egui::Pos2) -> Result<[u8; 3], String> {
+        let Some(document) = self.document.as_ref() else {
+            return Err("Open a photo before using the white-balance picker".to_owned());
+        };
+        if let Some(pixels) = document.preview_pixels.as_ref() {
+            let Some(texture) = document.texture.as_ref() else {
+                return Err("The preview is not ready for white-balance sampling".to_owned());
+            };
+            let (width, height) = texture.dimensions();
+            let x = ((width.saturating_sub(1)) as f32 * normalized.x).round() as usize;
+            let y = ((height.saturating_sub(1)) as f32 * normalized.y).round() as usize;
+            let index = y
+                .checked_mul(width)
+                .and_then(|value| value.checked_add(x))
+                .and_then(|value| value.checked_mul(3))
+                .ok_or_else(|| "The preview pixel coordinate overflowed".to_owned())?;
+            let pixel = pixels
+                .get(index..index.saturating_add(3))
+                .ok_or_else(|| "The preview pixel was outside the image".to_owned())?;
+            return Ok([pixel[0], pixel[1], pixel[2]]);
+        }
+
+        let Some(preview) = document.gpu_preview.as_ref() else {
+            return Err("The preview is not ready for white-balance sampling".to_owned());
+        };
+        let Some(runtime) = self.gpu.as_ref() else {
+            return Err("The GPU preview is no longer available for sampling".to_owned());
+        };
+        let readback = runtime
+            .processor
+            .readback_display(&preview.frame)
+            .map_err(|error| format!("Could not sample the GPU preview: {error}"))?;
+        let width = usize::try_from(readback.width)
+            .map_err(|_| "GPU preview width overflowed this system's usize".to_owned())?;
+        let height = usize::try_from(readback.height)
+            .map_err(|_| "GPU preview height overflowed this system's usize".to_owned())?;
+        let x = ((width.saturating_sub(1)) as f32 * normalized.x).round() as usize;
+        let y = ((height.saturating_sub(1)) as f32 * normalized.y).round() as usize;
+        let index = y
+            .checked_mul(width)
+            .and_then(|value| value.checked_add(x))
+            .and_then(|value| value.checked_mul(4))
+            .ok_or_else(|| "The GPU preview pixel coordinate overflowed".to_owned())?;
+        let pixel = readback
+            .rgba
+            .get(index..index.saturating_add(4))
+            .ok_or_else(|| "The GPU preview pixel was outside the image".to_owned())?;
+        Ok([pixel[0], pixel[1], pixel[2]])
     }
 
     fn show_status_bar(&mut self, context: &egui::Context) {
@@ -1205,7 +1308,10 @@ impl RohditorApp {
     }
 }
 
-fn document_panel_model(document: &Document) -> DocumentPanelModel {
+fn document_panel_model(
+    document: &Document,
+    white_balance_picker_active: bool,
+) -> DocumentPanelModel {
     let (
         white_balance_mode,
         white_balance_red,
@@ -1368,7 +1474,26 @@ fn document_panel_model(document: &Document) -> DocumentPanelModel {
         warning: document.warning.clone(),
         notice: document.notice.clone(),
         histogram: document.histogram,
+        white_balance_picker_active,
     }
+}
+
+fn white_balance_from_sample(sample: [u8; 3]) -> Option<WhiteBalance> {
+    let [red, green, blue] = sample.map(|value| srgb_to_linear_srgb(f32::from(value) / 255.0));
+    if red <= 1.0e-4 || green <= 1.0e-4 || blue <= 1.0e-4 {
+        return None;
+    }
+    Some(WhiteBalance::ManualMultipliers {
+        red: (green / red).clamp(
+            WHITE_BALANCE_MULTIPLIER_RANGE.minimum,
+            WHITE_BALANCE_MULTIPLIER_RANGE.maximum,
+        ),
+        green: WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
+        blue: (green / blue).clamp(
+            WHITE_BALANCE_MULTIPLIER_RANGE.minimum,
+            WHITE_BALANCE_MULTIPLIER_RANGE.maximum,
+        ),
+    })
 }
 
 fn set_white_balance_mode(edits: &mut EditSession, mode: WhiteBalanceMode) -> bool {
@@ -1576,21 +1701,28 @@ fn install_texture(
     image: WorkerImage,
     source: PreviewSource,
 ) {
+    let WorkerImage {
+        width: _,
+        height: _,
+        color,
+        pixels,
+    } = image;
     let texture_name = format!("document-{}-preview", document.id);
     match document.texture.as_mut() {
         Some(PreviewTexture::Cpu(texture)) => {
-            texture.set(image.color, egui::TextureOptions::LINEAR);
+            texture.set(color, egui::TextureOptions::LINEAR);
         }
         _ => {
             document.texture = Some(PreviewTexture::Cpu(context.load_texture(
                 texture_name,
-                image.color,
+                color,
                 egui::TextureOptions::LINEAR,
             )));
             let now = context.input(|input| input.time);
             document.view.fit(now);
         }
     }
+    document.preview_pixels = Some(pixels);
     document.preview_source = Some(source);
 }
 
@@ -1701,5 +1833,26 @@ mod tests {
         assert!(edits.undo());
         assert_eq!(edits.recipe().light.exposure_ev, EXPOSURE_EV_RANGE.neutral);
         assert!(!edits.undo());
+    }
+
+    #[test]
+    fn white_balance_picker_uses_linear_channel_ratios() {
+        let WhiteBalance::ManualMultipliers { red, green, blue } =
+            white_balance_from_sample([128, 128, 128]).expect("neutral sample")
+        else {
+            panic!("picker should produce manual multipliers");
+        };
+        assert!((red - 1.0).abs() < 1.0e-6);
+        assert!((green - 1.0).abs() < 1.0e-6);
+        assert!((blue - 1.0).abs() < 1.0e-6);
+
+        let WhiteBalance::ManualMultipliers { red, blue, .. } =
+            white_balance_from_sample([200, 128, 64]).expect("colored sample")
+        else {
+            panic!("picker should produce manual multipliers");
+        };
+        assert!(red < 1.0);
+        assert!(blue > 1.0);
+        assert!(white_balance_from_sample([0, 128, 128]).is_none());
     }
 }
