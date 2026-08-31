@@ -4,6 +4,7 @@
 //! distinct public types. The CPU implementation in this crate is the behavior
 //! that later preview and GPU implementations must match.
 
+mod analysis;
 mod cancel;
 mod color;
 mod cpu;
@@ -17,6 +18,7 @@ mod output;
 mod pipeline;
 mod resample;
 
+pub use analysis::Histogram;
 pub use cancel::CancellationToken;
 pub use color::{
     CameraColorTransform, LINEAR_REC2020_TO_XYZ_D65, Matrix3, XYZ_D65_TO_LINEAR_REC2020,
@@ -29,8 +31,12 @@ pub use cpu::{
 };
 pub use demosaic::{DemosaicAlgorithm, MALVAR_HE_CUTLER_HALO, WhiteBalanceGains, demosaic};
 pub use edit::{
-    CONTRAST_RANGE, EDIT_RECIPE_SCHEMA_VERSION, EXPOSURE_EV_RANGE, EditRecipe, ParameterRange,
-    SATURATION_RANGE, WHITE_BALANCE_MULTIPLIER_RANGE, WhiteBalance,
+    BLACKS_RANGE, COLOR_GRADING_RANGE, CONTRAST_RANGE, ColorAdjustments, ColorGradingAdjustments,
+    EDIT_RECIPE_SCHEMA_VERSION, EXPOSURE_EV_RANGE, EditRecipe, GeometryAdjustments,
+    HIGHLIGHTS_RANGE, HSL_CHANNEL_COUNT, HSL_HUE_RANGE, HSL_LUMINANCE_RANGE, HSL_SATURATION_RANGE,
+    HslAdjustments, HslChannelAdjustments, LightAdjustments, ParameterRange, SATURATION_RANGE,
+    SHADOWS_RANGE, TEMPERATURE_RANGE, TINT_RANGE, TONE_CURVE_RANGE, ToneCurve, VIBRANCE_RANGE,
+    WHITE_BALANCE_MULTIPLIER_RANGE, WHITES_RANGE, WhiteBalance,
 };
 pub use error::PipelineError;
 pub use export::{

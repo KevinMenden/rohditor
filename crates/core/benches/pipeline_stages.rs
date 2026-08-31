@@ -64,12 +64,10 @@ fn benchmark_demosaic(criterion: &mut Criterion) {
 
 fn benchmark_adjustments(criterion: &mut Criterion) {
     let image = representative_linear_image();
-    let recipe = EditRecipe {
-        exposure_ev: 0.7,
-        contrast: 0.25,
-        saturation: 1.2,
-        ..EditRecipe::default()
-    };
+    let mut recipe = EditRecipe::default();
+    recipe.light.exposure_ev = 0.7;
+    recipe.light.contrast = 0.25;
+    recipe.color.saturation = 1.2;
     let mut group = criterion.benchmark_group("adjustments");
     group.throughput(Throughput::Elements(
         (PREVIEW_WIDTH * PREVIEW_HEIGHT) as u64,

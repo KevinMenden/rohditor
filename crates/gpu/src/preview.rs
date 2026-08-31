@@ -12,7 +12,7 @@ use rohditor_raw::RawOrientation;
 use crate::{GpuCapabilities, GpuPreviewError};
 
 const WORKGROUP_EDGE: u32 = 16;
-const PARAMETER_WORDS: usize = 20;
+const PARAMETER_WORDS: usize = 32;
 
 /// One uploaded, immutable Rec.2020 preview base. It retains the GPU source
 /// texture until the document or its white balance changes.
@@ -381,12 +381,13 @@ impl GpuPreviewProcessor {
             .map_err(|error| GpuPreviewError::InvalidInput {
                 reason: error.to_string(),
             })?;
-        if recipe.white_balance != source.white_balance {
+        if recipe.color.white_balance != source.white_balance {
             return Err(GpuPreviewError::BaseMismatch {
                 reason: "white balance changed, so the linear base must be rebuilt".to_owned(),
             });
         }
         let orientation = recipe
+            .geometry
             .orientation_override
             .unwrap_or(source.source_orientation);
         let source_width =
@@ -731,15 +732,24 @@ fn build_parameters(
 ) -> [u32; PARAMETER_WORDS] {
     let transform = LINEAR_REC2020_TO_XYZ_D65.then(XYZ_D65_TO_LINEAR_SRGB);
     let mut words = [0_u32; PARAMETER_WORDS];
-    words[0] = recipe.exposure_ev.exp2().to_bits();
-    words[1] = recipe.contrast.exp2().to_bits();
-    words[2] = recipe.saturation.to_bits();
-    words[3] = orientation_code(orientation);
-    words[4] = source_dimensions.0;
-    words[5] = source_dimensions.1;
-    words[6] = output_dimensions.0;
-    words[7] = output_dimensions.1;
-    write_matrix_rows(&mut words[8..], transform);
+    words[0] = recipe.light.exposure_ev.exp2().to_bits();
+    words[1] = recipe.light.contrast.exp2().to_bits();
+    words[2] = recipe.color.saturation.to_bits();
+    words[3] = recipe.color.vibrance.to_bits();
+    words[4] = recipe.light.highlights.to_bits();
+    words[5] = recipe.light.shadows.to_bits();
+    words[6] = recipe.light.whites.to_bits();
+    words[7] = recipe.light.blacks.to_bits();
+    words[8] = recipe.light.tone_curve.shadows.to_bits();
+    words[9] = recipe.light.tone_curve.darks.to_bits();
+    words[10] = recipe.light.tone_curve.lights.to_bits();
+    words[11] = recipe.light.tone_curve.highlights.to_bits();
+    words[12] = orientation_code(orientation);
+    words[13] = source_dimensions.0;
+    words[14] = source_dimensions.1;
+    words[15] = output_dimensions.0;
+    words[16] = output_dimensions.1;
+    write_matrix_rows(&mut words[20..], transform);
     words
 }
 
@@ -780,19 +790,29 @@ mod tests {
 
     #[test]
     fn shader_parameters_match_the_cpu_orientation_and_transform_contract() {
-        let recipe = EditRecipe {
-            exposure_ev: 1.0,
-            contrast: -0.5,
-            saturation: 1.25,
-            orientation_override: Some(RawOrientation::Rotate90),
-            ..EditRecipe::default()
-        };
+        let mut recipe = EditRecipe::default();
+        recipe.light.exposure_ev = 1.0;
+        recipe.light.contrast = -0.5;
+        recipe.light.highlights = 0.2;
+        recipe.light.shadows = -0.3;
+        recipe.light.whites = 0.1;
+        recipe.light.blacks = -0.1;
+        recipe.light.tone_curve.shadows = 0.05;
+        recipe.light.tone_curve.highlights = -0.04;
+        recipe.color.saturation = 1.25;
+        recipe.color.vibrance = 0.4;
+        recipe.geometry.orientation_override = Some(RawOrientation::Rotate90);
         let parameters = build_parameters((7, 5), (5, 7), RawOrientation::Rotate90, &recipe);
-        assert_eq!(parameters[3], 5);
-        assert_eq!(parameters[4..8], [7, 5, 5, 7]);
+        assert_eq!(parameters[12], 5);
+        assert_eq!(parameters[13..17], [7, 5, 5, 7]);
         assert_eq!(f32::from_bits(parameters[0]), 2.0);
         assert_eq!(f32::from_bits(parameters[1]), 2_f32.powf(-0.5));
         assert_eq!(f32::from_bits(parameters[2]), 1.25);
+        assert_eq!(f32::from_bits(parameters[3]), 0.4);
+        assert_eq!(f32::from_bits(parameters[4]), 0.2);
+        assert_eq!(f32::from_bits(parameters[7]), -0.1);
+        assert_eq!(f32::from_bits(parameters[8]), 0.05);
+        assert_eq!(f32::from_bits(parameters[11]), -0.04);
     }
 
     #[test]
@@ -817,12 +837,10 @@ mod tests {
         let Some(processor) = gpu_test_processor() else {
             return;
         };
-        let recipe = EditRecipe {
-            exposure_ev: 0.8,
-            contrast: -0.35,
-            saturation: 1.4,
-            ..EditRecipe::default()
-        };
+        let mut recipe = EditRecipe::default();
+        recipe.light.exposure_ev = 0.8;
+        recipe.light.contrast = -0.35;
+        recipe.color.saturation = 1.4;
         for orientation in [
             RawOrientation::Normal,
             RawOrientation::HorizontalFlip,
@@ -874,12 +892,10 @@ mod tests {
             .render(&source, &initial_recipe, None)
             .expect("initial GPU preview should render");
         assert!(!first.textures_reused());
-        let adjusted_recipe = EditRecipe {
-            exposure_ev: 1.1,
-            contrast: 0.3,
-            saturation: 0.8,
-            ..EditRecipe::default()
-        };
+        let mut adjusted_recipe = EditRecipe::default();
+        adjusted_recipe.light.exposure_ev = 1.1;
+        adjusted_recipe.light.contrast = 0.3;
+        adjusted_recipe.color.saturation = 0.8;
         let second = processor
             .render(&source, &adjusted_recipe, Some(first))
             .expect("resident source should render downstream edits");
@@ -906,12 +922,10 @@ mod tests {
         let decoder = RawlerDecoder::default();
         let mut session = decoder.open(&source).expect("private ARW should open");
         let frame = session.decode().expect("private ARW should decode");
-        let recipe = EditRecipe {
-            exposure_ev: 0.65,
-            contrast: -0.2,
-            saturation: 1.15,
-            ..EditRecipe::default()
-        };
+        let mut recipe = EditRecipe::default();
+        recipe.light.exposure_ev = 0.65;
+        recipe.light.contrast = -0.2;
+        recipe.color.saturation = 1.15;
         let base = CpuPipeline
             .prepare_preview_base(&frame, &recipe, PreviewOptions::default())
             .expect("private preview base should develop");
@@ -952,12 +966,10 @@ mod tests {
         let mut samples = Vec::new();
 
         for index in 1..=40 {
-            let recipe = EditRecipe {
-                exposure_ev: index as f32 / 20.0 - 1.0,
-                contrast: index as f32 / 80.0,
-                saturation: 0.75 + index as f32 / 80.0,
-                ..EditRecipe::default()
-            };
+            let mut recipe = EditRecipe::default();
+            recipe.light.exposure_ev = index as f32 / 20.0 - 1.0;
+            recipe.light.contrast = index as f32 / 80.0;
+            recipe.color.saturation = 0.75 + index as f32 / 80.0;
             gpu_frame = processor
                 .render(&source, &recipe, Some(gpu_frame))
                 .expect("cached GPU adjustment should render");

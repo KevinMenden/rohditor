@@ -145,10 +145,9 @@ mod tests {
     use super::*;
 
     fn exposed(exposure_ev: f32) -> EditRecipe {
-        EditRecipe {
-            exposure_ev,
-            ..EditRecipe::default()
-        }
+        let mut recipe = EditRecipe::default();
+        recipe.light.exposure_ev = exposure_ev;
+        recipe
     }
 
     #[test]
@@ -159,7 +158,7 @@ mod tests {
         assert!(edits.reset());
         assert_eq!(edits.revision(), 2);
         assert!(edits.undo());
-        assert_eq!(edits.recipe().exposure_ev, 1.0);
+        assert_eq!(edits.recipe().light.exposure_ev, 1.0);
         assert_eq!(edits.revision(), 3);
         assert!(edits.redo());
         assert_eq!(edits.recipe(), &EditRecipe::default());
@@ -176,9 +175,9 @@ mod tests {
         edits.finish_gesture();
 
         assert_eq!(edits.revision(), 3);
-        assert_eq!(edits.recipe().exposure_ev, 0.75);
+        assert_eq!(edits.recipe().light.exposure_ev, 0.75);
         assert!(edits.undo());
-        assert_eq!(edits.recipe().exposure_ev, 0.0);
+        assert_eq!(edits.recipe().light.exposure_ev, 0.0);
         assert!(!edits.undo());
     }
 

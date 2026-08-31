@@ -169,11 +169,13 @@ pub(crate) struct ViewportModel<'a> {
     pub preparing: bool,
     pub texture: Option<&'a PreviewTexture>,
     pub source: Option<PreviewSource>,
+    pub white_balance_picker_active: bool,
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct ViewportOutput {
     pub open: bool,
+    pub white_balance_pick: Option<egui::Pos2>,
 }
 
 pub(crate) fn show(
@@ -196,7 +198,9 @@ pub(crate) fn show(
             let image_size = texture.size_vec2();
             let fit_scale = fit_scale(padded.size(), image_size);
             let now = context.input(|input| input.time);
-            if response.dragged_by(egui::PointerButton::Primary) {
+            if !model.white_balance_picker_active
+                && response.dragged_by(egui::PointerButton::Primary)
+            {
                 view.pan_by(fit_scale, response.drag_delta());
             }
             if response.hovered() {
@@ -210,6 +214,24 @@ pub(crate) fn show(
             let scale = if view.fit { fit_scale } else { view.zoom };
             let size = image_size * scale;
             let image_rect = egui::Rect::from_center_size(viewport.center() + view.pan, size);
+            if model.white_balance_picker_active {
+                if response.clicked_by(egui::PointerButton::Primary)
+                    && let Some(pointer) = response.interact_pointer_pos()
+                    && image_rect.contains(pointer)
+                {
+                    output.white_balance_pick = Some(egui::pos2(
+                        ((pointer.x - image_rect.left()) / image_rect.width()).clamp(0.0, 1.0),
+                        ((pointer.y - image_rect.top()) / image_rect.height()).clamp(0.0, 1.0),
+                    ));
+                }
+                paint_pill(
+                    ui,
+                    viewport.center_top() + egui::vec2(0.0, 16.0),
+                    egui::Align2::CENTER_TOP,
+                    "CLICK A NEUTRAL AREA",
+                    colors::ACCENT_HOVER,
+                );
+            }
             ui.painter().rect_filled(
                 image_rect.expand(8.0),
                 2.0,

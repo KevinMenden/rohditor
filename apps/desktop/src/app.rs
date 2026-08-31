@@ -6,10 +6,13 @@ use std::time::Duration;
 
 use eframe::egui;
 use rohditor_core::{
-    CONTRAST_RANGE, DemosaicAlgorithm, DitherMode, EXPOSURE_EV_RANGE, ExportFormat,
-    ExportMetadataPolicy, ExportSettings, JPEG_QUALITY_DEFAULT, MemoryEstimate, PngBitDepth,
-    PreviewOptions, RenderOptions, SATURATION_RANGE, StageTimings, WHITE_BALANCE_MULTIPLIER_RANGE,
-    WhiteBalance, paths_refer_to_same_file,
+    BLACKS_RANGE, COLOR_GRADING_RANGE, CONTRAST_RANGE, DemosaicAlgorithm, DitherMode,
+    EXPOSURE_EV_RANGE, ExportFormat, ExportMetadataPolicy, ExportSettings, HIGHLIGHTS_RANGE,
+    HSL_HUE_RANGE, HSL_LUMINANCE_RANGE, HSL_SATURATION_RANGE, Histogram, JPEG_QUALITY_DEFAULT,
+    MemoryEstimate, PngBitDepth, PreviewOptions, RenderOptions, SATURATION_RANGE, SHADOWS_RANGE,
+    StageTimings, TEMPERATURE_RANGE, TINT_RANGE, TONE_CURVE_RANGE, VIBRANCE_RANGE,
+    WHITE_BALANCE_MULTIPLIER_RANGE, WHITES_RANGE, WhiteBalance, paths_refer_to_same_file,
+    srgb_to_linear_srgb,
 };
 use rohditor_raw::{RawFileInfo, RawFrame};
 use tracing::{info, warn};
@@ -22,7 +25,7 @@ use crate::document::{EditSession, PreviewTicket};
 use crate::preview_cache::PreviewCacheHits;
 use crate::ui::adjustment_panel::{
     self, AdjustmentInteraction, AdjustmentRange, AdjustmentRanges, AdjustmentTarget,
-    AdjustmentValues, DocumentPanelModel, ExportKind, ExportUiSettings, PngDepth,
+    AdjustmentValues, DocumentPanelModel, ExportKind, ExportUiSettings, PngDepth, WhiteBalanceMode,
 };
 use crate::ui::diagnostics::{
     self, CacheModel, DiagnosticsMessages, DiagnosticsModel, GpuModel, PreviewModel, QueueModel,
@@ -81,6 +84,7 @@ struct Document {
     edits: EditSession,
     texture: Option<PreviewTexture>,
     preview_source: Option<PreviewSource>,
+    histogram: Option<Histogram>,
     source_scale_requested: bool,
     gpu_preview: Option<GpuDocumentPreview>,
     view: ViewState,
@@ -104,6 +108,7 @@ impl Document {
             edits: EditSession::default(),
             texture: None,
             preview_source: None,
+            histogram: None,
             source_scale_requested: false,
             gpu_preview: None,
             view: ViewState::default(),
@@ -335,12 +340,14 @@ impl RohditorApp {
             }
             return;
         }
-        if self.gpu.is_some() {
+        if self.gpu.is_some() && gpu_supports_recipe(&recipe) {
             let gpu_base_is_current = self
                 .document
                 .as_ref()
                 .and_then(|document| document.gpu_preview.as_ref())
-                .is_some_and(|preview| preview.source.white_balance() == recipe.white_balance);
+                .is_some_and(|preview| {
+                    preview.source.white_balance() == recipe.color.white_balance
+                });
             if gpu_base_is_current {
                 self.coordinator.cancel_preview(document_id);
                 self.render_gpu_preview(context, document_id);
@@ -360,8 +367,14 @@ impl RohditorApp {
             }
             return;
         }
+        if self.gpu.is_some() {
+            self.release_document_gpu_preview(document_id);
+        }
         if let Some(document) = self.document.as_mut() {
-            document.preview_status = Some((ticket.revision, "Queued CPU preview".to_owned()));
+            document.preview_status = Some((
+                ticket.revision,
+                "Queued CPU preview for the selected color tools".to_owned(),
+            ));
         }
         match self.coordinator.preview(ticket, frame, recipe) {
             Ok(()) => {
@@ -392,7 +405,7 @@ impl RohditorApp {
         let Some(document) = self.document.as_ref().filter(|document| {
             document.id == ticket.document_id
                 && !document.source_scale_requested
-                && document.edits.recipe().white_balance == upload.white_balance()
+                && document.edits.recipe().color.white_balance == upload.white_balance()
         }) else {
             return;
         };
@@ -420,13 +433,14 @@ impl RohditorApp {
                     .processor
                     .render(&source, &recipe, reusable_frame)
                     .map_err(|error| error.to_string())?;
+                let histogram = gpu_histogram(runtime, &frame)?;
                 let texture_id =
                     register_or_update_gpu_texture(runtime, previous_texture_id, &frame);
-                Ok::<_, String>((source, frame, texture_id))
+                Ok::<_, String>((source, frame, texture_id, histogram))
             });
 
         match result {
-            Ok((source, frame, texture_id)) => {
+            Ok((source, frame, texture_id, histogram)) => {
                 let output_size = gpu_output_size(frame.output_dimensions());
                 let elapsed =
                     diagnostics.timings.total + upload_preparation + frame.submission_time();
@@ -467,6 +481,7 @@ impl RohditorApp {
                     });
                     document.preview_source =
                         Some(PreviewSource::developed(diagnostics.algorithm, true));
+                    document.histogram = Some(histogram);
                     document.preview_status = None;
                     document.last_preview_time = Some(elapsed);
                     document.preview_diagnostics = Some(preview_diagnostics);
@@ -515,12 +530,13 @@ impl RohditorApp {
                     .processor
                     .render(&preview.source, &recipe, Some(preview.frame))
                     .map_err(|error| error.to_string())?;
+                let histogram = gpu_histogram(runtime, &frame)?;
                 register_or_update_gpu_texture(runtime, Some(texture_id), &frame);
-                Ok::<_, String>(frame)
+                Ok::<_, String>((frame, histogram))
             });
 
         match result {
-            Ok(frame) => {
+            Ok((frame, histogram)) => {
                 let output_size = gpu_output_size(frame.output_dimensions());
                 let submission = frame.submission_time();
                 let mut worker = previous_worker_diagnostics.unwrap_or(WorkerPreviewDiagnostics {
@@ -581,6 +597,7 @@ impl RohditorApp {
                     });
                     document.preview_source =
                         Some(PreviewSource::developed(worker.algorithm, true));
+                    document.histogram = Some(histogram);
                     document.preview_status = None;
                     document.last_preview_time = Some(submission);
                     document.preview_diagnostics = Some(preview_diagnostics);
@@ -638,6 +655,16 @@ impl RohditorApp {
             document.texture = None;
             document.preview_source = None;
         }
+    }
+
+    fn release_document_gpu_preview(&mut self, document_id: u64) {
+        let Some(mut document) = self.document.take() else {
+            return;
+        };
+        if document.id == document_id {
+            self.release_gpu_preview(&mut document);
+        }
+        self.document = Some(document);
     }
 
     fn clear_orphaned_gpu_display(&mut self, document_id: u64, texture_id: egui::TextureId) {
@@ -915,8 +942,13 @@ impl RohditorApp {
             }
 
             let mut changed = false;
-            if let Some(manual) = output.manual_white_balance {
-                changed |= set_manual_white_balance(&mut document.edits, manual);
+            if let Some(mode) = output.white_balance_mode {
+                changed |= set_white_balance_mode(&mut document.edits, mode);
+            }
+            if output.auto_tone
+                && let Some(histogram) = document.histogram.as_ref()
+            {
+                changed |= apply_auto_tone(&mut document.edits, histogram);
             }
             for interaction in output.interactions {
                 changed |= apply_adjustment_interaction(&mut document.edits, interaction);
@@ -1174,16 +1206,39 @@ impl RohditorApp {
 }
 
 fn document_panel_model(document: &Document) -> DocumentPanelModel {
-    let (manual_white_balance, white_balance_red, white_balance_green, white_balance_blue) =
-        match document.edits.recipe().white_balance {
-            WhiteBalance::AsShot => (
-                false,
-                WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
-                WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
-                WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
-            ),
-            WhiteBalance::ManualMultipliers { red, green, blue } => (true, red, green, blue),
-        };
+    let (
+        white_balance_mode,
+        white_balance_red,
+        white_balance_green,
+        white_balance_blue,
+        white_balance_temperature,
+        white_balance_tint,
+    ) = match document.edits.recipe().color.white_balance {
+        WhiteBalance::AsShot => (
+            WhiteBalanceMode::AsShot,
+            WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
+            WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
+            WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
+            TEMPERATURE_RANGE.neutral,
+            TINT_RANGE.neutral,
+        ),
+        WhiteBalance::ManualMultipliers { red, green, blue } => (
+            WhiteBalanceMode::ManualMultipliers,
+            red,
+            green,
+            blue,
+            TEMPERATURE_RANGE.neutral,
+            TINT_RANGE.neutral,
+        ),
+        WhiteBalance::TemperatureTint { temperature, tint } => (
+            WhiteBalanceMode::TemperatureTint,
+            WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
+            WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
+            WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
+            temperature,
+            tint,
+        ),
+    };
     DocumentPanelModel {
         file_name: document.file_name(),
         camera: document
@@ -1194,19 +1249,52 @@ fn document_panel_model(document: &Document) -> DocumentPanelModel {
         revision: document.edits.revision(),
         has_adjustments: document.edits.recipe() != &rohditor_core::EditRecipe::default(),
         values: AdjustmentValues {
-            manual_white_balance,
+            white_balance_mode,
             white_balance_red,
             white_balance_green,
             white_balance_blue,
-            exposure: document.edits.recipe().exposure_ev,
-            contrast: document.edits.recipe().contrast,
-            saturation: document.edits.recipe().saturation,
+            white_balance_temperature,
+            white_balance_tint,
+            exposure: document.edits.recipe().light.exposure_ev,
+            contrast: document.edits.recipe().light.contrast,
+            highlights: document.edits.recipe().light.highlights,
+            shadows: document.edits.recipe().light.shadows,
+            whites: document.edits.recipe().light.whites,
+            blacks: document.edits.recipe().light.blacks,
+            tone_curve_shadows: document.edits.recipe().light.tone_curve.shadows,
+            tone_curve_darks: document.edits.recipe().light.tone_curve.darks,
+            tone_curve_lights: document.edits.recipe().light.tone_curve.lights,
+            tone_curve_highlights: document.edits.recipe().light.tone_curve.highlights,
+            saturation: document.edits.recipe().color.saturation,
+            vibrance: document.edits.recipe().color.vibrance,
+            hsl: document
+                .edits
+                .recipe()
+                .color
+                .hsl
+                .channels
+                .map(|channel| [channel.hue, channel.saturation, channel.luminance]),
+            grading: [
+                document.edits.recipe().color.grading.shadows,
+                document.edits.recipe().color.grading.midtones,
+                document.edits.recipe().color.grading.highlights,
+            ],
         },
         ranges: AdjustmentRanges {
             white_balance: AdjustmentRange {
                 minimum: WHITE_BALANCE_MULTIPLIER_RANGE.minimum,
                 maximum: WHITE_BALANCE_MULTIPLIER_RANGE.maximum,
                 neutral: WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
+            },
+            temperature: AdjustmentRange {
+                minimum: TEMPERATURE_RANGE.minimum,
+                maximum: TEMPERATURE_RANGE.maximum,
+                neutral: TEMPERATURE_RANGE.neutral,
+            },
+            tint: AdjustmentRange {
+                minimum: TINT_RANGE.minimum,
+                maximum: TINT_RANGE.maximum,
+                neutral: TINT_RANGE.neutral,
             },
             exposure: AdjustmentRange {
                 minimum: EXPOSURE_EV_RANGE.minimum,
@@ -1218,10 +1306,60 @@ fn document_panel_model(document: &Document) -> DocumentPanelModel {
                 maximum: CONTRAST_RANGE.maximum,
                 neutral: CONTRAST_RANGE.neutral,
             },
+            highlights: AdjustmentRange {
+                minimum: HIGHLIGHTS_RANGE.minimum,
+                maximum: HIGHLIGHTS_RANGE.maximum,
+                neutral: HIGHLIGHTS_RANGE.neutral,
+            },
+            shadows: AdjustmentRange {
+                minimum: SHADOWS_RANGE.minimum,
+                maximum: SHADOWS_RANGE.maximum,
+                neutral: SHADOWS_RANGE.neutral,
+            },
+            whites: AdjustmentRange {
+                minimum: WHITES_RANGE.minimum,
+                maximum: WHITES_RANGE.maximum,
+                neutral: WHITES_RANGE.neutral,
+            },
+            blacks: AdjustmentRange {
+                minimum: BLACKS_RANGE.minimum,
+                maximum: BLACKS_RANGE.maximum,
+                neutral: BLACKS_RANGE.neutral,
+            },
+            tone_curve: AdjustmentRange {
+                minimum: TONE_CURVE_RANGE.minimum,
+                maximum: TONE_CURVE_RANGE.maximum,
+                neutral: TONE_CURVE_RANGE.neutral,
+            },
             saturation: AdjustmentRange {
                 minimum: SATURATION_RANGE.minimum,
                 maximum: SATURATION_RANGE.maximum,
                 neutral: SATURATION_RANGE.neutral,
+            },
+            vibrance: AdjustmentRange {
+                minimum: VIBRANCE_RANGE.minimum,
+                maximum: VIBRANCE_RANGE.maximum,
+                neutral: VIBRANCE_RANGE.neutral,
+            },
+            hsl_hue: AdjustmentRange {
+                minimum: HSL_HUE_RANGE.minimum,
+                maximum: HSL_HUE_RANGE.maximum,
+                neutral: HSL_HUE_RANGE.neutral,
+            },
+            hsl_saturation: AdjustmentRange {
+                minimum: HSL_SATURATION_RANGE.minimum,
+                maximum: HSL_SATURATION_RANGE.maximum,
+                neutral: HSL_SATURATION_RANGE.neutral,
+            },
+            hsl_luminance: AdjustmentRange {
+                minimum: HSL_LUMINANCE_RANGE.minimum,
+                maximum: HSL_LUMINANCE_RANGE.maximum,
+                neutral: HSL_LUMINANCE_RANGE.neutral,
+            },
+            grading: AdjustmentRange {
+                minimum: COLOR_GRADING_RANGE.minimum,
+                maximum: COLOR_GRADING_RANGE.maximum,
+                neutral: COLOR_GRADING_RANGE.neutral,
             },
         },
         export_ready: document.frame.is_some(),
@@ -1229,21 +1367,76 @@ fn document_panel_model(document: &Document) -> DocumentPanelModel {
         error: document.error.clone(),
         warning: document.warning.clone(),
         notice: document.notice.clone(),
+        histogram: document.histogram,
     }
 }
 
-fn set_manual_white_balance(edits: &mut EditSession, manual: bool) -> bool {
+fn set_white_balance_mode(edits: &mut EditSession, mode: WhiteBalanceMode) -> bool {
     let mut next = edits.recipe().clone();
-    next.white_balance = if manual {
-        WhiteBalance::ManualMultipliers {
-            red: WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
-            green: WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
-            blue: WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
-        }
-    } else {
-        WhiteBalance::AsShot
+    next.color.white_balance = match mode {
+        WhiteBalanceMode::AsShot => WhiteBalance::AsShot,
+        WhiteBalanceMode::TemperatureTint => match next.color.white_balance {
+            WhiteBalance::TemperatureTint { temperature, tint } => {
+                WhiteBalance::TemperatureTint { temperature, tint }
+            }
+            _ => WhiteBalance::TemperatureTint {
+                temperature: TEMPERATURE_RANGE.neutral,
+                tint: TINT_RANGE.neutral,
+            },
+        },
+        WhiteBalanceMode::ManualMultipliers => match next.color.white_balance {
+            WhiteBalance::ManualMultipliers { red, green, blue } => {
+                WhiteBalance::ManualMultipliers { red, green, blue }
+            }
+            _ => WhiteBalance::ManualMultipliers {
+                red: WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
+                green: WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
+                blue: WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
+            },
+        },
     };
     edits.set_discrete(next)
+}
+
+fn apply_auto_tone(edits: &mut EditSession, histogram: &Histogram) -> bool {
+    let midpoint = histogram.luminance_percentile(0.5);
+    let midpoint_linear = srgb_to_linear_srgb(f32::from(midpoint) / 255.0);
+    if midpoint_linear <= 0.0 {
+        return false;
+    }
+    let mut next = edits.recipe().clone();
+    next.light.exposure_ev = (0.18 / midpoint_linear)
+        .log2()
+        .clamp(EXPOSURE_EV_RANGE.minimum, EXPOSURE_EV_RANGE.maximum);
+    let low = histogram.luminance_percentile(0.01);
+    let high = histogram.luminance_percentile(0.99);
+    next.light.blacks = if low > 24 {
+        -0.1
+    } else if low == 0 {
+        0.1
+    } else {
+        0.0
+    };
+    next.light.highlights = if high > 245 {
+        -0.1
+    } else if high < 220 {
+        0.1
+    } else {
+        0.0
+    };
+    edits.set_discrete(next)
+}
+
+fn gpu_supports_recipe(recipe: &rohditor_core::EditRecipe) -> bool {
+    recipe
+        .color
+        .hsl
+        .channels
+        .iter()
+        .all(|channel| channel.hue == 0.0 && channel.saturation == 0.0 && channel.luminance == 0.0)
+        && recipe.color.grading.shadows == [0.0; 3]
+        && recipe.color.grading.midtones == [0.0; 3]
+        && recipe.color.grading.highlights == [0.0; 3]
 }
 
 fn apply_adjustment_interaction(
@@ -1259,8 +1452,8 @@ fn apply_adjustment_interaction(
         AdjustmentTarget::WhiteBalanceRed
         | AdjustmentTarget::WhiteBalanceGreen
         | AdjustmentTarget::WhiteBalanceBlue => {
-            let (mut red, mut green, mut blue) = match next.white_balance {
-                WhiteBalance::AsShot => (
+            let (mut red, mut green, mut blue) = match next.color.white_balance {
+                WhiteBalance::AsShot | WhiteBalance::TemperatureTint { .. } => (
                     WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
                     WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
                     WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
@@ -1271,15 +1464,73 @@ fn apply_adjustment_interaction(
                 AdjustmentTarget::WhiteBalanceRed => red = interaction.value,
                 AdjustmentTarget::WhiteBalanceGreen => green = interaction.value,
                 AdjustmentTarget::WhiteBalanceBlue => blue = interaction.value,
+                AdjustmentTarget::WhiteBalanceTemperature
+                | AdjustmentTarget::WhiteBalanceTint
+                | AdjustmentTarget::ToneCurveShadows
+                | AdjustmentTarget::ToneCurveDarks
+                | AdjustmentTarget::ToneCurveLights
+                | AdjustmentTarget::ToneCurveHighlights
+                | AdjustmentTarget::HslHue(_)
+                | AdjustmentTarget::HslSaturation(_)
+                | AdjustmentTarget::HslLuminance(_)
+                | AdjustmentTarget::GradingShadows(_)
+                | AdjustmentTarget::GradingMidtones(_)
+                | AdjustmentTarget::GradingHighlights(_) => {}
                 AdjustmentTarget::Exposure
                 | AdjustmentTarget::Contrast
-                | AdjustmentTarget::Saturation => {}
+                | AdjustmentTarget::Highlights
+                | AdjustmentTarget::Shadows
+                | AdjustmentTarget::Whites
+                | AdjustmentTarget::Blacks
+                | AdjustmentTarget::Saturation
+                | AdjustmentTarget::Vibrance => {}
             }
-            next.white_balance = WhiteBalance::ManualMultipliers { red, green, blue };
+            next.color.white_balance = WhiteBalance::ManualMultipliers { red, green, blue };
         }
-        AdjustmentTarget::Exposure => next.exposure_ev = interaction.value,
-        AdjustmentTarget::Contrast => next.contrast = interaction.value,
-        AdjustmentTarget::Saturation => next.saturation = interaction.value,
+        AdjustmentTarget::WhiteBalanceTemperature | AdjustmentTarget::WhiteBalanceTint => {
+            let (mut temperature, mut tint) = match next.color.white_balance {
+                WhiteBalance::TemperatureTint { temperature, tint } => (temperature, tint),
+                _ => (TEMPERATURE_RANGE.neutral, TINT_RANGE.neutral),
+            };
+            match interaction.target {
+                AdjustmentTarget::WhiteBalanceTemperature => temperature = interaction.value,
+                AdjustmentTarget::WhiteBalanceTint => tint = interaction.value,
+                _ => unreachable!("temperature/tint branch only handles its controls"),
+            }
+            next.color.white_balance = WhiteBalance::TemperatureTint { temperature, tint };
+        }
+        AdjustmentTarget::Exposure => next.light.exposure_ev = interaction.value,
+        AdjustmentTarget::Contrast => next.light.contrast = interaction.value,
+        AdjustmentTarget::Highlights => next.light.highlights = interaction.value,
+        AdjustmentTarget::Shadows => next.light.shadows = interaction.value,
+        AdjustmentTarget::Whites => next.light.whites = interaction.value,
+        AdjustmentTarget::Blacks => next.light.blacks = interaction.value,
+        AdjustmentTarget::ToneCurveShadows => next.light.tone_curve.shadows = interaction.value,
+        AdjustmentTarget::ToneCurveDarks => next.light.tone_curve.darks = interaction.value,
+        AdjustmentTarget::ToneCurveLights => next.light.tone_curve.lights = interaction.value,
+        AdjustmentTarget::ToneCurveHighlights => {
+            next.light.tone_curve.highlights = interaction.value
+        }
+        AdjustmentTarget::Saturation => next.color.saturation = interaction.value,
+        AdjustmentTarget::Vibrance => next.color.vibrance = interaction.value,
+        AdjustmentTarget::HslHue(channel) => {
+            next.color.hsl.channels[channel].hue = interaction.value
+        }
+        AdjustmentTarget::HslSaturation(channel) => {
+            next.color.hsl.channels[channel].saturation = interaction.value
+        }
+        AdjustmentTarget::HslLuminance(channel) => {
+            next.color.hsl.channels[channel].luminance = interaction.value
+        }
+        AdjustmentTarget::GradingShadows(channel) => {
+            next.color.grading.shadows[channel] = interaction.value
+        }
+        AdjustmentTarget::GradingMidtones(channel) => {
+            next.color.grading.midtones[channel] = interaction.value
+        }
+        AdjustmentTarget::GradingHighlights(channel) => {
+            next.color.grading.highlights[channel] = interaction.value
+        }
     }
 
     let changed = if interaction.reset {
@@ -1341,6 +1592,22 @@ fn install_texture(
         }
     }
     document.preview_source = Some(source);
+}
+
+fn gpu_histogram(
+    runtime: &GpuRuntime,
+    frame: &rohditor_gpu::GpuPreviewFrame,
+) -> Result<Histogram, String> {
+    let readback = runtime
+        .processor
+        .readback_display(frame)
+        .map_err(|error| format!("could not analyze GPU preview histogram: {error}"))?;
+    Histogram::from_rgba8(
+        usize::try_from(readback.width).map_err(|_| "GPU histogram width overflowed")?,
+        usize::try_from(readback.height).map_err(|_| "GPU histogram height overflowed")?,
+        &readback.rgba,
+    )
+    .ok_or_else(|| "GPU histogram buffer dimensions did not match its pixels".to_owned())
 }
 
 fn source_stem(path: &Path) -> String {
@@ -1430,9 +1697,9 @@ mod tests {
         }
 
         assert_eq!(edits.revision(), 2);
-        assert_eq!(edits.recipe().exposure_ev, 0.75);
+        assert_eq!(edits.recipe().light.exposure_ev, 0.75);
         assert!(edits.undo());
-        assert_eq!(edits.recipe().exposure_ev, EXPOSURE_EV_RANGE.neutral);
+        assert_eq!(edits.recipe().light.exposure_ev, EXPOSURE_EV_RANGE.neutral);
         assert!(!edits.undo());
     }
 }

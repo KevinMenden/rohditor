@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 use rohditor_raw::{RawFileInfo, RawFrame, RawOrientation};
 
+use crate::analysis::Histogram;
 use crate::color::{CameraColorTransform, camera_color_transform};
 use crate::cpu::{
     apply_adjustments_cancellable, apply_camera_color_transform_cancellable,
@@ -142,6 +143,7 @@ impl ReconstructedPreview {
 #[derive(Debug)]
 pub struct RenderResult {
     pub image: DisplayRgbImage<u8>,
+    pub histogram: Histogram,
     pub timings: StageTimings,
     pub memory: MemoryEstimate,
 }
@@ -158,7 +160,7 @@ pub struct ExportRenderResult {
 /// camera color conversion, but before interactive adjustments.
 ///
 /// This is the cache/upload boundary shared by the CPU reference path and the
-/// Phase 5 GPU backend. Exposure, contrast, saturation, orientation, and output
+/// Phase 5 GPU backend. Downstream light/color edits, orientation, and output
 /// conversion can change without rebuilding this base.
 #[derive(Debug, Clone)]
 pub struct DemosaicedBase {
@@ -439,16 +441,19 @@ impl CpuPipeline {
         timings.adjustments = adjustments_started.elapsed();
 
         let orientation = recipe
+            .geometry
             .orientation_override
             .unwrap_or(base.source_orientation);
         let output_started = Instant::now();
         let image =
             render_display_srgb8_cancellable(working, orientation, output_policy, cancellation)?;
+        let histogram = Histogram::from_display_rgb8(&image);
         timings.output_conversion = output_started.elapsed();
         timings.total = total_started.elapsed();
 
         Ok(RenderResult {
             image,
+            histogram,
             timings,
             memory,
         })
@@ -490,6 +495,7 @@ impl CpuPipeline {
         apply_adjustments_cancellable(&mut base.image, recipe, cancellation)?;
         base.timings.adjustments = adjustments_started.elapsed();
         let orientation = recipe
+            .geometry
             .orientation_override
             .unwrap_or(base.source_orientation);
         let output_started = Instant::now();
@@ -499,10 +505,12 @@ impl CpuPipeline {
             options.output_policy,
             cancellation,
         )?;
+        let histogram = Histogram::from_display_rgb8(&image);
         base.timings.output_conversion = output_started.elapsed();
         base.timings.total = total_started.elapsed();
         Ok(RenderResult {
             image,
+            histogram,
             timings: base.timings,
             memory,
         })
@@ -524,6 +532,7 @@ impl CpuPipeline {
         apply_adjustments(&mut base.image, recipe)?;
         base.timings.adjustments = adjustments_started.elapsed();
         let orientation = recipe
+            .geometry
             .orientation_override
             .unwrap_or(base.source_orientation);
 
@@ -669,7 +678,7 @@ fn prepare_demosaiced_preview(
     );
     let metadata_guard = metadata_span.enter();
     recipe.validate()?;
-    let gains = white_balance_gains(&reconstructed.info, recipe.white_balance)?;
+    let gains = white_balance_gains(&reconstructed.info, recipe.color.white_balance)?;
     let metadata = metadata_started.elapsed();
     drop(metadata_guard);
 
@@ -692,7 +701,7 @@ fn prepare_demosaiced_preview(
     Ok(DemosaicedBase {
         image,
         source_orientation: reconstructed.info.orientation,
-        white_balance: recipe.white_balance,
+        white_balance: recipe.color.white_balance,
         timings,
         decoded_raw_bytes: reconstructed.decoded_raw_bytes,
         normalized_mosaic_bytes: reconstructed.normalized_mosaic_bytes,
@@ -727,7 +736,7 @@ fn prepare_base_cancellable(
     );
     let metadata_guard = metadata_span.enter();
     recipe.validate()?;
-    let gains = white_balance_gains(&frame.info, recipe.white_balance)?;
+    let gains = white_balance_gains(&frame.info, recipe.color.white_balance)?;
     let camera_transform = camera_color_transform(&frame.info)?;
     let metadata = metadata_started.elapsed();
     drop(metadata_guard);
@@ -777,7 +786,7 @@ fn prepare_base_cancellable(
     Ok(DemosaicedBase {
         image: linear,
         source_orientation: frame.info.orientation,
-        white_balance: recipe.white_balance,
+        white_balance: recipe.color.white_balance,
         timings,
         decoded_raw_bytes,
         normalized_mosaic_bytes,
@@ -788,7 +797,7 @@ fn prepare_base_cancellable(
 
 fn validate_base_recipe(base: &DemosaicedBase, recipe: &EditRecipe) -> Result<(), PipelineError> {
     recipe.validate()?;
-    if recipe.white_balance == base.white_balance {
+    if recipe.color.white_balance == base.white_balance {
         Ok(())
     } else {
         Err(PipelineError::InvalidRecipe {
@@ -813,6 +822,7 @@ fn render_base(
 
     let output_started = Instant::now();
     let orientation = recipe
+        .geometry
         .orientation_override
         .unwrap_or(base.source_orientation);
     let image = render_display_srgb8(&base.image, orientation, output_policy)?;
@@ -826,6 +836,7 @@ fn render_base(
         + base.timings.output_conversion;
 
     Ok(RenderResult {
+        histogram: Histogram::from_display_rgb8(&image),
         image,
         timings: base.timings,
         memory,

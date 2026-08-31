@@ -1,7 +1,14 @@
 # Project guidelines
 
-Keep Rohditor small, readable, and focused on the current Sony ILCE-6400
-workflow.
+Focus on good maintainabiliy when writing code. Create crates where necessary, split files where they get too long.
+Write functions where it makes sense to split a bigger one.
+Make things modular where this can benefit in the long term.
+Add comments in the code where it could be helpful.
+
+Don't create extra documentation unless you are asked to do so.
+
+The goal of this project is to slowly and deliberately create a nice RAW-editor. It will stay focused on the basic functionality at first, but the plan is to build it out with a lot of features. Therefore, we need to think about code structure when adding things.
+
 
 - Keep boundaries clear: `raw` decodes files, `core` owns image processing,
   `gpu` owns interactive GPU work, and `apps/` owns CLI/UI concerns. Lower
@@ -22,6 +29,3 @@ workflow.
 - Benchmark image-processing changes on representative dimensions and add
   small asymmetric correctness tests. Keep UI rendering performance separate
   from image-processing performance.
-- Keep documentation limited to this file, `docs/status.md`, and a concise
-  README. Update checkboxes and commands when behavior changes; do not create
-  phase or subsystem documentation pages unless explicitly needed.

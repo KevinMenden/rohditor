@@ -17,17 +17,15 @@ use rohditor_raw::{
 fn synthetic_pipeline_is_identical_with_one_and_multiple_rayon_threads()
 -> Result<(), Box<dyn Error>> {
     let frame = synthetic_rggb_frame();
-    let recipe = EditRecipe {
-        white_balance: WhiteBalance::ManualMultipliers {
-            red: 1.1,
-            green: 1.0,
-            blue: 0.9,
-        },
-        exposure_ev: 0.5,
-        contrast: 0.25,
-        saturation: 1.2,
-        ..EditRecipe::default()
+    let mut recipe = EditRecipe::default();
+    recipe.color.white_balance = WhiteBalance::ManualMultipliers {
+        red: 1.1,
+        green: 1.0,
+        blue: 0.9,
     };
+    recipe.light.exposure_ev = 0.5;
+    recipe.light.contrast = 0.25;
+    recipe.color.saturation = 1.2;
     let options = RenderOptions {
         crop_policy: CropPolicy::Recommended,
         ..RenderOptions::default()
@@ -101,12 +99,10 @@ fn reusable_preview_base_matches_direct_render_and_rejects_stale_white_balance()
     assert_eq!(base.image().space(), LinearRgbSpace::Rec2020D65);
     assert_eq!((base.image().width(), base.image().height()), (3, 2));
 
-    let adjusted = EditRecipe {
-        exposure_ev: 0.75,
-        contrast: 0.2,
-        saturation: 1.3,
-        ..base_recipe.clone()
-    };
+    let mut adjusted = base_recipe.clone();
+    adjusted.light.exposure_ev = 0.75;
+    adjusted.light.contrast = 0.2;
+    adjusted.color.saturation = 1.3;
     let reused =
         CpuPipeline.render_preview_from_base(&base, &adjusted, options.render.output_policy)?;
     let direct = CpuPipeline.render_preview(&frame, &adjusted, options)?;
@@ -116,13 +112,11 @@ fn reusable_preview_base_matches_direct_render_and_rejects_stale_white_balance()
         direct.memory.estimated_peak_bytes
     );
 
-    let stale = EditRecipe {
-        white_balance: WhiteBalance::ManualMultipliers {
-            red: 1.1,
-            green: 1.0,
-            blue: 0.9,
-        },
-        ..adjusted
+    let mut stale = adjusted;
+    stale.color.white_balance = WhiteBalance::ManualMultipliers {
+        red: 1.1,
+        green: 1.0,
+        blue: 0.9,
     };
     assert!(
         CpuPipeline

@@ -81,13 +81,15 @@ impl RohditorApp {
                 ticket,
                 resolution,
                 image,
+                histogram,
                 diagnostics,
             } => {
                 if let Some(document) = self.document.as_mut()
                     && ticket.is_current(document.id, document.edits.revision())
                     && document.source_scale_requested
                         == (resolution == PreviewResolution::SourceScale)
-                    && (self.gpu.is_none() || resolution == PreviewResolution::SourceScale)
+                    && (document.gpu_preview.is_none()
+                        || resolution == PreviewResolution::SourceScale)
                 {
                     let source = if resolution == PreviewResolution::SourceScale {
                         PreviewSource::OneToOneCpu
@@ -95,6 +97,7 @@ impl RohditorApp {
                         PreviewSource::developed(diagnostics.algorithm, false)
                     };
                     install_texture(context, document, image, source);
+                    document.histogram = Some(*histogram);
                     if resolution == PreviewResolution::SourceScale {
                         document.view.actual_size(context.input(|input| input.time));
                     } else {
