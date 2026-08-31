@@ -2,6 +2,7 @@ mod app;
 mod coordinator;
 mod document;
 mod preview_cache;
+mod ui;
 
 use clap::{Parser, ValueEnum};
 use eframe::egui;
@@ -56,6 +57,10 @@ struct Arguments {
 
     /// Sony RAW file to open at startup.
     file: Option<PathBuf>,
+
+    /// Open the developer diagnostics window at startup.
+    #[arg(long)]
+    diagnostics: bool,
 }
 
 fn main() -> eframe::Result {
@@ -66,20 +71,32 @@ fn main() -> eframe::Result {
             eframe::Renderer::Wgpu,
             arguments.file.clone(),
             arguments.processor,
+            arguments.diagnostics,
         ) {
             Ok(()) => Ok(()),
             Err(error) => {
                 warn!(%error, "wgpu UI initialization failed; retrying with glow");
                 eprintln!("wgpu UI initialization failed ({error}); retrying with glow");
-                launch(eframe::Renderer::Glow, arguments.file, arguments.processor)
+                launch(
+                    eframe::Renderer::Glow,
+                    arguments.file,
+                    arguments.processor,
+                    arguments.diagnostics,
+                )
             }
         },
-        RendererPreference::Wgpu => {
-            launch(eframe::Renderer::Wgpu, arguments.file, arguments.processor)
-        }
-        RendererPreference::Glow => {
-            launch(eframe::Renderer::Glow, arguments.file, arguments.processor)
-        }
+        RendererPreference::Wgpu => launch(
+            eframe::Renderer::Wgpu,
+            arguments.file,
+            arguments.processor,
+            arguments.diagnostics,
+        ),
+        RendererPreference::Glow => launch(
+            eframe::Renderer::Glow,
+            arguments.file,
+            arguments.processor,
+            arguments.diagnostics,
+        ),
     }
 }
 
@@ -87,6 +104,7 @@ fn launch(
     renderer: eframe::Renderer,
     initial_path: Option<PathBuf>,
     processor: ProcessorPreference,
+    show_diagnostics: bool,
 ) -> eframe::Result {
     let options = eframe::NativeOptions {
         renderer,
@@ -104,6 +122,7 @@ fn launch(
                 context,
                 initial_path.clone(),
                 processor,
+                show_diagnostics,
             )?))
         }),
     )
@@ -134,9 +153,11 @@ mod tests {
             "glow",
             "--processor",
             "cpu",
+            "--diagnostics",
         ])
         .expect("valid desktop preferences should parse");
         assert_eq!(arguments.renderer, RendererPreference::Glow);
         assert_eq!(arguments.processor, ProcessorPreference::Cpu);
+        assert!(arguments.diagnostics);
     }
 }
