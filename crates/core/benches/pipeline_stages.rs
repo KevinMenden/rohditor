@@ -64,24 +64,53 @@ fn benchmark_demosaic(criterion: &mut Criterion) {
 
 fn benchmark_adjustments(criterion: &mut Criterion) {
     let image = representative_linear_image();
-    let mut recipe = EditRecipe::default();
-    recipe.light.exposure_ev = 0.7;
-    recipe.light.contrast = 0.25;
-    recipe.color.saturation = 1.2;
     let mut group = criterion.benchmark_group("adjustments");
     group.throughput(Throughput::Elements(
         (PREVIEW_WIDTH * PREVIEW_HEIGHT) as u64,
     ));
-    group.bench_function("fused_global_2560x1703", |bencher| {
-        bencher.iter_batched(
-            || image.clone(),
-            |mut working| {
-                must(apply_adjustments(&mut working, black_box(&recipe)));
-                black_box(working)
-            },
-            BatchSize::LargeInput,
-        );
-    });
+    let recipes = [
+        ("fused_global_2560x1703", {
+            let mut recipe = EditRecipe::default();
+            recipe.light.exposure_ev = 0.7;
+            recipe.light.contrast = 0.25;
+            recipe.color.saturation = 1.2;
+            recipe
+        }),
+        ("tonal_curve_2560x1703", {
+            let mut recipe = EditRecipe::default();
+            recipe.light.highlights = -0.4;
+            recipe.light.shadows = 0.35;
+            recipe.light.tone_curve.darks = 0.15;
+            recipe.light.tone_curve.highlights = -0.12;
+            recipe
+        }),
+        ("hsl_2560x1703", {
+            let mut recipe = EditRecipe::default();
+            recipe.color.hsl.channels[0].hue = 0.2;
+            recipe.color.hsl.channels[3].saturation = -0.3;
+            recipe.color.hsl.channels[5].luminance = 0.2;
+            recipe
+        }),
+        ("grading_2560x1703", {
+            let mut recipe = EditRecipe::default();
+            recipe.color.grading.shadows = [0.4, -0.1, 0.2];
+            recipe.color.grading.midtones = [-0.2, 0.25, 0.1];
+            recipe.color.grading.highlights = [0.1, 0.2, -0.3];
+            recipe
+        }),
+    ];
+    for (name, recipe) in recipes {
+        group.bench_function(name, |bencher| {
+            bencher.iter_batched(
+                || image.clone(),
+                |mut working| {
+                    must(apply_adjustments(&mut working, black_box(&recipe)));
+                    black_box(working)
+                },
+                BatchSize::LargeInput,
+            );
+        });
+    }
     group.finish();
 }
 

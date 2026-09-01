@@ -202,6 +202,9 @@ impl Default for HslAdjustments {
     }
 }
 
+/// Three-way scene-linear RGB tint strengths. Each group is a chroma tint
+/// applied with a luminance-preserving positive multiplier; it is deliberately
+/// not a lift/gamma/gain or color-wheel grade.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ColorGradingAdjustments {
     #[serde(default)]

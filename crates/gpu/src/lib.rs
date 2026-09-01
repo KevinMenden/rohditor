@@ -1,18 +1,22 @@
 //! GPU preview processing built on the application's existing `wgpu` device.
 //!
-//! This crate owns only downstream preview work. RAW decoding, normalization,
-//! demosaicing, and camera-to-Rec.2020 conversion remain in `rohditor-core`'s
-//! CPU reference path. A [`rohditor_core::DemosaicedBase`] is uploaded once,
-//! then this crate evaluates exposure, contrast, saturation, orientation, and
-//! the explicit sRGB output transform without reading the display result back
-//! to CPU memory.
+//! This crate owns only interactive preview work. RAW decoding, normalization,
+//! demosaicing, and calibration remain in `rohditor-core`'s CPU reference path.
+//! The desktop path uploads one camera-native
+//! [`rohditor_core::ReconstructedPreview`] and applies white balance, the
+//! camera transform, exposure, contrast, saturation, orientation, and the
+//! explicit sRGB output transform as GPU parameters. A legacy converted
+//! [`rohditor_core::DemosaicedBase`] upload remains available for lower-level
+//! callers. Normal interaction never reads the display result back to CPU
+//! memory.
 
 mod capabilities;
 mod preview;
 
 pub use capabilities::GpuCapabilities;
 pub use preview::{
-    GpuDisplayReadback, GpuPreviewFrame, GpuPreviewProcessor, GpuPreviewSource, GpuPreviewUpload,
+    GpuDisplayReadback, GpuDisplayReadbackPending, GpuPreviewFrame, GpuPreviewProcessor,
+    GpuPreviewSource, GpuPreviewUpload,
 };
 
 use thiserror::Error;
@@ -40,6 +44,10 @@ pub enum GpuPreviewError {
     /// white-balance selection.
     #[error("GPU preview base does not match the recipe: {reason}")]
     BaseMismatch { reason: String },
+
+    /// The recipe contains stages that this GPU backend does not implement.
+    #[error("GPU preview does not support these edits: {reason}")]
+    UnsupportedEdits { reason: String },
 
     /// Waiting for already-submitted GPU work failed.
     #[error("GPU preview queue synchronization failed: {reason}")]

@@ -5,17 +5,22 @@ use rohditor_raw::{
 
 use crate::color::{
     CameraColorTransform, LINEAR_REC2020_TO_XYZ_D65, XYZ_D65_TO_LINEAR_SRGB,
-    encode_rec2020_for_srgb_output,
+    camera_color_transform, encode_rec2020_for_srgb_output,
 };
 use crate::image::{allocate_zeroed_f32, allocate_zeroed_u8, allocate_zeroed_u16};
 use crate::{
     BayerPattern, CancellationToken, CfaColor, CropPolicy, DisplayRgbImage, DisplayTransfer,
     DitherMode, EditRecipe, ImageRegion, LinearRgbImage, LinearRgbSpace, MosaicImage,
-    OrientationMap, OutputPolicy, PipelineError, WhiteBalance, WhiteBalanceGains,
+    OrientationMap, OutputPolicy, PipelineError, TEMPERATURE_RANGE, TINT_RANGE,
+    WHITE_BALANCE_MULTIPLIER_RANGE, WhiteBalance, WhiteBalanceGains,
 };
 
 const CONTRAST_PIVOT: f32 = 0.18;
 const REC2020_LUMINANCE: [f32; 3] = [0.2627, 0.6780, 0.0593];
+// Blend into additive luminance changes near black instead of allowing a
+// ratio to magnify tiny numerical differences. The continuous transition also
+// keeps half-float source quantization from changing the visible result.
+const LUMINANCE_RATIO_TRANSITION: f32 = 0.02;
 /// Crop the decoded sensor frame and normalize samples as `(sample-black)/(white-black)`.
 ///
 /// Negative values and values above one are intentionally retained for later
@@ -183,7 +188,28 @@ pub fn white_balance_gains(
     info: &RawFileInfo,
     selection: WhiteBalance,
 ) -> Result<WhiteBalanceGains, PipelineError> {
-    let [red, green, blue, _] = info.as_shot_white_balance;
+    let camera_to_xyz_d65 = if matches!(selection, WhiteBalance::TemperatureTint { .. }) {
+        camera_color_transform(info)?.camera_to_xyz_d65
+    } else {
+        // As-shot and manual relative multipliers do not require a camera
+        // matrix. Keep this public helper useful for demosaic-only callers;
+        // full pipeline entry points validate the transform separately.
+        crate::Matrix3::identity()
+    };
+    white_balance_gains_from_calibration(info.as_shot_white_balance, camera_to_xyz_d65, selection)
+}
+
+/// Resolve white balance using as-shot gains and the selected camera
+/// calibration. The compact calibration form is suitable for preview/GPU
+/// boundaries that need to evaluate many recipes without retaining RAW
+/// metadata or rebuilding image pixels.
+pub fn white_balance_gains_from_calibration(
+    as_shot_white_balance: [Option<f32>; 4],
+    camera_to_xyz_d65: crate::Matrix3,
+    selection: WhiteBalance,
+) -> Result<WhiteBalanceGains, PipelineError> {
+    validate_white_balance_selection(selection)?;
+    let [red, green, blue, _] = as_shot_white_balance;
     let values =
         [red, green, blue].map(|value| value.filter(|number| number.is_finite() && *number > 0.0));
     let [Some(red), Some(green), Some(blue)] = values else {
@@ -205,7 +231,7 @@ pub fn white_balance_gains(
             gains.blue *= blue;
         }
         WhiteBalance::TemperatureTint { temperature, tint } => {
-            let [red, green, blue] = temperature_tint_gains(temperature, tint);
+            let [red, green, blue] = temperature_tint_gains(camera_to_xyz_d65, temperature, tint)?;
             gains.red *= red;
             gains.green *= green;
             gains.blue *= blue;
@@ -215,40 +241,96 @@ pub fn white_balance_gains(
     Ok(gains)
 }
 
-fn temperature_tint_gains(temperature: f32, tint: f32) -> [f32; 3] {
-    let neutral = approximate_daylight_rgb(6500.0);
-    let daylight = approximate_daylight_rgb(temperature);
+fn validate_white_balance_selection(selection: WhiteBalance) -> Result<(), PipelineError> {
+    let valid = match selection {
+        WhiteBalance::AsShot => true,
+        WhiteBalance::ManualMultipliers { red, green, blue } => [red, green, blue]
+            .into_iter()
+            .all(|value| WHITE_BALANCE_MULTIPLIER_RANGE.contains(value)),
+        WhiteBalance::TemperatureTint { temperature, tint } => {
+            TEMPERATURE_RANGE.contains(temperature) && TINT_RANGE.contains(tint)
+        }
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(PipelineError::InvalidRecipe {
+            field: "color.white_balance",
+            reason: "white-balance values are outside their declared finite ranges".to_owned(),
+        })
+    }
+}
+
+pub(crate) fn white_balance_gains_with_transform(
+    info: &RawFileInfo,
+    transform: &CameraColorTransform,
+    selection: WhiteBalance,
+) -> Result<WhiteBalanceGains, PipelineError> {
+    white_balance_gains_from_calibration(
+        info.as_shot_white_balance,
+        transform.camera_to_xyz_d65,
+        selection,
+    )
+}
+
+fn temperature_tint_gains(
+    camera_to_xyz_d65: crate::Matrix3,
+    temperature: f32,
+    tint: f32,
+) -> Result<[f32; 3], PipelineError> {
+    // Estimate the requested white point in XYZ, then solve the correction in
+    // the actual camera-native basis. This avoids treating sensor channels as
+    // if they were display RGB (the former implementation did exactly that).
     let tint_gain = 1.0 + tint * 0.15;
-    [
-        daylight[0] / neutral[0],
-        daylight[1] / neutral[1] / tint_gain,
-        daylight[2] / neutral[2],
-    ]
+    if (temperature - 6_500.0).abs() <= 0.5 {
+        // 6500 K is the neutral point of this control. Keeping it exact avoids
+        // introducing a small color change merely by switching modes from
+        // AsShot to Temperature/Tint.
+        return Ok([1.0, 1.0 / tint_gain, 1.0]);
+    }
+    let daylight_xyz = approximate_daylight_xyz(temperature);
+    let camera_white = camera_to_xyz_d65.inverse()?.transform(daylight_xyz);
+    if camera_white
+        .iter()
+        .any(|value| !value.is_finite() || *value <= 1.0e-8)
+    {
+        return Err(PipelineError::InvalidMetadata {
+            field: "temperature_tint",
+            reason: "the requested white point is outside the calibrated camera gamut".to_owned(),
+        });
+    }
+    let green = camera_white[1];
+    Ok([
+        green / camera_white[0],
+        1.0 / tint_gain,
+        green / camera_white[2],
+    ])
 }
 
 /// Approximate a daylight white point for the editor's temperature control.
-/// This is intentionally a small deterministic model; camera calibration and
-/// as-shot gains remain the source of the sensor-specific white balance.
-fn approximate_daylight_rgb(temperature: f32) -> [f32; 3] {
-    let temperature = (temperature / 100.0).clamp(20.0, 120.0);
-    let red = if temperature <= 66.0 {
-        1.0
+///
+/// This is a daylight-locus approximation expressed directly as a normalized
+/// XYZ white point (Y = 1). The published locus is most reliable above 4000 K;
+/// the same smooth polynomial is deliberately extended to the control's
+/// 2000 K lower bound. It is still only an illuminant model: camera
+/// calibration and as-shot gains remain the source of sensor-specific
+/// behavior. Keeping the intermediate in XYZ also avoids applying a
+/// display-transfer RGB approximation as though it were linear light.
+fn approximate_daylight_xyz(temperature: f32) -> [f32; 3] {
+    let temperature = temperature.clamp(2_000.0, 12_000.0);
+    let x = if temperature <= 7_000.0 {
+        -4_607_000_000.0 / temperature.powi(3)
+            + 2_967_800.0 / temperature.powi(2)
+            + 99.11 / temperature
+            + 0.244_063
     } else {
-        (329.6987 * (temperature - 60.0).powf(-0.133_204_76) / 255.0).clamp(0.0, 1.0)
+        -2_006_400_000.0 / temperature.powi(3)
+            + 1_901_800.0 / temperature.powi(2)
+            + 247.48 / temperature
+            + 0.237_040
     };
-    let green = if temperature <= 66.0 {
-        (0.390_081_58 * temperature.ln() - 0.631_841_4).clamp(0.0, 1.0)
-    } else {
-        (288.1222 * (temperature - 60.0).powf(-0.075_514_85) / 255.0).clamp(0.0, 1.0)
-    };
-    let blue = if temperature <= 19.0 {
-        0.0
-    } else if temperature <= 66.0 {
-        (0.543_206_8 * (temperature - 10.0).ln() - 1.196_254_1).clamp(0.0, 1.0)
-    } else {
-        1.0
-    };
-    [red, green, blue]
+    let y = -3.0 * x.powi(2) + 2.87 * x - 0.275;
+    [x / y, 1.0, (1.0 - x - y) / y]
 }
 
 pub(crate) fn apply_camera_color_transform_cancellable(
@@ -349,6 +431,26 @@ pub(crate) fn apply_adjustments_cancellable(
     let row_stride = image.row_stride();
     let light = recipe.light.clone();
     let color = recipe.color.clone();
+    // Resolve stage participation once per recipe instead of repeatedly
+    // checking all neutral controls for every pixel. This is especially
+    // useful for the common global-adjustment path, where HSL and grading are
+    // normally neutral but the image still contains millions of pixels.
+    let has_light_tone = light.highlights != 0.0
+        || light.shadows != 0.0
+        || light.whites != 0.0
+        || light.blacks != 0.0;
+    let has_tone_curve = light.tone_curve.shadows != 0.0
+        || light.tone_curve.darks != 0.0
+        || light.tone_curve.lights != 0.0
+        || light.tone_curve.highlights != 0.0;
+    let has_saturation = (color.saturation - 1.0).abs() > f32::EPSILON || color.vibrance != 0.0;
+    let has_hsl =
+        color.hsl.channels.iter().any(|channel| {
+            channel.hue != 0.0 || channel.saturation != 0.0 || channel.luminance != 0.0
+        });
+    let has_grading = color.grading.shadows != [0.0; 3]
+        || color.grading.midtones != [0.0; 3]
+        || color.grading.highlights != [0.0; 3];
     image.data_mut().par_chunks_mut(row_stride).try_for_each(
         |row| -> Result<(), PipelineError> {
             cancellation.checkpoint()?;
@@ -363,18 +465,28 @@ pub(crate) fn apply_adjustments_cancellable(
                         *value = CONTRAST_PIVOT + (*value - CONTRAST_PIVOT) * contrast_gain;
                     }
                 }
-                apply_light_tone(pixel, &light);
-                apply_tone_curve(pixel, &light.tone_curve);
-                let luminance = luminance(pixel);
-                let saturation = color.saturation
-                    * (1.0 + color.vibrance * (1.0 - color_saturation(pixel, luminance)));
-                if (saturation - 1.0).abs() > f32::EPSILON {
-                    for value in pixel.iter_mut() {
-                        *value = luminance + saturation * (*value - luminance);
+                if has_light_tone {
+                    apply_light_tone(pixel, &light);
+                }
+                if has_tone_curve {
+                    apply_tone_curve(pixel, &light.tone_curve);
+                }
+                if has_saturation {
+                    let luminance = luminance(pixel);
+                    let saturation = color.saturation
+                        * (1.0 + color.vibrance * (1.0 - color_saturation(pixel, luminance)));
+                    if (saturation - 1.0).abs() > f32::EPSILON {
+                        for value in pixel.iter_mut() {
+                            *value = luminance + saturation * (*value - luminance);
+                        }
                     }
                 }
-                apply_hsl_adjustments(pixel, &color.hsl);
-                apply_color_grading(pixel, &color.grading);
+                if has_hsl {
+                    apply_hsl_adjustments(pixel, &color.hsl);
+                }
+                if has_grading {
+                    apply_color_grading(pixel, &color.grading);
+                }
             }
             Ok(())
         },
@@ -401,17 +513,7 @@ fn apply_light_tone(pixel: &mut [f32], light: &crate::LightAdjustments) {
     if delta == 0.0 {
         return;
     }
-    let target = current + delta;
-    if current.abs() > 1.0e-6 {
-        let scale = target / current;
-        for value in pixel.iter_mut() {
-            *value *= scale;
-        }
-    } else {
-        for value in pixel.iter_mut() {
-            *value += delta;
-        }
-    }
+    apply_luminance_delta(pixel, current, current + delta);
 }
 
 fn apply_tone_curve(pixel: &mut [f32], curve: &crate::ToneCurve) {
@@ -420,34 +522,114 @@ fn apply_tone_curve(pixel: &mut [f32], curve: &crate::ToneCurve) {
         return;
     }
     let current = luminance(pixel);
-    let normalized = current.clamp(0.0, 1.0);
-    let shadows = 1.0 - smoothstep(0.0, 0.45, normalized);
-    let darks = smoothstep(0.0, 0.12, normalized) * (1.0 - smoothstep(0.35, 0.55, normalized));
-    let lights = smoothstep(0.45, 0.65, normalized) * (1.0 - smoothstep(0.88, 1.0, normalized));
-    let highlights = smoothstep(0.60, 1.0, normalized);
-    let delta = curve.shadows * shadows
-        + curve.darks * darks
-        + curve.lights * lights
-        + curve.highlights * highlights;
-    if delta == 0.0 {
+    let target = evaluate_tone_curve(curve, current);
+    if !target.is_finite() || (target - current).abs() <= f32::EPSILON {
         return;
     }
-    let target = current + delta;
-    if current.abs() > 1.0e-6 {
+    apply_luminance_delta(pixel, current, target);
+}
+
+/// Evaluate the monotonic scene-linear tone curve used by both the CPU and
+/// the editor graph. The four recipe values are offsets at fixed inputs;
+/// output points are projected into a non-decreasing curve so crossing
+/// controls cannot invert tonal order. Values outside [0, 1] are left on the
+/// identity extension to preserve HDR and negative working samples.
+pub fn evaluate_tone_curve(curve: &crate::ToneCurve, input: f32) -> f32 {
+    if !input.is_finite() || !(0.0..=1.0).contains(&input) {
+        return input;
+    }
+    const INPUTS: [f32; 6] = [0.0, 0.12, 0.35, 0.65, 0.88, 1.0];
+    let mut outputs = [
+        0.0,
+        INPUTS[1] + curve.shadows,
+        INPUTS[2] + curve.darks,
+        INPUTS[3] + curve.lights,
+        INPUTS[4] + curve.highlights,
+        1.0,
+    ];
+    for output in &mut outputs {
+        *output = output.clamp(0.0, 1.0);
+    }
+    for index in 1..outputs.len() {
+        outputs[index] = outputs[index].max(outputs[index - 1]);
+    }
+    let Some(index) = INPUTS.windows(2).position(|pair| input <= pair[1]) else {
+        return 1.0;
+    };
+    let span = INPUTS[index + 1] - INPUTS[index];
+    let fraction = (input - INPUTS[index]) / span;
+    outputs[index] + (outputs[index + 1] - outputs[index]) * fraction
+}
+
+#[inline(always)]
+fn apply_luminance_delta(pixel: &mut [f32], current: f32, target: f32) {
+    if !current.is_finite() || !target.is_finite() {
+        return;
+    }
+    if (current > 1.0e-6 && target >= LUMINANCE_RATIO_TRANSITION)
+        || (current < -1.0e-6 && target <= -LUMINANCE_RATIO_TRANSITION)
+    {
         let scale = target / current;
-        for value in pixel.iter_mut() {
-            *value *= scale;
+        let updated = [pixel[0] * scale, pixel[1] * scale, pixel[2] * scale];
+        if updated.iter().all(|value| value.is_finite()) {
+            pixel.copy_from_slice(&updated);
+            return;
         }
-    } else {
-        for value in pixel.iter_mut() {
-            *value += delta;
-        }
+    }
+    let delta = target - current;
+    if !delta.is_finite() {
+        return;
+    }
+    // Crossing zero with a multiplicative scale would flip the sign of every
+    // channel, so additive output is the stable endpoint of the transition.
+    let additive = [pixel[0] + delta, pixel[1] + delta, pixel[2] + delta];
+    if additive.iter().any(|value| !value.is_finite()) {
+        return;
+    }
+    if current.abs() <= 1.0e-6 || current.signum() != target.signum() {
+        pixel.copy_from_slice(&additive);
+        return;
+    }
+
+    let ratio_weight = smoothstep(0.0, LUMINANCE_RATIO_TRANSITION, target.abs());
+    if ratio_weight <= f32::EPSILON {
+        pixel.copy_from_slice(&additive);
+        return;
+    }
+    let scale = target / current;
+    let scaled = [pixel[0] * scale, pixel[1] * scale, pixel[2] * scale];
+    let updated = [
+        additive[0] + (scaled[0] - additive[0]) * ratio_weight,
+        additive[1] + (scaled[1] - additive[1]) * ratio_weight,
+        additive[2] + (scaled[2] - additive[2]) * ratio_weight,
+    ];
+    if updated.iter().all(|value| value.is_finite()) {
+        pixel.copy_from_slice(&updated);
     }
 }
 
 fn apply_hsl_adjustments(pixel: &mut [f32], adjustments: &crate::HslAdjustments) {
     let [red, green, blue] = [pixel[0], pixel[1], pixel[2]];
-    let [mut hue, mut saturation, mut lightness] = rgb_to_hsl([red, green, blue]);
+    if [red, green, blue]
+        .into_iter()
+        .any(|value| !value.is_finite())
+    {
+        return;
+    }
+    // HSL itself is bounded, but the working image is not. Normalize around
+    // the pixel's signed range, apply HSL there, and restore the original
+    // scale/offset so HDR and negative values are not silently clipped.
+    let offset = (-red.min(green).min(blue)).max(0.0);
+    let shifted = [red + offset, green + offset, blue + offset];
+    if shifted.iter().any(|value| !value.is_finite()) {
+        return;
+    }
+    let scale = shifted.into_iter().fold(0.0, f32::max);
+    if !scale.is_finite() || scale <= f32::EPSILON {
+        return;
+    }
+    let [mut hue, mut saturation, mut lightness] =
+        rgb_to_hsl([shifted[0] / scale, shifted[1] / scale, shifted[2] / scale]);
     let mut hue_shift = 0.0;
     let mut saturation_shift = 0.0;
     let mut lightness_shift = 0.0;
@@ -466,7 +648,10 @@ fn apply_hsl_adjustments(pixel: &mut [f32], adjustments: &crate::HslAdjustments)
     saturation = (saturation + saturation_shift).clamp(0.0, 1.0);
     lightness = (lightness + lightness_shift).clamp(0.0, 1.0);
     let converted = hsl_to_rgb([hue, saturation, lightness]);
-    pixel.copy_from_slice(&converted);
+    let restored = converted.map(|value| value * scale - offset);
+    if restored.iter().all(|value| value.is_finite()) {
+        pixel.copy_from_slice(&restored);
+    }
 }
 
 fn apply_color_grading(pixel: &mut [f32], grading: &crate::ColorGradingAdjustments) {
@@ -478,18 +663,37 @@ fn apply_color_grading(pixel: &mut [f32], grading: &crate::ColorGradingAdjustmen
     let shadows = 1.0 - smoothstep(0.0, 0.5, value);
     let midtones = smoothstep(0.15, 0.45, value) * (1.0 - smoothstep(0.55, 0.85, value));
     let highlights = smoothstep(0.5, 1.0, value);
-    for (index, channel) in pixel.iter_mut().enumerate() {
-        *channel += 0.1
-            * (grading.shadows[index] * shadows
-                + grading.midtones[index] * midtones
-                + grading.highlights[index] * highlights);
+    let grade = [0, 1, 2].map(|index| {
+        grading.shadows[index] * shadows
+            + grading.midtones[index] * midtones
+            + grading.highlights[index] * highlights
+    });
+    // Treat the RGB controls as a tint rather than an additive lift. Positive
+    // multipliers preserve the sign of HDR/filter-lobe values, while the
+    // luminance renormalization keeps a grade from silently changing exposure.
+    let target = [0, 1, 2].map(|index| pixel[index] * (1.0 + 0.25 * grade[index]));
+    if target.iter().any(|value| !value.is_finite()) {
+        return;
+    }
+    let source_luminance = luminance(pixel);
+    let target_luminance = luminance(&target);
+    if source_luminance.abs() > 1.0e-6
+        && source_luminance.is_finite()
+        && target_luminance.abs() > 1.0e-6
+        && target_luminance.is_finite()
+        && source_luminance.signum() == target_luminance.signum()
+    {
+        let scale = source_luminance / target_luminance;
+        let graded = target.map(|value| value * scale);
+        if graded.iter().all(|value| value.is_finite()) {
+            pixel.copy_from_slice(&graded);
+        }
+    } else {
+        pixel.copy_from_slice(&target);
     }
 }
 
 fn rgb_to_hsl([red, green, blue]: [f32; 3]) -> [f32; 3] {
-    let red = red.clamp(0.0, 1.0);
-    let green = green.clamp(0.0, 1.0);
-    let blue = blue.clamp(0.0, 1.0);
     let maximum = red.max(green).max(blue);
     let minimum = red.min(green).min(blue);
     let lightness = (maximum + minimum) * 0.5;
@@ -943,7 +1147,7 @@ mod tests {
     use rohditor_raw::{CameraColorMatrix, CaptureMetadata, CfaPattern, LevelPattern, RawFileInfo};
 
     use super::*;
-    use crate::{DemosaicAlgorithm, demosaic};
+    use crate::{DemosaicAlgorithm, ToneCurve, demosaic};
 
     fn test_info(width: usize, height: usize, pattern: &str) -> RawFileInfo {
         RawFileInfo {
@@ -1200,6 +1404,52 @@ mod tests {
     }
 
     #[test]
+    fn temperature_tint_uses_the_calibrated_camera_basis() {
+        let camera_to_xyz =
+            crate::Matrix3::new([[0.90, 0.08, 0.02], [0.03, 0.94, 0.03], [0.01, 0.08, 0.91]]);
+        let selection = WhiteBalance::TemperatureTint {
+            temperature: 3_200.0,
+            tint: 0.0,
+        };
+        let display_basis = white_balance_gains_from_calibration(
+            [Some(1.0), Some(1.0), Some(1.0), None],
+            crate::Matrix3::identity(),
+            selection,
+        )
+        .expect("identity basis should resolve");
+        let camera_basis = white_balance_gains_from_calibration(
+            [Some(1.0), Some(1.0), Some(1.0), None],
+            camera_to_xyz,
+            selection,
+        )
+        .expect("calibrated basis should resolve");
+        assert!(
+            [camera_basis.red, camera_basis.green, camera_basis.blue]
+                .into_iter()
+                .all(|value| value.is_finite() && value > 0.0)
+        );
+        assert!(
+            (camera_basis.red - display_basis.red).abs() > 1.0e-3
+                || (camera_basis.blue - display_basis.blue).abs() > 1.0e-3
+        );
+    }
+
+    #[test]
+    fn daylight_temperature_model_is_a_positive_xyz_white_point() {
+        let d65 = approximate_daylight_xyz(6_500.0);
+        assert!((d65[0] - 0.9505).abs() < 0.01);
+        assert_eq!(d65[1], 1.0);
+        assert!((d65[2] - 1.089).abs() < 0.01);
+        for temperature in [2_000.0, 3_200.0, 6_500.0, 12_000.0] {
+            assert!(
+                approximate_daylight_xyz(temperature)
+                    .into_iter()
+                    .all(|value| value.is_finite() && value > 0.0)
+            );
+        }
+    }
+
+    #[test]
     fn exposure_neutral_is_identity_and_known_ev_is_power_of_two() {
         let source = vec![0.1, 0.2, 0.3, 0.5, 0.6, 0.7];
         let mut neutral = LinearRgbImage::new(2, 1, 6, LinearRgbSpace::Rec2020D65, source.clone())
@@ -1299,6 +1549,134 @@ mod tests {
         let shadow = image.pixel(1, 0).expect("shadow pixel");
         assert!(red[1] > 0.2);
         assert!(shadow[2] > 0.1);
+    }
+
+    #[test]
+    fn hsl_keeps_scene_linear_hdr_and_negative_range() {
+        let source = [-0.25, 1.5, 2.25];
+        let mut image = LinearRgbImage::new(1, 1, 3, LinearRgbSpace::Rec2020D65, source.to_vec())
+            .expect("valid HDR image");
+        let mut recipe = EditRecipe::default();
+        recipe.color.hsl.channels[4].hue = 0.5;
+
+        apply_adjustments(&mut image, &recipe).expect("valid HSL adjustment");
+        let pixel = image.pixel(0, 0).expect("pixel remains present");
+        assert!(pixel.iter().all(|value| value.is_finite()));
+        assert!(pixel.iter().any(|value| *value > 1.0));
+        assert!(pixel.iter().any(|value| *value < 0.0));
+    }
+
+    #[test]
+    fn every_adjustment_stage_keeps_asymmetric_working_values_finite() {
+        let mut image = LinearRgbImage::new(
+            2,
+            2,
+            6,
+            LinearRgbSpace::Rec2020D65,
+            vec![
+                -0.35, 0.08, 1.75, 0.02, 0.65, 1.20, 0.9, -0.1, 0.4, 1.4, 0.3, -0.2,
+            ],
+        )
+        .expect("valid asymmetric HDR image");
+        let mut recipe = EditRecipe::default();
+        recipe.light.exposure_ev = 1.25;
+        recipe.light.contrast = -0.4;
+        recipe.light.highlights = -0.7;
+        recipe.light.shadows = 0.65;
+        recipe.light.whites = 0.55;
+        recipe.light.blacks = -0.6;
+        recipe.light.tone_curve = ToneCurve {
+            shadows: 0.2,
+            darks: -0.15,
+            lights: 0.18,
+            highlights: -0.2,
+        };
+        recipe.color.saturation = 1.45;
+        recipe.color.vibrance = -0.6;
+        for (index, channel) in recipe.color.hsl.channels.iter_mut().enumerate() {
+            channel.hue = if index % 2 == 0 { 0.4 } else { -0.35 };
+            channel.saturation = if index % 3 == 0 { 0.3 } else { -0.2 };
+            channel.luminance = if index % 2 == 0 { -0.25 } else { 0.2 };
+        }
+        recipe.color.grading.shadows = [0.8, -0.6, 0.4];
+        recipe.color.grading.midtones = [-0.5, 0.7, -0.3];
+        recipe.color.grading.highlights = [0.35, -0.45, 0.65];
+
+        apply_adjustments(&mut image, &recipe).expect("all adjustment values are valid");
+        assert!(
+            image.data().iter().all(|value| value.is_finite()),
+            "adjustments produced a non-finite sample"
+        );
+    }
+
+    #[test]
+    fn tone_curve_extremes_remain_monotonic_and_keep_endpoints() {
+        let curve = ToneCurve {
+            shadows: 0.25,
+            darks: -0.25,
+            lights: 0.25,
+            highlights: -0.25,
+        };
+        let mut previous = evaluate_tone_curve(&curve, 0.0);
+        assert_eq!(previous, 0.0);
+        for index in 1..=1_000 {
+            let input = index as f32 / 1_000.0;
+            let output = evaluate_tone_curve(&curve, input);
+            assert!(output >= previous, "curve decreased at input {input}");
+            previous = output;
+        }
+        assert_eq!(previous, 1.0);
+        assert_eq!(evaluate_tone_curve(&curve, -0.5), -0.5);
+        assert_eq!(evaluate_tone_curve(&curve, 1.5), 1.5);
+    }
+
+    #[test]
+    fn tonal_crossing_uses_an_additive_transition_without_global_sign_flip() {
+        let mut image =
+            LinearRgbImage::new(1, 1, 3, LinearRgbSpace::Rec2020D65, vec![-0.4, -0.2, -0.1])
+                .expect("valid image");
+        let mut recipe = EditRecipe::default();
+        recipe.light.shadows = 1.0;
+
+        apply_adjustments(&mut image, &recipe).expect("valid tonal adjustment");
+        let pixel = image.pixel(0, 0).expect("pixel remains present");
+        assert!(pixel.iter().all(|value| value.is_finite()));
+        assert!(pixel[0] < 0.0);
+        assert!(pixel[1] > 0.0);
+    }
+
+    #[test]
+    fn tonal_luminance_transition_is_continuous_near_black() {
+        let mut below_transition = [0.15, 0.1, 0.05];
+        let mut above_transition = below_transition;
+        apply_luminance_delta(&mut below_transition, 0.12, 0.0099);
+        apply_luminance_delta(&mut above_transition, 0.12, 0.0101);
+        for (below, above) in below_transition.iter().zip(above_transition) {
+            assert!((below - above).abs() < 0.01);
+        }
+
+        let mut negative_crossing = [0.15, 0.1, 0.05];
+        let mut positive_crossing = negative_crossing;
+        apply_luminance_delta(&mut negative_crossing, 0.12, -0.0001);
+        apply_luminance_delta(&mut positive_crossing, 0.12, 0.0001);
+        for (negative, positive) in negative_crossing.iter().zip(positive_crossing) {
+            assert!((negative - positive).abs() < 0.001);
+        }
+    }
+
+    #[test]
+    fn three_way_rgb_tint_preserves_neutral_luminance() {
+        let mut image =
+            LinearRgbImage::new(1, 1, 3, LinearRgbSpace::Rec2020D65, vec![0.4, 0.4, 0.4])
+                .expect("valid image");
+        let mut recipe = EditRecipe::default();
+        recipe.color.grading.shadows[0] = 1.0;
+
+        apply_adjustments(&mut image, &recipe).expect("valid grading adjustment");
+        let pixel = image.pixel(0, 0).expect("pixel remains present");
+        assert!((luminance(pixel) - 0.4).abs() < 1.0e-6);
+        assert!(pixel[0] > pixel[1]);
+        assert!(pixel[1] > pixel[2] - 1.0e-6);
     }
 
     #[test]

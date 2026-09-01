@@ -41,6 +41,7 @@ pub(crate) struct GpuModel {
     pub upload_preparation: Option<Duration>,
     pub submission: Option<Duration>,
     pub queue_completion: Option<Duration>,
+    pub histogram_readback: Option<Duration>,
     pub textures_reused: Option<bool>,
     pub resident_bytes: usize,
 }
@@ -195,6 +196,11 @@ pub(crate) fn show(
                         optional_duration_row(ui, "CPU upload packing", gpu.upload_preparation);
                         optional_duration_row(ui, "Encode + submit", gpu.submission);
                         optional_duration_row(ui, "Queue completion", gpu.queue_completion);
+                        optional_duration_row(
+                            ui,
+                            "Histogram readback",
+                            gpu.histogram_readback,
+                        );
                         diagnostic_row(
                             ui,
                             "Output textures",
@@ -222,7 +228,7 @@ pub(crate) fn show(
 /// the JSON is portable and readable without Rust-specific encodings.
 pub(crate) fn report(model: &DiagnosticsModel) -> DiagnosticsReport<'_> {
     DiagnosticsReport {
-        format_version: 2,
+        format_version: 3,
         application: ApplicationReport {
             name: "Rohditor",
             version: env!("CARGO_PKG_VERSION"),
@@ -365,6 +371,7 @@ pub(crate) struct GpuReport {
     pub upload_preparation_ms: Option<f64>,
     pub submission_ms: Option<f64>,
     pub queue_completion_ms: Option<f64>,
+    pub histogram_readback_ms: Option<f64>,
     pub textures_reused: Option<bool>,
     pub resident_bytes: usize,
 }
@@ -375,6 +382,7 @@ impl From<GpuModel> for GpuReport {
             upload_preparation_ms: value.upload_preparation.map(duration_milliseconds),
             submission_ms: value.submission.map(duration_milliseconds),
             queue_completion_ms: value.queue_completion.map(duration_milliseconds),
+            histogram_readback_ms: value.histogram_readback.map(duration_milliseconds),
             textures_reused: value.textures_reused,
             resident_bytes: value.resident_bytes,
         }

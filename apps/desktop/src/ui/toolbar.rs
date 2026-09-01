@@ -10,7 +10,12 @@ pub(crate) struct ToolbarModel {
     pub can_undo: bool,
     pub can_redo: bool,
     pub fit_selected: bool,
-    pub actual_size_selected: bool,
+    /// Whether the full-resolution source inspection mode is active.
+    ///
+    /// This is deliberately separate from the current view magnification:
+    /// scrolling after entering Source 1:1 changes the zoom percentage but
+    /// must not make the resolution-mode button appear inactive.
+    pub source_scale_selected: bool,
     pub zoom_label: String,
     pub diagnostics_open: bool,
     pub export_ready: bool,
@@ -121,7 +126,7 @@ pub(crate) fn show_top(context: &egui::Context, model: &ToolbarModel) -> Toolbar
                         output.actual_size = widgets::toolbar_button(
                             ui,
                             if narrow { "1:1" } else { "Source 1:1" },
-                            model.actual_size_selected,
+                            model.source_scale_selected,
                             true,
                         )
                         .on_hover_text("Develop and show one source pixel per screen point")

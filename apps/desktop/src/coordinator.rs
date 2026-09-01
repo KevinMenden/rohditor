@@ -97,7 +97,6 @@ pub(crate) struct WorkerImage {
     pub width: usize,
     pub height: usize,
     pub color: egui::ColorImage,
-    pub pixels: Vec<u8>,
 }
 
 impl WorkerImage {
@@ -137,7 +136,6 @@ impl WorkerImage {
             width,
             height,
             color,
-            pixels,
         })
     }
 }
@@ -175,6 +173,14 @@ pub(crate) enum WorkerEvent {
         upload: Box<GpuPreviewUpload>,
         diagnostics: WorkerPreviewDiagnostics,
         upload_preparation: Duration,
+    },
+    WhiteBalanceSampleReady {
+        ticket: PreviewTicket,
+        sample: [f32; 3],
+    },
+    WhiteBalanceSampleFailed {
+        ticket: PreviewTicket,
+        message: String,
     },
     ExportReady {
         document_id: u64,
@@ -222,9 +228,19 @@ struct ExportJob {
 }
 
 #[derive(Debug)]
+struct WhiteBalanceSampleJob {
+    ticket: PreviewTicket,
+    frame: Arc<RawFrame>,
+    recipe: EditRecipe,
+    coordinate: (f32, f32),
+    options: PreviewOptions,
+}
+
+#[derive(Debug)]
 enum WorkerRequest {
     Open { document_id: u64, path: PathBuf },
     PreviewAvailable,
+    SampleWhiteBalance(Box<WhiteBalanceSampleJob>),
     Export(Box<ExportJob>),
     AbandonDocument(u64),
     Shutdown,
@@ -347,6 +363,25 @@ impl RenderCoordinator {
             },
             &self.requests,
         )
+    }
+
+    pub(crate) fn sample_white_balance(
+        &self,
+        ticket: PreviewTicket,
+        frame: Arc<RawFrame>,
+        recipe: EditRecipe,
+        coordinate: (f32, f32),
+        options: PreviewOptions,
+    ) -> Result<(), String> {
+        self.send(WorkerRequest::SampleWhiteBalance(Box::new(
+            WhiteBalanceSampleJob {
+                ticket,
+                frame,
+                recipe,
+                coordinate,
+                options,
+            },
+        )))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -476,6 +511,11 @@ fn worker_loop(
                 };
                 previews.finish(ticket, completion);
             }
+            WorkerRequest::SampleWhiteBalance(job) => {
+                if !abandoned.contains(&job.ticket.document_id) {
+                    process_white_balance_sample(*job, &sender, &context, &mut preview_cache);
+                }
+            }
             WorkerRequest::Export(job) => {
                 if !abandoned.contains(&job.document_id) {
                     process_export(*job, &sender, &context);
@@ -507,6 +547,7 @@ impl WorkerRequest {
                 Some(*document_id)
             }
             Self::Export(job) => Some(job.document_id),
+            Self::SampleWhiteBalance(job) => Some(job.ticket.document_id),
             Self::PreviewAvailable | Self::Shutdown => None,
         }
     }
@@ -868,15 +909,13 @@ fn process_gpu_base(
         JobKind::Preview,
         Some(job.ticket.revision),
         None,
-        if cache_hits.demosaiced {
-            "Packing cached linear base for GPU preview"
-        } else if cache_hits.reconstructed {
-            "Applying color to cached reconstructed GPU preview base"
+        if cache_hits.reconstructed {
+            "Packing cached camera-native source for GPU preview"
         } else {
-            "Preparing linear 2560 px GPU preview base"
+            "Preparing camera-native 2560 px GPU preview source"
         },
     );
-    let timings = match ensure_preview_base(
+    let timings = match ensure_preview_reconstruction(
         &job,
         options,
         &keys,
@@ -902,7 +941,7 @@ fn process_gpu_base(
             return PreviewCompletion::Failed;
         }
     };
-    let Some(base) = preview_cache.demosaiced(&keys) else {
+    let Some(reconstructed) = preview_cache.reconstructed(&keys) else {
         send_failure(
             sender,
             context,
@@ -910,14 +949,18 @@ fn process_gpu_base(
             JobKind::Preview,
             Some(job.ticket.revision),
             None,
-            "GPU preview cache lost its demosaiced base unexpectedly".to_owned(),
+            "GPU preview cache lost its reconstructed source unexpectedly".to_owned(),
         );
         return PreviewCompletion::Failed;
     };
-    let width = base.image().width();
-    let height = base.image().height();
+    let width = reconstructed.image().width();
+    let height = reconstructed.image().height();
     let upload_started = Instant::now();
-    let upload = match GpuPreviewUpload::from_demosaiced_base_cancellable(base, cancellation) {
+    let upload = match GpuPreviewUpload::from_reconstructed_preview_cancellable(
+        reconstructed,
+        job.recipe.color.white_balance,
+        cancellation,
+    ) {
         Ok(upload) => upload,
         Err(GpuPreviewError::Cancelled) => {
             info!("GPU upload packing cancelled after being superseded");
@@ -938,7 +981,7 @@ fn process_gpu_base(
     };
     let upload_preparation = upload_started.elapsed();
     let cache_resident_bytes = preview_cache.resident_bytes();
-    let memory = gpu_base_memory(&job.frame, base, cache_resident_bytes);
+    let memory = gpu_base_memory(&job.frame, reconstructed, cache_resident_bytes);
     let diagnostics = WorkerPreviewDiagnostics {
         backend: PreviewBackend::GpuBase,
         resolution: PreviewResolution::Fit,
@@ -1043,16 +1086,8 @@ fn ensure_preview_base(
     cancellation: &CancellationToken,
     preview_cache: &mut PreviewCache,
 ) -> Result<StageTimings, PipelineError> {
-    let mut timings = StageTimings::default();
-    if !cache_hits.reconstructed {
-        let reconstructed = CpuPipeline.prepare_preview_reconstruction_cancellable(
-            &job.frame,
-            options,
-            cancellation,
-        )?;
-        add_stage_timings(&mut timings, reconstructed.timings());
-        preview_cache.insert_reconstructed(keys, reconstructed);
-    }
+    let mut timings =
+        ensure_preview_reconstruction(job, options, keys, cache_hits, cancellation, preview_cache)?;
     if !cache_hits.demosaiced {
         let reconstructed = preview_cache.reconstructed(keys).ok_or_else(|| {
             cache_invariant("reconstructed preview was unavailable before color conversion")
@@ -1069,6 +1104,164 @@ fn ensure_preview_base(
     Ok(timings)
 }
 
+fn ensure_preview_reconstruction(
+    job: &PreviewJob,
+    options: PreviewOptions,
+    keys: &PreviewCacheKeys,
+    cache_hits: PreviewCacheHits,
+    cancellation: &CancellationToken,
+    preview_cache: &mut PreviewCache,
+) -> Result<StageTimings, PipelineError> {
+    let mut timings = StageTimings::default();
+    if !cache_hits.reconstructed {
+        let reconstructed = CpuPipeline.prepare_preview_reconstruction_cancellable(
+            &job.frame,
+            options,
+            cancellation,
+        )?;
+        add_stage_timings(&mut timings, reconstructed.timings());
+        preview_cache.insert_reconstructed(keys, reconstructed);
+    }
+    cancellation.checkpoint()?;
+    Ok(timings)
+}
+
+fn process_white_balance_sample(
+    job: WhiteBalanceSampleJob,
+    sender: &mpsc::Sender<WorkerEvent>,
+    context: &egui::Context,
+    preview_cache: &mut PreviewCache,
+) {
+    let result = sample_white_balance_patch(&job, preview_cache);
+    let event = match result {
+        Ok(sample) => WorkerEvent::WhiteBalanceSampleReady {
+            ticket: job.ticket,
+            sample,
+        },
+        Err(message) => WorkerEvent::WhiteBalanceSampleFailed {
+            ticket: job.ticket,
+            message,
+        },
+    };
+    send_event(sender, context, event);
+}
+
+fn sample_white_balance_patch(
+    job: &WhiteBalanceSampleJob,
+    preview_cache: &mut PreviewCache,
+) -> Result<[f32; 3], String> {
+    if !job.coordinate.0.is_finite()
+        || !job.coordinate.1.is_finite()
+        || !(0.0..=1.0).contains(&job.coordinate.0)
+        || !(0.0..=1.0).contains(&job.coordinate.1)
+    {
+        return Err("The white-balance sample coordinate was invalid".to_owned());
+    }
+    job.recipe
+        .validate()
+        .map_err(|error| format!("The current edit recipe is invalid: {error}"))?;
+
+    let keys = PreviewCacheKeys::new(job.ticket.document_id, &job.frame, &job.recipe, job.options);
+    let cache_hits = preview_cache.prepare(&keys, &job.frame);
+    let preview_job = PreviewJob {
+        ticket: job.ticket,
+        frame: Arc::clone(&job.frame),
+        recipe: job.recipe.clone(),
+        backend: PreviewBackend::Cpu,
+        resolution: PreviewResolution::Fit,
+    };
+    let cancellation = CancellationToken::new();
+    ensure_preview_reconstruction(
+        &preview_job,
+        job.options,
+        &keys,
+        cache_hits,
+        &cancellation,
+        preview_cache,
+    )
+    .map_err(|error| format!("Could not prepare the white-balance sample: {error}"))?;
+    let reconstructed = preview_cache.reconstructed(&keys).ok_or_else(|| {
+        "The reconstructed preview was unavailable for white-balance sampling".to_owned()
+    })?;
+
+    sample_camera_native_patch(
+        reconstructed,
+        job.recipe.geometry.orientation_override,
+        job.coordinate,
+    )
+}
+
+fn sample_camera_native_patch(
+    reconstructed: &rohditor_core::ReconstructedPreview,
+    orientation_override: Option<RawOrientation>,
+    coordinate: (f32, f32),
+) -> Result<[f32; 3], String> {
+    let image = reconstructed.image();
+    let orientation = orientation_override.unwrap_or(reconstructed.source_orientation());
+    let orientation_map = OrientationMap::new(image.width(), image.height(), orientation)
+        .map_err(|error| format!("Could not map the white-balance sample: {error}"))?;
+    let (output_width, output_height) = orientation_map.output_dimensions();
+    let center_x = (coordinate.0 * output_width.saturating_sub(1) as f32)
+        .round()
+        .clamp(0.0, output_width.saturating_sub(1) as f32) as usize;
+    let center_y = (coordinate.1 * output_height.saturating_sub(1) as f32)
+        .round()
+        .clamp(0.0, output_height.saturating_sub(1) as f32) as usize;
+    const RADIUS: usize = 2;
+    let x_start = center_x.saturating_sub(RADIUS);
+    let x_end = center_x
+        .saturating_add(RADIUS)
+        .min(output_width.saturating_sub(1));
+    let y_start = center_y.saturating_sub(RADIUS);
+    let y_end = center_y
+        .saturating_add(RADIUS)
+        .min(output_height.saturating_sub(1));
+    let mut samples = [Vec::new(), Vec::new(), Vec::new()];
+
+    for output_y in y_start..=y_end {
+        for output_x in x_start..=x_end {
+            let (source_x, source_y) = orientation_map
+                .source_coordinate(output_x, output_y)
+                .ok_or_else(|| "The white-balance sample mapped outside the image".to_owned())?;
+            let Some(pixel) = image.pixel(source_x, source_y) else {
+                continue;
+            };
+            if pixel
+                .iter()
+                .all(|value| value.is_finite() && *value > 1.0e-5 && *value < 1.0)
+            {
+                for (channel, value) in samples.iter_mut().zip(pixel.iter().copied()) {
+                    channel.push(value);
+                }
+            }
+        }
+    }
+
+    if samples[0].len() < 5 {
+        return Err(
+            "Could not find enough unclipped, non-black pixels in that white-balance patch"
+                .to_owned(),
+        );
+    }
+    let mut median = [0.0; 3];
+    for (channel, values) in samples.iter_mut().enumerate() {
+        values.sort_by(f32::total_cmp);
+        let middle = values.len() / 2;
+        median[channel] = if values.len() % 2 == 0 {
+            (values[middle - 1] + values[middle]) * 0.5
+        } else {
+            values[middle]
+        };
+        let spread = (values[values.len() - 1] - values[0]) / median[channel];
+        if !median[channel].is_finite() || spread > 0.75 {
+            return Err(
+                "That white-balance patch is too varied; choose a larger neutral area".to_owned(),
+            );
+        }
+    }
+    Ok(median)
+}
+
 fn add_stage_timings(target: &mut StageTimings, additional: StageTimings) {
     target.metadata += additional.metadata;
     target.normalization += additional.normalization;
@@ -1082,16 +1275,16 @@ fn add_stage_timings(target: &mut StageTimings, additional: StageTimings) {
 
 fn gpu_base_memory(
     frame: &RawFrame,
-    base: &rohditor_core::DemosaicedBase,
+    reconstructed: &rohditor_core::ReconstructedPreview,
     cache_resident_bytes: usize,
 ) -> MemoryEstimate {
     MemoryEstimate {
         decoded_raw_bytes: frame.mosaic.len().saturating_mul(size_of::<u16>()),
-        normalized_mosaic_bytes: base.normalized_mosaic_bytes(),
-        resample_intermediate_bytes: base.resample_intermediate_bytes(),
-        linear_rgb_bytes: base.buffer_bytes(),
+        normalized_mosaic_bytes: reconstructed.normalized_mosaic_bytes(),
+        resample_intermediate_bytes: reconstructed.resample_intermediate_bytes(),
+        linear_rgb_bytes: reconstructed.buffer_bytes(),
         display_rgb_bytes: 0,
-        estimated_peak_bytes: cache_resident_bytes.max(base.preparation_peak_bytes()),
+        estimated_peak_bytes: cache_resident_bytes.max(reconstructed.preparation_peak_bytes()),
     }
 }
 
@@ -1347,7 +1540,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use image::{Rgb, RgbImage};
-    use rohditor_core::{ExportFormat, JPEG_QUALITY_DEFAULT, WhiteBalance};
+    use rohditor_core::{CpuPipeline, ExportFormat, JPEG_QUALITY_DEFAULT, WhiteBalance};
     use rohditor_raw::{
         CameraColorMatrix, CaptureMetadata, CfaPattern, LevelPattern, PhotometricInterpretation,
         RawError, RawSession,
@@ -1638,6 +1831,24 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, WorkerEvent::PreviewReady { .. }))
         );
+    }
+
+    #[test]
+    fn white_balance_picker_samples_camera_native_patch_and_rejects_clipping() {
+        let frame = fake_frame();
+        let reconstructed = CpuPipeline
+            .prepare_preview_reconstruction(&frame, PreviewOptions::default())
+            .expect("fixture reconstruction should succeed");
+        let sample = sample_camera_native_patch(&reconstructed, None, (0.5, 0.5))
+            .expect("unclipped fixture patch should be sampleable");
+        assert!(sample.iter().all(|value| value.is_finite() && *value > 0.0));
+
+        let mut clipped = frame;
+        clipped.mosaic = Arc::from(vec![u16::MAX; clipped.info.width * clipped.info.height]);
+        let reconstructed = CpuPipeline
+            .prepare_preview_reconstruction(&clipped, PreviewOptions::default())
+            .expect("clipped fixture reconstruction should succeed");
+        assert!(sample_camera_native_patch(&reconstructed, None, (0.5, 0.5)).is_err());
     }
 
     #[test]
