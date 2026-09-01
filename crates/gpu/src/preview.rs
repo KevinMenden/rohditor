@@ -4,9 +4,9 @@ use std::time::{Duration, Instant};
 
 use half::f16;
 use rohditor_core::{
-    CancellationToken, DemosaicedBase, EditRecipe, LINEAR_REC2020_TO_XYZ_D65, LinearRgbSpace,
-    Matrix3, OrientationMap, ReconstructedPreview, WhiteBalance, WhiteBalanceGains,
-    XYZ_D65_TO_LINEAR_SRGB,
+    CancellationToken, DemosaicedBase, EditRecipe, LIGHT_TONE_LUT_SIZE, LINEAR_REC2020_TO_XYZ_D65,
+    LightToneLut, LinearRgbSpace, Matrix3, OrientationMap, ReconstructedPreview, WhiteBalance,
+    WhiteBalanceGains, XYZ_D65_TO_LINEAR_SRGB,
 };
 use rohditor_raw::RawOrientation;
 
@@ -354,6 +354,7 @@ pub struct GpuPreviewProcessor {
     pipeline: wgpu::ComputePipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     parameters: wgpu::Buffer,
+    light_tone_lut: wgpu::Buffer,
 }
 
 impl GpuPreviewProcessor {
@@ -413,6 +414,16 @@ impl GpuPreviewProcessor {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -438,6 +449,12 @@ impl GpuPreviewProcessor {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let light_tone_lut = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("rohditor shared Light tone LUT"),
+            size: (LIGHT_TONE_LUT_SIZE * size_of::<f32>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         Ok(Self {
             device: device.clone(),
@@ -446,6 +463,7 @@ impl GpuPreviewProcessor {
             pipeline,
             bind_group_layout,
             parameters,
+            light_tone_lut,
         })
     }
 
@@ -625,6 +643,12 @@ impl GpuPreviewProcessor {
         );
         self.queue
             .write_buffer(&self.parameters, 0, bytemuck::cast_slice(&parameters));
+        let light_tone_lut = LightToneLut::new(&recipe.light);
+        self.queue.write_buffer(
+            &self.light_tone_lut,
+            0,
+            bytemuck::cast_slice(light_tone_lut.values()),
+        );
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("rohditor GPU preview bind group"),
             layout: &self.bind_group_layout,
@@ -644,6 +668,10 @@ impl GpuPreviewProcessor {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: self.parameters.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: self.light_tone_lut.as_entire_binding(),
                 },
             ],
         });

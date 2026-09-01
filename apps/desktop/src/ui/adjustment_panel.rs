@@ -467,21 +467,12 @@ fn histogram_canvas_data(ui: &mut egui::Ui, histogram: &Histogram) {
             egui::Stroke::new(1.0, colors::BORDER.gamma_multiply(0.45)),
         );
     }
-    let maximum = histogram
-        .red
-        .iter()
-        .chain(histogram.green.iter())
-        .chain(histogram.blue.iter())
-        .chain(histogram.luminance.iter())
-        .copied()
-        .max()
-        .unwrap_or(0)
-        .max(1) as f32;
+    let vertical_scale = histogram_vertical_scale(histogram);
     let width = rect.width() / 256.0;
     for index in 0..256 {
         let x0 = rect.left() + index as f32 * width;
         let x1 = x0 + width.max(1.0);
-        let luminance = histogram.luminance[index] as f32 / maximum;
+        let luminance = histogram_bin_height(histogram.luminance[index], vertical_scale);
         if luminance > 0.0 {
             let y = egui::lerp(rect.bottom()..=rect.top(), luminance);
             ui.painter().rect_filled(
@@ -501,7 +492,8 @@ fn histogram_canvas_data(ui: &mut egui::Ui, histogram: &Histogram) {
             .enumerate()
             .map(|(index, count)| {
                 let x = rect.left() + (index as f32 + 0.5) * width;
-                let y = egui::lerp(rect.bottom()..=rect.top(), *count as f32 / maximum);
+                let height = histogram_bin_height(*count, vertical_scale);
+                let y = egui::lerp(rect.bottom()..=rect.top(), height);
                 egui::pos2(x, y)
             })
             .collect::<Vec<_>>();
@@ -510,6 +502,34 @@ fn histogram_canvas_data(ui: &mut egui::Ui, histogram: &Histogram) {
             egui::Stroke::new(1.0, color.gamma_multiply(0.8)),
         ));
     }
+}
+
+/// Use a robust interior-bin scale. Endpoint bins are clipping indicators and
+/// can be orders of magnitude larger than the useful distribution, so they do
+/// not participate in the graph's vertical normalization.
+fn histogram_vertical_scale(histogram: &Histogram) -> f32 {
+    let mut interior_counts = Vec::with_capacity(4 * 254);
+    for bins in [
+        &histogram.red,
+        &histogram.green,
+        &histogram.blue,
+        &histogram.luminance,
+    ] {
+        interior_counts.extend(bins[1..255].iter().copied().filter(|count| *count > 0));
+    }
+    if interior_counts.is_empty() {
+        return 1.0;
+    }
+    interior_counts.sort_unstable();
+    let percentile_99 = (interior_counts.len() - 1) * 99 / 100;
+    interior_counts[percentile_99].max(1) as f32
+}
+
+fn histogram_bin_height(count: u64, vertical_scale: f32) -> f32 {
+    if count == 0 {
+        return 0.0;
+    }
+    ((count as f32).ln_1p() / vertical_scale.max(1.0).ln_1p()).clamp(0.0, 1.0)
 }
 
 fn show_light_controls(
@@ -1041,5 +1061,26 @@ mod tests {
         let lowered = tone_curve_graph_value(0.85, [0.0, 0.0, 0.0, -0.1]);
         assert!(lifted > 0.15);
         assert!(lowered < 0.85);
+    }
+
+    #[test]
+    fn histogram_scale_ignores_dominant_clipping_spikes() {
+        let mut histogram = Histogram::default();
+        for bins in [
+            &mut histogram.red,
+            &mut histogram.green,
+            &mut histogram.blue,
+            &mut histogram.luminance,
+        ] {
+            bins[0] = 1_000_000;
+            bins[64] = 10;
+            bins[128] = 20;
+            bins[255] = 2_000_000;
+        }
+
+        let scale = histogram_vertical_scale(&histogram);
+        assert_eq!(scale, 20.0);
+        assert!(histogram_bin_height(10, scale) > 0.5);
+        assert_eq!(histogram_bin_height(1_000_000, scale), 1.0);
     }
 }

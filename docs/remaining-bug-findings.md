@@ -40,73 +40,6 @@ Long term:
 - Apply downstream adjustments on the GPU where possible, retaining the CPU path as the correctness fallback.
 - Add quality fixtures for diagonal edges, saturated boundaries, and image borders before adding any false-colour suppression.
 
-## 2. Mouse-anchored zoom
-
-### Observed behavior
-
-The mouse wheel changes scale around the viewport center. The pixel under the pointer moves away from the pointer while zooming.
-
-### Current cause
-
-`ViewState::zoom_by` changes `zoom` but leaves `pan` unchanged. The image rectangle is then rebuilt around the same viewport center.
-
-Relevant path: `apps/desktop/src/ui/viewport.rs`.
-
-### Proposed solution
-
-Pass the pointer position and viewport center into the zoom operation. Before changing scale, record the pointer's image-space offset. After changing scale, update pan so that the same image coordinate remains under the pointer:
-
-```text
-pan += (pointer - old_image_center) * (1 - new_scale / old_scale)
-```
-
-Add asymmetric tests for zooming near all four viewport corners and for zooming in and out repeatedly. Add sensible pan bounds so the image cannot be lost completely.
-
-## 3. Light controls and histogram collapse
-
-### Observed behavior
-
-Small changes to several Light sliders can make the histogram look like a flat line.
-
-### Current cause
-
-Exposure is correctly implemented as a power-of-two gain. Contrast is also internally consistent, although the UI displays a percentage while the core interprets the value as a stop-based slope change.
-
-Highlights, Shadows, Whites, and Blacks are currently combined into overlapping additive luminance offsets. Near-black negative adjustments can cross below zero; near-white positive adjustments can cross above one. Output conversion then creates large bin-0 or bin-255 clipping spikes.
-
-The histogram renderer scales every channel and luminance curve against one absolute maximum, including those clipping spikes. One large endpoint bin therefore makes the rest of the graph appear flat even when the image still has a useful distribution.
-
-Relevant paths:
-
-- `crates/core/src/cpu.rs`: `apply_light_tone`
-- `apps/desktop/src/ui/adjustment_panel.rs`: `histogram_canvas_data`
-- `crates/core/src/analysis.rs`: display-referred histogram construction
-
-### Proposed solution
-
-Processing:
-
-- Define the Light controls as one coherent, bounded scene-to-display tonal transform.
-- Keep Exposure separate.
-- Use protected toe/shoulder behavior for Contrast.
-- Use bounded masks for Shadows/Highlights and endpoint controls for Blacks/Whites.
-- Preserve chromaticity where safe and handle near-black sign transitions explicitly.
-- Generate a deterministic LUT in `core`; use the same evaluator/LUT for CPU and GPU.
-
-Histogram display:
-
-- Exclude bins 0 and 255 from the vertical scale, since clipping is shown separately.
-- Use a robust percentile or logarithmic (`log1p`) height scale.
-- Keep the endpoint clipping counts visible.
-
-Coverage to add:
-
-- Small positive and negative deltas on an asymmetric tonal ramp.
-- Locality checks: shadows must not materially move highlights, and vice versa.
-- Clipping and sign-transition checks.
-- CPU/GPU parity for every Light control.
-- Histogram rendering tests with a dominant endpoint spike.
-
 ## 4. Tone curve has insufficient range
 
 ### Observed behavior
@@ -186,11 +119,9 @@ Coverage to add:
 
 ## Suggested implementation order
 
-1. Mouse-anchored zoom.
-2. Robust histogram scaling and a bounded Light transform.
-3. Free-form tone curve.
-4. Color Mixer UX, corrected HSL weighting, and targeted picker.
-5. Tiled/mipmapped Source 1:1 inspection and GPU-assisted source tiles.
+1. Free-form tone curve.
+2. Color Mixer UX, corrected HSL weighting, and targeted picker.
+3. Tiled/mipmapped Source 1:1 inspection and GPU-assisted source tiles.
 
 The Source 1:1 toolbar-selection fix is already implemented and should remain separate from these larger changes.
 

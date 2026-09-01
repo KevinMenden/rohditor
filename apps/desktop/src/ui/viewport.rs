@@ -148,19 +148,58 @@ impl ViewState {
         self.zoom_feedback_until = now + 0.8;
     }
 
-    fn pan_by(&mut self, fit_scale: f32, delta: egui::Vec2) {
+    fn pan_by(
+        &mut self,
+        fit_scale: f32,
+        viewport: egui::Rect,
+        image_size: egui::Vec2,
+        delta: egui::Vec2,
+    ) {
         if self.fit {
             self.fit = false;
             self.zoom = fit_scale;
         }
         self.pan += delta;
+        self.clamp_pan(viewport, image_size);
     }
 
-    fn zoom_by(&mut self, fit_scale: f32, scroll_delta: f32, now: f64) {
-        let current = if self.fit { fit_scale } else { self.zoom };
+    fn zoom_by(
+        &mut self,
+        fit_scale: f32,
+        viewport: egui::Rect,
+        image_size: egui::Vec2,
+        pointer: Option<egui::Pos2>,
+        scroll_delta: f32,
+        now: f64,
+    ) {
+        let old_scale = if self.fit { fit_scale } else { self.zoom };
+        let old_image_center = viewport.center() + self.pan;
+        let old_image_rect = egui::Rect::from_center_size(old_image_center, image_size * old_scale);
+        let anchor = pointer
+            .filter(|pointer| old_image_rect.contains(*pointer))
+            .unwrap_or(old_image_center);
         self.fit = false;
-        self.zoom = (current * (scroll_delta * 0.002).exp()).clamp(0.03, 16.0);
+        self.zoom = (old_scale * (scroll_delta * 0.002).exp()).clamp(0.03, 16.0);
+
+        // Keep the same image-space point below the pointer as the scale changes.
+        // `pan` moves the displayed image center relative to the viewport center.
+        let scale_ratio = self.zoom / old_scale;
+        self.pan += (anchor - old_image_center) * (1.0 - scale_ratio);
+        self.clamp_pan(viewport, image_size);
         self.show_zoom_feedback(now);
+    }
+
+    fn clamp_pan(&mut self, viewport: egui::Rect, image_size: egui::Vec2) {
+        let displayed_size = image_size * self.zoom;
+        let viewport_size = viewport.size();
+        // Keep at least half of the smaller extent overlapping on each axis. These
+        // limits remain continuous when an image dimension crosses the viewport.
+        let pan_limit = egui::vec2(
+            displayed_size.x.max(viewport_size.x) * 0.5,
+            displayed_size.y.max(viewport_size.y) * 0.5,
+        );
+        self.pan.x = self.pan.x.clamp(-pan_limit.x, pan_limit.x);
+        self.pan.y = self.pan.y.clamp(-pan_limit.y, pan_limit.y);
     }
 }
 
@@ -201,12 +240,19 @@ pub(crate) fn show(
             if !model.white_balance_picker_active
                 && response.dragged_by(egui::PointerButton::Primary)
             {
-                view.pan_by(fit_scale, response.drag_delta());
+                view.pan_by(fit_scale, viewport, image_size, response.drag_delta());
             }
             if response.hovered() {
                 let scroll = context.input(|input| input.smooth_scroll_delta.y);
                 if scroll.abs() > f32::EPSILON {
-                    view.zoom_by(fit_scale, scroll, now);
+                    view.zoom_by(
+                        fit_scale,
+                        viewport,
+                        image_size,
+                        response.hover_pos(),
+                        scroll,
+                        now,
+                    );
                     context.request_repaint_after(Duration::from_millis(16));
                 }
             }
@@ -378,16 +424,167 @@ mod tests {
     }
 
     #[test]
-    fn pan_and_wheel_zoom_leave_fit_mode_without_touching_processing_state() {
+    fn pan_and_wheel_zoom_leave_fit_mode_and_anchor_to_the_pointer() {
         let mut state = ViewState::default();
-        state.pan_by(0.5, egui::vec2(12.0, -8.0));
+        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let image_size = egui::vec2(1_000.0, 1_000.0);
+        state.pan_by(0.5, viewport, image_size, egui::vec2(12.0, -8.0));
         assert!(!state.is_fit());
         assert_eq!(state.zoom, 0.5);
         assert_eq!(state.pan, egui::vec2(12.0, -8.0));
 
-        state.zoom_by(0.5, 120.0, 5.0);
+        state.zoom_by(
+            0.5,
+            viewport,
+            image_size,
+            Some(viewport.center()),
+            120.0,
+            5.0,
+        );
         assert!(state.zoom > 0.5);
-        assert_eq!(state.pan, egui::vec2(12.0, -8.0));
+        assert_vec2_close(egui::vec2(12.0, -8.0) * (state.zoom / 0.5), state.pan);
         assert_eq!(state.zoom_feedback_until, 5.8);
+    }
+
+    #[test]
+    fn wheel_zoom_keeps_corner_image_points_under_the_pointer() {
+        let viewport = egui::Rect::from_min_size(egui::pos2(100.0, 40.0), egui::vec2(900.0, 500.0));
+        let image_size = egui::vec2(2_400.0, 1_600.0);
+        let corners = [
+            viewport.left_top() + egui::vec2(12.0, 12.0),
+            viewport.right_top() + egui::vec2(-12.0, 12.0),
+            viewport.left_bottom() + egui::vec2(12.0, -12.0),
+            viewport.right_bottom() + egui::vec2(-12.0, -12.0),
+        ];
+
+        for pointer in corners {
+            let mut state = ViewState {
+                fit: false,
+                zoom: 0.8,
+                pan: egui::vec2(20.0, -15.0),
+                zoom_feedback_until: 0.0,
+            };
+            let before = image_space_offset(&state, viewport, pointer);
+
+            state.zoom_by(0.4, viewport, image_size, Some(pointer), 160.0, 1.0);
+
+            let after = image_space_offset(&state, viewport, pointer);
+            assert_vec2_close(before, after);
+        }
+    }
+
+    #[test]
+    fn repeated_zoom_in_and_out_restores_scale_and_pan() {
+        let viewport = egui::Rect::from_min_size(egui::pos2(100.0, 40.0), egui::vec2(900.0, 500.0));
+        let image_size = egui::vec2(2_400.0, 1_600.0);
+        let pointer = egui::pos2(140.0, 100.0);
+        let mut state = ViewState {
+            fit: false,
+            zoom: 0.9,
+            pan: egui::vec2(50.0, -30.0),
+            zoom_feedback_until: 0.0,
+        };
+        let original_zoom = state.zoom;
+        let original_pan = state.pan;
+
+        for _ in 0..8 {
+            state.zoom_by(0.4, viewport, image_size, Some(pointer), 120.0, 1.0);
+            state.zoom_by(0.4, viewport, image_size, Some(pointer), -120.0, 1.0);
+        }
+
+        assert!((state.zoom - original_zoom).abs() < 0.0001);
+        assert_vec2_close(original_pan, state.pan);
+    }
+
+    #[test]
+    fn zoom_across_viewport_dimensions_keeps_the_pointer_anchor_stable() {
+        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 500.0));
+        let image_size = egui::vec2(1_600.0, 900.0);
+        let pointer = egui::pos2(250.0, 180.0);
+        let mut state = ViewState {
+            fit: false,
+            zoom: 0.45,
+            pan: egui::Vec2::ZERO,
+            zoom_feedback_until: 0.0,
+        };
+        let original_offset = image_space_offset(&state, viewport, pointer);
+
+        assert!(image_size.x * state.zoom < viewport.width());
+        assert!(image_size.y * state.zoom < viewport.height());
+        for _ in 0..4 {
+            state.zoom_by(0.45, viewport, image_size, Some(pointer), 60.0, 1.0);
+            assert_vec2_close(
+                original_offset,
+                image_space_offset(&state, viewport, pointer),
+            );
+        }
+        assert!(image_size.x * state.zoom > viewport.width());
+        assert!(image_size.y * state.zoom > viewport.height());
+
+        for _ in 0..4 {
+            state.zoom_by(0.45, viewport, image_size, Some(pointer), -60.0, 1.0);
+            assert_vec2_close(
+                original_offset,
+                image_space_offset(&state, viewport, pointer),
+            );
+        }
+        assert!((state.zoom - 0.45).abs() < 0.0001);
+        assert_vec2_close(egui::Vec2::ZERO, state.pan);
+    }
+
+    #[test]
+    fn wheel_over_empty_canvas_keeps_the_image_center_stable() {
+        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 500.0));
+        let image_size = egui::vec2(400.0, 200.0);
+        let pointer = egui::pos2(50.0, 50.0);
+        let mut state = ViewState {
+            fit: false,
+            zoom: 1.0,
+            pan: egui::vec2(40.0, -20.0),
+            zoom_feedback_until: 0.0,
+        };
+        let original_pan = state.pan;
+
+        state.zoom_by(1.0, viewport, image_size, Some(pointer), 120.0, 1.0);
+
+        assert_vec2_close(original_pan, state.pan);
+    }
+
+    #[test]
+    fn pan_bounds_keep_half_of_the_smaller_extent_overlapping_the_viewport() {
+        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 500.0));
+
+        let mut small_image = ViewState::default();
+        small_image.pan_by(
+            1.0,
+            viewport,
+            egui::vec2(100.0, 200.0),
+            egui::vec2(1_000.0, -1_000.0),
+        );
+        assert_eq!(small_image.pan, egui::vec2(450.0, -250.0));
+
+        let mut large_image = ViewState::default();
+        large_image.pan_by(
+            1.0,
+            viewport,
+            egui::vec2(1_800.0, 1_200.0),
+            egui::vec2(1_000.0, -1_000.0),
+        );
+        assert_eq!(large_image.pan, egui::vec2(900.0, -600.0));
+    }
+
+    fn image_space_offset(
+        state: &ViewState,
+        viewport: egui::Rect,
+        pointer: egui::Pos2,
+    ) -> egui::Vec2 {
+        (pointer - (viewport.center() + state.pan)) / state.zoom
+    }
+
+    fn assert_vec2_close(expected: egui::Vec2, actual: egui::Vec2) {
+        assert!(
+            (expected - actual).length() < 0.0001,
+            "{expected:?} != {actual:?}"
+        );
     }
 }
