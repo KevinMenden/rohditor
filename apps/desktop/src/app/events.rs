@@ -86,16 +86,24 @@ impl RohditorApp {
                 histogram,
                 diagnostics,
             } => {
-                if let Some(document) = self.document.as_mut()
-                    && ticket.is_current(document.id, document.edits.revision())
-                    && document.source_scale_requested
-                        == (resolution == PreviewResolution::SourceScale)
-                    && (resolution == PreviewResolution::SourceScale
-                        || document
-                            .gpu_preview
-                            .as_ref()
-                            .is_none_or(|preview| preview.ticket != ticket))
-                {
+                let should_install = self.document.as_ref().is_some_and(|document| {
+                    ticket.is_current(document.id, document.edits.revision())
+                        && document.source_scale_requested
+                            == (resolution == PreviewResolution::SourceScale)
+                        && (resolution == PreviewResolution::SourceScale
+                            || document
+                                .gpu_preview
+                                .as_ref()
+                                .is_none_or(|preview| preview.ticket != ticket))
+                });
+                if should_install {
+                    // Swap directly from the retained GPU frame to the ready
+                    // CPU frame during one update, so an unsupported edit such
+                    // as HSL never exposes an empty viewport between backends.
+                    self.release_document_gpu_preview(ticket.document_id);
+                    let Some(document) = self.document.as_mut() else {
+                        return;
+                    };
                     let source = if resolution == PreviewResolution::SourceScale {
                         PreviewSource::OneToOneCpu
                     } else {
@@ -180,8 +188,7 @@ impl RohditorApp {
                 if document.edits.set_discrete(next) {
                     queue_preview = true;
                 }
-                document.notice =
-                    Some("White balance picked from a camera-native patch".to_owned());
+                document.notice = None;
                 document.error = None;
                 if queue_preview {
                     let document_id = document.id;

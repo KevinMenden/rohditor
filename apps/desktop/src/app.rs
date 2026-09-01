@@ -11,8 +11,8 @@ use rohditor_core::{
     HSL_HUE_RANGE, HSL_LUMINANCE_RANGE, HSL_SATURATION_RANGE, Histogram, JPEG_QUALITY_DEFAULT,
     MemoryEstimate, PngBitDepth, PreviewOptions, RenderOptions, SATURATION_RANGE, SHADOWS_RANGE,
     StageTimings, TEMPERATURE_RANGE, TINT_RANGE, TONE_CURVE_RANGE, VIBRANCE_RANGE,
-    WHITE_BALANCE_MULTIPLIER_RANGE, WHITES_RANGE, WhiteBalance, paths_refer_to_same_file,
-    srgb_to_linear_srgb,
+    WHITE_BALANCE_MULTIPLIER_RANGE, WHITES_RANGE, WhiteBalance,
+    hsl_channel_weights_from_display_rgb, paths_refer_to_same_file, srgb_to_linear_srgb,
 };
 use rohditor_raw::{RawFileInfo, RawFrame};
 use tracing::{info, warn};
@@ -23,6 +23,7 @@ use crate::coordinator::{
 };
 use crate::document::{EditSession, PreviewTicket};
 use crate::preview_cache::PreviewCacheHits;
+use crate::ui::PickerMode;
 use crate::ui::adjustment_panel::{
     self, AdjustmentInteraction, AdjustmentRange, AdjustmentRanges, AdjustmentTarget,
     AdjustmentValues, DocumentPanelModel, ExportKind, ExportUiSettings, PngDepth, WhiteBalanceMode,
@@ -88,6 +89,7 @@ struct Document {
     frame: Option<Arc<RawFrame>>,
     edits: EditSession,
     texture: Option<PreviewTexture>,
+    preview_pixels: Option<DisplayPreviewPixels>,
     preview_source: Option<PreviewSource>,
     histogram: Option<Histogram>,
     histogram_revision: Option<u64>,
@@ -106,6 +108,13 @@ struct Document {
     notice: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct DisplayPreviewPixels {
+    width: usize,
+    height: usize,
+    rgb: Vec<u8>,
+}
+
 impl Document {
     fn opening(id: u64, path: PathBuf) -> Self {
         Self {
@@ -115,6 +124,7 @@ impl Document {
             frame: None,
             edits: EditSession::default(),
             texture: None,
+            preview_pixels: None,
             preview_source: None,
             histogram: None,
             histogram_revision: None,
@@ -195,7 +205,8 @@ pub(crate) struct RohditorApp {
     processor_note: Option<String>,
     startup_error: Option<String>,
     show_diagnostics: bool,
-    white_balance_picker_active: bool,
+    picker_mode: Option<PickerMode>,
+    color_mixer_channel: usize,
     pending_white_balance_pick: Option<PreviewTicket>,
     white_balance_memory: WhiteBalanceModeMemory,
 }
@@ -317,7 +328,8 @@ impl RohditorApp {
             processor_note,
             startup_error,
             show_diagnostics,
-            white_balance_picker_active: false,
+            picker_mode: None,
+            color_mixer_channel: 0,
             pending_white_balance_pick: None,
             white_balance_memory: WhiteBalanceModeMemory::default(),
         };
@@ -360,7 +372,8 @@ impl RohditorApp {
     }
 
     fn close_document(&mut self, context: &egui::Context) {
-        self.white_balance_picker_active = false;
+        self.picker_mode = None;
+        self.color_mixer_channel = 0;
         self.pending_white_balance_pick = None;
         self.white_balance_memory = WhiteBalanceModeMemory::default();
         if let Some(mut document) = self.document.take() {
@@ -466,9 +479,11 @@ impl RohditorApp {
             }
             return;
         }
-        if self.gpu.is_some() {
-            self.release_document_gpu_preview(document_id);
-        }
+        // Keep the last GPU frame installed while the first CPU-only color
+        // preview is rendered. Releasing it here leaves the viewport without
+        // a texture for one or more frames and produces a visible black flash.
+        // The worker-event handoff releases it immediately before installing
+        // the completed CPU texture in the same UI update.
         if let Some(document) = self.document.as_mut() {
             document.preview_status = Some((
                 ticket.revision,
@@ -580,6 +595,7 @@ impl RohditorApp {
                         id: texture_id,
                         size: output_size,
                     });
+                    document.preview_pixels = None;
                     document.preview_source =
                         Some(PreviewSource::developed(diagnostics.algorithm, true));
                     document.preview_status = None;
@@ -703,6 +719,7 @@ impl RohditorApp {
                         id: texture_id,
                         size: output_size,
                     });
+                    document.preview_pixels = None;
                     document.preview_source =
                         Some(PreviewSource::developed(worker.algorithm, true));
                     document.preview_status = None;
@@ -1165,12 +1182,11 @@ impl RohditorApp {
     }
 
     fn show_adjustment_panel(&mut self, context: &egui::Context) {
-        let model = self
-            .document
-            .as_ref()
-            .map(|document| document_panel_model(document, self.white_balance_picker_active));
+        let model = self.document.as_ref().map(|document| {
+            document_panel_model(document, self.picker_mode, self.color_mixer_channel)
+        });
         let output = adjustment_panel::show(context, model, &mut self.export_settings);
-        let picker_state = output.white_balance_picker_active;
+        let picker_mode = output.picker_mode;
         let mut changed_document = None;
         let mut white_balance_memory = self.white_balance_memory;
         if let Some(document) = self.document.as_mut() {
@@ -1220,8 +1236,11 @@ impl RohditorApp {
         if let Some(document_id) = changed_document {
             self.queue_preview(context, document_id);
         }
-        if let Some(active) = picker_state {
-            self.white_balance_picker_active = active;
+        if let Some(mode) = picker_mode {
+            self.picker_mode = mode;
+        }
+        if let Some(channel) = output.color_mixer_channel {
+            self.color_mixer_channel = channel.min(rohditor_core::HSL_CHANNEL_COUNT - 1);
         }
         if output.export {
             self.request_export();
@@ -1238,7 +1257,7 @@ impl RohditorApp {
                     preparing,
                     texture: document.texture.as_ref(),
                     source: document.preview_source,
-                    white_balance_picker_active: self.white_balance_picker_active,
+                    picker_mode: self.picker_mode,
                 },
                 &mut document.view,
             )
@@ -1251,7 +1270,7 @@ impl RohditorApp {
                     preparing: false,
                     texture: None,
                     source: None,
-                    white_balance_picker_active: false,
+                    picker_mode: None,
                 },
                 &mut empty_view,
             )
@@ -1259,13 +1278,16 @@ impl RohditorApp {
         if output.open {
             self.open_dialog(context);
         }
-        if let Some(normalized) = output.white_balance_pick {
-            self.apply_white_balance_pick(context, normalized);
+        if let Some((mode, normalized)) = output.picker_sample {
+            match mode {
+                PickerMode::WhiteBalance => self.apply_white_balance_pick(context, normalized),
+                PickerMode::ColorMixer => self.apply_color_mixer_pick(normalized),
+            }
         }
     }
 
     fn apply_white_balance_pick(&mut self, context: &egui::Context, normalized: egui::Pos2) {
-        self.white_balance_picker_active = false;
+        self.picker_mode = None;
         if self.pending_white_balance_pick.is_some() {
             return;
         }
@@ -1329,6 +1351,70 @@ impl RohditorApp {
                 }
             }
         }
+    }
+
+    fn apply_color_mixer_pick(&mut self, normalized: egui::Pos2) {
+        self.picker_mode = None;
+        let sample = self.sample_display_pixel(normalized);
+        let Some(sample) = sample else {
+            if let Some(document) = self.document.as_mut() {
+                document.error = Some(
+                    "A current developed preview is required to pick a Color Mixer band".to_owned(),
+                );
+            }
+            return;
+        };
+        let Some(weights) = hsl_channel_weights_from_display_rgb(sample) else {
+            if let Some(document) = self.document.as_mut() {
+                document.error =
+                    Some("That sample is too neutral to identify a Color Mixer band".to_owned());
+            }
+            return;
+        };
+        let selected = weights
+            .into_iter()
+            .enumerate()
+            .max_by(|(_, left), (_, right)| left.total_cmp(right))
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+        self.color_mixer_channel = selected;
+        if let Some(document) = self.document.as_mut() {
+            document.notice = None;
+            document.error = None;
+        }
+    }
+
+    fn sample_display_pixel(&self, normalized: egui::Pos2) -> Option<[u8; 3]> {
+        if !normalized.x.is_finite()
+            || !normalized.y.is_finite()
+            || !(0.0..=1.0).contains(&normalized.x)
+            || !(0.0..=1.0).contains(&normalized.y)
+        {
+            return None;
+        }
+        let document = self.document.as_ref()?;
+        if !document
+            .preview_source
+            .is_some_and(PreviewSource::is_developed)
+        {
+            return None;
+        }
+        if let Some(preview) = document.preview_pixels.as_ref() {
+            return sample_rgb_patch(preview.width, preview.height, 3, &preview.rgb, normalized);
+        }
+        let gpu_preview = document.gpu_preview.as_ref()?;
+        let runtime = self.gpu.as_ref()?;
+        let readback = runtime
+            .processor
+            .readback_display(&gpu_preview.frame)
+            .ok()?;
+        sample_rgb_patch(
+            usize::try_from(readback.width).ok()?,
+            usize::try_from(readback.height).ok()?,
+            4,
+            &readback.rgba,
+            normalized,
+        )
     }
 
     fn show_status_bar(&mut self, context: &egui::Context) {
@@ -1544,7 +1630,8 @@ fn source_scale_selected(document: Option<&Document>) -> bool {
 
 fn document_panel_model(
     document: &Document,
-    white_balance_picker_active: bool,
+    picker_mode: Option<PickerMode>,
+    color_mixer_channel: usize,
 ) -> DocumentPanelModel {
     let (
         white_balance_mode,
@@ -1709,8 +1796,42 @@ fn document_panel_model(
         notice: document.notice.clone(),
         histogram: document.histogram,
         auto_tone_available: document.histogram_revision == Some(document.edits.revision()),
-        white_balance_picker_active,
+        picker_mode,
+        color_mixer_channel,
     }
+}
+
+fn sample_rgb_patch(
+    width: usize,
+    height: usize,
+    channels: usize,
+    pixels: &[u8],
+    normalized: egui::Pos2,
+) -> Option<[u8; 3]> {
+    if width == 0 || height == 0 || channels < 3 {
+        return None;
+    }
+    let expected = width.checked_mul(height)?.checked_mul(channels)?;
+    if pixels.len() < expected {
+        return None;
+    }
+    let center_x = (normalized.x * (width.saturating_sub(1)) as f32).round() as usize;
+    let center_y = (normalized.y * (height.saturating_sub(1)) as f32).round() as usize;
+    let mut totals = [0_u32; 3];
+    let mut count = 0_u32;
+    for y in center_y.saturating_sub(2)..=(center_y + 2).min(height - 1) {
+        for x in center_x.saturating_sub(2)..=(center_x + 2).min(width - 1) {
+            let offset = y
+                .checked_mul(width)?
+                .checked_add(x)?
+                .checked_mul(channels)?;
+            for (channel, total) in totals.iter_mut().enumerate() {
+                *total += u32::from(*pixels.get(offset + channel)?);
+            }
+            count += 1;
+        }
+    }
+    (count > 0).then(|| totals.map(|total| ((total + count / 2) / count) as u8))
 }
 
 fn white_balance_from_camera_sample(
@@ -1944,10 +2065,16 @@ fn install_texture(
     source: PreviewSource,
 ) {
     let WorkerImage {
-        width: _,
-        height: _,
+        width,
+        height,
+        pixels,
         color,
     } = image;
+    document.preview_pixels = Some(DisplayPreviewPixels {
+        width,
+        height,
+        rgb: pixels,
+    });
     let texture_name = format!("document-{}-preview", document.id);
     match document.texture.as_mut() {
         Some(PreviewTexture::Cpu(texture)) => {
@@ -2163,6 +2290,22 @@ mod tests {
                 green: 0.8,
                 blue: 1.2,
             }
+        );
+    }
+
+    #[test]
+    fn color_mixer_picker_averages_a_bounded_display_patch() {
+        let pixels = vec![
+            255, 0, 0, 0, 255, 0, // first row
+            0, 0, 255, 255, 255, 255, // second row
+        ];
+        assert_eq!(
+            sample_rgb_patch(2, 2, 3, &pixels, egui::pos2(0.0, 0.0)),
+            Some([128, 128, 128])
+        );
+        assert_eq!(
+            sample_rgb_patch(2, 2, 3, &pixels[..9], egui::pos2(0.0, 0.0)),
+            None
         );
     }
 
