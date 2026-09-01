@@ -96,6 +96,7 @@ impl fmt::Display for JobKind {
 pub(crate) struct WorkerImage {
     pub width: usize,
     pub height: usize,
+    pub pixels: Vec<u8>,
     pub color: egui::ColorImage,
 }
 
@@ -135,6 +136,7 @@ impl WorkerImage {
         Ok(Self {
             width,
             height,
+            pixels,
             color,
         })
     }

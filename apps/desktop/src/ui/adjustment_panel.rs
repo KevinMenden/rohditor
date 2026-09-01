@@ -1,8 +1,13 @@
 use eframe::egui;
 use rohditor_core::{Histogram, ToneCurve, evaluate_tone_curve};
 
+use super::PickerMode;
 use super::theme::{self, colors, metrics};
 use super::widgets::{self, AdjustmentSpec, ValueScale};
+
+pub(crate) const COLOR_MIXER_LABELS: [&str; 8] = [
+    "Red", "Orange", "Yellow", "Green", "Aqua", "Blue", "Purple", "Magenta",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AdjustmentTarget {
@@ -105,7 +110,8 @@ pub(crate) struct DocumentPanelModel {
     pub notice: Option<String>,
     pub histogram: Option<Histogram>,
     pub auto_tone_available: bool,
-    pub white_balance_picker_active: bool,
+    pub picker_mode: Option<PickerMode>,
+    pub color_mixer_channel: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -122,7 +128,8 @@ pub(crate) struct AdjustmentInteraction {
 #[derive(Debug, Default)]
 pub(crate) struct AdjustmentPanelOutput {
     pub white_balance_mode: Option<WhiteBalanceMode>,
-    pub white_balance_picker_active: Option<bool>,
+    pub picker_mode: Option<Option<PickerMode>>,
+    pub color_mixer_channel: Option<usize>,
     pub interactions: Vec<AdjustmentInteraction>,
     pub auto_tone: bool,
     pub reset_all: bool,
@@ -672,7 +679,8 @@ fn show_color_controls(
             .small()
             .color(colors::TEXT_MUTED),
     );
-    let picker_label = if document.white_balance_picker_active {
+    let picker_active = document.picker_mode == Some(PickerMode::WhiteBalance);
+    let picker_label = if picker_active {
         "Cancel picker"
     } else {
         "Pick neutral"
@@ -682,14 +690,11 @@ fn show_color_controls(
         .on_hover_text("Click a neutral or gray area in the image")
         .clicked()
     {
-        output.white_balance_picker_active = Some(!document.white_balance_picker_active);
-    }
-    if document.white_balance_picker_active {
-        ui.label(
-            egui::RichText::new("Click a neutral area in the image")
-                .small()
-                .color(colors::ACCENT_HOVER),
-        );
+        output.picker_mode = Some(if picker_active {
+            None
+        } else {
+            Some(PickerMode::WhiteBalance)
+        });
     }
     ui.add_space(4.0);
 
@@ -813,55 +818,71 @@ fn show_color_mixer_controls(
     egui::CollapsingHeader::new("Color mixer")
         .default_open(false)
         .show(ui, |ui| {
-            for (index, label) in [
-                "Red", "Orange", "Yellow", "Green", "Aqua", "Blue", "Purple", "Magenta",
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                ui.label(egui::RichText::new(label).small().color(colors::TEXT_MUTED));
+            const CHANNEL_COLORS: [egui::Color32; 8] = [
+                egui::Color32::from_rgb(220, 66, 67),
+                egui::Color32::from_rgb(232, 132, 48),
+                egui::Color32::from_rgb(220, 190, 50),
+                egui::Color32::from_rgb(72, 174, 91),
+                egui::Color32::from_rgb(52, 181, 178),
+                egui::Color32::from_rgb(65, 116, 220),
+                egui::Color32::from_rgb(139, 87, 213),
+                egui::Color32::from_rgb(205, 75, 164),
+            ];
+            let selected = document
+                .color_mixer_channel
+                .min(COLOR_MIXER_LABELS.len() - 1);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                for (index, (label, color)) in COLOR_MIXER_LABELS
+                    .into_iter()
+                    .zip(CHANNEL_COLORS)
+                    .enumerate()
+                {
+                    if color_swatch(ui, label, color, index == selected).clicked() {
+                        output.color_mixer_channel = Some(index);
+                    }
+                }
+                ui.add_space(2.0);
+                let picker_active = document.picker_mode == Some(PickerMode::ColorMixer);
+                if color_picker_swatch(ui, picker_active, CHANNEL_COLORS).clicked() {
+                    output.picker_mode = Some(if picker_active {
+                        None
+                    } else {
+                        Some(PickerMode::ColorMixer)
+                    });
+                }
+            });
+            ui.add_space(3.0);
+            ui.label(
+                egui::RichText::new(COLOR_MIXER_LABELS[selected])
+                    .strong()
+                    .color(colors::TEXT),
+            );
+            ui.add_space(3.0);
+
+            let ranges = [
+                document.ranges.hsl_hue,
+                document.ranges.hsl_saturation,
+                document.ranges.hsl_luminance,
+            ];
+            let labels = ["Hue", "Saturation", "Luminance"];
+            for component in 0..3 {
+                let target = match component {
+                    0 => AdjustmentTarget::HslHue(selected),
+                    1 => AdjustmentTarget::HslSaturation(selected),
+                    _ => AdjustmentTarget::HslLuminance(selected),
+                };
+                let range = ranges[component];
                 record_slider(
                     ui,
                     &mut output.interactions,
-                    AdjustmentTarget::HslHue(index),
-                    &mut document.values.hsl[index][0],
+                    target,
+                    &mut document.values.hsl[selected][component],
                     AdjustmentSpec {
-                        label: "Hue",
-                        minimum: document.ranges.hsl_hue.minimum,
-                        maximum: document.ranges.hsl_hue.maximum,
-                        neutral: document.ranges.hsl_hue.neutral,
-                        decimals: 0,
-                        step: 0.01,
-                        suffix: "%",
-                        scale: ValueScale::OffsetPercent,
-                    },
-                );
-                record_slider(
-                    ui,
-                    &mut output.interactions,
-                    AdjustmentTarget::HslSaturation(index),
-                    &mut document.values.hsl[index][1],
-                    AdjustmentSpec {
-                        label: "Saturation",
-                        minimum: document.ranges.hsl_saturation.minimum,
-                        maximum: document.ranges.hsl_saturation.maximum,
-                        neutral: document.ranges.hsl_saturation.neutral,
-                        decimals: 0,
-                        step: 0.01,
-                        suffix: "%",
-                        scale: ValueScale::OffsetPercent,
-                    },
-                );
-                record_slider(
-                    ui,
-                    &mut output.interactions,
-                    AdjustmentTarget::HslLuminance(index),
-                    &mut document.values.hsl[index][2],
-                    AdjustmentSpec {
-                        label: "Luminance",
-                        minimum: document.ranges.hsl_luminance.minimum,
-                        maximum: document.ranges.hsl_luminance.maximum,
-                        neutral: document.ranges.hsl_luminance.neutral,
+                        label: labels[component],
+                        minimum: range.minimum,
+                        maximum: range.maximum,
+                        neutral: range.neutral,
                         decimals: 0,
                         step: 0.01,
                         suffix: "%",
@@ -870,6 +891,56 @@ fn show_color_mixer_controls(
                 );
             }
         });
+}
+
+fn color_swatch(
+    ui: &mut egui::Ui,
+    label: &str,
+    color: egui::Color32,
+    selected: bool,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::Vec2::splat(27.0), egui::Sense::click());
+    let visuals = ui.style().interact_selectable(&response, selected);
+    if selected {
+        ui.painter().circle_stroke(
+            rect.center(),
+            11.5,
+            egui::Stroke::new(2.0, colors::ACCENT_HOVER),
+        );
+    }
+    ui.painter().circle_filled(rect.center(), 8.0, color);
+    ui.painter()
+        .circle_stroke(rect.center(), 8.0, visuals.bg_stroke);
+    response.on_hover_text(label)
+}
+
+fn color_picker_swatch(
+    ui: &mut egui::Ui,
+    selected: bool,
+    channel_colors: [egui::Color32; 8],
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::Vec2::splat(27.0), egui::Sense::click());
+    let visuals = ui.style().interact_selectable(&response, selected);
+    if selected {
+        ui.painter().circle_stroke(
+            rect.center(),
+            11.5,
+            egui::Stroke::new(2.0, colors::ACCENT_HOVER),
+        );
+    }
+    for (index, color) in channel_colors.into_iter().enumerate() {
+        let angle = index as f32 * std::f32::consts::TAU / channel_colors.len() as f32;
+        let offset = egui::vec2(angle.cos(), angle.sin()) * 5.0;
+        ui.painter()
+            .circle_filled(rect.center() + offset, 2.8, color);
+    }
+    ui.painter()
+        .circle_stroke(rect.center(), 9.0, visuals.bg_stroke);
+    response.on_hover_text(if selected {
+        "Cancel Color Mixer picker"
+    } else {
+        "Pick a Color Mixer band from the image"
+    })
 }
 
 fn show_color_grading_controls(

@@ -702,8 +702,9 @@ impl GpuPreviewProcessor {
         Ok(frame)
     }
 
-    /// Explicitly copy a display texture back for tests or diagnostics. The UI
-    /// path must use [`GpuPreviewFrame::display_view`] directly instead.
+    /// Explicitly copy a display texture back for tests, diagnostics, or a
+    /// one-shot picker sample. Normal UI display must use
+    /// [`GpuPreviewFrame::display_view`] directly instead.
     pub fn readback_display(
         &self,
         frame: &GpuPreviewFrame,

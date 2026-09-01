@@ -16,6 +16,19 @@ use crate::{
 };
 
 const REC2020_LUMINANCE: [f32; 3] = [0.2627, 0.6780, 0.0593];
+/// Conventional Red, Orange, Yellow, Green, Aqua, Blue, Purple, and Magenta
+/// centers on a normalized hue circle. The unequal spacing is intentional:
+/// it matches the named color slices users see in mainstream RAW editors.
+pub const HSL_CHANNEL_CENTERS: [f32; crate::HSL_CHANNEL_COUNT] = [
+    0.0,
+    30.0 / 360.0,
+    60.0 / 360.0,
+    120.0 / 360.0,
+    180.0 / 360.0,
+    240.0 / 360.0,
+    270.0 / 360.0,
+    300.0 / 360.0,
+];
 // Blend into additive luminance changes near black instead of allowing a
 // ratio to magnify tiny numerical differences. The continuous transition also
 // keeps half-float source quantization from changing the visible result.
@@ -614,13 +627,19 @@ fn apply_hsl_adjustments(pixel: &mut [f32], adjustments: &crate::HslAdjustments)
     }
     let [mut hue, mut saturation, mut lightness] =
         rgb_to_hsl([shifted[0] / scale, shifted[1] / scale, shifted[2] / scale]);
+    // Hue is undefined for a neutral pixel. Fade the mixer in over the first
+    // small amount of chroma so luminance edits cannot accidentally target
+    // gray pixels through the arbitrary red/zero hue returned by rgb_to_hsl.
+    let chroma_weight = smoothstep(0.0, 0.05, saturation);
+    if chroma_weight <= f32::EPSILON {
+        return;
+    }
+    let channel_weights = hsl_channel_weights(hue);
     let mut hue_shift = 0.0;
     let mut saturation_shift = 0.0;
     let mut lightness_shift = 0.0;
-    for (index, channel) in adjustments.channels.iter().enumerate() {
-        let center = index as f32 / adjustments.channels.len() as f32;
-        let distance = (hue - center).abs().min(1.0 - (hue - center).abs());
-        let weight = (1.0 - distance * 4.0).clamp(0.0, 1.0);
+    for (channel, weight) in adjustments.channels.iter().zip(channel_weights) {
+        let weight = weight * chroma_weight;
         hue_shift += channel.hue * 0.125 * weight;
         saturation_shift += channel.saturation * 0.5 * weight;
         lightness_shift += channel.luminance * 0.25 * weight;
@@ -636,6 +655,66 @@ fn apply_hsl_adjustments(pixel: &mut [f32], adjustments: &crate::HslAdjustments)
     if restored.iter().all(|value| value.is_finite()) {
         pixel.copy_from_slice(&restored);
     }
+}
+
+/// Interpolate between the two named HSL color centers surrounding `hue`.
+///
+/// Exact centers receive one full band. Between centers the two feathered
+/// weights always sum to one, including across the Magenta/Red wraparound, so
+/// applying the same value to every band has exactly one adjustment's effect.
+#[must_use]
+pub fn hsl_channel_weights(hue: f32) -> [f32; crate::HSL_CHANNEL_COUNT] {
+    let mut weights = [0.0; crate::HSL_CHANNEL_COUNT];
+    if !hue.is_finite() {
+        return weights;
+    }
+    let hue = hue.rem_euclid(1.0);
+    let last = HSL_CHANNEL_CENTERS.len() - 1;
+    let (left, right, start, end) = HSL_CHANNEL_CENTERS
+        .windows(2)
+        .enumerate()
+        .find_map(|(index, centers)| {
+            (hue >= centers[0] && hue < centers[1]).then_some((
+                index,
+                index + 1,
+                centers[0],
+                centers[1],
+            ))
+        })
+        .unwrap_or((last, 0, HSL_CHANNEL_CENTERS[last], 1.0));
+    let fraction = ((hue - start) / (end - start)).clamp(0.0, 1.0);
+    weights[left] = 1.0 - fraction;
+    weights[right] = fraction;
+    weights
+}
+
+/// Find Color Mixer band weights for one display-encoded sRGB sample.
+///
+/// The sample is transformed back into Rohditor's linear Rec.2020 working
+/// space before its hue is classified. Nearly neutral samples have no stable
+/// hue and deliberately return `None`.
+#[must_use]
+pub fn hsl_channel_weights_from_display_rgb(
+    display_rgb: [u8; 3],
+) -> Option<[f32; crate::HSL_CHANNEL_COUNT]> {
+    let linear_srgb = display_rgb.map(|value| crate::srgb_to_linear_srgb(f32::from(value) / 255.0));
+    let linear_srgb_to_rec2020 = crate::XYZ_D65_TO_LINEAR_SRGB
+        .inverse()
+        .ok()?
+        .then(crate::XYZ_D65_TO_LINEAR_REC2020);
+    let working = linear_srgb_to_rec2020.transform(linear_srgb);
+    if working.iter().any(|value| !value.is_finite()) {
+        return None;
+    }
+    let minimum = working.into_iter().fold(f32::INFINITY, f32::min);
+    let offset = (-minimum).max(0.0);
+    let shifted = working.map(|value| value + offset);
+    let scale = shifted.into_iter().fold(0.0, f32::max);
+    if !scale.is_finite() || scale <= f32::EPSILON {
+        return None;
+    }
+    let [hue, saturation, _] = rgb_to_hsl(shifted.map(|value| value / scale));
+    (saturation >= 0.02).then(|| hsl_channel_weights(hue))
 }
 
 fn apply_color_grading(pixel: &mut [f32], grading: &crate::ColorGradingAdjustments) {
@@ -1551,6 +1630,77 @@ mod tests {
         assert!(pixel.iter().all(|value| value.is_finite()));
         assert!(pixel.iter().any(|value| *value > 1.0));
         assert!(pixel.iter().any(|value| *value < 0.0));
+    }
+
+    #[test]
+    fn hsl_channel_weights_match_centers_midpoints_and_wraparound() {
+        for (index, center) in HSL_CHANNEL_CENTERS.into_iter().enumerate() {
+            let weights = hsl_channel_weights(center);
+            for (channel, weight) in weights.into_iter().enumerate() {
+                let expected = if channel == index { 1.0 } else { 0.0 };
+                assert!((weight - expected).abs() < 1.0e-6);
+            }
+        }
+
+        for index in 0..HSL_CHANNEL_CENTERS.len() {
+            let next = (index + 1) % HSL_CHANNEL_CENTERS.len();
+            let start = HSL_CHANNEL_CENTERS[index];
+            let end = if next == 0 {
+                1.0
+            } else {
+                HSL_CHANNEL_CENTERS[next]
+            };
+            let weights = hsl_channel_weights((start + end) * 0.5);
+            assert!((weights[index] - 0.5).abs() < 1.0e-6);
+            assert!((weights[next] - 0.5).abs() < 1.0e-6);
+            assert!((weights.into_iter().sum::<f32>() - 1.0).abs() < 1.0e-6);
+        }
+    }
+
+    #[test]
+    fn equal_hsl_band_values_are_not_amplified_in_overlap_regions() {
+        let source_hsl = [45.0 / 360.0, 0.5, 0.5];
+        let source = hsl_to_rgb(source_hsl);
+        let mut pixel = source;
+        let mut adjustments = crate::HslAdjustments::default();
+        for channel in &mut adjustments.channels {
+            channel.hue = 0.4;
+        }
+
+        apply_hsl_adjustments(&mut pixel, &adjustments);
+
+        let adjusted = rgb_to_hsl(pixel);
+        assert!((adjusted[0] - (source_hsl[0] + 0.05)).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn hsl_mixer_does_not_assign_a_hue_to_neutral_pixels() {
+        let mut pixel = [0.4; 3];
+        let mut adjustments = crate::HslAdjustments::default();
+        for channel in &mut adjustments.channels {
+            channel.hue = 1.0;
+            channel.saturation = 1.0;
+            channel.luminance = 1.0;
+        }
+
+        apply_hsl_adjustments(&mut pixel, &adjustments);
+
+        assert_eq!(pixel, [0.4; 3]);
+        assert!(hsl_channel_weights_from_display_rgb([128; 3]).is_none());
+    }
+
+    #[test]
+    fn display_rgb_picker_maps_primaries_to_the_expected_mixer_bands() {
+        for (sample, expected) in [([255, 0, 0], 0), ([0, 255, 0], 3), ([0, 0, 255], 5)] {
+            let weights = hsl_channel_weights_from_display_rgb(sample)
+                .expect("a saturated display primary has a stable hue");
+            let selected = weights
+                .into_iter()
+                .enumerate()
+                .max_by(|(_, left), (_, right)| left.total_cmp(right))
+                .map(|(index, _)| index);
+            assert_eq!(selected, Some(expected));
+        }
     }
 
     #[test]
