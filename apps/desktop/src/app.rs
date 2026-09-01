@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 use rohditor_core::{
@@ -36,13 +36,16 @@ use crate::ui::toolbar::{self, FilePanelModel, StatusBarModel, ToolbarModel};
 use crate::ui::viewport::{self, PreviewSource, PreviewTexture, ViewState, ViewportModel};
 use rohditor_gpu::GpuPreviewUpload;
 
+const GPU_HISTOGRAM_DEBOUNCE: Duration = Duration::from_millis(75);
+const AUTO_TONE_EXPOSURE_EPSILON_EV: f32 = 0.01;
+
 #[path = "app/events.rs"]
 mod events;
 #[path = "app/gpu.rs"]
 mod gpu;
 
 use gpu::{
-    GpuDocumentPreview, GpuRuntime, gpu_output_size, initialize_gpu_runtime,
+    GpuDocumentPreview, GpuRuntime, PendingGpuHistogram, gpu_output_size, initialize_gpu_runtime,
     register_or_update_gpu_texture,
 };
 
@@ -52,6 +55,7 @@ struct DocumentPreviewDiagnostics {
     gpu_upload_preparation: Option<Duration>,
     gpu_submission: Option<Duration>,
     gpu_queue_completion: Option<Duration>,
+    gpu_histogram_readback: Option<Duration>,
     gpu_textures_reused: Option<bool>,
     gpu_resident_bytes: usize,
 }
@@ -63,6 +67,7 @@ impl DocumentPreviewDiagnostics {
             gpu_upload_preparation: None,
             gpu_submission: None,
             gpu_queue_completion: None,
+            gpu_histogram_readback: None,
             gpu_textures_reused: None,
             gpu_resident_bytes: 0,
         }
@@ -83,9 +88,11 @@ struct Document {
     frame: Option<Arc<RawFrame>>,
     edits: EditSession,
     texture: Option<PreviewTexture>,
-    preview_pixels: Option<Vec<u8>>,
     preview_source: Option<PreviewSource>,
     histogram: Option<Histogram>,
+    histogram_revision: Option<u64>,
+    pending_gpu_histogram: Option<PendingGpuHistogram>,
+    gpu_histogram_due: Option<(PreviewTicket, Instant)>,
     source_scale_requested: bool,
     gpu_preview: Option<GpuDocumentPreview>,
     view: ViewState,
@@ -108,9 +115,11 @@ impl Document {
             frame: None,
             edits: EditSession::default(),
             texture: None,
-            preview_pixels: None,
             preview_source: None,
             histogram: None,
+            histogram_revision: None,
+            pending_gpu_histogram: None,
+            gpu_histogram_due: None,
             source_scale_requested: false,
             gpu_preview: None,
             view: ViewState::default(),
@@ -187,6 +196,69 @@ pub(crate) struct RohditorApp {
     startup_error: Option<String>,
     show_diagnostics: bool,
     white_balance_picker_active: bool,
+    pending_white_balance_pick: Option<PreviewTicket>,
+    white_balance_memory: WhiteBalanceModeMemory,
+}
+
+/// Keep the last values for the two editable WB modes while the user switches
+/// through As-shot. This makes the mode selector non-destructive instead of
+/// silently resetting a carefully chosen temperature or manual balance.
+#[derive(Debug, Clone, Copy)]
+struct WhiteBalanceModeMemory {
+    temperature: f32,
+    tint: f32,
+    manual: [f32; 3],
+}
+
+impl Default for WhiteBalanceModeMemory {
+    fn default() -> Self {
+        Self {
+            temperature: TEMPERATURE_RANGE.neutral,
+            tint: TINT_RANGE.neutral,
+            manual: [WHITE_BALANCE_MULTIPLIER_RANGE.neutral; 3],
+        }
+    }
+}
+
+impl WhiteBalanceModeMemory {
+    fn remember(&mut self, balance: WhiteBalance) {
+        match balance {
+            WhiteBalance::TemperatureTint { temperature, tint } => {
+                self.temperature = temperature;
+                self.tint = tint;
+            }
+            WhiteBalance::ManualMultipliers { red, green, blue } => {
+                self.manual = [red, green, blue];
+            }
+            WhiteBalance::AsShot => {}
+        }
+    }
+
+    fn select(&mut self, current: WhiteBalance, mode: WhiteBalanceMode) -> WhiteBalance {
+        self.remember(current);
+        match mode {
+            WhiteBalanceMode::AsShot => WhiteBalance::AsShot,
+            WhiteBalanceMode::TemperatureTint => match current {
+                WhiteBalance::TemperatureTint { temperature, tint } => {
+                    WhiteBalance::TemperatureTint { temperature, tint }
+                }
+                _ => WhiteBalance::TemperatureTint {
+                    temperature: self.temperature,
+                    tint: self.tint,
+                },
+            },
+            WhiteBalanceMode::ManualMultipliers => match current {
+                WhiteBalance::ManualMultipliers { red, green, blue } => {
+                    WhiteBalance::ManualMultipliers { red, green, blue }
+                }
+                _ => WhiteBalance::ManualMultipliers {
+                    red: self.manual[0],
+                    green: self.manual[1],
+                    blue: self.manual[2],
+                },
+            },
+        }
+    }
 }
 
 impl RohditorApp {
@@ -246,6 +318,8 @@ impl RohditorApp {
             startup_error,
             show_diagnostics,
             white_balance_picker_active: false,
+            pending_white_balance_pick: None,
+            white_balance_memory: WhiteBalanceModeMemory::default(),
         };
         if let Some(path) = initial_path {
             application.open_path(&context.egui_ctx, path);
@@ -287,6 +361,8 @@ impl RohditorApp {
 
     fn close_document(&mut self, context: &egui::Context) {
         self.white_balance_picker_active = false;
+        self.pending_white_balance_pick = None;
+        self.white_balance_memory = WhiteBalanceModeMemory::default();
         if let Some(mut document) = self.document.take() {
             self.release_gpu_preview(&mut document);
             self.coordinator.abandon(document.id);
@@ -330,7 +406,24 @@ impl RohditorApp {
             .document
             .as_ref()
             .is_some_and(|document| document.source_scale_requested);
+        if let Some(document) = self
+            .document
+            .as_mut()
+            .filter(|document| document.id == document_id)
+        {
+            // A histogram is only a valid Auto Tone input for the recipe that
+            // produced it. Keep the old graph visible, but never apply it to
+            // a newer revision.
+            document.histogram_revision = None;
+            // Do not describe the previous backend as active while the new
+            // recipe is still being rendered. The status bar can therefore
+            // distinguish an old visible frame from the current work.
+            document.preview_diagnostics = None;
+        }
         if source_scale_requested {
+            if self.gpu.is_some() {
+                self.release_document_gpu_preview(document_id);
+            }
             if let Some(document) = self.document.as_mut() {
                 document.preview_status = Some((
                     ticket.revision,
@@ -351,7 +444,8 @@ impl RohditorApp {
                 .as_ref()
                 .and_then(|document| document.gpu_preview.as_ref())
                 .is_some_and(|preview| {
-                    preview.source.white_balance() == recipe.color.white_balance
+                    preview.source.supports_dynamic_white_balance()
+                        || preview.source.white_balance() == recipe.color.white_balance
                 });
             if gpu_base_is_current {
                 self.coordinator.cancel_preview(document_id);
@@ -407,18 +501,19 @@ impl RohditorApp {
         diagnostics: WorkerPreviewDiagnostics,
         upload_preparation: Duration,
     ) {
-        let Some(document) = self.document.as_ref().filter(|document| {
-            document.id == ticket.document_id
-                && !document.source_scale_requested
-                && document.edits.recipe().color.white_balance == upload.white_balance()
-        }) else {
+        let Some(document) = self
+            .document
+            .as_ref()
+            .filter(|document| gpu_upload_matches_document(document, ticket))
+        else {
             return;
         };
         let recipe = document.edits.recipe().clone();
-        let previous = self
-            .document
-            .as_mut()
-            .and_then(|document| document.gpu_preview.take());
+        let previous = self.document.as_mut().and_then(|document| {
+            document.pending_gpu_histogram = None;
+            document.gpu_histogram_due = None;
+            document.gpu_preview.take()
+        });
         let previous_texture_id = previous.as_ref().map(|preview| preview.texture_id);
         let reusable_frame = previous.map(|preview| preview.frame);
 
@@ -438,14 +533,13 @@ impl RohditorApp {
                     .processor
                     .render(&source, &recipe, reusable_frame)
                     .map_err(|error| error.to_string())?;
-                let histogram = gpu_histogram(runtime, &frame)?;
                 let texture_id =
                     register_or_update_gpu_texture(runtime, previous_texture_id, &frame);
-                Ok::<_, String>((source, frame, texture_id, histogram))
+                Ok::<_, String>((source, frame, texture_id))
             });
 
         match result {
-            Ok((source, frame, texture_id, histogram)) => {
+            Ok((source, frame, texture_id)) => {
                 let output_size = gpu_output_size(frame.output_dimensions());
                 let elapsed =
                     diagnostics.timings.total + upload_preparation + frame.submission_time();
@@ -457,6 +551,7 @@ impl RohditorApp {
                     gpu_upload_preparation: Some(upload_preparation),
                     gpu_submission: Some(frame.submission_time()),
                     gpu_queue_completion: frame.queue_completion_time(),
+                    gpu_histogram_readback: None,
                     gpu_textures_reused: Some(frame.textures_reused()),
                     gpu_resident_bytes,
                 };
@@ -470,24 +565,23 @@ impl RohditorApp {
                     submission_us = frame.submission_time().as_micros(),
                     "GPU preview complete"
                 );
-                if let Some(document) = self
-                    .document
-                    .as_mut()
-                    .filter(|document| document.id == ticket.document_id)
-                {
+                if let Some(document) = self.document.as_mut().filter(|document| {
+                    document.id == ticket.document_id && document.ticket() == ticket
+                }) {
                     document.gpu_preview = Some(GpuDocumentPreview {
+                        ticket,
                         source,
                         frame,
                         texture_id,
                     });
-                    document.preview_pixels = None;
+                    document.gpu_histogram_due =
+                        Some((ticket, Instant::now() + GPU_HISTOGRAM_DEBOUNCE));
                     document.texture = Some(PreviewTexture::Gpu {
                         id: texture_id,
                         size: output_size,
                     });
                     document.preview_source =
                         Some(PreviewSource::developed(diagnostics.algorithm, true));
-                    document.histogram = Some(histogram);
                     document.preview_status = None;
                     document.last_preview_time = Some(elapsed);
                     document.preview_diagnostics = Some(preview_diagnostics);
@@ -516,6 +610,9 @@ impl RohditorApp {
         let Some(preview) = document.gpu_preview.take() else {
             return;
         };
+        document.pending_gpu_histogram = None;
+        document.gpu_histogram_due = None;
+        document.histogram_revision = None;
         let texture_id = preview.texture_id;
         let recipe = document.edits.recipe().clone();
         let revision = document.edits.revision();
@@ -536,13 +633,12 @@ impl RohditorApp {
                     .processor
                     .render(&preview.source, &recipe, Some(preview.frame))
                     .map_err(|error| error.to_string())?;
-                let histogram = gpu_histogram(runtime, &frame)?;
                 register_or_update_gpu_texture(runtime, Some(texture_id), &frame);
-                Ok::<_, String>((frame, histogram))
+                Ok::<_, String>(frame)
             });
 
         match result {
-            Ok((frame, histogram)) => {
+            Ok(frame) => {
                 let output_size = gpu_output_size(frame.output_dimensions());
                 let submission = frame.submission_time();
                 let mut worker = previous_worker_diagnostics.unwrap_or(WorkerPreviewDiagnostics {
@@ -559,7 +655,7 @@ impl RohditorApp {
                 worker.cache_hits = PreviewCacheHits {
                     decoded: true,
                     reconstructed: true,
-                    demosaiced: true,
+                    demosaiced: false,
                     adjusted: false,
                 };
                 worker.timings = StageTimings {
@@ -573,6 +669,7 @@ impl RohditorApp {
                     gpu_upload_preparation: None,
                     gpu_submission: Some(submission),
                     gpu_queue_completion: frame.queue_completion_time(),
+                    gpu_histogram_readback: None,
                     gpu_textures_reused: Some(frame.textures_reused()),
                     gpu_resident_bytes: preview
                         .source
@@ -587,24 +684,27 @@ impl RohditorApp {
                     submission_us = frame.submission_time().as_micros(),
                     "GPU preview adjustment complete"
                 );
-                if let Some(document) = self
-                    .document
-                    .as_mut()
-                    .filter(|document| document.id == document_id)
-                {
+                let current_ticket = PreviewTicket {
+                    document_id,
+                    revision,
+                };
+                if let Some(document) = self.document.as_mut().filter(|document| {
+                    document.id == document_id && document.ticket() == current_ticket
+                }) {
                     document.gpu_preview = Some(GpuDocumentPreview {
+                        ticket: current_ticket,
                         source: preview.source,
                         frame,
                         texture_id,
                     });
-                    document.preview_pixels = None;
+                    document.gpu_histogram_due =
+                        Some((current_ticket, Instant::now() + GPU_HISTOGRAM_DEBOUNCE));
                     document.texture = Some(PreviewTexture::Gpu {
                         id: texture_id,
                         size: output_size,
                     });
                     document.preview_source =
                         Some(PreviewSource::developed(worker.algorithm, true));
-                    document.histogram = Some(histogram);
                     document.preview_status = None;
                     document.last_preview_time = Some(submission);
                     document.preview_diagnostics = Some(preview_diagnostics);
@@ -651,6 +751,8 @@ impl RohditorApp {
     }
 
     fn release_gpu_preview(&mut self, document: &mut Document) {
+        document.pending_gpu_histogram = None;
+        document.gpu_histogram_due = None;
         let texture_id = document
             .gpu_preview
             .take()
@@ -701,6 +803,11 @@ impl RohditorApp {
     }
 
     fn refresh_gpu_queue_completion(&mut self, context: &egui::Context) {
+        if let Some(runtime) = self.gpu.as_ref()
+            && let Err(error) = runtime.processor.poll()
+        {
+            warn!(%error, "GPU polling failed while refreshing preview diagnostics");
+        }
         let Some(document) = self.document.as_mut() else {
             return;
         };
@@ -721,13 +828,134 @@ impl RohditorApp {
         }
     }
 
+    fn refresh_gpu_histogram(&mut self, context: &egui::Context) {
+        if let Some(mut pending) = self
+            .document
+            .as_mut()
+            .and_then(|document| document.pending_gpu_histogram.take())
+        {
+            let readback_latency = pending.started.elapsed();
+            match pending.readback.try_finish() {
+                Ok(Some(readback)) => {
+                    let histogram = usize::try_from(readback.width)
+                        .ok()
+                        .and_then(|width| {
+                            usize::try_from(readback.height)
+                                .ok()
+                                .map(|height| (width, height))
+                        })
+                        .and_then(|(width, height)| {
+                            Histogram::from_rgba8(width, height, &readback.rgba)
+                        });
+                    if let Some(document) = self.document.as_mut().filter(|document| {
+                        document.ticket() == pending.ticket
+                            && document
+                                .gpu_preview
+                                .as_ref()
+                                .is_some_and(|preview| preview.ticket == pending.ticket)
+                    }) && let Some(histogram) = histogram
+                    {
+                        document.histogram = Some(histogram);
+                        document.histogram_revision = Some(pending.ticket.revision);
+                        if let Some(diagnostics) = document.preview_diagnostics.as_mut() {
+                            diagnostics.gpu_histogram_readback = Some(readback_latency);
+                        }
+                    }
+                    context.request_repaint();
+                }
+                Ok(None) => {
+                    if let Some(document) = self.document.as_mut().filter(|document| {
+                        document.ticket() == pending.ticket
+                            && document
+                                .gpu_preview
+                                .as_ref()
+                                .is_some_and(|preview| preview.ticket == pending.ticket)
+                    }) {
+                        document.pending_gpu_histogram = Some(pending);
+                        context.request_repaint_after(Duration::from_millis(16));
+                    }
+                }
+                Err(error) => {
+                    warn!(ticket = ?pending.ticket, %error, "GPU histogram readback failed");
+                }
+            }
+            return;
+        }
+
+        let now = Instant::now();
+        let Some((ticket, due)) = self
+            .document
+            .as_ref()
+            .and_then(|document| document.gpu_histogram_due)
+        else {
+            return;
+        };
+        if due > now {
+            context.request_repaint_after(due.duration_since(now));
+            return;
+        }
+
+        let readback = self
+            .document
+            .as_ref()
+            .filter(|document| {
+                document.ticket() == ticket
+                    && document
+                        .gpu_preview
+                        .as_ref()
+                        .is_some_and(|preview| preview.ticket == ticket)
+            })
+            .and_then(|document| document.gpu_preview.as_ref())
+            .and_then(|preview| {
+                self.gpu
+                    .as_ref()
+                    .map(|runtime| runtime.processor.begin_display_readback(&preview.frame))
+            });
+        if let Some(document) = self.document.as_mut()
+            && document
+                .gpu_histogram_due
+                .is_some_and(|(due_ticket, _)| due_ticket == ticket)
+        {
+            document.gpu_histogram_due = None;
+        }
+        match readback {
+            Some(Ok(readback)) => {
+                if let Some(document) = self.document.as_mut().filter(|document| {
+                    document.ticket() == ticket
+                        && document
+                            .gpu_preview
+                            .as_ref()
+                            .is_some_and(|preview| preview.ticket == ticket)
+                }) {
+                    document.pending_gpu_histogram = Some(PendingGpuHistogram {
+                        ticket,
+                        readback,
+                        started: Instant::now(),
+                    });
+                    context.request_repaint_after(Duration::from_millis(16));
+                }
+            }
+            Some(Err(error)) => {
+                warn!(?ticket, %error, "could not start GPU histogram readback");
+            }
+            None => {}
+        }
+    }
+
     fn processor_description(&self) -> String {
         if let Some(runtime) = &self.gpu {
             let capabilities = runtime.processor.capabilities();
-            format!(
-                "GPU · {} · {}",
-                capabilities.adapter_name, capabilities.backend
-            )
+            let hardware = format!("{} · {}", capabilities.adapter_name, capabilities.backend);
+            match self
+                .document
+                .as_ref()
+                .and_then(|document| document.preview_diagnostics)
+                .map(|diagnostics| diagnostics.worker.backend)
+            {
+                Some(PreviewBackend::Cpu) => format!("CPU fallback · GPU available · {hardware}"),
+                Some(PreviewBackend::GpuBase) => format!("GPU active · {hardware}"),
+                None => format!("GPU available · {hardware}"),
+            }
         } else {
             format!("CPU ({})", self.processor_preference.label())
         }
@@ -840,10 +1068,7 @@ impl RohditorApp {
                 .document
                 .as_ref()
                 .is_none_or(|document| document.view.is_fit()),
-            actual_size_selected: self
-                .document
-                .as_ref()
-                .is_some_and(|document| document.view.is_actual_size()),
+            source_scale_selected: source_scale_selected(self.document.as_ref()),
             zoom_label: self
                 .document
                 .as_ref()
@@ -898,6 +1123,9 @@ impl RohditorApp {
                 }
             }
         }
+        if actions.reset {
+            self.white_balance_memory = WhiteBalanceModeMemory::default();
+        }
         if let Some(document_id) = changed_document {
             self.queue_preview(context, document_id);
         } else if let Some(document_id) = view_changed_document {
@@ -944,6 +1172,7 @@ impl RohditorApp {
         let output = adjustment_panel::show(context, model, &mut self.export_settings);
         let picker_state = output.white_balance_picker_active;
         let mut changed_document = None;
+        let mut white_balance_memory = self.white_balance_memory;
         if let Some(document) = self.document.as_mut() {
             if output.dismiss_error {
                 document.error = None;
@@ -953,25 +1182,41 @@ impl RohditorApp {
             }
 
             let mut changed = false;
+            let mut auto_tone_applied = false;
             if let Some(mode) = output.white_balance_mode {
-                changed |= set_white_balance_mode(&mut document.edits, mode);
+                changed |=
+                    set_white_balance_mode(&mut document.edits, mode, &mut white_balance_memory);
             }
             if output.auto_tone
+                && document.histogram_revision == Some(document.edits.revision())
                 && let Some(histogram) = document.histogram.as_ref()
             {
-                changed |= apply_auto_tone(&mut document.edits, histogram);
+                let auto_changed = apply_auto_tone(&mut document.edits, histogram);
+                changed |= auto_changed;
+                auto_tone_applied = auto_changed;
             }
             for interaction in output.interactions {
                 changed |= apply_adjustment_interaction(&mut document.edits, interaction);
             }
             if output.reset_all {
                 changed |= document.edits.reset();
+                // Hidden values are UI state, but reset-all should reset them
+                // too; otherwise switching away from As-shot after a reset
+                // would unexpectedly resurrect an older manual WB choice.
+                white_balance_memory = WhiteBalanceModeMemory::default();
             }
             if changed {
                 document.notice = None;
                 changed_document = Some(document.id);
             }
+            white_balance_memory.remember(document.edits.recipe().color.white_balance);
+            if auto_tone_applied {
+                document.notice = Some(
+                    "Auto tone applied from the current display histogram heuristic".to_owned(),
+                );
+            }
         }
+        self.white_balance_memory = white_balance_memory;
         if let Some(document_id) = changed_document {
             self.queue_preview(context, document_id);
         }
@@ -1021,86 +1266,69 @@ impl RohditorApp {
 
     fn apply_white_balance_pick(&mut self, context: &egui::Context, normalized: egui::Pos2) {
         self.white_balance_picker_active = false;
-        let sample = match self.sample_preview_pixel(normalized) {
-            Ok(sample) => sample,
-            Err(error) => {
-                if let Some(document) = self.document.as_mut() {
-                    document.error = Some(error);
-                }
-                return;
+        if self.pending_white_balance_pick.is_some() {
+            return;
+        }
+        let Some((ticket, frame, recipe)) = self.document.as_ref().and_then(|document| {
+            let source_ready = matches!(
+                document.preview_source,
+                Some(
+                    PreviewSource::FastCpu
+                        | PreviewSource::FastGpu
+                        | PreviewSource::HighQualityCpu
+                        | PreviewSource::HighQualityGpu
+                )
+            );
+            if !source_ready || document.source_scale_requested {
+                return None;
             }
-        };
-        let Some(balance) = white_balance_from_sample(sample) else {
+            document.frame.as_ref().map(|frame| {
+                (
+                    document.ticket(),
+                    Arc::clone(frame),
+                    document.edits.recipe().clone(),
+                )
+            })
+        }) else {
             if let Some(document) = self.document.as_mut() {
                 document.error = Some(
-                    "Could not pick white balance from a nearly black preview pixel".to_owned(),
+                    "Fit a developed RAW preview before using the white-balance picker".to_owned(),
                 );
             }
             return;
         };
-        let mut changed_document = None;
-        if let Some(document) = self.document.as_mut() {
-            let mut next = document.edits.recipe().clone();
-            next.color.white_balance = balance;
-            if document.edits.set_discrete(next) {
-                document.notice = Some("White balance picked from the preview".to_owned());
-                document.error = None;
-                changed_document = Some(document.id);
+        let options = PreviewOptions {
+            render: self.render_options,
+            ..PreviewOptions::default()
+        };
+        match self.coordinator.sample_white_balance(
+            ticket,
+            frame,
+            recipe,
+            (normalized.x, normalized.y),
+            options,
+        ) {
+            Ok(()) => {
+                self.pending_white_balance_pick = Some(ticket);
+                if let Some(document) = self
+                    .document
+                    .as_mut()
+                    .filter(|document| document.ticket() == ticket)
+                {
+                    document.preview_status = Some((
+                        ticket.revision,
+                        "Sampling a camera-native white-balance patch".to_owned(),
+                    ));
+                    document.error = None;
+                }
+                context.request_repaint();
+            }
+            Err(error) => {
+                if let Some(document) = self.document.as_mut() {
+                    document.error = Some(error);
+                }
             }
         }
-        if let Some(document_id) = changed_document {
-            self.queue_preview(context, document_id);
-        }
-    }
-
-    fn sample_preview_pixel(&self, normalized: egui::Pos2) -> Result<[u8; 3], String> {
-        let Some(document) = self.document.as_ref() else {
-            return Err("Open a photo before using the white-balance picker".to_owned());
-        };
-        if let Some(pixels) = document.preview_pixels.as_ref() {
-            let Some(texture) = document.texture.as_ref() else {
-                return Err("The preview is not ready for white-balance sampling".to_owned());
-            };
-            let (width, height) = texture.dimensions();
-            let x = ((width.saturating_sub(1)) as f32 * normalized.x).round() as usize;
-            let y = ((height.saturating_sub(1)) as f32 * normalized.y).round() as usize;
-            let index = y
-                .checked_mul(width)
-                .and_then(|value| value.checked_add(x))
-                .and_then(|value| value.checked_mul(3))
-                .ok_or_else(|| "The preview pixel coordinate overflowed".to_owned())?;
-            let pixel = pixels
-                .get(index..index.saturating_add(3))
-                .ok_or_else(|| "The preview pixel was outside the image".to_owned())?;
-            return Ok([pixel[0], pixel[1], pixel[2]]);
-        }
-
-        let Some(preview) = document.gpu_preview.as_ref() else {
-            return Err("The preview is not ready for white-balance sampling".to_owned());
-        };
-        let Some(runtime) = self.gpu.as_ref() else {
-            return Err("The GPU preview is no longer available for sampling".to_owned());
-        };
-        let readback = runtime
-            .processor
-            .readback_display(&preview.frame)
-            .map_err(|error| format!("Could not sample the GPU preview: {error}"))?;
-        let width = usize::try_from(readback.width)
-            .map_err(|_| "GPU preview width overflowed this system's usize".to_owned())?;
-        let height = usize::try_from(readback.height)
-            .map_err(|_| "GPU preview height overflowed this system's usize".to_owned())?;
-        let x = ((width.saturating_sub(1)) as f32 * normalized.x).round() as usize;
-        let y = ((height.saturating_sub(1)) as f32 * normalized.y).round() as usize;
-        let index = y
-            .checked_mul(width)
-            .and_then(|value| value.checked_add(x))
-            .and_then(|value| value.checked_mul(4))
-            .ok_or_else(|| "The GPU preview pixel coordinate overflowed".to_owned())?;
-        let pixel = readback
-            .rgba
-            .get(index..index.saturating_add(4))
-            .ok_or_else(|| "The GPU preview pixel was outside the image".to_owned())?;
-        Ok([pixel[0], pixel[1], pixel[2]])
     }
 
     fn show_status_bar(&mut self, context: &egui::Context) {
@@ -1152,7 +1380,8 @@ impl RohditorApp {
             document.open_status.is_some()
                 || document.preview_status.is_some()
                 || document.export_status.is_some()
-        })
+                || document.pending_gpu_histogram.is_some()
+        }) || self.pending_white_balance_pick.is_some()
     }
 
     fn show_developer_diagnostics(&mut self, context: &egui::Context) {
@@ -1215,6 +1444,7 @@ impl RohditorApp {
                     upload_preparation: preview.gpu_upload_preparation,
                     submission: Some(submission),
                     queue_completion: preview.gpu_queue_completion,
+                    histogram_readback: preview.gpu_histogram_readback,
                     textures_reused: preview.gpu_textures_reused,
                     resident_bytes: preview.gpu_resident_bytes,
                 }),
@@ -1306,6 +1536,10 @@ impl RohditorApp {
             }
         }
     }
+}
+
+fn source_scale_selected(document: Option<&Document>) -> bool {
+    document.is_some_and(|document| document.source_scale_requested)
 }
 
 fn document_panel_model(
@@ -1474,52 +1708,54 @@ fn document_panel_model(
         warning: document.warning.clone(),
         notice: document.notice.clone(),
         histogram: document.histogram,
+        auto_tone_available: document.histogram_revision == Some(document.edits.revision()),
         white_balance_picker_active,
     }
 }
 
-fn white_balance_from_sample(sample: [u8; 3]) -> Option<WhiteBalance> {
-    let [red, green, blue] = sample.map(|value| srgb_to_linear_srgb(f32::from(value) / 255.0));
-    if red <= 1.0e-4 || green <= 1.0e-4 || blue <= 1.0e-4 {
+fn white_balance_from_camera_sample(
+    sample: [f32; 3],
+    as_shot_white_balance: [Option<f32>; 4],
+) -> Option<WhiteBalance> {
+    if sample
+        .iter()
+        .any(|value| !value.is_finite() || *value <= 1.0e-5)
+    {
+        return None;
+    }
+    let [red, green, blue, _] = as_shot_white_balance;
+    let [Some(red), Some(green), Some(blue)] = [red, green, blue]
+        .map(|value| value.filter(|number| number.is_finite() && *number > 1.0e-5))
+    else {
+        return None;
+    };
+    let as_shot_relative = [red / green, 1.0, blue / green];
+    let desired_total = [sample[1] / sample[0], 1.0, sample[1] / sample[2]];
+    let manual = [
+        desired_total[0] / as_shot_relative[0],
+        WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
+        desired_total[2] / as_shot_relative[2],
+    ];
+    if manual
+        .iter()
+        .any(|value| !WHITE_BALANCE_MULTIPLIER_RANGE.contains(*value))
+    {
         return None;
     }
     Some(WhiteBalance::ManualMultipliers {
-        red: (green / red).clamp(
-            WHITE_BALANCE_MULTIPLIER_RANGE.minimum,
-            WHITE_BALANCE_MULTIPLIER_RANGE.maximum,
-        ),
-        green: WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
-        blue: (green / blue).clamp(
-            WHITE_BALANCE_MULTIPLIER_RANGE.minimum,
-            WHITE_BALANCE_MULTIPLIER_RANGE.maximum,
-        ),
+        red: manual[0],
+        green: manual[1],
+        blue: manual[2],
     })
 }
 
-fn set_white_balance_mode(edits: &mut EditSession, mode: WhiteBalanceMode) -> bool {
+fn set_white_balance_mode(
+    edits: &mut EditSession,
+    mode: WhiteBalanceMode,
+    memory: &mut WhiteBalanceModeMemory,
+) -> bool {
     let mut next = edits.recipe().clone();
-    next.color.white_balance = match mode {
-        WhiteBalanceMode::AsShot => WhiteBalance::AsShot,
-        WhiteBalanceMode::TemperatureTint => match next.color.white_balance {
-            WhiteBalance::TemperatureTint { temperature, tint } => {
-                WhiteBalance::TemperatureTint { temperature, tint }
-            }
-            _ => WhiteBalance::TemperatureTint {
-                temperature: TEMPERATURE_RANGE.neutral,
-                tint: TINT_RANGE.neutral,
-            },
-        },
-        WhiteBalanceMode::ManualMultipliers => match next.color.white_balance {
-            WhiteBalance::ManualMultipliers { red, green, blue } => {
-                WhiteBalance::ManualMultipliers { red, green, blue }
-            }
-            _ => WhiteBalance::ManualMultipliers {
-                red: WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
-                green: WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
-                blue: WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
-            },
-        },
-    };
+    next.color.white_balance = memory.select(next.color.white_balance, mode);
     edits.set_discrete(next)
 }
 
@@ -1530,9 +1766,15 @@ fn apply_auto_tone(edits: &mut EditSession, histogram: &Histogram) -> bool {
         return false;
     }
     let mut next = edits.recipe().clone();
-    next.light.exposure_ev = (0.18 / midpoint_linear)
-        .log2()
-        .clamp(EXPOSURE_EV_RANGE.minimum, EXPOSURE_EV_RANGE.maximum);
+    // The histogram already includes the current recipe. Apply a correction
+    // relative to the current exposure; assigning the correction as an
+    // absolute value would make Auto tone move in the wrong direction after a
+    // manual exposure edit.
+    let exposure_correction = (0.18 / midpoint_linear).log2();
+    if exposure_correction.abs() > AUTO_TONE_EXPOSURE_EPSILON_EV {
+        next.light.exposure_ev = (edits.recipe().light.exposure_ev + exposure_correction)
+            .clamp(EXPOSURE_EV_RANGE.minimum, EXPOSURE_EV_RANGE.maximum);
+    }
     let low = histogram.luminance_percentile(0.01);
     let high = histogram.luminance_percentile(0.99);
     next.light.blacks = if low > 24 {
@@ -1553,15 +1795,14 @@ fn apply_auto_tone(edits: &mut EditSession, histogram: &Histogram) -> bool {
 }
 
 fn gpu_supports_recipe(recipe: &rohditor_core::EditRecipe) -> bool {
-    recipe
-        .color
-        .hsl
-        .channels
-        .iter()
-        .all(|channel| channel.hue == 0.0 && channel.saturation == 0.0 && channel.luminance == 0.0)
-        && recipe.color.grading.shadows == [0.0; 3]
-        && recipe.color.grading.midtones == [0.0; 3]
-        && recipe.color.grading.highlights == [0.0; 3]
+    rohditor_gpu::GpuPreviewProcessor::supports_recipe(recipe)
+}
+
+fn gpu_upload_matches_document(document: &Document, ticket: PreviewTicket) -> bool {
+    document.id == ticket.document_id
+        && document.ticket() == ticket
+        && !document.source_scale_requested
+        && gpu_supports_recipe(document.edits.recipe())
 }
 
 fn apply_adjustment_interaction(
@@ -1679,6 +1920,7 @@ impl eframe::App for RohditorApp {
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
         self.process_worker_events(context);
         self.refresh_gpu_queue_completion(context);
+        self.refresh_gpu_histogram(context);
         self.show_top_bar(context);
         self.show_status_bar(context);
         self.show_file_panel(context);
@@ -1705,7 +1947,6 @@ fn install_texture(
         width: _,
         height: _,
         color,
-        pixels,
     } = image;
     let texture_name = format!("document-{}-preview", document.id);
     match document.texture.as_mut() {
@@ -1722,24 +1963,7 @@ fn install_texture(
             document.view.fit(now);
         }
     }
-    document.preview_pixels = Some(pixels);
     document.preview_source = Some(source);
-}
-
-fn gpu_histogram(
-    runtime: &GpuRuntime,
-    frame: &rohditor_gpu::GpuPreviewFrame,
-) -> Result<Histogram, String> {
-    let readback = runtime
-        .processor
-        .readback_display(frame)
-        .map_err(|error| format!("could not analyze GPU preview histogram: {error}"))?;
-    Histogram::from_rgba8(
-        usize::try_from(readback.width).map_err(|_| "GPU histogram width overflowed")?,
-        usize::try_from(readback.height).map_err(|_| "GPU histogram height overflowed")?,
-        &readback.rgba,
-    )
-    .ok_or_else(|| "GPU histogram buffer dimensions did not match its pixels".to_owned())
 }
 
 fn source_stem(path: &Path) -> String {
@@ -1759,6 +1983,8 @@ fn display_file_name(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    use rohditor_core::EditRecipe;
+
     use super::*;
 
     #[test]
@@ -1836,9 +2062,13 @@ mod tests {
     }
 
     #[test]
-    fn white_balance_picker_uses_linear_channel_ratios() {
+    fn white_balance_picker_uses_camera_native_channel_ratios() {
         let WhiteBalance::ManualMultipliers { red, green, blue } =
-            white_balance_from_sample([128, 128, 128]).expect("neutral sample")
+            white_balance_from_camera_sample(
+                [0.5, 0.5, 0.5],
+                [Some(1.0), Some(1.0), Some(1.0), None],
+            )
+            .expect("neutral sample")
         else {
             panic!("picker should produce manual multipliers");
         };
@@ -1846,13 +2076,189 @@ mod tests {
         assert!((green - 1.0).abs() < 1.0e-6);
         assert!((blue - 1.0).abs() < 1.0e-6);
 
-        let WhiteBalance::ManualMultipliers { red, blue, .. } =
-            white_balance_from_sample([200, 128, 64]).expect("colored sample")
-        else {
+        let WhiteBalance::ManualMultipliers { red, blue, .. } = white_balance_from_camera_sample(
+            [0.8, 0.5, 0.2],
+            [Some(1.0), Some(1.0), Some(1.0), None],
+        )
+        .expect("colored sample") else {
             panic!("picker should produce manual multipliers");
         };
         assert!(red < 1.0);
         assert!(blue > 1.0);
-        assert!(white_balance_from_sample([0, 128, 128]).is_none());
+        assert!(
+            white_balance_from_camera_sample(
+                [0.0, 0.5, 0.5],
+                [Some(1.0), Some(1.0), Some(1.0), None]
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn white_balance_picker_accounts_for_as_shot_baseline() {
+        let WhiteBalance::ManualMultipliers { red, green, blue } =
+            white_balance_from_camera_sample(
+                [0.4, 0.5, 0.6],
+                [Some(2.0), Some(1.0), Some(1.5), None],
+            )
+            .expect("sample should fit the manual range")
+        else {
+            panic!("picker should produce manual multipliers");
+        };
+        assert!((red - 0.625).abs() < 1.0e-6);
+        assert!((green - 1.0).abs() < 1.0e-6);
+        assert!((blue - (5.0 / 9.0)).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn white_balance_mode_switch_preserves_last_editable_values() {
+        let mut edits = EditSession::default();
+        let mut memory = WhiteBalanceModeMemory::default();
+        let mut recipe = EditRecipe::default();
+        recipe.color.white_balance = WhiteBalance::TemperatureTint {
+            temperature: 7_400.0,
+            tint: -0.35,
+        };
+        assert!(edits.set_discrete(recipe));
+
+        assert!(set_white_balance_mode(
+            &mut edits,
+            WhiteBalanceMode::ManualMultipliers,
+            &mut memory,
+        ));
+        let mut recipe = edits.recipe().clone();
+        recipe.color.white_balance = WhiteBalance::ManualMultipliers {
+            red: 1.6,
+            green: 0.8,
+            blue: 1.2,
+        };
+        assert!(edits.set_discrete(recipe));
+        assert!(set_white_balance_mode(
+            &mut edits,
+            WhiteBalanceMode::AsShot,
+            &mut memory,
+        ));
+
+        assert!(set_white_balance_mode(
+            &mut edits,
+            WhiteBalanceMode::TemperatureTint,
+            &mut memory,
+        ));
+        assert_eq!(
+            edits.recipe().color.white_balance,
+            WhiteBalance::TemperatureTint {
+                temperature: 7_400.0,
+                tint: -0.35,
+            }
+        );
+        assert!(set_white_balance_mode(
+            &mut edits,
+            WhiteBalanceMode::ManualMultipliers,
+            &mut memory,
+        ));
+        assert_eq!(
+            edits.recipe().color.white_balance,
+            WhiteBalance::ManualMultipliers {
+                red: 1.6,
+                green: 0.8,
+                blue: 1.2,
+            }
+        );
+    }
+
+    #[test]
+    fn gpu_upload_guard_requires_the_current_revision_and_supported_recipe() {
+        let mut document = Document::opening(7, PathBuf::from("fixture.arw"));
+        let ticket = document.ticket();
+        assert!(gpu_upload_matches_document(&document, ticket));
+
+        let mut recipe = document.edits.recipe().clone();
+        recipe.color.hsl.channels[0].saturation = 0.2;
+        assert!(document.edits.set_discrete(recipe));
+        assert!(!gpu_upload_matches_document(&document, ticket));
+        assert!(!gpu_upload_matches_document(&document, document.ticket()));
+
+        let current = document.ticket();
+        let mut recipe = document.edits.recipe().clone();
+        recipe.color.hsl = Default::default();
+        assert!(document.edits.set_discrete(recipe));
+        assert!(gpu_upload_matches_document(&document, document.ticket()));
+        assert!(!gpu_upload_matches_document(&document, current));
+    }
+
+    #[test]
+    fn source_scale_toolbar_selection_tracks_resolution_request() {
+        let mut document = Document::opening(7, PathBuf::from("fixture.arw"));
+        document.source_scale_requested = true;
+        document.view.fit(0.0);
+
+        assert!(source_scale_selected(Some(&document)));
+
+        document.source_scale_requested = false;
+        assert!(!source_scale_selected(Some(&document)));
+    }
+
+    #[test]
+    fn auto_tone_applies_a_relative_exposure_correction() {
+        let image = rohditor_core::DisplayRgbImage::new(
+            4,
+            1,
+            12,
+            rohditor_core::DisplayTransfer::Srgb,
+            vec![128; 12],
+        )
+        .expect("valid histogram fixture");
+        let histogram = Histogram::from_display_rgb8(&image);
+        let mut edits = EditSession::default();
+        edits.set_discrete({
+            let mut recipe = EditRecipe::default();
+            recipe.light.exposure_ev = 1.0;
+            recipe
+        });
+
+        assert!(apply_auto_tone(&mut edits, &histogram));
+        let midpoint = srgb_to_linear_srgb(128.0 / 255.0);
+        let expected = (1.0 + (0.18 / midpoint).log2())
+            .clamp(EXPOSURE_EV_RANGE.minimum, EXPOSURE_EV_RANGE.maximum);
+        assert!((edits.recipe().light.exposure_ev - expected).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn auto_tone_stays_finite_and_clamped_for_extreme_display_histograms() {
+        for value in [0_u8, 8, 32, 240, 255] {
+            let image = rohditor_core::DisplayRgbImage::new(
+                8,
+                1,
+                24,
+                rohditor_core::DisplayTransfer::Srgb,
+                vec![value; 24],
+            )
+            .expect("valid histogram fixture");
+            let histogram = Histogram::from_display_rgb8(&image);
+            let mut edits = EditSession::default();
+            assert!(apply_auto_tone(&mut edits, &histogram) || value == 0);
+            assert!(edits.recipe().light.exposure_ev.is_finite());
+            assert!(EXPOSURE_EV_RANGE.contains(edits.recipe().light.exposure_ev));
+            assert!(HIGHLIGHTS_RANGE.contains(edits.recipe().light.highlights));
+            assert!(BLACKS_RANGE.contains(edits.recipe().light.blacks));
+        }
+    }
+
+    #[test]
+    fn repeated_auto_tone_is_stable_when_the_histogram_is_already_neutral() {
+        let image = rohditor_core::DisplayRgbImage::new(
+            4,
+            1,
+            12,
+            rohditor_core::DisplayTransfer::Srgb,
+            vec![118; 12],
+        )
+        .expect("valid histogram fixture");
+        let histogram = Histogram::from_display_rgb8(&image);
+        let mut edits = EditSession::default();
+        assert!(apply_auto_tone(&mut edits, &histogram));
+        let first = edits.recipe().clone();
+        assert!(!apply_auto_tone(&mut edits, &histogram));
+        assert_eq!(edits.recipe(), &first);
     }
 }

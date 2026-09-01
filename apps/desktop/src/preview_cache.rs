@@ -36,7 +36,10 @@ impl PreviewCacheKeys {
             crop_policy: options.render.crop_policy,
             max_long_edge: options.max_long_edge,
             algorithm: options.render.demosaic,
-            reconstruction_version: 2,
+            // Bump when the retained source representation changes. The GPU
+            // boundary now consumes camera-native samples rather than a
+            // camera-converted base.
+            reconstruction_version: 3,
         };
         let demosaiced = DemosaicedBaseKey {
             reconstructed: reconstructed.clone(),

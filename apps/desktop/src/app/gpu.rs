@@ -4,15 +4,27 @@
 //! resources that must stay tied to eframe's adapter, device, and renderer.
 
 use eframe::egui;
-use rohditor_gpu::{GpuCapabilities, GpuPreviewFrame, GpuPreviewProcessor, GpuPreviewSource};
+use rohditor_gpu::{
+    GpuCapabilities, GpuDisplayReadbackPending, GpuPreviewFrame, GpuPreviewProcessor,
+    GpuPreviewSource,
+};
+use std::time::Instant;
 use tracing::info;
 
 use crate::ProcessorPreference;
+use crate::document::PreviewTicket;
 
 pub(super) struct GpuDocumentPreview {
+    pub(super) ticket: PreviewTicket,
     pub(super) source: GpuPreviewSource,
     pub(super) frame: GpuPreviewFrame,
     pub(super) texture_id: egui::TextureId,
+}
+
+pub(super) struct PendingGpuHistogram {
+    pub(super) ticket: PreviewTicket,
+    pub(super) readback: GpuDisplayReadbackPending,
+    pub(super) started: Instant,
 }
 
 pub(super) struct GpuRuntime {

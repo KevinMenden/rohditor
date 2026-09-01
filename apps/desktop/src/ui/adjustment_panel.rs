@@ -1,5 +1,5 @@
 use eframe::egui;
-use rohditor_core::Histogram;
+use rohditor_core::{Histogram, ToneCurve, evaluate_tone_curve};
 
 use super::theme::{self, colors, metrics};
 use super::widgets::{self, AdjustmentSpec, ValueScale};
@@ -104,6 +104,7 @@ pub(crate) struct DocumentPanelModel {
     pub warning: Option<String>,
     pub notice: Option<String>,
     pub histogram: Option<Histogram>,
+    pub auto_tone_available: bool,
     pub white_balance_picker_active: bool,
 }
 
@@ -345,12 +346,15 @@ fn show_tone_curve_controls(
 }
 
 fn tone_curve_graph_value(input: f32, values: [f32; 4]) -> f32 {
-    let shadows = 1.0 - smoothstep(0.0, 0.45, input);
-    let darks = smoothstep(0.0, 0.12, input) * (1.0 - smoothstep(0.35, 0.55, input));
-    let lights = smoothstep(0.45, 0.65, input) * (1.0 - smoothstep(0.88, 1.0, input));
-    let highlights = smoothstep(0.60, 1.0, input);
-    (input + values[0] * shadows + values[1] * darks + values[2] * lights + values[3] * highlights)
-        .clamp(0.0, 1.0)
+    evaluate_tone_curve(
+        &ToneCurve {
+            shadows: values[0],
+            darks: values[1],
+            lights: values[2],
+            highlights: values[3],
+        },
+        input,
+    )
 }
 
 fn curve_graph_position(rect: egui::Rect, input: f32, output: f32) -> egui::Pos2 {
@@ -358,11 +362,6 @@ fn curve_graph_position(rect: egui::Rect, input: f32, output: f32) -> egui::Pos2
         egui::lerp(rect.left()..=rect.right(), input),
         egui::lerp(rect.bottom()..=rect.top(), output),
     )
-}
-
-fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
-    let normalized = ((value - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
-    normalized * normalized * (3.0 - 2.0 * normalized)
 }
 
 fn empty_panel(ui: &mut egui::Ui) {
@@ -519,10 +518,17 @@ fn show_light_controls(
     output: &mut AdjustmentPanelOutput,
 ) {
     widgets::section_header(ui, "Light");
-    output.auto_tone = ui
-        .small_button("Auto tone")
-        .on_hover_text("Set a neutral exposure from the current histogram")
-        .clicked();
+    let auto_tone_response = ui
+        .add_enabled_ui(document.auto_tone_available, |ui| {
+            ui.small_button("Auto tone")
+        })
+        .inner
+        .on_hover_text(if document.auto_tone_available {
+            "Display-referred heuristic: set exposure and clipping guards from the current histogram"
+        } else {
+            "Auto tone becomes available when the current preview histogram is ready"
+        });
+    output.auto_tone = auto_tone_response.clicked();
     record_slider(
         ui,
         &mut output.interactions,
@@ -851,9 +857,14 @@ fn show_color_grading_controls(
     document: &mut DocumentPanelModel,
     output: &mut AdjustmentPanelOutput,
 ) {
-    egui::CollapsingHeader::new("Color grading")
+    egui::CollapsingHeader::new("Three-way RGB tint")
         .default_open(false)
         .show(ui, |ui| {
+            ui.label(
+                egui::RichText::new("Luminance-preserving tint; values are not lift/gamma/gain")
+                    .small()
+                    .color(colors::TEXT_MUTED),
+            );
             for (group, label, target) in [
                 (0, "Shadows", AdjustmentTarget::GradingShadows(0)),
                 (1, "Midtones", AdjustmentTarget::GradingMidtones(0)),

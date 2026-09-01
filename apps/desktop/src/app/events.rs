@@ -8,7 +8,9 @@ use eframe::egui;
 use crate::coordinator::{JobKind, PreviewResolution, WorkerEvent};
 use crate::ui::viewport::PreviewSource;
 
-use super::{DocumentPreviewDiagnostics, RohditorApp, install_texture};
+use super::{
+    DocumentPreviewDiagnostics, RohditorApp, install_texture, white_balance_from_camera_sample,
+};
 
 impl RohditorApp {
     pub(super) fn process_worker_events(&mut self, context: &egui::Context) {
@@ -88,8 +90,11 @@ impl RohditorApp {
                     && ticket.is_current(document.id, document.edits.revision())
                     && document.source_scale_requested
                         == (resolution == PreviewResolution::SourceScale)
-                    && (document.gpu_preview.is_none()
-                        || resolution == PreviewResolution::SourceScale)
+                    && (resolution == PreviewResolution::SourceScale
+                        || document
+                            .gpu_preview
+                            .as_ref()
+                            .is_none_or(|preview| preview.ticket != ticket))
                 {
                     let source = if resolution == PreviewResolution::SourceScale {
                         PreviewSource::OneToOneCpu
@@ -98,6 +103,7 @@ impl RohditorApp {
                     };
                     install_texture(context, document, image, source);
                     document.histogram = Some(*histogram);
+                    document.histogram_revision = Some(ticket.revision);
                     if resolution == PreviewResolution::SourceScale {
                         document.view.actual_size(context.input(|input| input.time));
                     } else {
@@ -117,6 +123,98 @@ impl RohditorApp {
                 upload_preparation,
             } => {
                 self.install_gpu_upload(context, ticket, *upload, diagnostics, upload_preparation);
+            }
+            WorkerEvent::WhiteBalanceSampleReady { ticket, sample } => {
+                if self.pending_white_balance_pick != Some(ticket) {
+                    return;
+                }
+                let Some(current_document) = self.document.as_mut() else {
+                    self.pending_white_balance_pick = None;
+                    return;
+                };
+                if current_document.id != ticket.document_id {
+                    self.pending_white_balance_pick = None;
+                    return;
+                }
+                if current_document.edits.revision() != ticket.revision {
+                    self.pending_white_balance_pick = None;
+                    if current_document
+                        .preview_status
+                        .as_ref()
+                        .is_some_and(|(revision, _)| *revision == ticket.revision)
+                    {
+                        current_document.preview_status = None;
+                    }
+                    return;
+                }
+                let mut queue_preview = false;
+                self.pending_white_balance_pick = None;
+                let document = current_document;
+                document.preview_status = None;
+                let as_shot = document
+                    .frame
+                    .as_ref()
+                    .map(|frame| frame.info.as_shot_white_balance)
+                    .or_else(|| {
+                        document
+                            .info
+                            .as_ref()
+                            .map(|info| info.as_shot_white_balance)
+                    });
+                let Some(as_shot) = as_shot else {
+                    document.error = Some(
+                        "The RAW file did not provide usable as-shot white-balance metadata"
+                            .to_owned(),
+                    );
+                    return;
+                };
+                let Some(balance) = white_balance_from_camera_sample(sample, as_shot) else {
+                    document.error = Some(
+                        "That sample could not be represented by the available white-balance range"
+                            .to_owned(),
+                    );
+                    return;
+                };
+                let mut next = document.edits.recipe().clone();
+                next.color.white_balance = balance;
+                if document.edits.set_discrete(next) {
+                    queue_preview = true;
+                }
+                document.notice =
+                    Some("White balance picked from a camera-native patch".to_owned());
+                document.error = None;
+                if queue_preview {
+                    let document_id = document.id;
+                    let _ = document;
+                    self.queue_preview(context, document_id);
+                }
+            }
+            WorkerEvent::WhiteBalanceSampleFailed { ticket, message } => {
+                if self.pending_white_balance_pick != Some(ticket) {
+                    return;
+                }
+                let Some(document) = self.document.as_mut() else {
+                    self.pending_white_balance_pick = None;
+                    return;
+                };
+                if document.id != ticket.document_id {
+                    self.pending_white_balance_pick = None;
+                    return;
+                }
+                if document.edits.revision() != ticket.revision {
+                    self.pending_white_balance_pick = None;
+                    if document
+                        .preview_status
+                        .as_ref()
+                        .is_some_and(|(revision, _)| *revision == ticket.revision)
+                    {
+                        document.preview_status = None;
+                    }
+                    return;
+                }
+                self.pending_white_balance_pick = None;
+                document.preview_status = None;
+                document.error = Some(message);
             }
             WorkerEvent::ExportReady {
                 document_id,

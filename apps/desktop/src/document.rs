@@ -61,6 +61,9 @@ impl EditSession {
         if next == self.recipe {
             return false;
         }
+        if next.validate().is_err() {
+            return false;
+        }
         self.begin_gesture();
         if let Some(gesture) = self.gesture.as_mut()
             && !gesture.changed
@@ -85,6 +88,9 @@ impl EditSession {
     pub(crate) fn set_discrete(&mut self, next: EditRecipe) -> bool {
         self.finish_gesture();
         if next == self.recipe {
+            return false;
+        }
+        if next.validate().is_err() {
             return false;
         }
         push_bounded(&mut self.undo, self.recipe.clone());
@@ -189,6 +195,23 @@ mod tests {
         assert!(edits.can_redo());
         assert!(edits.set_discrete(exposed(-1.0)));
         assert!(!edits.can_redo());
+    }
+
+    #[test]
+    fn invalid_recipes_never_enter_the_edit_session() {
+        let mut edits = EditSession::default();
+        let mut invalid = EditRecipe::default();
+        invalid.light.exposure_ev = f32::NAN;
+
+        assert!(!edits.set_discrete(invalid.clone()));
+        assert_eq!(edits.revision(), 0);
+        assert_eq!(edits.recipe(), &EditRecipe::default());
+
+        edits.begin_gesture();
+        assert!(!edits.set_during_gesture(invalid));
+        edits.finish_gesture();
+        assert_eq!(edits.revision(), 0);
+        assert!(!edits.can_undo());
     }
 
     #[test]

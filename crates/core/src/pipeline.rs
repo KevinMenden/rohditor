@@ -8,7 +8,7 @@ use crate::color::{CameraColorTransform, camera_color_transform};
 use crate::cpu::{
     apply_adjustments_cancellable, apply_camera_color_transform_cancellable,
     apply_white_balance_cancellable, normalize_raw_cancellable, preview_dimensions,
-    render_display_srgb8_cancellable,
+    render_display_srgb8_cancellable, white_balance_gains_with_transform,
 };
 use crate::demosaic::demosaic_cancellable;
 use crate::resample::resize_area_cancellable;
@@ -16,7 +16,6 @@ use crate::{
     CancellationToken, DemosaicAlgorithm, DisplayRgbImage, DitherMode, EditRecipe, ExportImage,
     LinearRgbImage, OutputBitDepth, PipelineError, WhiteBalance, WhiteBalanceGains,
     apply_adjustments, render_display_srgb8, render_display_srgb8_dithered, render_display_srgb16,
-    white_balance_gains,
 };
 
 /// Default longest edge of an interactively developed preview.
@@ -110,6 +109,43 @@ impl ReconstructedPreview {
     #[must_use]
     pub const fn image(&self) -> &LinearRgbImage<f32> {
         &self.image
+    }
+
+    /// Source EXIF orientation for the reconstructed camera-native image.
+    #[must_use]
+    pub const fn source_orientation(&self) -> RawOrientation {
+        self.info.orientation
+    }
+
+    /// Camera-native to linear Rec.2020/D65 transform for GPU parameterization.
+    #[must_use]
+    pub const fn camera_to_linear_rec2020(&self) -> crate::Matrix3 {
+        self.camera_transform.camera_to_linear_rec2020
+    }
+
+    /// Camera-native to D65 XYZ transform used to resolve temperature/tint.
+    #[must_use]
+    pub const fn camera_to_xyz_d65(&self) -> crate::Matrix3 {
+        self.camera_transform.camera_to_xyz_d65
+    }
+
+    /// Decoder as-shot multipliers used as the relative WB baseline.
+    #[must_use]
+    pub const fn as_shot_white_balance(&self) -> [Option<f32>; 4] {
+        self.info.as_shot_white_balance
+    }
+
+    /// Resolve a recipe white balance against this reconstruction's camera
+    /// calibration without changing the immutable camera-native pixels.
+    pub fn white_balance_gains(
+        &self,
+        selection: WhiteBalance,
+    ) -> Result<WhiteBalanceGains, PipelineError> {
+        crate::cpu::white_balance_gains_with_transform(
+            &self.info,
+            &self.camera_transform,
+            selection,
+        )
     }
 
     #[must_use]
@@ -678,7 +714,11 @@ fn prepare_demosaiced_preview(
     );
     let metadata_guard = metadata_span.enter();
     recipe.validate()?;
-    let gains = white_balance_gains(&reconstructed.info, recipe.color.white_balance)?;
+    let gains = white_balance_gains_with_transform(
+        &reconstructed.info,
+        &reconstructed.camera_transform,
+        recipe.color.white_balance,
+    )?;
     let metadata = metadata_started.elapsed();
     drop(metadata_guard);
 
@@ -736,8 +776,12 @@ fn prepare_base_cancellable(
     );
     let metadata_guard = metadata_span.enter();
     recipe.validate()?;
-    let gains = white_balance_gains(&frame.info, recipe.color.white_balance)?;
     let camera_transform = camera_color_transform(&frame.info)?;
+    let gains = white_balance_gains_with_transform(
+        &frame.info,
+        &camera_transform,
+        recipe.color.white_balance,
+    )?;
     let metadata = metadata_started.elapsed();
     drop(metadata_guard);
 

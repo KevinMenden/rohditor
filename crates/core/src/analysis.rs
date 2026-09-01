@@ -32,9 +32,9 @@ impl Histogram {
 
     /// Build a histogram from a packed RGBA8 display buffer.
     ///
-    /// This is used only for the initial GPU-preview analysis path. The GPU
-    /// display texture remains the normal display source; the readback is
-    /// consumed by analysis and never installed as the UI texture.
+    /// This is used by the debounced asynchronous GPU-preview analysis path.
+    /// The GPU display texture remains the normal display source; the readback
+    /// is consumed by analysis and never installed as the UI texture.
     pub fn from_rgba8(width: usize, height: usize, rgba: &[u8]) -> Option<Self> {
         let expected = width.checked_mul(height)?.checked_mul(4)?;
         if rgba.len() != expected {
