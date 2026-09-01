@@ -13,6 +13,7 @@ mod edit;
 mod error;
 mod export;
 mod image;
+mod light;
 mod orientation;
 mod output;
 mod pipeline;
@@ -49,6 +50,7 @@ pub use image::{
     BayerPattern, CfaColor, DisplayRgbImage, DisplayTransfer, Halo, ImageRegion, LinearRgbImage,
     LinearRgbSpace, MosaicImage,
 };
+pub use light::{LIGHT_TONE_LUT_SIZE, LightToneLut};
 pub use orientation::OrientationMap;
 pub use output::{paths_refer_to_same_file, write_output_bytes};
 pub use pipeline::{

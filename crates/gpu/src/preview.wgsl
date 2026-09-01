@@ -37,6 +37,9 @@ var display_srgb: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(3)
 var<uniform> parameters: PreviewParameters;
 
+@group(0) @binding(4)
+var<storage, read> light_tone_lut: array<f32, 4096>;
+
 const LUMINANCE_RATIO_TRANSITION: f32 = 0.02;
 
 fn source_coordinate(output: vec2<u32>) -> vec2<u32> {
@@ -99,19 +102,17 @@ fn apply_luminance_delta(pixel: vec3<f32>, current: f32, desired: f32) -> vec3<f
 
 fn apply_light_tone(pixel: vec3<f32>) -> vec3<f32> {
     let current = dot(pixel, vec3<f32>(0.2627, 0.6780, 0.0593));
-    let normalized = clamp(current, 0.0, 1.0);
-    let shadow_weight = 1.0 - smoothstep(0.0, 0.55, normalized);
-    let highlight_weight = smoothstep(0.45, 1.0, normalized);
-    let black_weight = 1.0 - smoothstep(0.0, 0.30, normalized);
-    let white_weight = smoothstep(0.70, 1.0, normalized);
-    let delta = parameters.shadows * 0.25 * shadow_weight
-        + parameters.highlights * 0.25 * highlight_weight
-        + parameters.blacks * 0.15 * black_weight
-        + parameters.whites * 0.15 * white_weight;
-    if delta == 0.0 {
+    if current < 0.0 || current > 1.0 {
         return pixel;
     }
-    return apply_luminance_delta(pixel, current, current + delta);
+    let position = current * 4095.0;
+    let lower = u32(floor(position));
+    let upper = min(lower + 1u, 4095u);
+    let desired = mix(light_tone_lut[lower], light_tone_lut[upper], position - f32(lower));
+    if desired == current {
+        return pixel;
+    }
+    return apply_luminance_delta(pixel, current, desired);
 }
 
 fn tone_curve_value(input: f32) -> f32 {
@@ -174,8 +175,7 @@ fn develop_preview(@builtin(global_invocation_id) invocation: vec3<u32>) {
         dot(parameters.camera_to_rec2020_row2.xyz, balanced),
     );
     let exposed = base * parameters.exposure_gain;
-    let contrasted = vec3<f32>(0.18) + (exposed - vec3<f32>(0.18)) * parameters.contrast_gain;
-    let toned = apply_tone_curve(apply_light_tone(contrasted));
+    let toned = apply_tone_curve(apply_light_tone(exposed));
     let luminance = dot(toned, vec3<f32>(0.2627, 0.6780, 0.0593));
     let saturation = parameters.saturation
         * (1.0 + parameters.vibrance * (1.0 - color_saturation(toned, luminance)));

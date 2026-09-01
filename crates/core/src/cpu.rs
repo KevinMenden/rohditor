@@ -10,12 +10,11 @@ use crate::color::{
 use crate::image::{allocate_zeroed_f32, allocate_zeroed_u8, allocate_zeroed_u16};
 use crate::{
     BayerPattern, CancellationToken, CfaColor, CropPolicy, DisplayRgbImage, DisplayTransfer,
-    DitherMode, EditRecipe, ImageRegion, LinearRgbImage, LinearRgbSpace, MosaicImage,
+    DitherMode, EditRecipe, ImageRegion, LightToneLut, LinearRgbImage, LinearRgbSpace, MosaicImage,
     OrientationMap, OutputPolicy, PipelineError, TEMPERATURE_RANGE, TINT_RANGE,
     WHITE_BALANCE_MULTIPLIER_RANGE, WhiteBalance, WhiteBalanceGains,
 };
 
-const CONTRAST_PIVOT: f32 = 0.18;
 const REC2020_LUMINANCE: [f32; 3] = [0.2627, 0.6780, 0.0593];
 // Blend into additive luminance changes near black instead of allowing a
 // ratio to magnify tiny numerical differences. The continuous transition also
@@ -392,10 +391,11 @@ pub(crate) fn apply_white_balance_cancellable(
 
 /// Apply global scene-linear adjustments in their documented fixed order.
 ///
-/// Exposure is `2^EV`. Contrast is a linear slope of `2^contrast` around 18%
-/// gray. The tonal controls move luminance while scaling the RGB triplet to
-/// preserve its hue. Saturation and vibrance then operate around Rec.2020
-/// luminance. No stage clips the scene-linear working image.
+/// Exposure is `2^EV`. The remaining Light controls share one bounded,
+/// monotonic luminance LUT with a protected toe and shoulder. Tonal changes
+/// scale the RGB triplet where safe to preserve chromaticity. Saturation and
+/// vibrance then operate around Rec.2020 luminance. Negative and HDR working
+/// samples remain available through the tonal LUT's identity extension.
 pub fn apply_adjustments(
     image: &mut LinearRgbImage<f32>,
     recipe: &EditRecipe,
@@ -426,7 +426,6 @@ pub(crate) fn apply_adjustments_cancellable(
     require_space(image, LinearRgbSpace::Rec2020D65)?;
     recipe.validate()?;
     let exposure_gain = recipe.light.exposure_ev.exp2();
-    let contrast_gain = recipe.light.contrast.exp2();
     let width_samples = image.width() * 3;
     let row_stride = image.row_stride();
     let light = recipe.light.clone();
@@ -435,10 +434,12 @@ pub(crate) fn apply_adjustments_cancellable(
     // checking all neutral controls for every pixel. This is especially
     // useful for the common global-adjustment path, where HSL and grading are
     // normally neutral but the image still contains millions of pixels.
-    let has_light_tone = light.highlights != 0.0
+    let has_light_tone = light.contrast != 0.0
+        || light.highlights != 0.0
         || light.shadows != 0.0
         || light.whites != 0.0
         || light.blacks != 0.0;
+    let light_tone_lut = has_light_tone.then(|| LightToneLut::new(&light));
     let has_tone_curve = light.tone_curve.shadows != 0.0
         || light.tone_curve.darks != 0.0
         || light.tone_curve.lights != 0.0
@@ -460,13 +461,8 @@ pub(crate) fn apply_adjustments_cancellable(
                         *value *= exposure_gain;
                     }
                 }
-                if light.contrast != 0.0 {
-                    for value in pixel.iter_mut() {
-                        *value = CONTRAST_PIVOT + (*value - CONTRAST_PIVOT) * contrast_gain;
-                    }
-                }
-                if has_light_tone {
-                    apply_light_tone(pixel, &light);
+                if let Some(light_tone_lut) = &light_tone_lut {
+                    apply_light_tone(pixel, light_tone_lut);
                 }
                 if has_tone_curve {
                     apply_tone_curve(pixel, &light.tone_curve);
@@ -495,25 +491,13 @@ pub(crate) fn apply_adjustments_cancellable(
     Ok(())
 }
 
-fn apply_light_tone(pixel: &mut [f32], light: &crate::LightAdjustments) {
-    if light.highlights == 0.0 && light.shadows == 0.0 && light.whites == 0.0 && light.blacks == 0.0
-    {
-        return;
-    }
+fn apply_light_tone(pixel: &mut [f32], light_tone_lut: &LightToneLut) {
     let current = luminance(pixel);
-    let normalized = current.clamp(0.0, 1.0);
-    let shadow_weight = 1.0 - smoothstep(0.0, 0.55, normalized);
-    let highlight_weight = smoothstep(0.45, 1.0, normalized);
-    let black_weight = 1.0 - smoothstep(0.0, 0.30, normalized);
-    let white_weight = smoothstep(0.70, 1.0, normalized);
-    let delta = light.shadows * 0.25 * shadow_weight
-        + light.highlights * 0.25 * highlight_weight
-        + light.blacks * 0.15 * black_weight
-        + light.whites * 0.15 * white_weight;
-    if delta == 0.0 {
+    let target = light_tone_lut.sample(current);
+    if !target.is_finite() || (target - current).abs() <= f32::EPSILON {
         return;
     }
-    apply_luminance_delta(pixel, current, current + delta);
+    apply_luminance_delta(pixel, current, target);
 }
 
 fn apply_tone_curve(pixel: &mut [f32], curve: &crate::ToneCurve) {
@@ -1468,6 +1452,7 @@ mod tests {
 
     #[test]
     fn contrast_pivot_and_saturation_grayscale_are_stable() {
+        const CONTRAST_PIVOT: f32 = 0.18;
         let mut image = LinearRgbImage::new(
             2,
             1,
@@ -1483,7 +1468,9 @@ mod tests {
         recipe.light.contrast = 1.0;
         recipe.color.saturation = 2.0;
         apply_adjustments(&mut image, &recipe).expect("valid adjustments");
-        assert_eq!(image.pixel(0, 0), Some(&[CONTRAST_PIVOT; 3][..]));
+        for value in image.pixel(0, 0).expect("pivot pixel") {
+            assert!((*value - CONTRAST_PIVOT).abs() < 1.0e-6);
+        }
         let gray = image.pixel(1, 0).expect("second pixel");
         assert!((gray[0] - gray[1]).abs() < 1.0e-6);
         assert!((gray[1] - gray[2]).abs() < 1.0e-6);
@@ -1631,18 +1618,17 @@ mod tests {
     }
 
     #[test]
-    fn tonal_crossing_uses_an_additive_transition_without_global_sign_flip() {
-        let mut image =
-            LinearRgbImage::new(1, 1, 3, LinearRgbSpace::Rec2020D65, vec![-0.4, -0.2, -0.1])
-                .expect("valid image");
+    fn light_lut_preserves_negative_working_values_without_sign_flip() {
+        let source = vec![-0.4, -0.2, -0.1];
+        let mut image = LinearRgbImage::new(1, 1, 3, LinearRgbSpace::Rec2020D65, source.clone())
+            .expect("valid image");
         let mut recipe = EditRecipe::default();
         recipe.light.shadows = 1.0;
 
         apply_adjustments(&mut image, &recipe).expect("valid tonal adjustment");
         let pixel = image.pixel(0, 0).expect("pixel remains present");
         assert!(pixel.iter().all(|value| value.is_finite()));
-        assert!(pixel[0] < 0.0);
-        assert!(pixel[1] > 0.0);
+        assert_eq!(pixel, source);
     }
 
     #[test]
