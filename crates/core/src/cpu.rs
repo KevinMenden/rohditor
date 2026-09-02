@@ -1412,7 +1412,7 @@ mod tests {
             )
             .expect("demosaic succeeds");
             for pixel in rgb.data().as_chunks::<3>().0 {
-                assert_eq!(pixel, [0.2, 0.4, 0.8]);
+                assert_eq!(*pixel, [0.2, 0.4, 0.8]);
             }
         }
     }
