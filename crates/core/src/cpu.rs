@@ -891,8 +891,7 @@ fn render_display_srgb8_dithered_cancellable(
     output.par_chunks_mut(row_stride).enumerate().try_for_each(
         |(output_y, output_row)| -> Result<(), PipelineError> {
             cancellation.checkpoint()?;
-            for (output_x, destination) in
-                output_row.as_chunks_mut::<3>().0.iter_mut().enumerate()
+            for (output_x, destination) in output_row.as_chunks_mut::<3>().0.iter_mut().enumerate()
             {
                 let (source_x, source_y) =
                     orientation_map.source_coordinate_in_bounds(output_x, output_y);
@@ -959,8 +958,7 @@ pub fn render_display_srgb16(
         .par_chunks_mut(row_stride)
         .enumerate()
         .for_each(|(output_y, output_row)| {
-            for (output_x, destination) in
-                output_row.as_chunks_mut::<3>().0.iter_mut().enumerate()
+            for (output_x, destination) in output_row.as_chunks_mut::<3>().0.iter_mut().enumerate()
             {
                 let (source_x, source_y) =
                     orientation_map.source_coordinate_in_bounds(output_x, output_y);

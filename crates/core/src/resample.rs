@@ -64,8 +64,7 @@ pub(crate) fn resize_area_cancellable(
         .try_for_each(|(source_y, output_row)| -> Result<(), PipelineError> {
             cancellation.checkpoint()?;
             let source_row_start = source_y * image.row_stride();
-            for (target_x, destination) in
-                output_row.as_chunks_mut::<3>().0.iter_mut().enumerate()
+            for (target_x, destination) in output_row.as_chunks_mut::<3>().0.iter_mut().enumerate()
             {
                 let sample = &horizontal_samples[target_x];
                 for (offset, &weight) in sample.weights.iter().enumerate() {
