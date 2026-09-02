@@ -2843,6 +2843,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rohditor-demosaic"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "rayon",
+ "rohditor-image",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "rohditor-desktop"
 version = "0.1.0"
 dependencies = [
@@ -2862,16 +2872,6 @@ dependencies = [
  "tracing-subscriber",
  "wgpu",
  "winit",
-]
-
-[[package]]
-name = "rohditor-demosaic"
-version = "0.1.0"
-dependencies = [
- "criterion",
- "rayon",
- "rohditor-image",
- "thiserror 2.0.20",
 ]
 
 [[package]]
