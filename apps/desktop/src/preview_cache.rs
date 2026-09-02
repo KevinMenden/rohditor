@@ -2,10 +2,13 @@ use std::mem::size_of;
 use std::sync::Arc;
 
 use rohditor_core::{
-    CpuPreviewWorkspace, CropPolicy, DemosaicAlgorithm, DemosaicedBase, DisplayRgbImage,
-    EditRecipe, MemoryEstimate, OutputPolicy, PreviewOptions, ReconstructedPreview, WhiteBalance,
+    CpuPreviewWorkspace, CropPolicy, DemosaicedBase, MemoryEstimate, OutputPolicy, PreviewOptions,
+    ReconstructedPreview,
 };
-use rohditor_raw::{RawFrame, RawOrientation, SourceIdentity};
+use rohditor_demosaic::DemosaicAlgorithm;
+use rohditor_edit::{EditRecipe, WhiteBalance};
+use rohditor_image::{DisplayRgbImage, Orientation};
+use rohditor_raw::{RawFrame, SourceIdentity};
 
 /// Explicit keys for the four preview cache levels defined in the roadmap.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,7 +169,7 @@ struct AdjustedPreviewKey {
     vibrance_bits: u32,
     hsl_bits: Vec<u32>,
     grading_bits: Vec<u32>,
-    orientation: RawOrientation,
+    orientation: Orientation,
     output_policy: OutputPolicy,
 }
 

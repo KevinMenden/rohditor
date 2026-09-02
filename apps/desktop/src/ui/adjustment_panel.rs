@@ -1,5 +1,6 @@
 use eframe::egui;
-use rohditor_core::{Histogram, ToneCurve, evaluate_tone_curve};
+use rohditor_core::{Histogram, evaluate_tone_curve};
+use rohditor_edit::ToneCurve;
 
 use super::PickerMode;
 use super::theme::{self, colors, metrics};
@@ -262,7 +263,7 @@ fn show_tone_curve_controls(
         rect,
         metrics::RADIUS,
         colors::FIELD,
-        egui::Stroke::new(1.0, colors::BORDER),
+        egui::Stroke::new(1.0_f32, colors::BORDER),
         egui::StrokeKind::Inside,
     );
     for fraction in [0.25_f32, 0.5, 0.75] {
@@ -271,17 +272,17 @@ fn show_tone_curve_controls(
         painter.vline(
             x,
             rect.top()..=rect.bottom(),
-            egui::Stroke::new(1.0, colors::BORDER.gamma_multiply(0.55)),
+            egui::Stroke::new(1.0_f32, colors::BORDER.gamma_multiply(0.55)),
         );
         painter.hline(
             rect.left()..=rect.right(),
             y,
-            egui::Stroke::new(1.0, colors::BORDER.gamma_multiply(0.55)),
+            egui::Stroke::new(1.0_f32, colors::BORDER.gamma_multiply(0.55)),
         );
     }
     painter.line_segment(
         [rect.left_bottom(), rect.right_top()],
-        egui::Stroke::new(1.0, colors::TEXT_DISABLED),
+        egui::Stroke::new(1.0_f32, colors::TEXT_DISABLED),
     );
     let curve_points = (0..=64)
         .map(|index| {
@@ -291,7 +292,7 @@ fn show_tone_curve_controls(
         .collect::<Vec<_>>();
     painter.add(egui::Shape::line(
         curve_points,
-        egui::Stroke::new(2.0, colors::ACCENT_HOVER),
+        egui::Stroke::new(2.0_f32, colors::ACCENT_HOVER),
     ));
 
     const CONTROL_INPUTS: [f32; 4] = [0.12, 0.35, 0.65, 0.88];
@@ -334,7 +335,7 @@ fn show_tone_curve_controls(
         }
         let visuals = ui.style().interact(&response);
         painter.circle_filled(point, 5.0, visuals.fg_stroke.color);
-        painter.circle_stroke(point, 6.0, egui::Stroke::new(1.0, colors::FIELD));
+        painter.circle_stroke(point, 6.0, egui::Stroke::new(1.0_f32, colors::FIELD));
     }
     ui.label(
         egui::RichText::new("Drag points · double-click a point to reset")
@@ -436,7 +437,7 @@ fn histogram_canvas(ui: &mut egui::Ui, caption: &str) {
         rect,
         metrics::RADIUS,
         colors::FIELD,
-        egui::Stroke::new(1.0, colors::BORDER),
+        egui::Stroke::new(1.0_f32, colors::BORDER),
         egui::StrokeKind::Inside,
     );
     for fraction in [0.25_f32, 0.5, 0.75] {
@@ -444,7 +445,7 @@ fn histogram_canvas(ui: &mut egui::Ui, caption: &str) {
         ui.painter().vline(
             x,
             rect.top() + 1.0..=rect.bottom() - 1.0,
-            egui::Stroke::new(1.0, colors::BORDER.gamma_multiply(0.45)),
+            egui::Stroke::new(1.0_f32, colors::BORDER.gamma_multiply(0.45)),
         );
     }
     ui.painter().text(
@@ -463,7 +464,7 @@ fn histogram_canvas_data(ui: &mut egui::Ui, histogram: &Histogram) {
         rect,
         metrics::RADIUS,
         colors::FIELD,
-        egui::Stroke::new(1.0, colors::BORDER),
+        egui::Stroke::new(1.0_f32, colors::BORDER),
         egui::StrokeKind::Inside,
     );
     for fraction in [0.25_f32, 0.5, 0.75] {
@@ -471,7 +472,7 @@ fn histogram_canvas_data(ui: &mut egui::Ui, histogram: &Histogram) {
         ui.painter().vline(
             x,
             rect.top() + 1.0..=rect.bottom() - 1.0,
-            egui::Stroke::new(1.0, colors::BORDER.gamma_multiply(0.45)),
+            egui::Stroke::new(1.0_f32, colors::BORDER.gamma_multiply(0.45)),
         );
     }
     let vertical_scale = histogram_vertical_scale(histogram);
@@ -506,7 +507,7 @@ fn histogram_canvas_data(ui: &mut egui::Ui, histogram: &Histogram) {
             .collect::<Vec<_>>();
         ui.painter().add(egui::Shape::line(
             points,
-            egui::Stroke::new(1.0, color.gamma_multiply(0.8)),
+            egui::Stroke::new(1.0_f32, color.gamma_multiply(0.8)),
         ));
     }
 }
@@ -905,7 +906,7 @@ fn color_swatch(
         ui.painter().circle_stroke(
             rect.center(),
             11.5,
-            egui::Stroke::new(2.0, colors::ACCENT_HOVER),
+            egui::Stroke::new(2.0_f32, colors::ACCENT_HOVER),
         );
     }
     ui.painter().circle_filled(rect.center(), 8.0, color);
@@ -925,7 +926,7 @@ fn color_picker_swatch(
         ui.painter().circle_stroke(
             rect.center(),
             11.5,
-            egui::Stroke::new(2.0, colors::ACCENT_HOVER),
+            egui::Stroke::new(2.0_f32, colors::ACCENT_HOVER),
         );
     }
     for (index, color) in channel_colors.into_iter().enumerate() {

@@ -12,14 +12,14 @@ use rawler::imgop::Rect;
 use rawler::rawimage::{RawImage, RawImageData, RawPhotometricInterpretation};
 use rawler::rawsource::RawSource;
 use rawler::tags::{ExifTag, TiffCommonTag};
-use rawler::{Orientation, RawlerError};
+use rawler::{Orientation as RawlerOrientation, RawlerError};
+use rohditor_image::Orientation;
 use tracing::{info_span, warn};
 
 use crate::{
     CameraColorMatrix, CaptureMetadata, CfaPattern, DecoderLimits, EmbeddedPreviewInfo,
     EncodedPreview, EncodedPreviewFormat, ImageRect, LevelPattern, PhotometricInterpretation,
-    RationalValue, RawDecoder, RawError, RawFileInfo, RawFrame, RawOrientation, RawSession,
-    SourceIdentity,
+    RationalValue, RawDecoder, RawError, RawFileInfo, RawFrame, RawSession, SourceIdentity,
 };
 
 /// `rawler` implementation of Rohditor's private decoder boundary.
@@ -592,7 +592,7 @@ fn map_file_info(
         orientation: metadata
             .exif
             .orientation
-            .map(Orientation::from_u16)
+            .map(RawlerOrientation::from_u16)
             .map_or_else(|| map_orientation(image.orientation), map_orientation),
         capture: map_capture_metadata(metadata),
         embedded_preview,
@@ -622,17 +622,17 @@ fn map_photometric(value: &RawPhotometricInterpretation) -> PhotometricInterpret
     }
 }
 
-fn map_orientation(value: Orientation) -> RawOrientation {
+fn map_orientation(value: RawlerOrientation) -> Orientation {
     match value {
-        Orientation::Normal => RawOrientation::Normal,
-        Orientation::HorizontalFlip => RawOrientation::HorizontalFlip,
-        Orientation::Rotate180 => RawOrientation::Rotate180,
-        Orientation::VerticalFlip => RawOrientation::VerticalFlip,
-        Orientation::Transpose => RawOrientation::Transpose,
-        Orientation::Rotate90 => RawOrientation::Rotate90,
-        Orientation::Transverse => RawOrientation::Transverse,
-        Orientation::Rotate270 => RawOrientation::Rotate270,
-        Orientation::Unknown => RawOrientation::Unknown,
+        RawlerOrientation::Normal => Orientation::Normal,
+        RawlerOrientation::HorizontalFlip => Orientation::HorizontalFlip,
+        RawlerOrientation::Rotate180 => Orientation::Rotate180,
+        RawlerOrientation::VerticalFlip => Orientation::VerticalFlip,
+        RawlerOrientation::Transpose => Orientation::Transpose,
+        RawlerOrientation::Rotate90 => Orientation::Rotate90,
+        RawlerOrientation::Transverse => Orientation::Transverse,
+        RawlerOrientation::Rotate270 => Orientation::Rotate270,
+        RawlerOrientation::Unknown => Orientation::Unknown,
     }
 }
 

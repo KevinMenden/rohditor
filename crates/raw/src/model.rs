@@ -1,6 +1,7 @@
 use std::fmt;
 use std::sync::Arc;
 
+use rohditor_image::Orientation;
 use serde::{Deserialize, Serialize};
 
 /// A rectangle in unrotated sensor coordinates.
@@ -27,38 +28,6 @@ pub enum PhotometricInterpretation {
     Cfa { pattern: CfaPattern },
     LinearRaw,
     BlackIsZero,
-}
-
-/// Orientation represented independently of any decoder library.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RawOrientation {
-    Normal,
-    HorizontalFlip,
-    Rotate180,
-    VerticalFlip,
-    Transpose,
-    Rotate90,
-    Transverse,
-    Rotate270,
-    Unknown,
-}
-
-impl fmt::Display for RawOrientation {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let name = match self {
-            Self::Normal => "normal",
-            Self::HorizontalFlip => "horizontal flip",
-            Self::Rotate180 => "rotate 180 degrees",
-            Self::VerticalFlip => "vertical flip",
-            Self::Transpose => "transpose",
-            Self::Rotate90 => "rotate 90 degrees",
-            Self::Transverse => "transverse",
-            Self::Rotate270 => "rotate 270 degrees",
-            Self::Unknown => "unknown",
-        };
-        formatter.write_str(name)
-    }
 }
 
 /// Levels plus the dimensions of their repeating sensor pattern.
@@ -181,7 +150,7 @@ pub struct RawFileInfo {
     pub as_shot_white_balance: [Option<f32>; 4],
     pub xyz_to_camera: [[f32; 3]; 4],
     pub color_matrices: Vec<CameraColorMatrix>,
-    pub orientation: RawOrientation,
+    pub orientation: Orientation,
     pub capture: CaptureMetadata,
     pub embedded_preview: Option<EmbeddedPreviewInfo>,
 }
@@ -221,7 +190,8 @@ pub struct RawFrame {
 
 #[cfg(test)]
 mod tests {
-    use super::{RationalValue, RawOrientation};
+    use super::RationalValue;
+    use rohditor_image::Orientation;
 
     #[test]
     fn zero_denominator_has_no_float_value() {
@@ -236,6 +206,6 @@ mod tests {
 
     #[test]
     fn orientation_has_readable_text() {
-        assert_eq!(RawOrientation::Rotate270.to_string(), "rotate 270 degrees");
+        assert_eq!(Orientation::Rotate270.to_string(), "rotate 270 degrees");
     }
 }

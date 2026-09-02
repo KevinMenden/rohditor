@@ -4,13 +4,12 @@ use std::sync::Arc;
 
 use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
 use rohditor_core::{
-    BayerPattern, CropPolicy, DemosaicAlgorithm, EditRecipe, LinearRgbImage, LinearRgbSpace,
-    MosaicImage, OutputPolicy, WhiteBalanceGains, apply_adjustments, demosaic,
-    normalize_raw_preview, render_display_srgb8,
+    CropPolicy, OutputPolicy, apply_adjustments, normalize_raw_preview, render_display_srgb8,
 };
+use rohditor_edit::EditRecipe;
+use rohditor_image::{LinearRgbImage, LinearRgbSpace, Orientation};
 use rohditor_raw::{
     CaptureMetadata, CfaPattern, LevelPattern, PhotometricInterpretation, RawFileInfo, RawFrame,
-    RawOrientation,
 };
 
 const SENSOR_WIDTH: usize = 6_048;
@@ -34,32 +33,6 @@ fn benchmark_normalization(criterion: &mut Criterion) {
         });
     });
     group.finish();
-}
-
-fn benchmark_demosaic(criterion: &mut Criterion) {
-    for (name, width, height) in [
-        ("preview_2560x1703", PREVIEW_WIDTH, PREVIEW_HEIGHT),
-        ("full_a6400_6000x4000", 6_000, 4_000),
-    ] {
-        let mosaic = representative_mosaic(width, height);
-        let mut group = criterion.benchmark_group(format!("demosaic/{name}"));
-        group.throughput(Throughput::Elements((width * height) as u64));
-        for (algorithm_name, algorithm) in [
-            ("bilinear", DemosaicAlgorithm::Bilinear),
-            ("mhc", DemosaicAlgorithm::MalvarHeCutler),
-        ] {
-            group.bench_function(algorithm_name, |bencher| {
-                bencher.iter(|| {
-                    must(demosaic(
-                        black_box(&mosaic),
-                        WhiteBalanceGains::identity(),
-                        algorithm,
-                    ))
-                });
-            });
-        }
-        group.finish();
-    }
 }
 
 fn benchmark_adjustments(criterion: &mut Criterion) {
@@ -124,7 +97,7 @@ fn benchmark_output_conversion(criterion: &mut Criterion) {
         bencher.iter(|| {
             must(render_display_srgb8(
                 black_box(&image),
-                RawOrientation::Normal,
+                Orientation::Normal,
                 OutputPolicy::ClipToSrgb,
             ))
         });
@@ -142,20 +115,6 @@ fn representative_raw_frame() -> RawFrame {
         row_stride: SENSOR_WIDTH,
         mosaic: Arc::from(mosaic),
     }
-}
-
-fn representative_mosaic(width: usize, height: usize) -> MosaicImage<f32> {
-    let samples = width * height;
-    let data = (0..samples)
-        .map(|index| (index % 1_024) as f32 / 1_023.0)
-        .collect();
-    must(MosaicImage::new(
-        width,
-        height,
-        width,
-        BayerPattern::Rggb,
-        data,
-    ))
 }
 
 fn representative_linear_image() -> LinearRgbImage<f32> {
@@ -204,7 +163,7 @@ fn raw_info(width: usize, height: usize) -> RawFileInfo {
         as_shot_white_balance: [Some(1.0); 4],
         xyz_to_camera: [[0.0; 3]; 4],
         color_matrices: Vec::new(),
-        orientation: RawOrientation::Normal,
+        orientation: Orientation::Normal,
         capture: CaptureMetadata::default(),
         embedded_preview: None,
     }
@@ -220,7 +179,6 @@ fn must<T, E: Display>(result: Result<T, E>) -> T {
 criterion_group!(
     benches,
     benchmark_normalization,
-    benchmark_demosaic,
     benchmark_adjustments,
     benchmark_output_conversion
 );

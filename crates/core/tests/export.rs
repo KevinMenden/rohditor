@@ -6,12 +6,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use image::{ColorType, ImageDecoder, ImageReader};
 use rohditor_core::{
-    DisplayRgbImage, DisplayTransfer, DitherMode, ExportFormat, ExportImage, ExportMetadataPolicy,
-    ExportSettings, PngBitDepth, export_image, paths_refer_to_same_file, write_output_bytes,
+    DitherMode, ExportFormat, ExportImage, ExportMetadataPolicy, ExportSettings, PngBitDepth,
+    export_image, paths_refer_to_same_file, write_output_bytes,
 };
+use rohditor_image::{DisplayRgbImage, DisplayTransfer, Orientation};
 use rohditor_raw::{
     CameraColorMatrix, CaptureMetadata, CfaPattern, LevelPattern, PhotometricInterpretation,
-    RationalValue, RawFileInfo, RawOrientation,
+    RationalValue, RawFileInfo,
 };
 
 #[test]
@@ -344,7 +345,7 @@ fn source_info() -> RawFileInfo {
             illuminant: "D65".to_owned(),
             values: vec![1.0; 9],
         }],
-        orientation: RawOrientation::Rotate270,
+        orientation: Orientation::Rotate270,
         capture: CaptureMetadata {
             iso: Some(640),
             exposure_time: Some(RationalValue {

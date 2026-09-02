@@ -1,4 +1,4 @@
-use crate::DisplayRgbImage;
+use rohditor_image::DisplayRgbImage;
 
 const HISTOGRAM_BINS: usize = 256;
 
@@ -23,7 +23,7 @@ impl Histogram {
     pub fn from_display_rgb8(image: &DisplayRgbImage<u8>) -> Self {
         let mut histogram = Self::default();
         for row in image.data().chunks(image.row_stride()).take(image.height()) {
-            for pixel in row[..image.width() * 3].chunks_exact(3) {
+            for pixel in row[..image.width() * 3].as_chunks::<3>().0 {
                 histogram.add_pixel(pixel[0], pixel[1], pixel[2]);
             }
         }
@@ -41,7 +41,7 @@ impl Histogram {
             return None;
         }
         let mut histogram = Self::default();
-        for pixel in rgba.chunks_exact(4) {
+        for pixel in rgba.as_chunks::<4>().0 {
             histogram.add_pixel(pixel[0], pixel[1], pixel[2]);
         }
         Some(histogram)
@@ -101,7 +101,7 @@ impl Default for Histogram {
 #[cfg(test)]
 mod tests {
     use super::Histogram;
-    use crate::{DisplayRgbImage, DisplayTransfer};
+    use rohditor_image::{DisplayRgbImage, DisplayTransfer};
 
     #[test]
     fn histogram_counts_channels_luminance_and_clipping() {

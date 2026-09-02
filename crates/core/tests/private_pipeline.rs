@@ -1,10 +1,11 @@
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
-use rohditor_core::{
-    CancellationToken, CpuPipeline, DemosaicAlgorithm, EditRecipe, PreviewOptions, RenderOptions,
-};
-use rohditor_raw::{RawDecoder, RawOrientation, RawlerDecoder};
+use rohditor_core::{CancellationToken, CpuPipeline, PreviewOptions, RenderOptions};
+use rohditor_demosaic::DemosaicAlgorithm;
+use rohditor_edit::EditRecipe;
+use rohditor_image::Orientation;
+use rohditor_raw::{RawDecoder, RawlerDecoder};
 
 const SAMPLES: [&str; 6] = [
     "DSC00851.ARW",
@@ -43,7 +44,7 @@ fn neutral_recipe_develops_every_private_sample_deterministically() -> Result<()
             let frame = decoder.decode(&path)?;
             let orientation = frame.info.orientation;
             let result = pipeline.render(&frame, &recipe, options)?;
-            let expected_dimensions = if orientation == RawOrientation::Rotate270 {
+            let expected_dimensions = if orientation == Orientation::Rotate270 {
                 (4_000, 6_000)
             } else {
                 (6_000, 4_000)
@@ -63,7 +64,7 @@ fn neutral_recipe_develops_every_private_sample_deterministically() -> Result<()
                 preview.memory.estimated_peak_bytes < PHASE_9_PREVIEW_PEAK_LIMIT_BYTES,
                 "{name} {algorithm_name} preview exceeded the Phase 9 transient-memory budget"
             );
-            let expected_preview_dimensions = if orientation == RawOrientation::Rotate270 {
+            let expected_preview_dimensions = if orientation == Orientation::Rotate270 {
                 (1_707, 2_560)
             } else {
                 (2_560, 1_707)

@@ -1,4 +1,4 @@
-//! Rohditor-owned editor-domain types and deterministic CPU reference pipeline.
+//! Rohditor's deterministic CPU reference pipeline and processing orchestration.
 //!
 //! Sensor mosaics, scene-linear RGB, and display-encoded RGB deliberately use
 //! distinct public types. The CPU implementation in this crate is the behavior
@@ -9,12 +9,8 @@ mod cancel;
 mod color;
 mod cpu;
 mod demosaic;
-mod edit;
 mod error;
 mod export;
-mod image;
-mod light;
-mod orientation;
 mod output;
 mod pipeline;
 mod resample;
@@ -32,27 +28,12 @@ pub use cpu::{
     render_display_srgb8, render_display_srgb8_dithered, render_display_srgb16,
     white_balance_gains, white_balance_gains_from_calibration,
 };
-pub use demosaic::{DemosaicAlgorithm, MALVAR_HE_CUTLER_HALO, WhiteBalanceGains, demosaic};
-pub use edit::{
-    BLACKS_RANGE, COLOR_GRADING_RANGE, CONTRAST_RANGE, ColorAdjustments, ColorGradingAdjustments,
-    EDIT_RECIPE_SCHEMA_VERSION, EXPOSURE_EV_RANGE, EditRecipe, GeometryAdjustments,
-    HIGHLIGHTS_RANGE, HSL_CHANNEL_COUNT, HSL_HUE_RANGE, HSL_LUMINANCE_RANGE, HSL_SATURATION_RANGE,
-    HslAdjustments, HslChannelAdjustments, LightAdjustments, ParameterRange, SATURATION_RANGE,
-    SHADOWS_RANGE, TEMPERATURE_RANGE, TINT_RANGE, TONE_CURVE_RANGE, ToneCurve, VIBRANCE_RANGE,
-    WHITE_BALANCE_MULTIPLIER_RANGE, WHITES_RANGE, WhiteBalance,
-};
 pub use error::PipelineError;
 pub use export::{
     DitherMode, ExportError, ExportFormat, ExportImage, ExportMetadataPolicy, ExportReport,
     ExportSettings, JPEG_QUALITY_DEFAULT, JPEG_QUALITY_MAX, JPEG_QUALITY_MIN, OutputBitDepth,
     PngBitDepth, export_image,
 };
-pub use image::{
-    BayerPattern, CfaColor, DisplayRgbImage, DisplayTransfer, Halo, ImageRegion, LinearRgbImage,
-    LinearRgbSpace, MosaicImage,
-};
-pub use light::{LIGHT_TONE_LUT_SIZE, LightToneLut};
-pub use orientation::OrientationMap;
 pub use output::{paths_refer_to_same_file, write_output_bytes};
 pub use pipeline::{
     CPU_WORKING_SET_LIMIT_BYTES, CpuPipeline, CpuPreviewWorkspace, CropPolicy,

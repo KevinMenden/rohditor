@@ -4,13 +4,14 @@ use std::time::Duration;
 
 use rayon::ThreadPoolBuilder;
 use rohditor_core::{
-    CancellationToken, CpuPipeline, CropPolicy, DitherMode, EditRecipe, ExportImage,
-    LinearRgbSpace, OutputBitDepth, PipelineError, PreviewOptions, RenderOptions, WhiteBalance,
-    camera_color_transform,
+    CancellationToken, CpuPipeline, CropPolicy, DitherMode, ExportImage, OutputBitDepth,
+    PipelineError, PreviewOptions, RenderOptions, camera_color_transform,
 };
+use rohditor_edit::{EditRecipe, WhiteBalance};
+use rohditor_image::{BayerPattern, CfaColor, LinearRgbSpace, Orientation};
 use rohditor_raw::{
     CameraColorMatrix, CaptureMetadata, CfaPattern, ImageRect, LevelPattern,
-    PhotometricInterpretation, RawFileInfo, RawFrame, RawOrientation,
+    PhotometricInterpretation, RawFileInfo, RawFrame,
 };
 
 #[test]
@@ -272,16 +273,16 @@ fn synthetic_rggb_frame() -> RawFrame {
     let height = 6;
     let black = [64.0_f32, 80.0, 96.0, 112.0];
     let white = [1064.0_f32, 1080.0, 1096.0, 1112.0];
-    let pattern = rohditor_core::BayerPattern::Rggb;
+    let pattern = BayerPattern::Rggb;
     let mut samples = Vec::with_capacity(width * height);
     for y in 0..height {
         for x in 0..width {
             let phase = (y & 1) * 2 + (x & 1);
             let gradient = (x + y) as f32 / (width + height) as f32 * 0.2;
             let normalized = match pattern.color_at(x, y) {
-                rohditor_core::CfaColor::Red => 0.2 + gradient,
-                rohditor_core::CfaColor::Green => 0.35 + gradient,
-                rohditor_core::CfaColor::Blue => 0.5 + gradient,
+                CfaColor::Red => 0.2 + gradient,
+                CfaColor::Green => 0.35 + gradient,
+                CfaColor::Blue => 0.5 + gradient,
             };
             samples
                 .push((black[phase] + normalized * (white[phase] - black[phase])).round() as u16);
@@ -335,7 +336,7 @@ fn synthetic_rggb_frame() -> RawFrame {
                 illuminant: "D65".to_owned(),
                 values: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
             }],
-            orientation: RawOrientation::Rotate270,
+            orientation: Orientation::Rotate270,
             capture: CaptureMetadata::default(),
             embedded_preview: None,
         },

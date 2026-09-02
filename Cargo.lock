@@ -2814,6 +2814,9 @@ dependencies = [
  "clap",
  "image",
  "rohditor-core",
+ "rohditor-demosaic",
+ "rohditor-edit",
+ "rohditor-image",
  "rohditor-raw",
  "serde",
  "serde_json",
@@ -2829,11 +2832,24 @@ dependencies = [
  "criterion",
  "image",
  "rayon",
+ "rohditor-demosaic",
+ "rohditor-edit",
+ "rohditor-image",
  "rohditor-raw",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
  "tracing",
+]
+
+[[package]]
+name = "rohditor-demosaic"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "rayon",
+ "rohditor-image",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -2845,7 +2861,10 @@ dependencies = [
  "image",
  "rfd",
  "rohditor-core",
+ "rohditor-demosaic",
+ "rohditor-edit",
  "rohditor-gpu",
+ "rohditor-image",
  "rohditor-raw",
  "serde",
  "serde_json",
@@ -2856,6 +2875,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rohditor-edit"
+version = "0.1.0"
+dependencies = [
+ "rohditor-image",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "rohditor-gpu"
 version = "0.1.0"
 dependencies = [
@@ -2863,9 +2892,20 @@ dependencies = [
  "half",
  "pollster",
  "rohditor-core",
+ "rohditor-demosaic",
+ "rohditor-edit",
+ "rohditor-image",
  "rohditor-raw",
  "thiserror 2.0.20",
  "wgpu",
+]
+
+[[package]]
+name = "rohditor-image"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -2874,6 +2914,7 @@ version = "0.1.0"
 dependencies = [
  "image",
  "rawler",
+ "rohditor-image",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
