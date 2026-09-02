@@ -13,5 +13,5 @@ pub use model::{
     EncodedPreviewFormat, ImageRect, LevelPattern, PhotometricInterpretation, RationalValue,
     RawFileInfo, RawFrame, SourceIdentity,
 };
-pub use rohditor_image::Orientation as RawOrientation;
 pub use rawler_adapter::RawlerDecoder;
+pub use rohditor_image::Orientation as RawOrientation;

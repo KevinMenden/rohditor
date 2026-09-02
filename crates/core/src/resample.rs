@@ -1,7 +1,7 @@
 use rayon::prelude::*;
 
-use rohditor_image::allocate_zeroed_f32;
 use crate::{CancellationToken, LinearRgbImage, PipelineError};
+use rohditor_image::allocate_zeroed_f32;
 
 #[derive(Debug)]
 struct AreaSample {
