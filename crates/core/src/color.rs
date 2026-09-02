@@ -1,8 +1,10 @@
 use rayon::prelude::*;
+use rohditor_image::{
+    DisplayRgbImage, DisplayTransfer, LinearRgbImage, LinearRgbSpace, allocate_zeroed_f32,
+};
 use rohditor_raw::{CameraColorMatrix, RawFileInfo};
 
-use crate::{DisplayRgbImage, DisplayTransfer, LinearRgbImage, LinearRgbSpace, PipelineError};
-use rohditor_image::allocate_zeroed_f32;
+use crate::PipelineError;
 
 const D65_WHITE: [f32; 3] = [0.950_455_9, 1.0, 1.089_057_8];
 const D50_WHITE: [f32; 3] = [0.964_22, 1.0, 0.825_21];
@@ -366,7 +368,7 @@ mod tests {
         clip_linear_srgb_for_output, convert_rec2020_to_display_srgb, linear_srgb_to_srgb,
         srgb_to_linear_srgb,
     };
-    use crate::{DisplayTransfer, LinearRgbImage, LinearRgbSpace};
+    use rohditor_image::{DisplayTransfer, LinearRgbImage, LinearRgbSpace};
 
     fn assert_close(actual: f32, expected: f32, tolerance: f32) {
         assert!(

@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use rohditor_core::EditRecipe;
+use rohditor_edit::EditRecipe;
 
 const HISTORY_LIMIT: usize = 100;
 

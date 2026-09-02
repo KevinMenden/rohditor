@@ -9,6 +9,9 @@ publish.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 rohditor-core = { path = "../../crates/core" }
+rohditor-demosaic = { path = "../../crates/demosaic" }
+rohditor-edit = { path = "../../crates/edit" }
+rohditor-image = { path = "../../crates/image" }
 rohditor-raw = { path = "../../crates/raw" }
 serde.workspace = true
 serde_json.workspace = true

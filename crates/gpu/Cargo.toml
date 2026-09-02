@@ -12,6 +12,9 @@ workspace = true
 bytemuck.workspace = true
 half.workspace = true
 rohditor-core = { path = "../core" }
+rohditor-demosaic = { path = "../demosaic" }
+rohditor-edit = { path = "../edit" }
+rohditor-image = { path = "../image" }
 rohditor-raw = { path = "../raw" }
 thiserror.workspace = true
 wgpu.workspace = true

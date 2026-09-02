@@ -5,9 +5,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rohditor_raw::{
     CameraColorMatrix, DecoderLimits, EmbeddedPreviewInfo, EncodedPreviewFormat, ImageRect,
-    LevelPattern, PhotometricInterpretation, RationalValue, RawDecoder, RawError, RawOrientation,
-    RawlerDecoder,
+    LevelPattern, PhotometricInterpretation, RationalValue, RawDecoder, RawError, RawlerDecoder,
 };
+use rohditor_image::Orientation;
 use serde::Deserialize;
 
 const EXPECTATIONS_JSON: &str = include_str!("fixtures/sony_a6400_expectations.json");
@@ -46,7 +46,7 @@ struct SampleExpectation {
     file_name: String,
     source_bits_per_sample: usize,
     as_shot_white_balance: [Option<f32>; 4],
-    orientation: RawOrientation,
+    orientation: Orientation,
     iso: Option<u32>,
     exposure_time: Option<RationalValue>,
     aperture: Option<RationalValue>,

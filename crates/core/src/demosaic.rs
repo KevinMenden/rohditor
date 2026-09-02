@@ -1,17 +1,9 @@
 //! Pipeline adapter for the independently testable demosaic algorithms.
 
-use crate::{CancellationToken, LinearRgbImage, MosaicImage, PipelineError};
+use rohditor_demosaic::{DemosaicAlgorithm, WhiteBalanceGains};
+use rohditor_image::{LinearRgbImage, MosaicImage};
 
-pub use rohditor_demosaic::{DemosaicAlgorithm, MALVAR_HE_CUTLER_HALO, WhiteBalanceGains};
-
-/// Reconstruct a normalized Bayer mosaic into camera-native linear RGB.
-pub fn demosaic(
-    mosaic: &MosaicImage<f32>,
-    gains: WhiteBalanceGains,
-    algorithm: DemosaicAlgorithm,
-) -> Result<LinearRgbImage<f32>, PipelineError> {
-    rohditor_demosaic::demosaic(mosaic, gains, algorithm).map_err(Into::into)
-}
+use crate::{CancellationToken, PipelineError};
 
 pub(crate) fn demosaic_cancellable(
     mosaic: &MosaicImage<f32>,
@@ -35,7 +27,7 @@ pub(crate) fn demosaic_cancellable(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::BayerPattern;
+    use rohditor_image::BayerPattern;
 
     #[test]
     fn maps_algorithm_cancellation_to_the_pipeline_error() {

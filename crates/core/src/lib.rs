@@ -1,4 +1,4 @@
-//! Rohditor-owned editor-domain types and deterministic CPU reference pipeline.
+//! Rohditor's deterministic CPU reference pipeline and processing orchestration.
 //!
 //! Sensor mosaics, scene-linear RGB, and display-encoded RGB deliberately use
 //! distinct public types. The CPU implementation in this crate is the behavior
@@ -28,7 +28,6 @@ pub use cpu::{
     render_display_srgb8, render_display_srgb8_dithered, render_display_srgb16,
     white_balance_gains, white_balance_gains_from_calibration,
 };
-pub use demosaic::{DemosaicAlgorithm, MALVAR_HE_CUTLER_HALO, WhiteBalanceGains, demosaic};
 pub use error::PipelineError;
 pub use export::{
     DitherMode, ExportError, ExportFormat, ExportImage, ExportMetadataPolicy, ExportReport,
@@ -40,17 +39,4 @@ pub use pipeline::{
     CPU_WORKING_SET_LIMIT_BYTES, CpuPipeline, CpuPreviewWorkspace, CropPolicy,
     DEFAULT_PREVIEW_LONG_EDGE, DemosaicedBase, ExportRenderResult, MemoryEstimate, OutputPolicy,
     PreviewOptions, ReconstructedPreview, RenderOptions, RenderResult, StageTimings,
-};
-pub use rohditor_edit::{
-    BLACKS_RANGE, COLOR_GRADING_RANGE, CONTRAST_RANGE, ColorAdjustments, ColorGradingAdjustments,
-    EDIT_RECIPE_SCHEMA_VERSION, EXPOSURE_EV_RANGE, EditError, EditRecipe, GeometryAdjustments,
-    HIGHLIGHTS_RANGE, HSL_CHANNEL_COUNT, HSL_HUE_RANGE, HSL_LUMINANCE_RANGE, HSL_SATURATION_RANGE,
-    HslAdjustments, HslChannelAdjustments, LightAdjustments, ParameterRange, SATURATION_RANGE,
-    SHADOWS_RANGE, TEMPERATURE_RANGE, TINT_RANGE, TONE_CURVE_RANGE, ToneCurve, VIBRANCE_RANGE,
-    WHITE_BALANCE_MULTIPLIER_RANGE, WHITES_RANGE, WhiteBalance,
-};
-pub use rohditor_edit::{LIGHT_TONE_LUT_SIZE, LightToneLut};
-pub use rohditor_image::{
-    BayerPattern, CfaColor, DisplayRgbImage, DisplayTransfer, Halo, ImageError, ImageRegion,
-    LinearRgbImage, LinearRgbSpace, MosaicImage, OrientationMap,
 };
