@@ -1,7 +1,10 @@
 use rayon::prelude::*;
 
-use super::{MALVAR_HE_CUTLER_HALO, WhiteBalanceGains, bilinear, require_finite_output};
-use crate::{CancellationToken, CfaColor, MosaicImage, PipelineError};
+use super::{
+    CancellationCheck, DemosaicError, MALVAR_HE_CUTLER_HALO, WhiteBalanceGains, bilinear,
+    checkpoint, require_finite_output,
+};
+use rohditor_image::{CfaColor, MosaicImage};
 
 /// MHC uses a two-pixel neighborhood. The initial deterministic border policy
 /// reconstructs this outer band with the bilinear reference implementation.
@@ -37,13 +40,13 @@ const RED_AT_BLUE_OR_BLUE_AT_RED_X16: [[i8; 5]; 5] = [
 pub(super) fn reconstruct(
     mosaic: &MosaicImage<f32>,
     gains: WhiteBalanceGains,
-    cancellation: &CancellationToken,
+    cancellation: &dyn CancellationCheck,
     row_stride: usize,
     output: &mut [f32],
-) -> Result<(), PipelineError> {
+) -> Result<(), DemosaicError> {
     output.par_chunks_mut(row_stride).enumerate().try_for_each(
-        |(y, output_row)| -> Result<(), PipelineError> {
-            cancellation.checkpoint()?;
+        |(y, output_row)| -> Result<(), DemosaicError> {
+            checkpoint(cancellation)?;
             for (x, pixel) in output_row.chunks_exact_mut(3).enumerate() {
                 let mut rgb = if is_border(mosaic, x, y) {
                     bilinear::reconstruct_pixel(mosaic, x, y)
@@ -118,7 +121,7 @@ fn apply_kernel(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::BayerPattern;
+    use rohditor_image::BayerPattern;
 
     #[test]
     fn published_kernel_impulses_have_exact_coefficients() {

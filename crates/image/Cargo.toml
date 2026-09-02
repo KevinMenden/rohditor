@@ -1,20 +1,13 @@
 [package]
-name = "rohditor-raw"
+name = "rohditor-image"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
-image.workspace = true
-rawler.workspace = true
-rohditor-image = { path = "../image" }
 serde.workspace = true
 thiserror.workspace = true
-tracing.workspace = true
-
-[dev-dependencies]
-serde_json.workspace = true
 
 [lints]
 workspace = true

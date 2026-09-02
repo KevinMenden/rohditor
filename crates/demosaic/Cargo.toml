@@ -1,28 +1,20 @@
 [package]
-name = "rohditor-core"
+name = "rohditor-demosaic"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
-bytemuck.workspace = true
-image.workspace = true
 rayon.workspace = true
-rohditor-demosaic = { path = "../demosaic" }
-rohditor-edit = { path = "../edit" }
 rohditor-image = { path = "../image" }
-rohditor-raw = { path = "../raw" }
-serde.workspace = true
 thiserror.workspace = true
-tracing.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
-serde_json.workspace = true
 
 [[bench]]
-name = "pipeline_stages"
+name = "demosaic"
 harness = false
 
 [lints]

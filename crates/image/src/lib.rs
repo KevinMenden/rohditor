@@ -1,4 +1,32 @@
-use crate::PipelineError;
+//! Foundational typed image states and checked buffer-layout primitives.
+
+use thiserror::Error;
+
+mod orientation;
+
+pub use orientation::{Orientation, OrientationMap};
+
+/// Errors produced while constructing or allocating typed image buffers.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum ImageError {
+    #[error("invalid image dimensions {width}x{height} with row stride {row_stride}: {reason}")]
+    InvalidDimensions {
+        width: usize,
+        height: usize,
+        row_stride: usize,
+        reason: String,
+    },
+
+    #[error("could not allocate {elements} image elements")]
+    Allocation { elements: usize },
+
+    #[error("unsupported CFA pattern {name} ({width}x{height})")]
+    UnsupportedCfa {
+        name: String,
+        width: usize,
+        height: usize,
+    },
+}
 
 /// One color site in a Bayer color-filter array.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -10,7 +38,7 @@ pub enum CfaColor {
 
 impl CfaColor {
     #[must_use]
-    pub(crate) const fn channel_index(self) -> usize {
+    pub const fn channel_index(self) -> usize {
         match self {
             Self::Red => 0,
             Self::Green => 1,
@@ -29,7 +57,7 @@ pub enum BayerPattern {
 }
 
 impl BayerPattern {
-    pub(crate) fn parse(name: &str, width: usize, height: usize) -> Result<Self, PipelineError> {
+    pub fn parse(name: &str, width: usize, height: usize) -> Result<Self, ImageError> {
         if width == 2 && height == 2 {
             match name.to_ascii_uppercase().as_str() {
                 "RGGB" => return Ok(Self::Rggb),
@@ -39,7 +67,7 @@ impl BayerPattern {
                 _ => {}
             }
         }
-        Err(PipelineError::UnsupportedCfa {
+        Err(ImageError::UnsupportedCfa {
             name: name.to_owned(),
             width,
             height,
@@ -139,7 +167,7 @@ impl<T> MosaicImage<T> {
         row_stride: usize,
         pattern: BayerPattern,
         data: Vec<T>,
-    ) -> Result<Self, PipelineError> {
+    ) -> Result<Self, ImageError> {
         validate_layout(width, height, row_stride, width, data.len())?;
         Ok(Self {
             width,
@@ -185,7 +213,7 @@ impl<T> MosaicImage<T> {
         (x < self.width && y < self.height).then(|| &self.data[y * self.row_stride + x])
     }
 
-    pub(crate) fn sample(&self, x: usize, y: usize) -> &T {
+    pub fn sample(&self, x: usize, y: usize) -> &T {
         &self.data[y * self.row_stride + x]
     }
 }
@@ -199,7 +227,7 @@ pub enum LinearRgbSpace {
 }
 
 impl LinearRgbSpace {
-    pub(crate) const fn description(self) -> &'static str {
+    pub const fn description(self) -> &'static str {
         match self {
             Self::CameraNative => "camera-native linear RGB",
             Self::Rec2020D65 => "linear Rec.2020/D65",
@@ -225,7 +253,7 @@ impl<T> LinearRgbImage<T> {
         row_stride: usize,
         space: LinearRgbSpace,
         data: Vec<T>,
-    ) -> Result<Self, PipelineError> {
+    ) -> Result<Self, ImageError> {
         let minimum_stride = width.checked_mul(3).ok_or_else(|| {
             invalid_layout(
                 width,
@@ -283,11 +311,11 @@ impl<T> LinearRgbImage<T> {
         Some(&self.data[start..start + 3])
     }
 
-    pub(crate) fn data_mut(&mut self) -> &mut [T] {
+    pub fn data_mut(&mut self) -> &mut [T] {
         &mut self.data
     }
 
-    pub(crate) fn set_space(&mut self, space: LinearRgbSpace) {
+    pub fn set_space(&mut self, space: LinearRgbSpace) {
         self.space = space;
     }
 }
@@ -315,7 +343,7 @@ impl<T> DisplayRgbImage<T> {
         row_stride: usize,
         transfer: DisplayTransfer,
         data: Vec<T>,
-    ) -> Result<Self, PipelineError> {
+    ) -> Result<Self, ImageError> {
         let minimum_stride = width.checked_mul(3).ok_or_else(|| {
             invalid_layout(
                 width,
@@ -374,29 +402,32 @@ impl<T> DisplayRgbImage<T> {
     }
 }
 
-pub(crate) fn allocate_zeroed_f32(elements: usize) -> Result<Vec<f32>, PipelineError> {
+#[doc(hidden)]
+pub fn allocate_zeroed_f32(elements: usize) -> Result<Vec<f32>, ImageError> {
     let mut values = Vec::new();
     values
         .try_reserve_exact(elements)
-        .map_err(|_| PipelineError::Allocation { elements })?;
+        .map_err(|_| ImageError::Allocation { elements })?;
     values.resize(elements, 0.0);
     Ok(values)
 }
 
-pub(crate) fn allocate_zeroed_u8(elements: usize) -> Result<Vec<u8>, PipelineError> {
+#[doc(hidden)]
+pub fn allocate_zeroed_u8(elements: usize) -> Result<Vec<u8>, ImageError> {
     let mut values = Vec::new();
     values
         .try_reserve_exact(elements)
-        .map_err(|_| PipelineError::Allocation { elements })?;
+        .map_err(|_| ImageError::Allocation { elements })?;
     values.resize(elements, 0);
     Ok(values)
 }
 
-pub(crate) fn allocate_zeroed_u16(elements: usize) -> Result<Vec<u16>, PipelineError> {
+#[doc(hidden)]
+pub fn allocate_zeroed_u16(elements: usize) -> Result<Vec<u16>, ImageError> {
     let mut values = Vec::new();
     values
         .try_reserve_exact(elements)
-        .map_err(|_| PipelineError::Allocation { elements })?;
+        .map_err(|_| ImageError::Allocation { elements })?;
     values.resize(elements, 0);
     Ok(values)
 }
@@ -407,7 +438,7 @@ fn validate_layout(
     row_stride: usize,
     minimum_stride: usize,
     actual_elements: usize,
-) -> Result<(), PipelineError> {
+) -> Result<(), ImageError> {
     if width == 0 || height == 0 {
         return Err(invalid_layout(
             width,
@@ -443,8 +474,8 @@ fn validate_layout(
     Ok(())
 }
 
-fn invalid_layout(width: usize, height: usize, row_stride: usize, reason: &str) -> PipelineError {
-    PipelineError::InvalidDimensions {
+fn invalid_layout(width: usize, height: usize, row_stride: usize, reason: &str) -> ImageError {
+    ImageError::InvalidDimensions {
         width,
         height,
         row_stride,

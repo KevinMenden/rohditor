@@ -9,12 +9,8 @@ mod cancel;
 mod color;
 mod cpu;
 mod demosaic;
-mod edit;
 mod error;
 mod export;
-mod image;
-mod light;
-mod orientation;
 mod output;
 mod pipeline;
 mod resample;
@@ -33,9 +29,9 @@ pub use cpu::{
     white_balance_gains, white_balance_gains_from_calibration,
 };
 pub use demosaic::{DemosaicAlgorithm, MALVAR_HE_CUTLER_HALO, WhiteBalanceGains, demosaic};
-pub use edit::{
+pub use rohditor_edit::{
     BLACKS_RANGE, COLOR_GRADING_RANGE, CONTRAST_RANGE, ColorAdjustments, ColorGradingAdjustments,
-    EDIT_RECIPE_SCHEMA_VERSION, EXPOSURE_EV_RANGE, EditRecipe, GeometryAdjustments,
+    EDIT_RECIPE_SCHEMA_VERSION, EXPOSURE_EV_RANGE, EditError, EditRecipe, GeometryAdjustments,
     HIGHLIGHTS_RANGE, HSL_CHANNEL_COUNT, HSL_HUE_RANGE, HSL_LUMINANCE_RANGE, HSL_SATURATION_RANGE,
     HslAdjustments, HslChannelAdjustments, LightAdjustments, ParameterRange, SATURATION_RANGE,
     SHADOWS_RANGE, TEMPERATURE_RANGE, TINT_RANGE, TONE_CURVE_RANGE, ToneCurve, VIBRANCE_RANGE,
@@ -47,12 +43,11 @@ pub use export::{
     ExportSettings, JPEG_QUALITY_DEFAULT, JPEG_QUALITY_MAX, JPEG_QUALITY_MIN, OutputBitDepth,
     PngBitDepth, export_image,
 };
-pub use image::{
+pub use rohditor_image::{
     BayerPattern, CfaColor, DisplayRgbImage, DisplayTransfer, Halo, ImageRegion, LinearRgbImage,
-    LinearRgbSpace, MosaicImage,
+    ImageError, LinearRgbSpace, MosaicImage, OrientationMap,
 };
-pub use light::{LIGHT_TONE_LUT_SIZE, LightToneLut};
-pub use orientation::OrientationMap;
+pub use rohditor_edit::{LIGHT_TONE_LUT_SIZE, LightToneLut};
 pub use output::{paths_refer_to_same_file, write_output_bytes};
 pub use pipeline::{
     CPU_WORKING_SET_LIMIT_BYTES, CpuPipeline, CpuPreviewWorkspace, CropPolicy,

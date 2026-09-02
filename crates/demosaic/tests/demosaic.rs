@@ -1,10 +1,8 @@
 use std::error::Error;
 
 use rayon::ThreadPoolBuilder;
-use rohditor_core::{
-    BayerPattern, CfaColor, DemosaicAlgorithm, MosaicImage, PipelineError, WhiteBalanceGains,
-    demosaic,
-};
+use rohditor_demosaic::{DemosaicAlgorithm, DemosaicError, WhiteBalanceGains, demosaic};
+use rohditor_image::{BayerPattern, CfaColor, ImageError, MosaicImage};
 
 const PATTERNS: [BayerPattern; 4] = [
     BayerPattern::Rggb,
@@ -145,7 +143,7 @@ fn demosaic_rejects_non_finite_mosaic_samples() {
     .expect_err("non-finite normalized input must be rejected");
     assert!(matches!(
         error,
-        PipelineError::NonFiniteImageData {
+        DemosaicError::NonFiniteImageData {
             stage: "demosaicing",
             x: 4,
             y: 3
@@ -189,7 +187,7 @@ fn mosaic_from_rgb(
     height: usize,
     pattern: BayerPattern,
     rgb_at: impl Fn(usize, usize) -> [f32; 3],
-) -> Result<MosaicImage<f32>, PipelineError> {
+) -> Result<MosaicImage<f32>, ImageError> {
     let mut data = Vec::with_capacity(width * height);
     for y in 0..height {
         for x in 0..width {

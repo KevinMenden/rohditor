@@ -1,7 +1,7 @@
 use rayon::prelude::*;
 use rohditor_raw::{CameraColorMatrix, RawFileInfo};
 
-use crate::image::allocate_zeroed_f32;
+use rohditor_image::allocate_zeroed_f32;
 use crate::{DisplayRgbImage, DisplayTransfer, LinearRgbImage, LinearRgbSpace, PipelineError};
 
 const D65_WHITE: [f32; 3] = [0.950_455_9, 1.0, 1.089_057_8];

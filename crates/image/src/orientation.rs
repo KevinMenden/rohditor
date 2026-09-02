@@ -1,10 +1,44 @@
-use rohditor_raw::RawOrientation;
+use std::fmt;
 
-use crate::PipelineError;
+use serde::{Deserialize, Serialize};
+
+use crate::ImageError;
+
+/// Orientation represented independently of any decoder library.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Orientation {
+    Normal,
+    HorizontalFlip,
+    Rotate180,
+    VerticalFlip,
+    Transpose,
+    Rotate90,
+    Transverse,
+    Rotate270,
+    Unknown,
+}
+
+impl fmt::Display for Orientation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            Self::Normal => "normal",
+            Self::HorizontalFlip => "horizontal flip",
+            Self::Rotate180 => "rotate 180 degrees",
+            Self::VerticalFlip => "vertical flip",
+            Self::Transpose => "transpose",
+            Self::Rotate90 => "rotate 90 degrees",
+            Self::Transverse => "transverse",
+            Self::Rotate270 => "rotate 270 degrees",
+            Self::Unknown => "unknown",
+        };
+        formatter.write_str(name)
+    }
+}
 
 /// Coordinate mapping for physically applying one RAW orientation.
 ///
-/// Keeping this mapping in the core crate prevents loading previews, CPU
+/// Keeping this mapping with the image vocabulary prevents loading previews, CPU
 /// output, and future GPU implementations from growing independent EXIF
 /// orientation tables.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13,7 +47,7 @@ pub struct OrientationMap {
     source_height: usize,
     output_width: usize,
     output_height: usize,
-    orientation: RawOrientation,
+    orientation: Orientation,
 }
 
 impl OrientationMap {
@@ -21,15 +55,15 @@ impl OrientationMap {
     ///
     /// # Errors
     ///
-    /// Returns [`PipelineError::InvalidDimensions`] when either source
+    /// Returns [`ImageError::InvalidDimensions`] when either source
     /// dimension is zero.
     pub fn new(
         source_width: usize,
         source_height: usize,
-        orientation: RawOrientation,
-    ) -> Result<Self, PipelineError> {
+        orientation: Orientation,
+    ) -> Result<Self, ImageError> {
         if source_width == 0 || source_height == 0 {
-            return Err(PipelineError::InvalidDimensions {
+            return Err(ImageError::InvalidDimensions {
                 width: source_width,
                 height: source_height,
                 row_stride: 0,
@@ -37,10 +71,10 @@ impl OrientationMap {
             });
         }
         let (output_width, output_height) = match orientation {
-            RawOrientation::Transpose
-            | RawOrientation::Rotate90
-            | RawOrientation::Transverse
-            | RawOrientation::Rotate270 => (source_height, source_width),
+            Orientation::Transpose
+            | Orientation::Rotate90
+            | Orientation::Transverse
+            | Orientation::Rotate270 => (source_height, source_width),
             _ => (source_width, source_height),
         };
         Ok(Self {
@@ -70,26 +104,27 @@ impl OrientationMap {
         Some(self.source_coordinate_in_bounds(output_x, output_y))
     }
 
-    pub(crate) const fn source_coordinate_in_bounds(
+    #[doc(hidden)]
+    pub const fn source_coordinate_in_bounds(
         self,
         output_x: usize,
         output_y: usize,
     ) -> (usize, usize) {
         match self.orientation {
-            RawOrientation::Normal | RawOrientation::Unknown => (output_x, output_y),
-            RawOrientation::HorizontalFlip => (self.source_width - 1 - output_x, output_y),
-            RawOrientation::Rotate180 => (
+            Orientation::Normal | Orientation::Unknown => (output_x, output_y),
+            Orientation::HorizontalFlip => (self.source_width - 1 - output_x, output_y),
+            Orientation::Rotate180 => (
                 self.source_width - 1 - output_x,
                 self.source_height - 1 - output_y,
             ),
-            RawOrientation::VerticalFlip => (output_x, self.source_height - 1 - output_y),
-            RawOrientation::Transpose => (output_y, output_x),
-            RawOrientation::Rotate90 => (output_y, self.source_height - 1 - output_x),
-            RawOrientation::Transverse => (
+            Orientation::VerticalFlip => (output_x, self.source_height - 1 - output_y),
+            Orientation::Transpose => (output_y, output_x),
+            Orientation::Rotate90 => (output_y, self.source_height - 1 - output_x),
+            Orientation::Transverse => (
                 self.source_width - 1 - output_y,
                 self.source_height - 1 - output_x,
             ),
-            RawOrientation::Rotate270 => (self.source_width - 1 - output_y, output_x),
+            Orientation::Rotate270 => (self.source_width - 1 - output_y, output_x),
         }
     }
 }
@@ -100,8 +135,8 @@ mod tests {
 
     #[test]
     fn rejects_empty_images_and_out_of_range_coordinates() {
-        assert!(OrientationMap::new(0, 2, RawOrientation::Normal).is_err());
-        let map = OrientationMap::new(2, 3, RawOrientation::Rotate90).expect("valid map");
+        assert!(OrientationMap::new(0, 2, Orientation::Normal).is_err());
+        let map = OrientationMap::new(2, 3, Orientation::Rotate90).expect("valid map");
         assert_eq!(map.output_dimensions(), (3, 2));
         assert_eq!(map.source_coordinate(0, 0), Some((0, 2)));
         assert_eq!(map.source_coordinate(3, 0), None);

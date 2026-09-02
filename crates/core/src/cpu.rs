@@ -7,7 +7,7 @@ use crate::color::{
     CameraColorTransform, LINEAR_REC2020_TO_XYZ_D65, XYZ_D65_TO_LINEAR_SRGB,
     camera_color_transform, encode_rec2020_for_srgb_output,
 };
-use crate::image::{allocate_zeroed_f32, allocate_zeroed_u8, allocate_zeroed_u16};
+use rohditor_image::{allocate_zeroed_f32, allocate_zeroed_u8, allocate_zeroed_u16};
 use crate::{
     BayerPattern, CancellationToken, CfaColor, CropPolicy, DisplayRgbImage, DisplayTransfer,
     DitherMode, EditRecipe, ImageRegion, LightToneLut, LinearRgbImage, LinearRgbSpace, MosaicImage,

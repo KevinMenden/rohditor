@@ -1,6 +1,7 @@
 use std::fmt;
 use std::sync::Arc;
 
+use rohditor_image::Orientation as RawOrientation;
 use serde::{Deserialize, Serialize};
 
 /// A rectangle in unrotated sensor coordinates.
@@ -27,38 +28,6 @@ pub enum PhotometricInterpretation {
     Cfa { pattern: CfaPattern },
     LinearRaw,
     BlackIsZero,
-}
-
-/// Orientation represented independently of any decoder library.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RawOrientation {
-    Normal,
-    HorizontalFlip,
-    Rotate180,
-    VerticalFlip,
-    Transpose,
-    Rotate90,
-    Transverse,
-    Rotate270,
-    Unknown,
-}
-
-impl fmt::Display for RawOrientation {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let name = match self {
-            Self::Normal => "normal",
-            Self::HorizontalFlip => "horizontal flip",
-            Self::Rotate180 => "rotate 180 degrees",
-            Self::VerticalFlip => "vertical flip",
-            Self::Transpose => "transpose",
-            Self::Rotate90 => "rotate 90 degrees",
-            Self::Transverse => "transverse",
-            Self::Rotate270 => "rotate 270 degrees",
-            Self::Unknown => "unknown",
-        };
-        formatter.write_str(name)
-    }
 }
 
 /// Levels plus the dimensions of their repeating sensor pattern.

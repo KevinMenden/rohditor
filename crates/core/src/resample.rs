@@ -1,6 +1,6 @@
 use rayon::prelude::*;
 
-use crate::image::allocate_zeroed_f32;
+use rohditor_image::allocate_zeroed_f32;
 use crate::{CancellationToken, LinearRgbImage, PipelineError};
 
 #[derive(Debug)]
