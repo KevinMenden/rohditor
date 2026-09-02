@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 image.workspace = true
 rawler.workspace = true
+rohditor-image = { path = "../image" }
 serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

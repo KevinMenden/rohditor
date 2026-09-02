@@ -8,8 +8,52 @@
 mod bilinear;
 mod malvar_he_cutler;
 
-use crate::image::allocate_zeroed_f32;
-use crate::{CancellationToken, Halo, LinearRgbImage, LinearRgbSpace, MosaicImage, PipelineError};
+use rohditor_image::{
+    Halo, ImageError, LinearRgbImage, LinearRgbSpace, MosaicImage, allocate_zeroed_f32,
+};
+use thiserror::Error;
+
+/// Failures specific to Bayer reconstruction.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum DemosaicError {
+    #[error("demosaicing was cancelled")]
+    Cancelled,
+
+    #[error("invalid white-balance gains: {reason}")]
+    InvalidGains { reason: &'static str },
+
+    #[error("invalid image dimensions {width}x{height} with row stride {row_stride}: {reason}")]
+    InvalidDimensions {
+        width: usize,
+        height: usize,
+        row_stride: usize,
+        reason: String,
+    },
+
+    #[error("{stage} received a non-finite sample at ({x}, {y})")]
+    NonFiniteImageData {
+        stage: &'static str,
+        x: usize,
+        y: usize,
+    },
+
+    #[error(transparent)]
+    Image(#[from] ImageError),
+}
+
+/// Minimal cancellation contract accepted by reconstruction algorithms.
+pub trait CancellationCheck: Sync {
+    fn is_cancelled(&self) -> bool;
+}
+
+impl<F> CancellationCheck for F
+where
+    F: Fn() -> bool + Sync,
+{
+    fn is_cancelled(&self) -> bool {
+        self()
+    }
+}
 
 /// Neighborhood required to reconstruct an MHC output region.
 pub const MALVAR_HE_CUTLER_HALO: Halo = Halo {
@@ -57,22 +101,21 @@ impl WhiteBalanceGains {
         }
     }
 
-    pub(crate) fn apply(self, rgb: &mut [f32; 3]) {
+    fn apply(self, rgb: &mut [f32; 3]) {
         rgb[0] *= self.red;
         rgb[1] *= self.green;
         rgb[2] *= self.blue;
     }
 
-    pub(crate) fn validate(self) -> Result<(), PipelineError> {
+    fn validate(self) -> Result<(), DemosaicError> {
         if [self.red, self.green, self.blue]
             .into_iter()
             .all(|value| value.is_finite() && value > 0.0)
         {
             Ok(())
         } else {
-            Err(PipelineError::InvalidMetadata {
-                field: "as_shot_white_balance",
-                reason: "effective R, G, and B gains must be finite and positive".to_owned(),
+            Err(DemosaicError::InvalidGains {
+                reason: "effective R, G, and B gains must be finite and positive",
             })
         }
     }
@@ -87,24 +130,17 @@ pub fn demosaic(
     mosaic: &MosaicImage<f32>,
     gains: WhiteBalanceGains,
     algorithm: DemosaicAlgorithm,
-) -> Result<LinearRgbImage<f32>, PipelineError> {
-    demosaic_cancellable(mosaic, gains, algorithm, &CancellationToken::new())
+) -> Result<LinearRgbImage<f32>, DemosaicError> {
+    demosaic_cancellable(mosaic, gains, algorithm, &|| false)
 }
 
-pub(crate) fn demosaic_cancellable(
+pub fn demosaic_cancellable(
     mosaic: &MosaicImage<f32>,
     gains: WhiteBalanceGains,
     algorithm: DemosaicAlgorithm,
-    cancellation: &CancellationToken,
-) -> Result<LinearRgbImage<f32>, PipelineError> {
-    let span = tracing::info_span!(
-        "cpu.demosaic",
-        width = mosaic.width(),
-        height = mosaic.height(),
-        algorithm = ?algorithm
-    );
-    let _guard = span.enter();
-    cancellation.checkpoint()?;
+    cancellation: &dyn CancellationCheck,
+) -> Result<LinearRgbImage<f32>, DemosaicError> {
+    checkpoint(cancellation)?;
     gains.validate()?;
     validate_mosaic(mosaic, cancellation)?;
 
@@ -124,7 +160,7 @@ pub(crate) fn demosaic_cancellable(
             malvar_he_cutler::reconstruct(mosaic, gains, cancellation, row_stride, &mut output)?
         }
     }
-    cancellation.checkpoint()?;
+    checkpoint(cancellation)?;
     LinearRgbImage::new(
         mosaic.width(),
         mosaic.height(),
@@ -136,8 +172,8 @@ pub(crate) fn demosaic_cancellable(
 
 fn validate_mosaic(
     mosaic: &MosaicImage<f32>,
-    cancellation: &CancellationToken,
-) -> Result<(), PipelineError> {
+    cancellation: &dyn CancellationCheck,
+) -> Result<(), DemosaicError> {
     if mosaic.width() < 2 || mosaic.height() < 2 {
         return Err(invalid_dimensions(
             mosaic,
@@ -146,10 +182,10 @@ fn validate_mosaic(
         ));
     }
     for y in 0..mosaic.height() {
-        cancellation.checkpoint()?;
+        checkpoint(cancellation)?;
         for x in 0..mosaic.width() {
             if !mosaic.sample(x, y).is_finite() {
-                return Err(PipelineError::NonFiniteImageData {
+                return Err(DemosaicError::NonFiniteImageData {
                     stage: "demosaicing",
                     x,
                     y,
@@ -160,8 +196,12 @@ fn validate_mosaic(
     Ok(())
 }
 
-fn invalid_dimensions(mosaic: &MosaicImage<f32>, row_stride: usize, reason: &str) -> PipelineError {
-    PipelineError::InvalidDimensions {
+fn invalid_dimensions(
+    mosaic: &MosaicImage<f32>,
+    row_stride: usize,
+    reason: &str,
+) -> DemosaicError {
+    DemosaicError::InvalidDimensions {
         width: mosaic.width(),
         height: mosaic.height(),
         row_stride,
@@ -169,11 +209,11 @@ fn invalid_dimensions(mosaic: &MosaicImage<f32>, row_stride: usize, reason: &str
     }
 }
 
-fn require_finite_output(rgb: &[f32; 3], x: usize, y: usize) -> Result<(), PipelineError> {
+fn require_finite_output(rgb: &[f32; 3], x: usize, y: usize) -> Result<(), DemosaicError> {
     if rgb.iter().all(|value| value.is_finite()) {
         Ok(())
     } else {
-        Err(PipelineError::NonFiniteImageData {
+        Err(DemosaicError::NonFiniteImageData {
             stage: "demosaicing output",
             x,
             y,
@@ -181,17 +221,24 @@ fn require_finite_output(rgb: &[f32; 3], x: usize, y: usize) -> Result<(), Pipel
     }
 }
 
+fn checkpoint(cancellation: &dyn CancellationCheck) -> Result<(), DemosaicError> {
+    if cancellation.is_cancelled() {
+        Err(DemosaicError::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::BayerPattern;
+    use rohditor_image::BayerPattern;
 
     #[test]
     fn mhc_honors_cancellation_before_starting_rows() {
         let mosaic =
             MosaicImage::new(8, 8, 8, BayerPattern::Rggb, vec![0.5; 64]).expect("valid mosaic");
-        let cancellation = CancellationToken::new();
-        cancellation.cancel();
+        let cancellation = || true;
         let error = demosaic_cancellable(
             &mosaic,
             WhiteBalanceGains::identity(),
@@ -199,6 +246,6 @@ mod tests {
             &cancellation,
         )
         .expect_err("cancelled reconstruction must stop");
-        assert!(matches!(error, PipelineError::Cancelled));
+        assert!(matches!(error, DemosaicError::Cancelled));
     }
 }

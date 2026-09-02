@@ -1,8 +1,19 @@
-use rohditor_raw::RawOrientation;
+use rohditor_image::Orientation as RawOrientation;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
+use thiserror::Error;
 
-use crate::PipelineError;
+mod light;
+
+pub use light::{LIGHT_TONE_LUT_SIZE, LightToneLut};
+
+/// Validation errors for serialized, non-destructive edit recipes.
+#[derive(Debug, Error, PartialEq, Eq)]
+#[error("invalid edit recipe field {field}: {reason}")]
+pub struct EditError {
+    pub field: &'static str,
+    pub reason: String,
+}
 
 /// Schema version of the current non-destructive edit recipe.
 pub const EDIT_RECIPE_SCHEMA_VERSION: u32 = 2;
@@ -294,9 +305,9 @@ impl Default for EditRecipe {
 }
 
 impl EditRecipe {
-    pub fn validate(&self) -> Result<(), PipelineError> {
+    pub fn validate(&self) -> Result<(), EditError> {
         if self.schema_version != EDIT_RECIPE_SCHEMA_VERSION {
-            return Err(PipelineError::InvalidRecipe {
+            return Err(EditError {
                 field: "schema_version",
                 reason: format!(
                     "version {} is not supported; expected {}",
@@ -376,7 +387,7 @@ impl EditRecipe {
             validate_parameter("color.white_balance.tint", tint, TINT_RANGE)?;
         }
         if self.geometry.orientation_override == Some(RawOrientation::Unknown) {
-            return Err(PipelineError::InvalidRecipe {
+            return Err(EditError {
                 field: "geometry.orientation_override",
                 reason: "unknown is metadata state, not a usable override".to_owned(),
             });
@@ -453,11 +464,11 @@ fn validate_parameter(
     field: &'static str,
     value: f32,
     range: ParameterRange,
-) -> Result<(), PipelineError> {
+) -> Result<(), EditError> {
     if range.contains(value) {
         Ok(())
     } else {
-        Err(PipelineError::InvalidRecipe {
+        Err(EditError {
             field,
             reason: format!(
                 "{value} is outside the inclusive range {}..={}",

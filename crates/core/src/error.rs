@@ -1,5 +1,9 @@
 use thiserror::Error;
 
+use rohditor_edit::EditError;
+use rohditor_demosaic::DemosaicError;
+use rohditor_image::ImageError;
+
 /// Errors from validation or execution of Rohditor's CPU image pipeline.
 #[derive(Debug, Error)]
 pub enum PipelineError {
@@ -50,4 +54,68 @@ pub enum PipelineError {
         expected: &'static str,
         actual: &'static str,
     },
+}
+
+impl From<ImageError> for PipelineError {
+    fn from(error: ImageError) -> Self {
+        match error {
+            ImageError::InvalidDimensions {
+                width,
+                height,
+                row_stride,
+                reason,
+            } => Self::InvalidDimensions {
+                width,
+                height,
+                row_stride,
+                reason,
+            },
+            ImageError::Allocation { elements } => Self::Allocation { elements },
+            ImageError::UnsupportedCfa {
+                name,
+                width,
+                height,
+            } => Self::UnsupportedCfa {
+                name,
+                width,
+                height,
+            },
+        }
+    }
+}
+
+impl From<EditError> for PipelineError {
+    fn from(error: EditError) -> Self {
+        Self::InvalidRecipe {
+            field: error.field,
+            reason: error.reason,
+        }
+    }
+}
+
+impl From<DemosaicError> for PipelineError {
+    fn from(error: DemosaicError) -> Self {
+        match error {
+            DemosaicError::Cancelled => Self::Cancelled,
+            DemosaicError::InvalidGains { reason } => Self::InvalidMetadata {
+                field: "as_shot_white_balance",
+                reason: reason.to_owned(),
+            },
+            DemosaicError::InvalidDimensions {
+                width,
+                height,
+                row_stride,
+                reason,
+            } => Self::InvalidDimensions {
+                width,
+                height,
+                row_stride,
+                reason,
+            },
+            DemosaicError::NonFiniteImageData { stage, x, y } => {
+                Self::NonFiniteImageData { stage, x, y }
+            }
+            DemosaicError::Image(error) => error.into(),
+        }
+    }
 }

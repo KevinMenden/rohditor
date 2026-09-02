@@ -2829,6 +2829,9 @@ dependencies = [
  "criterion",
  "image",
  "rayon",
+ "rohditor-demosaic",
+ "rohditor-edit",
+ "rohditor-image",
  "rohditor-raw",
  "serde",
  "serde_json",
@@ -2856,6 +2859,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "rohditor-demosaic"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "rayon",
+ "rohditor-image",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "rohditor-edit"
+version = "0.1.0"
+dependencies = [
+ "rohditor-image",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "rohditor-gpu"
 version = "0.1.0"
 dependencies = [
@@ -2869,11 +2892,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rohditor-image"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "rohditor-raw"
 version = "0.1.0"
 dependencies = [
  "image",
  "rawler",
+ "rohditor-image",
  "serde",
  "serde_json",
  "thiserror 2.0.20",

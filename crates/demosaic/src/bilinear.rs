@@ -1,7 +1,7 @@
 use rayon::prelude::*;
 
-use super::{WhiteBalanceGains, require_finite_output};
-use crate::{CancellationToken, CfaColor, MosaicImage, PipelineError};
+use super::{CancellationCheck, DemosaicError, WhiteBalanceGains, checkpoint, require_finite_output};
+use rohditor_image::{CfaColor, MosaicImage};
 
 const CROSS_OFFSETS: [(isize, isize); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
 const DIAGONAL_OFFSETS: [(isize, isize); 4] = [(-1, -1), (1, -1), (-1, 1), (1, 1)];
@@ -11,13 +11,13 @@ const VERTICAL_OFFSETS: [(isize, isize); 2] = [(0, -1), (0, 1)];
 pub(super) fn reconstruct(
     mosaic: &MosaicImage<f32>,
     gains: WhiteBalanceGains,
-    cancellation: &CancellationToken,
+    cancellation: &dyn CancellationCheck,
     row_stride: usize,
     output: &mut [f32],
-) -> Result<(), PipelineError> {
+) -> Result<(), DemosaicError> {
     output.par_chunks_mut(row_stride).enumerate().try_for_each(
-        |(y, output_row)| -> Result<(), PipelineError> {
-            cancellation.checkpoint()?;
+        |(y, output_row)| -> Result<(), DemosaicError> {
+            checkpoint(cancellation)?;
             for (x, pixel) in output_row.chunks_exact_mut(3).enumerate() {
                 let mut rgb = reconstruct_pixel(mosaic, x, y);
                 gains.apply(&mut rgb);
