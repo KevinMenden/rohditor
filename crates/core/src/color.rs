@@ -226,6 +226,7 @@ pub fn convert_rec2020_to_display_srgb(
         DisplayTransfer::Srgb,
         output,
     )
+    .map_err(Into::into)
 }
 
 /// The shared per-pixel output transform used by float display conversion and

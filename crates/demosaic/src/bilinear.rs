@@ -20,7 +20,7 @@ pub(super) fn reconstruct(
     output.par_chunks_mut(row_stride).enumerate().try_for_each(
         |(y, output_row)| -> Result<(), DemosaicError> {
             checkpoint(cancellation)?;
-            for (x, pixel) in output_row.chunks_exact_mut(3).enumerate() {
+            for (x, pixel) in output_row.as_chunks_mut::<3>().0.iter_mut().enumerate() {
                 let mut rgb = reconstruct_pixel(mosaic, x, y);
                 gains.apply(&mut rgb);
                 require_finite_output(&rgb, x, y)?;

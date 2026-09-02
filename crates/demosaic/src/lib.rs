@@ -107,7 +107,7 @@ impl WhiteBalanceGains {
         rgb[2] *= self.blue;
     }
 
-    fn validate(self) -> Result<(), DemosaicError> {
+    pub fn validate(self) -> Result<(), DemosaicError> {
         if [self.red, self.green, self.blue]
             .into_iter()
             .all(|value| value.is_finite() && value > 0.0)
