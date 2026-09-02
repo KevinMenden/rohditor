@@ -365,7 +365,7 @@ pub(crate) fn apply_camera_color_transform_cancellable(
     image.data_mut().par_chunks_mut(row_stride).try_for_each(
         |row| -> Result<(), PipelineError> {
             cancellation.checkpoint()?;
-            for pixel in row[..width_samples].chunks_exact_mut(3) {
+            for pixel in row[..width_samples].as_chunks_mut::<3>().0 {
                 let converted = transform
                     .camera_to_linear_rec2020
                     .transform([pixel[0], pixel[1], pixel[2]]);
@@ -392,7 +392,7 @@ pub(crate) fn apply_white_balance_cancellable(
     image.data_mut().par_chunks_mut(row_stride).try_for_each(
         |row| -> Result<(), PipelineError> {
             cancellation.checkpoint()?;
-            for pixel in row[..width_samples].chunks_exact_mut(3) {
+            for pixel in row[..width_samples].as_chunks_mut::<3>().0 {
                 pixel[0] *= gains.red;
                 pixel[1] *= gains.green;
                 pixel[2] *= gains.blue;
@@ -469,7 +469,7 @@ pub(crate) fn apply_adjustments_cancellable(
     image.data_mut().par_chunks_mut(row_stride).try_for_each(
         |row| -> Result<(), PipelineError> {
             cancellation.checkpoint()?;
-            for pixel in row[..width_samples].chunks_exact_mut(3) {
+            for pixel in row[..width_samples].as_chunks_mut::<3>().0 {
                 if light.exposure_ev != 0.0 {
                     for value in pixel.iter_mut() {
                         *value *= exposure_gain;
@@ -891,7 +891,9 @@ fn render_display_srgb8_dithered_cancellable(
     output.par_chunks_mut(row_stride).enumerate().try_for_each(
         |(output_y, output_row)| -> Result<(), PipelineError> {
             cancellation.checkpoint()?;
-            for (output_x, destination) in output_row.chunks_exact_mut(3).enumerate() {
+            for (output_x, destination) in
+                output_row.as_chunks_mut::<3>().0.iter_mut().enumerate()
+            {
                 let (source_x, source_y) =
                     orientation_map.source_coordinate_in_bounds(output_x, output_y);
                 let start = source_y * image.row_stride() + source_x * 3;
@@ -957,7 +959,9 @@ pub fn render_display_srgb16(
         .par_chunks_mut(row_stride)
         .enumerate()
         .for_each(|(output_y, output_row)| {
-            for (output_x, destination) in output_row.chunks_exact_mut(3).enumerate() {
+            for (output_x, destination) in
+                output_row.as_chunks_mut::<3>().0.iter_mut().enumerate()
+            {
                 let (source_x, source_y) =
                     orientation_map.source_coordinate_in_bounds(output_x, output_y);
                 let start = source_y * image.row_stride() + source_x * 3;
@@ -1409,7 +1413,7 @@ mod tests {
                 DemosaicAlgorithm::Bilinear,
             )
             .expect("demosaic succeeds");
-            for pixel in rgb.data().chunks_exact(3) {
+            for pixel in rgb.data().as_chunks::<3>().0 {
                 assert_eq!(pixel, [0.2, 0.4, 0.8]);
             }
         }
@@ -1592,7 +1596,7 @@ mod tests {
         recipe.light.tone_curve.darks = 0.1;
         recipe.light.tone_curve.highlights = -0.1;
         apply_adjustments(&mut image, &recipe).expect("tone curve adjustment");
-        for pixel in image.data().chunks_exact(3) {
+        for pixel in image.data().as_chunks::<3>().0 {
             assert!((pixel[0] - pixel[1]).abs() < 1.0e-6);
             assert!((pixel[1] - pixel[2]).abs() < 1.0e-6);
         }

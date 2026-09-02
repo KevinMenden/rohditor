@@ -977,7 +977,7 @@ fn verify_libraw(
     for (index, (&rohditor, libraw_bytes)) in frame
         .mosaic
         .iter()
-        .zip(pgm.pixels.chunks_exact(2))
+        .zip(pgm.pixels.as_chunks::<2>().0.iter())
         .enumerate()
     {
         let libraw = u16::from_be_bytes([libraw_bytes[0], libraw_bytes[1]]);
@@ -1233,7 +1233,7 @@ fn nearest_neighbor_2x(image: &DisplayRgbImage<u8>) -> Result<DisplayRgbImage<u8
         let source_row =
             &image.data()[y * image.row_stride()..y * image.row_stride() + image.width() * 3];
         for _ in 0..2 {
-            for pixel in source_row.chunks_exact(3) {
+            for pixel in source_row.as_chunks::<3>().0 {
                 pixels.extend_from_slice(pixel);
                 pixels.extend_from_slice(pixel);
             }

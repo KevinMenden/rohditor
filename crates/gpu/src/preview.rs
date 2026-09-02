@@ -920,7 +920,7 @@ fn pack_rgba16f(
                 reason: "linear base row stride is shorter than its active RGB samples".to_owned(),
             });
         }
-        for pixel in row[..width_samples].chunks_exact(3) {
+        for pixel in row[..width_samples].as_chunks::<3>().0 {
             let mut encoded = [0_u16; 4];
             for (channel, value) in pixel.iter().copied().enumerate() {
                 if !value.is_finite() {
@@ -1684,8 +1684,10 @@ mod tests {
         );
         let mut stats = GpuParityStats::default();
         for (pixel_index, (cpu_pixel, gpu_pixel)) in cpu
-            .chunks_exact(3)
-            .zip(gpu.rgba.chunks_exact(4))
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .zip(gpu.rgba.as_chunks::<4>().0.iter())
             .enumerate()
         {
             for channel in 0..3 {
