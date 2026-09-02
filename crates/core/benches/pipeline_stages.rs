@@ -4,12 +4,12 @@ use std::sync::Arc;
 
 use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
 use rohditor_core::{
-    CropPolicy, EditRecipe, LinearRgbImage, LinearRgbSpace, OutputPolicy, apply_adjustments,
-    normalize_raw_preview, render_display_srgb8,
+    CropPolicy, OutputPolicy, apply_adjustments, normalize_raw_preview, render_display_srgb8,
 };
+use rohditor_edit::EditRecipe;
+use rohditor_image::{LinearRgbImage, LinearRgbSpace, Orientation};
 use rohditor_raw::{
     CaptureMetadata, CfaPattern, LevelPattern, PhotometricInterpretation, RawFileInfo, RawFrame,
-    RawOrientation,
 };
 
 const SENSOR_WIDTH: usize = 6_048;
@@ -97,7 +97,7 @@ fn benchmark_output_conversion(criterion: &mut Criterion) {
         bencher.iter(|| {
             must(render_display_srgb8(
                 black_box(&image),
-                RawOrientation::Normal,
+                Orientation::Normal,
                 OutputPolicy::ClipToSrgb,
             ))
         });
@@ -163,7 +163,7 @@ fn raw_info(width: usize, height: usize) -> RawFileInfo {
         as_shot_white_balance: [Some(1.0); 4],
         xyz_to_camera: [[0.0; 3]; 4],
         color_matrices: Vec::new(),
-        orientation: RawOrientation::Normal,
+        orientation: Orientation::Normal,
         capture: CaptureMetadata::default(),
         embedded_preview: None,
     }

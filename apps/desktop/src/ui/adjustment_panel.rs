@@ -1,5 +1,6 @@
 use eframe::egui;
-use rohditor_core::{Histogram, ToneCurve, evaluate_tone_curve};
+use rohditor_core::{Histogram, evaluate_tone_curve};
+use rohditor_edit::ToneCurve;
 
 use super::PickerMode;
 use super::theme::{self, colors, metrics};

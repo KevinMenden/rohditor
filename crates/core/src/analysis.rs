@@ -1,4 +1,4 @@
-use crate::DisplayRgbImage;
+use rohditor_image::DisplayRgbImage;
 
 const HISTOGRAM_BINS: usize = 256;
 
@@ -101,7 +101,7 @@ impl Default for Histogram {
 #[cfg(test)]
 mod tests {
     use super::Histogram;
-    use crate::{DisplayRgbImage, DisplayTransfer};
+    use rohditor_image::{DisplayRgbImage, DisplayTransfer};
 
     #[test]
     fn histogram_counts_channels_luminance_and_clipping() {

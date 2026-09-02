@@ -6,14 +6,18 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use rohditor_core::{
-    BLACKS_RANGE, COLOR_GRADING_RANGE, CONTRAST_RANGE, DemosaicAlgorithm, DitherMode,
-    EXPOSURE_EV_RANGE, ExportFormat, ExportMetadataPolicy, ExportSettings, HIGHLIGHTS_RANGE,
-    HSL_HUE_RANGE, HSL_LUMINANCE_RANGE, HSL_SATURATION_RANGE, Histogram, JPEG_QUALITY_DEFAULT,
-    MemoryEstimate, PngBitDepth, PreviewOptions, RenderOptions, SATURATION_RANGE, SHADOWS_RANGE,
-    StageTimings, TEMPERATURE_RANGE, TINT_RANGE, TONE_CURVE_RANGE, VIBRANCE_RANGE,
-    WHITE_BALANCE_MULTIPLIER_RANGE, WHITES_RANGE, WhiteBalance,
+    DitherMode, ExportFormat, ExportMetadataPolicy, ExportSettings, Histogram, JPEG_QUALITY_DEFAULT,
+    MemoryEstimate, PngBitDepth, PreviewOptions, RenderOptions, StageTimings,
     hsl_channel_weights_from_display_rgb, paths_refer_to_same_file, srgb_to_linear_srgb,
 };
+use rohditor_demosaic::DemosaicAlgorithm;
+use rohditor_edit::{
+    BLACKS_RANGE, COLOR_GRADING_RANGE, CONTRAST_RANGE, EXPOSURE_EV_RANGE, EditRecipe,
+    HIGHLIGHTS_RANGE, HSL_CHANNEL_COUNT, HSL_HUE_RANGE, HSL_LUMINANCE_RANGE, HSL_SATURATION_RANGE,
+    SATURATION_RANGE, SHADOWS_RANGE, TEMPERATURE_RANGE, TINT_RANGE, TONE_CURVE_RANGE, VIBRANCE_RANGE,
+    WHITE_BALANCE_MULTIPLIER_RANGE, WHITES_RANGE, WhiteBalance,
+};
+use rohditor_image::{DisplayRgbImage, DisplayTransfer};
 use rohditor_raw::{RawFileInfo, RawFrame};
 use tracing::{info, warn};
 
@@ -1240,7 +1244,7 @@ impl RohditorApp {
             self.picker_mode = mode;
         }
         if let Some(channel) = output.color_mixer_channel {
-            self.color_mixer_channel = channel.min(rohditor_core::HSL_CHANNEL_COUNT - 1);
+            self.color_mixer_channel = channel.min(HSL_CHANNEL_COUNT - 1);
         }
         if output.export {
             self.request_export();
@@ -1674,7 +1678,7 @@ fn document_panel_model(
             .map(|info| format!("{} {}", info.clean_make, info.clean_model)),
         sensor_dimensions: document.info.as_ref().map(|info| (info.width, info.height)),
         revision: document.edits.revision(),
-        has_adjustments: document.edits.recipe() != &rohditor_core::EditRecipe::default(),
+        has_adjustments: document.edits.recipe() != &EditRecipe::default(),
         values: AdjustmentValues {
             white_balance_mode,
             white_balance_red,
@@ -1915,7 +1919,7 @@ fn apply_auto_tone(edits: &mut EditSession, histogram: &Histogram) -> bool {
     edits.set_discrete(next)
 }
 
-fn gpu_supports_recipe(recipe: &rohditor_core::EditRecipe) -> bool {
+fn gpu_supports_recipe(recipe: &EditRecipe) -> bool {
     rohditor_gpu::GpuPreviewProcessor::supports_recipe(recipe)
 }
 
@@ -2110,7 +2114,6 @@ fn display_file_name(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use rohditor_core::EditRecipe;
 
     use super::*;
 
@@ -2343,11 +2346,11 @@ mod tests {
 
     #[test]
     fn auto_tone_applies_a_relative_exposure_correction() {
-        let image = rohditor_core::DisplayRgbImage::new(
+        let image = DisplayRgbImage::new(
             4,
             1,
             12,
-            rohditor_core::DisplayTransfer::Srgb,
+            DisplayTransfer::Srgb,
             vec![128; 12],
         )
         .expect("valid histogram fixture");
@@ -2369,11 +2372,11 @@ mod tests {
     #[test]
     fn auto_tone_stays_finite_and_clamped_for_extreme_display_histograms() {
         for value in [0_u8, 8, 32, 240, 255] {
-            let image = rohditor_core::DisplayRgbImage::new(
+            let image = DisplayRgbImage::new(
                 8,
                 1,
                 24,
-                rohditor_core::DisplayTransfer::Srgb,
+                DisplayTransfer::Srgb,
                 vec![value; 24],
             )
             .expect("valid histogram fixture");
@@ -2389,11 +2392,11 @@ mod tests {
 
     #[test]
     fn repeated_auto_tone_is_stable_when_the_histogram_is_already_neutral() {
-        let image = rohditor_core::DisplayRgbImage::new(
+        let image = DisplayRgbImage::new(
             4,
             1,
             12,
-            rohditor_core::DisplayTransfer::Srgb,
+            DisplayTransfer::Srgb,
             vec![118; 12],
         )
         .expect("valid histogram fixture");

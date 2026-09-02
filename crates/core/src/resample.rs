@@ -1,7 +1,7 @@
 use rayon::prelude::*;
+use rohditor_image::{LinearRgbImage, allocate_zeroed_f32};
 
-use crate::{CancellationToken, LinearRgbImage, PipelineError};
-use rohditor_image::allocate_zeroed_f32;
+use crate::{CancellationToken, PipelineError};
 
 #[derive(Debug)]
 struct AreaSample {
@@ -151,7 +151,7 @@ mod tests {
     use rayon::ThreadPoolBuilder;
 
     use super::*;
-    use crate::LinearRgbSpace;
+    use rohditor_image::LinearRgbSpace;
 
     #[test]
     fn exact_two_by_two_reduction_averages_each_source_block() {

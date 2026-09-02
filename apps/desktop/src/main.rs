@@ -6,7 +6,7 @@ mod ui;
 
 use clap::{Parser, ValueEnum};
 use eframe::egui;
-use rohditor_core::DemosaicAlgorithm;
+use rohditor_demosaic::DemosaicAlgorithm;
 use std::path::PathBuf;
 use tracing::warn;
 use tracing_subscriber::EnvFilter;

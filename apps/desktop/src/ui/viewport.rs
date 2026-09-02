@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use eframe::egui;
-use rohditor_core::DemosaicAlgorithm;
+use rohditor_demosaic::DemosaicAlgorithm;
 
 use super::PickerMode;
 use super::theme::{self, colors};

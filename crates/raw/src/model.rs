@@ -1,7 +1,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-use rohditor_image::Orientation as RawOrientation;
+use rohditor_image::Orientation;
 use serde::{Deserialize, Serialize};
 
 /// A rectangle in unrotated sensor coordinates.
@@ -150,7 +150,7 @@ pub struct RawFileInfo {
     pub as_shot_white_balance: [Option<f32>; 4],
     pub xyz_to_camera: [[f32; 3]; 4],
     pub color_matrices: Vec<CameraColorMatrix>,
-    pub orientation: RawOrientation,
+    pub orientation: Orientation,
     pub capture: CaptureMetadata,
     pub embedded_preview: Option<EmbeddedPreviewInfo>,
 }
@@ -190,7 +190,8 @@ pub struct RawFrame {
 
 #[cfg(test)]
 mod tests {
-    use super::{RationalValue, RawOrientation};
+    use super::RationalValue;
+    use rohditor_image::Orientation;
 
     #[test]
     fn zero_denominator_has_no_float_value() {
@@ -205,6 +206,6 @@ mod tests {
 
     #[test]
     fn orientation_has_readable_text() {
-        assert_eq!(RawOrientation::Rotate270.to_string(), "rotate 270 degrees");
+        assert_eq!(Orientation::Rotate270.to_string(), "rotate 270 degrees");
     }
 }

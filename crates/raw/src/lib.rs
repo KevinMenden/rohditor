@@ -14,4 +14,3 @@ pub use model::{
     RawFileInfo, RawFrame, SourceIdentity,
 };
 pub use rawler_adapter::RawlerDecoder;
-pub use rohditor_image::Orientation as RawOrientation;

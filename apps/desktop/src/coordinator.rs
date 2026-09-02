@@ -11,12 +11,14 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use image::RgbImage;
 use rohditor_core::{
-    CancellationToken, CpuPipeline, DemosaicAlgorithm, EditRecipe, ExportReport, ExportSettings,
-    Histogram, MemoryEstimate, OrientationMap, PipelineError, PreviewOptions, RenderOptions,
-    StageTimings, export_image,
+    CancellationToken, CpuPipeline, ExportReport, ExportSettings, Histogram, MemoryEstimate,
+    PipelineError, PreviewOptions, RenderOptions, StageTimings, export_image,
 };
+use rohditor_demosaic::DemosaicAlgorithm;
+use rohditor_edit::EditRecipe;
 use rohditor_gpu::{GpuPreviewError, GpuPreviewUpload};
-use rohditor_raw::{RawDecoder, RawFileInfo, RawFrame, RawOrientation, RawSession, RawlerDecoder};
+use rohditor_image::{DisplayRgbImage, Orientation, OrientationMap};
+use rohditor_raw::{RawDecoder, RawFileInfo, RawFrame, RawSession, RawlerDecoder};
 use tracing::{info, info_span};
 
 use crate::document::PreviewTicket;
@@ -101,7 +103,7 @@ pub(crate) struct WorkerImage {
 }
 
 impl WorkerImage {
-    fn from_display(image: rohditor_core::DisplayRgbImage<u8>) -> Result<Self, String> {
+    fn from_display(image: DisplayRgbImage<u8>) -> Result<Self, String> {
         let width = image.width();
         let height = image.height();
         let packed_stride = width
@@ -660,7 +662,7 @@ fn process_open(
 
 fn process_embedded_placeholder(
     document_id: u64,
-    orientation: RawOrientation,
+    orientation: Orientation,
     session: &mut dyn RawSession,
     sender: &mpsc::Sender<WorkerEvent>,
     context: &egui::Context,
@@ -1017,7 +1019,7 @@ fn develop_preview(
     preview_cache: &mut PreviewCache,
 ) -> Result<
     (
-        rohditor_core::DisplayRgbImage<u8>,
+        DisplayRgbImage<u8>,
         Histogram,
         WorkerPreviewDiagnostics,
     ),
@@ -1195,7 +1197,7 @@ fn sample_white_balance_patch(
 
 fn sample_camera_native_patch(
     reconstructed: &rohditor_core::ReconstructedPreview,
-    orientation_override: Option<RawOrientation>,
+    orientation_override: Option<Orientation>,
     coordinate: (f32, f32),
 ) -> Result<[f32; 3], String> {
     let image = reconstructed.image();
@@ -1418,7 +1420,7 @@ fn process_export(job: ExportJob, sender: &mpsc::Sender<WorkerEvent>, context: &
     }
 }
 
-fn decode_placeholder(bytes: &[u8], orientation: RawOrientation) -> Result<WorkerImage, String> {
+fn decode_placeholder(bytes: &[u8], orientation: Orientation) -> Result<WorkerImage, String> {
     let decoded = image::load_from_memory(bytes)
         .map_err(|error| format!("JPEG decoding failed: {error}"))?
         .to_rgb8();
@@ -1430,7 +1432,7 @@ fn decode_placeholder(bytes: &[u8], orientation: RawOrientation) -> Result<Worke
     )
 }
 
-fn orient_rgb8(source: &RgbImage, orientation: RawOrientation) -> Result<RgbImage, String> {
+fn orient_rgb8(source: &RgbImage, orientation: Orientation) -> Result<RgbImage, String> {
     let (source_width, source_height) = source.dimensions();
     let source_width = usize::try_from(source_width)
         .map_err(|_| "embedded preview width exceeds this system's usize".to_owned())?;
@@ -1542,7 +1544,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use image::{Rgb, RgbImage};
-    use rohditor_core::{CpuPipeline, ExportFormat, JPEG_QUALITY_DEFAULT, WhiteBalance};
+    use rohditor_core::{CpuPipeline, ExportFormat, JPEG_QUALITY_DEFAULT};
+    use rohditor_edit::WhiteBalance;
     use rohditor_raw::{
         CameraColorMatrix, CaptureMetadata, CfaPattern, LevelPattern, PhotometricInterpretation,
         RawError, RawSession,
@@ -1772,7 +1775,7 @@ mod tests {
 
         let alternate_options = PreviewOptions {
             render: rohditor_core::RenderOptions {
-                demosaic: rohditor_core::DemosaicAlgorithm::Bilinear,
+                demosaic: DemosaicAlgorithm::Bilinear,
                 ..options.render
             },
             ..options
@@ -1926,7 +1929,7 @@ mod tests {
             }
         }
 
-        let rotated = orient_rgb8(&source, RawOrientation::Rotate90).expect("valid preview");
+        let rotated = orient_rgb8(&source, Orientation::Rotate90).expect("valid preview");
         assert_eq!(rotated.dimensions(), (3, 2));
         assert_eq!(rotated.get_pixel(0, 0).0[0], 5);
         assert_eq!(rotated.get_pixel(2, 0).0[0], 1);
@@ -2065,7 +2068,7 @@ mod tests {
                     illuminant: "D65".to_owned(),
                     values: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
                 }],
-                orientation: RawOrientation::Normal,
+                orientation: Orientation::Normal,
                 capture: CaptureMetadata::default(),
                 embedded_preview: None,
             },

@@ -1,4 +1,4 @@
-use rohditor_image::Orientation as RawOrientation;
+use rohditor_image::Orientation;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
@@ -281,7 +281,7 @@ impl Default for ColorAdjustments {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct GeometryAdjustments {
     #[serde(default)]
-    pub orientation_override: Option<RawOrientation>,
+    pub orientation_override: Option<Orientation>,
 }
 
 /// Serializable, non-destructive global edits.
@@ -386,7 +386,7 @@ impl EditRecipe {
             )?;
             validate_parameter("color.white_balance.tint", tint, TINT_RANGE)?;
         }
-        if self.geometry.orientation_override == Some(RawOrientation::Unknown) {
+        if self.geometry.orientation_override == Some(Orientation::Unknown) {
             return Err(EditError {
                 field: "geometry.orientation_override",
                 reason: "unknown is metadata state, not a usable override".to_owned(),
@@ -415,7 +415,7 @@ struct RecipeFields {
     #[serde(default, alias = "saturation")]
     legacy_saturation: Option<f32>,
     #[serde(default, alias = "orientation_override")]
-    legacy_orientation_override: Option<RawOrientation>,
+    legacy_orientation_override: Option<Orientation>,
 }
 
 impl<'de> Deserialize<'de> for EditRecipe {
