@@ -109,6 +109,7 @@ pub(crate) fn resize_area_cancellable(
     cancellation.checkpoint()?;
 
     LinearRgbImage::new(target_width, target_height, output_stride, space, output)
+        .map_err(Into::into)
 }
 
 fn area_samples(source_length: usize, target_length: usize) -> Vec<AreaSample> {

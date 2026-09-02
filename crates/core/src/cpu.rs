@@ -133,6 +133,7 @@ fn normalize_raw_impl(
         pattern.shifted(crop.x, crop.y),
         normalized,
     )
+    .map_err(Into::into)
 }
 
 pub(crate) fn preview_dimensions(
@@ -917,6 +918,7 @@ fn render_display_srgb8_dithered_cancellable(
         DisplayTransfer::Srgb,
         output,
     )
+    .map_err(Into::into)
 }
 
 /// Convert linear Rec.2020 directly to clipped, transfer-encoded sRGB16 while
@@ -979,6 +981,7 @@ pub fn render_display_srgb16(
         DisplayTransfer::Srgb,
         output,
     )
+    .map_err(Into::into)
 }
 
 fn quantization_dither(mode: DitherMode, x: usize, y: usize) -> f32 {
