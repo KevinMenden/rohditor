@@ -20,7 +20,7 @@ fn mhc_reconstructs_constants_for_every_bayer_layout() -> Result<(), Box<dyn Err
             WhiteBalanceGains::identity(),
             DemosaicAlgorithm::MalvarHeCutler,
         )?;
-        for pixel in image.data().chunks_exact(3) {
+        for pixel in image.data().as_chunks::<3>().0 {
             assert_close(pixel, &[0.2, 0.4, 0.8], 1.0e-6);
         }
     }
@@ -124,7 +124,7 @@ fn mhc_retains_negative_values_and_over_range_highlights() -> Result<(), Box<dyn
         },
         DemosaicAlgorithm::MalvarHeCutler,
     )?;
-    for pixel in image.data().chunks_exact(3) {
+    for pixel in image.data().as_chunks::<3>().0 {
         assert_close(pixel, &[-0.5, 1.25, 3.0], 1.0e-6);
     }
     Ok(())

@@ -210,8 +210,10 @@ pub fn convert_rec2020_to_display_srgb(
             let source_start = y * input.row_stride();
             let source_row = &input.data()[source_start..source_start + row_stride];
             for (source, destination) in source_row
-                .chunks_exact(3)
-                .zip(output_row.chunks_exact_mut(3))
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .zip(output_row.as_chunks_mut::<3>().0.iter_mut())
             {
                 destination.copy_from_slice(&encode_rec2020_for_srgb_output(
                     rec2020_to_srgb,
