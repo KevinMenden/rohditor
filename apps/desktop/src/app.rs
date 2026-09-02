@@ -6,18 +6,17 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use rohditor_core::{
-    DitherMode, ExportFormat, ExportMetadataPolicy, ExportSettings, Histogram, JPEG_QUALITY_DEFAULT,
-    MemoryEstimate, PngBitDepth, PreviewOptions, RenderOptions, StageTimings,
+    DitherMode, ExportFormat, ExportMetadataPolicy, ExportSettings, Histogram,
+    JPEG_QUALITY_DEFAULT, MemoryEstimate, PngBitDepth, PreviewOptions, RenderOptions, StageTimings,
     hsl_channel_weights_from_display_rgb, paths_refer_to_same_file, srgb_to_linear_srgb,
 };
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_edit::{
     BLACKS_RANGE, COLOR_GRADING_RANGE, CONTRAST_RANGE, EXPOSURE_EV_RANGE, EditRecipe,
     HIGHLIGHTS_RANGE, HSL_CHANNEL_COUNT, HSL_HUE_RANGE, HSL_LUMINANCE_RANGE, HSL_SATURATION_RANGE,
-    SATURATION_RANGE, SHADOWS_RANGE, TEMPERATURE_RANGE, TINT_RANGE, TONE_CURVE_RANGE, VIBRANCE_RANGE,
-    WHITE_BALANCE_MULTIPLIER_RANGE, WHITES_RANGE, WhiteBalance,
+    SATURATION_RANGE, SHADOWS_RANGE, TEMPERATURE_RANGE, TINT_RANGE, TONE_CURVE_RANGE,
+    VIBRANCE_RANGE, WHITE_BALANCE_MULTIPLIER_RANGE, WHITES_RANGE, WhiteBalance,
 };
-use rohditor_image::{DisplayRgbImage, DisplayTransfer};
 use rohditor_raw::{RawFileInfo, RawFrame};
 use tracing::{info, warn};
 
@@ -2115,6 +2114,8 @@ fn display_file_name(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
 
+    use rohditor_image::{DisplayRgbImage, DisplayTransfer};
+
     use super::*;
 
     #[test]
@@ -2346,14 +2347,8 @@ mod tests {
 
     #[test]
     fn auto_tone_applies_a_relative_exposure_correction() {
-        let image = DisplayRgbImage::new(
-            4,
-            1,
-            12,
-            DisplayTransfer::Srgb,
-            vec![128; 12],
-        )
-        .expect("valid histogram fixture");
+        let image = DisplayRgbImage::new(4, 1, 12, DisplayTransfer::Srgb, vec![128; 12])
+            .expect("valid histogram fixture");
         let histogram = Histogram::from_display_rgb8(&image);
         let mut edits = EditSession::default();
         edits.set_discrete({
@@ -2372,14 +2367,8 @@ mod tests {
     #[test]
     fn auto_tone_stays_finite_and_clamped_for_extreme_display_histograms() {
         for value in [0_u8, 8, 32, 240, 255] {
-            let image = DisplayRgbImage::new(
-                8,
-                1,
-                24,
-                DisplayTransfer::Srgb,
-                vec![value; 24],
-            )
-            .expect("valid histogram fixture");
+            let image = DisplayRgbImage::new(8, 1, 24, DisplayTransfer::Srgb, vec![value; 24])
+                .expect("valid histogram fixture");
             let histogram = Histogram::from_display_rgb8(&image);
             let mut edits = EditSession::default();
             assert!(apply_auto_tone(&mut edits, &histogram) || value == 0);
@@ -2392,14 +2381,8 @@ mod tests {
 
     #[test]
     fn repeated_auto_tone_is_stable_when_the_histogram_is_already_neutral() {
-        let image = DisplayRgbImage::new(
-            4,
-            1,
-            12,
-            DisplayTransfer::Srgb,
-            vec![118; 12],
-        )
-        .expect("valid histogram fixture");
+        let image = DisplayRgbImage::new(4, 1, 12, DisplayTransfer::Srgb, vec![118; 12])
+            .expect("valid histogram fixture");
         let histogram = Histogram::from_display_rgb8(&image);
         let mut edits = EditSession::default();
         assert!(apply_auto_tone(&mut edits, &histogram));

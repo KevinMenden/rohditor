@@ -1514,6 +1514,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use clap::Parser;
+    use rohditor_image::{DisplayRgbImage, DisplayTransfer};
     use rohditor_raw::{CfaPattern, EncodedPreviewFormat, PhotometricInterpretation};
 
     use super::{

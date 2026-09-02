@@ -1,9 +1,7 @@
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
-use rohditor_core::{
-    CancellationToken, CpuPipeline, PreviewOptions, RenderOptions,
-};
+use rohditor_core::{CancellationToken, CpuPipeline, PreviewOptions, RenderOptions};
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_edit::EditRecipe;
 use rohditor_image::Orientation;

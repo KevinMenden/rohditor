@@ -1,5 +1,5 @@
 use rayon::prelude::*;
-use rohditor_demosaic::{DemosaicAlgorithm, WhiteBalanceGains};
+use rohditor_demosaic::WhiteBalanceGains;
 use rohditor_edit::{
     ColorGradingAdjustments, EditRecipe, HSL_CHANNEL_COUNT, HslAdjustments, LightToneLut,
     TEMPERATURE_RANGE, TINT_RANGE, ToneCurve, WHITE_BALANCE_MULTIPLIER_RANGE, WhiteBalance,
@@ -9,9 +9,7 @@ use rohditor_image::{
     LinearRgbSpace, MosaicImage, Orientation, OrientationMap, allocate_zeroed_f32,
     allocate_zeroed_u8, allocate_zeroed_u16,
 };
-use rohditor_raw::{
-    ImageRect, LevelPattern, PhotometricInterpretation, RawFileInfo, RawFrame,
-};
+use rohditor_raw::{ImageRect, LevelPattern, PhotometricInterpretation, RawFileInfo, RawFrame};
 
 use crate::color::{
     CameraColorTransform, LINEAR_REC2020_TO_XYZ_D65, XYZ_D65_TO_LINEAR_SRGB,
@@ -1219,7 +1217,7 @@ mod tests {
     use rohditor_raw::{CameraColorMatrix, CaptureMetadata, CfaPattern, LevelPattern, RawFileInfo};
 
     use super::*;
-    use rohditor_demosaic::demosaic;
+    use rohditor_demosaic::{DemosaicAlgorithm, demosaic};
 
     fn test_info(width: usize, height: usize, pattern: &str) -> RawFileInfo {
         RawFileInfo {
@@ -1832,9 +1830,8 @@ mod tests {
             LinearRgbImage::new(2, 3, 6, LinearRgbSpace::Rec2020D65, data).expect("valid image");
         let normal = render_display_srgb8(&image, Orientation::Normal, OutputPolicy::ClipToSrgb)
             .expect("normal output");
-        let rotated =
-            render_display_srgb8(&image, Orientation::Rotate90, OutputPolicy::ClipToSrgb)
-                .expect("rotated output");
+        let rotated = render_display_srgb8(&image, Orientation::Rotate90, OutputPolicy::ClipToSrgb)
+            .expect("rotated output");
         assert_eq!((rotated.width(), rotated.height()), (3, 2));
         assert_eq!(rotated.pixel(0, 0), normal.pixel(0, 2));
         assert_eq!(rotated.pixel(2, 0), normal.pixel(0, 0));

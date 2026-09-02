@@ -1017,14 +1017,7 @@ fn develop_preview(
     cache_hits: PreviewCacheHits,
     cancellation: &CancellationToken,
     preview_cache: &mut PreviewCache,
-) -> Result<
-    (
-        DisplayRgbImage<u8>,
-        Histogram,
-        WorkerPreviewDiagnostics,
-    ),
-    PipelineError,
-> {
+) -> Result<(DisplayRgbImage<u8>, Histogram, WorkerPreviewDiagnostics), PipelineError> {
     if let Some(cached) = preview_cache.adjusted(keys) {
         let copy_started = Instant::now();
         let image = cached.image.clone();
