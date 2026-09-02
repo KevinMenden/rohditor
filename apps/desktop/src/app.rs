@@ -2089,8 +2089,6 @@ fn install_texture(
                 color,
                 egui::TextureOptions::LINEAR,
             )));
-            let now = context.input(|input| input.time);
-            document.view.fit(now);
         }
     }
     document.preview_source = Some(source);
@@ -2311,6 +2309,29 @@ mod tests {
             sample_rgb_patch(2, 2, 3, &pixels[..9], egui::pos2(0.0, 0.0)),
             None
         );
+    }
+
+    #[test]
+    fn installing_a_cpu_preview_preserves_the_existing_view() {
+        let context = egui::Context::default();
+        let mut document = Document::opening(7, PathBuf::from("fixture.arw"));
+        document.view.actual_size(0.0);
+        let pixels = vec![255, 0, 0, 0, 255, 0];
+
+        install_texture(
+            &context,
+            &mut document,
+            WorkerImage {
+                width: 2,
+                height: 1,
+                color: egui::ColorImage::from_rgb([2, 1], &pixels),
+                pixels,
+            },
+            PreviewSource::FastCpu,
+        );
+
+        assert!(!document.view.is_fit());
+        assert_eq!(document.view.zoom_label(), "SOURCE 100%");
     }
 
     #[test]

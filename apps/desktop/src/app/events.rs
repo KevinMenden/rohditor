@@ -114,8 +114,6 @@ impl RohditorApp {
                     document.histogram_revision = Some(ticket.revision);
                     if resolution == PreviewResolution::SourceScale {
                         document.view.actual_size(context.input(|input| input.time));
-                    } else {
-                        document.view.fit(context.input(|input| input.time));
                     }
                     document.preview_status = None;
                     document.last_preview_time = Some(diagnostics.timings.total);
