@@ -13,7 +13,7 @@ pub(crate) enum Icon {
 
 pub(crate) fn paint(painter: &egui::Painter, rect: egui::Rect, icon: Icon, color: egui::Color32) {
     let rect = egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(15.0));
-    let stroke = egui::Stroke::new(1.5, color);
+    let stroke = egui::Stroke::new(1.5_f32, color);
     match icon {
         Icon::Menu => {
             for y in [rect.top() + 3.0, rect.center().y, rect.bottom() - 3.0] {
