@@ -1,7 +1,7 @@
 use thiserror::Error;
 
-use rohditor_edit::EditError;
 use rohditor_demosaic::DemosaicError;
+use rohditor_edit::EditError;
 use rohditor_image::ImageError;
 
 /// Errors from validation or execution of Rohditor's CPU image pipeline.

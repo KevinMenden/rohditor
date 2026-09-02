@@ -1,6 +1,8 @@
 use rayon::prelude::*;
 
-use super::{CancellationCheck, DemosaicError, WhiteBalanceGains, checkpoint, require_finite_output};
+use super::{
+    CancellationCheck, DemosaicError, WhiteBalanceGains, checkpoint, require_finite_output,
+};
 use rohditor_image::{CfaColor, MosaicImage};
 
 const CROSS_OFFSETS: [(isize, isize); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];

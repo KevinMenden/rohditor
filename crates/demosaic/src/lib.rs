@@ -196,11 +196,7 @@ fn validate_mosaic(
     Ok(())
 }
 
-fn invalid_dimensions(
-    mosaic: &MosaicImage<f32>,
-    row_stride: usize,
-    reason: &str,
-) -> DemosaicError {
+fn invalid_dimensions(mosaic: &MosaicImage<f32>, row_stride: usize, reason: &str) -> DemosaicError {
     DemosaicError::InvalidDimensions {
         width: mosaic.width(),
         height: mosaic.height(),
