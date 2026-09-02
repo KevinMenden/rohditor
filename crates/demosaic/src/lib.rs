@@ -168,6 +168,7 @@ pub fn demosaic_cancellable(
         LinearRgbSpace::CameraNative,
         output,
     )
+    .map_err(Into::into)
 }
 
 fn validate_mosaic(
