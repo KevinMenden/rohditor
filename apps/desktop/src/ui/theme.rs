@@ -92,7 +92,7 @@ pub(crate) fn apply(context: &egui::Context) {
     visuals.code_bg_color = colors::FIELD;
     visuals.window_corner_radius = egui::CornerRadius::same(metrics::RADIUS_LARGE);
     visuals.menu_corner_radius = corner;
-    visuals.window_stroke = egui::Stroke::new(1.0, colors::BORDER_STRONG);
+    visuals.window_stroke = egui::Stroke::new(1.0_f32, colors::BORDER_STRONG);
     visuals.window_shadow = egui::epaint::Shadow {
         offset: [0, 6],
         blur: 18,
@@ -101,7 +101,7 @@ pub(crate) fn apply(context: &egui::Context) {
     };
     visuals.popup_shadow = visuals.window_shadow;
     visuals.selection.bg_fill = colors::ACCENT_MUTED;
-    visuals.selection.stroke = egui::Stroke::new(1.0, colors::ACCENT_HOVER);
+    visuals.selection.stroke = egui::Stroke::new(1.0_f32, colors::ACCENT_HOVER);
     visuals.hyperlink_color = colors::ACCENT_HOVER;
     visuals.warn_fg_color = colors::WARNING;
     visuals.error_fg_color = colors::ERROR;
@@ -114,41 +114,41 @@ pub(crate) fn apply(context: &egui::Context) {
     visuals.widgets.noninteractive = egui::style::WidgetVisuals {
         bg_fill: colors::PANEL,
         weak_bg_fill: egui::Color32::TRANSPARENT,
-        bg_stroke: egui::Stroke::new(1.0, colors::BORDER),
+        bg_stroke: egui::Stroke::new(1.0_f32, colors::BORDER),
         corner_radius: corner,
-        fg_stroke: egui::Stroke::new(1.0, colors::TEXT),
+        fg_stroke: egui::Stroke::new(1.0_f32, colors::TEXT),
         expansion: 0.0,
     };
     visuals.widgets.inactive = egui::style::WidgetVisuals {
         bg_fill: colors::FIELD,
         weak_bg_fill: colors::PANEL_RAISED,
-        bg_stroke: egui::Stroke::new(1.0, colors::BORDER),
+        bg_stroke: egui::Stroke::new(1.0_f32, colors::BORDER),
         corner_radius: small_corner,
-        fg_stroke: egui::Stroke::new(1.0, colors::TEXT_MUTED),
+        fg_stroke: egui::Stroke::new(1.0_f32, colors::TEXT_MUTED),
         expansion: 0.0,
     };
     visuals.widgets.hovered = egui::style::WidgetVisuals {
         bg_fill: colors::HOVER,
         weak_bg_fill: colors::HOVER,
-        bg_stroke: egui::Stroke::new(1.0, colors::BORDER_STRONG),
+        bg_stroke: egui::Stroke::new(1.0_f32, colors::BORDER_STRONG),
         corner_radius: small_corner,
-        fg_stroke: egui::Stroke::new(1.25, colors::TEXT),
+        fg_stroke: egui::Stroke::new(1.25_f32, colors::TEXT),
         expansion: 0.0,
     };
     visuals.widgets.active = egui::style::WidgetVisuals {
         bg_fill: colors::ACTIVE,
         weak_bg_fill: colors::ACTIVE,
-        bg_stroke: egui::Stroke::new(1.0, colors::ACCENT_ACTIVE),
+        bg_stroke: egui::Stroke::new(1.0_f32, colors::ACCENT_ACTIVE),
         corner_radius: small_corner,
-        fg_stroke: egui::Stroke::new(1.25, colors::ACCENT_HOVER),
+        fg_stroke: egui::Stroke::new(1.25_f32, colors::ACCENT_HOVER),
         expansion: 0.0,
     };
     visuals.widgets.open = egui::style::WidgetVisuals {
         bg_fill: colors::ACTIVE,
         weak_bg_fill: colors::ACTIVE,
-        bg_stroke: egui::Stroke::new(1.0, colors::ACCENT),
+        bg_stroke: egui::Stroke::new(1.0_f32, colors::ACCENT),
         corner_radius: small_corner,
-        fg_stroke: egui::Stroke::new(1.25, colors::TEXT),
+        fg_stroke: egui::Stroke::new(1.25_f32, colors::TEXT),
         expansion: 0.0,
     };
     style.visuals = visuals;
@@ -159,21 +159,21 @@ pub(crate) fn toolbar_frame() -> egui::Frame {
     egui::Frame::new()
         .fill(colors::PANEL)
         .inner_margin(egui::Margin::symmetric(12, 8))
-        .stroke(egui::Stroke::new(1.0, colors::BORDER))
+        .stroke(egui::Stroke::new(1.0_f32, colors::BORDER))
 }
 
 pub(crate) fn side_panel_frame() -> egui::Frame {
     egui::Frame::new()
         .fill(colors::PANEL)
         .inner_margin(egui::Margin::same(12))
-        .stroke(egui::Stroke::new(1.0, colors::BORDER))
+        .stroke(egui::Stroke::new(1.0_f32, colors::BORDER))
 }
 
 pub(crate) fn status_frame() -> egui::Frame {
     egui::Frame::new()
         .fill(colors::PANEL)
         .inner_margin(egui::Margin::symmetric(10, 5))
-        .stroke(egui::Stroke::new(1.0, colors::BORDER))
+        .stroke(egui::Stroke::new(1.0_f32, colors::BORDER))
 }
 
 pub(crate) fn viewport_frame() -> egui::Frame {
@@ -185,7 +185,7 @@ pub(crate) fn card_frame() -> egui::Frame {
         .fill(colors::PANEL_RAISED)
         .inner_margin(egui::Margin::same(10))
         .corner_radius(metrics::RADIUS)
-        .stroke(egui::Stroke::new(1.0, colors::BORDER))
+        .stroke(egui::Stroke::new(1.0_f32, colors::BORDER))
 }
 
 pub(crate) fn overlay_frame() -> egui::Frame {
@@ -193,7 +193,10 @@ pub(crate) fn overlay_frame() -> egui::Frame {
         .fill(egui::Color32::from_black_alpha(205))
         .inner_margin(egui::Margin::symmetric(9, 5))
         .corner_radius(metrics::RADIUS)
-        .stroke(egui::Stroke::new(1.0, egui::Color32::from_white_alpha(24)))
+        .stroke(egui::Stroke::new(
+            1.0_f32,
+            egui::Color32::from_white_alpha(24),
+        ))
 }
 
 #[cfg(test)]

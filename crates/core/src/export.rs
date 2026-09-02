@@ -4,12 +4,12 @@ use std::path::{Path, PathBuf};
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
 use image::{ExtendedColorType, ImageEncoder};
+use rohditor_image::{DisplayRgbImage, DisplayTransfer};
 use rohditor_raw::{RationalValue, RawFileInfo};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::output::write_transactionally;
-use crate::{DisplayRgbImage, DisplayTransfer};
 
 pub const JPEG_QUALITY_MIN: u8 = 1;
 pub const JPEG_QUALITY_MAX: u8 = 100;

@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use eframe::egui;
-use rohditor_core::DemosaicAlgorithm;
+use rohditor_demosaic::DemosaicAlgorithm;
 
 use super::PickerMode;
 use super::theme::{self, colors};
@@ -288,7 +288,7 @@ pub(crate) fn show(
             ui.painter().rect_stroke(
                 image_rect,
                 0.0,
-                egui::Stroke::new(1.0, egui::Color32::from_white_alpha(18)),
+                egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(18)),
                 egui::StrokeKind::Inside,
             );
 

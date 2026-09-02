@@ -8,16 +8,21 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use rohditor_core::{
-    BLACKS_RANGE, CONTRAST_RANGE, CpuPipeline, CropPolicy, DemosaicAlgorithm, DisplayRgbImage,
-    DisplayTransfer, DitherMode, EXPOSURE_EV_RANGE, EditRecipe, ExportFormat, ExportImage,
-    ExportMetadataPolicy, ExportSettings, HIGHLIGHTS_RANGE, JPEG_QUALITY_DEFAULT, JPEG_QUALITY_MAX,
-    JPEG_QUALITY_MIN, OutputPolicy, PngBitDepth, RenderOptions, SATURATION_RANGE, SHADOWS_RANGE,
-    StageTimings, TINT_RANGE, TONE_CURVE_RANGE, VIBRANCE_RANGE, WHITES_RANGE, WhiteBalance,
-    export_image, paths_refer_to_same_file, write_output_bytes,
+    CpuPipeline, CropPolicy, DitherMode, ExportFormat, ExportImage, ExportMetadataPolicy,
+    ExportSettings, JPEG_QUALITY_DEFAULT, JPEG_QUALITY_MAX, JPEG_QUALITY_MIN, OutputPolicy,
+    PngBitDepth, RenderOptions, StageTimings, export_image, paths_refer_to_same_file,
+    write_output_bytes,
 };
+use rohditor_demosaic::DemosaicAlgorithm;
+use rohditor_edit::{
+    BLACKS_RANGE, CONTRAST_RANGE, EXPOSURE_EV_RANGE, EditRecipe, HIGHLIGHTS_RANGE,
+    SATURATION_RANGE, SHADOWS_RANGE, TEMPERATURE_RANGE, TINT_RANGE, TONE_CURVE_RANGE,
+    VIBRANCE_RANGE, WHITES_RANGE, WhiteBalance,
+};
+use rohditor_image::{DisplayRgbImage, DisplayTransfer, Orientation};
 use rohditor_raw::{
     EncodedPreviewFormat, ImageRect, PhotometricInterpretation, RawDecoder, RawFileInfo,
-    RawOrientation, RawlerDecoder,
+    RawlerDecoder,
 };
 use serde::{Deserialize, Serialize};
 use tracing_subscriber::EnvFilter;
@@ -304,7 +309,7 @@ impl From<CliMetadata> for ExportMetadataPolicy {
     }
 }
 
-impl From<CliOrientation> for RawOrientation {
+impl From<CliOrientation> for Orientation {
     fn from(value: CliOrientation) -> Self {
         match value {
             CliOrientation::Normal => Self::Normal,
@@ -705,7 +710,7 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
         },
         (None, temperature, tint) if temperature.is_some() || tint != 0.0 => {
             WhiteBalance::TemperatureTint {
-                temperature: temperature.unwrap_or(rohditor_core::TEMPERATURE_RANGE.neutral),
+                temperature: temperature.unwrap_or(TEMPERATURE_RANGE.neutral),
                 tint,
             }
         }
@@ -823,7 +828,7 @@ fn quality_crops(
         output_policy: OutputPolicy::ClipToSrgb,
     };
     let mut recipe = EditRecipe::default();
-    recipe.geometry.orientation_override = Some(RawOrientation::Normal);
+    recipe.geometry.orientation_override = Some(Orientation::Normal);
     let settings = ExportSettings {
         format: ExportFormat::Png {
             bit_depth: PngBitDepth::Eight,
@@ -977,7 +982,7 @@ fn verify_libraw(
     for (index, (&rohditor, libraw_bytes)) in frame
         .mosaic
         .iter()
-        .zip(pgm.pixels.chunks_exact(2))
+        .zip(pgm.pixels.as_chunks::<2>().0.iter())
         .enumerate()
     {
         let libraw = u16::from_be_bytes([libraw_bytes[0], libraw_bytes[1]]);
@@ -1233,7 +1238,7 @@ fn nearest_neighbor_2x(image: &DisplayRgbImage<u8>) -> Result<DisplayRgbImage<u8
         let source_row =
             &image.data()[y * image.row_stride()..y * image.row_stride() + image.width() * 3];
         for _ in 0..2 {
-            for pixel in source_row.chunks_exact(3) {
+            for pixel in source_row.as_chunks::<3>().0 {
                 pixels.extend_from_slice(pixel);
                 pixels.extend_from_slice(pixel);
             }
@@ -1509,6 +1514,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use clap::Parser;
+    use rohditor_image::{DisplayRgbImage, DisplayTransfer};
     use rohditor_raw::{CfaPattern, EncodedPreviewFormat, PhotometricInterpretation};
 
     use super::{
@@ -1620,11 +1626,11 @@ mod tests {
 
     #[test]
     fn quality_crop_and_pixel_enlargement_preserve_exact_samples() {
-        let image = rohditor_core::DisplayRgbImage::new(
+        let image = DisplayRgbImage::new(
             3,
             2,
             9,
-            rohditor_core::DisplayTransfer::Srgb,
+            DisplayTransfer::Srgb,
             vec![
                 1, 2, 3, 4, 5, 6, 7, 8, 9, // row 0
                 10, 11, 12, 13, 14, 15, 16, 17, 18, // row 1

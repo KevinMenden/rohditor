@@ -9,6 +9,9 @@ publish.workspace = true
 bytemuck.workspace = true
 image.workspace = true
 rayon.workspace = true
+rohditor-demosaic = { path = "../demosaic" }
+rohditor-edit = { path = "../edit" }
+rohditor-image = { path = "../image" }
 rohditor-raw = { path = "../raw" }
 serde.workspace = true
 thiserror.workspace = true

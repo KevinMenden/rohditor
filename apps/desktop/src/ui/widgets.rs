@@ -98,7 +98,7 @@ fn paint_neutral_marker(ui: &egui::Ui, rect: egui::Rect, spec: AdjustmentSpec<'_
     }
     let normalized = ((spec.neutral - spec.minimum) / span).clamp(0.0, 1.0);
     let marker_x = egui::lerp(rect.left()..=rect.right(), normalized);
-    let marker = egui::Stroke::new(1.0, colors::TEXT_DISABLED);
+    let marker = egui::Stroke::new(1.0_f32, colors::TEXT_DISABLED);
     ui.painter().line_segment(
         [
             egui::pos2(marker_x, rect.center().y - 5.0),
@@ -185,7 +185,7 @@ pub(crate) fn primary_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> e
                 .color(colors::APP_BACKGROUND),
         )
         .fill(colors::ACCENT)
-        .stroke(egui::Stroke::new(1.0, colors::ACCENT_ACTIVE))
+        .stroke(egui::Stroke::new(1.0_f32, colors::ACCENT_ACTIVE))
         .corner_radius(metrics::RADIUS_SMALL),
     )
 }

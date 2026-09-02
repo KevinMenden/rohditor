@@ -4,11 +4,12 @@ use std::time::{Duration, Instant};
 
 use half::f16;
 use rohditor_core::{
-    CancellationToken, DemosaicedBase, EditRecipe, LIGHT_TONE_LUT_SIZE, LINEAR_REC2020_TO_XYZ_D65,
-    LightToneLut, LinearRgbSpace, Matrix3, OrientationMap, ReconstructedPreview, WhiteBalance,
-    WhiteBalanceGains, XYZ_D65_TO_LINEAR_SRGB,
+    CancellationToken, DemosaicedBase, LINEAR_REC2020_TO_XYZ_D65, Matrix3, ReconstructedPreview,
+    XYZ_D65_TO_LINEAR_SRGB,
 };
-use rohditor_raw::RawOrientation;
+use rohditor_demosaic::WhiteBalanceGains;
+use rohditor_edit::{EditRecipe, LIGHT_TONE_LUT_SIZE, LightToneLut, WhiteBalance};
+use rohditor_image::{LinearRgbSpace, Orientation, OrientationMap};
 
 use crate::{GpuCapabilities, GpuPreviewError};
 
@@ -25,7 +26,7 @@ pub struct GpuPreviewSource {
     view: wgpu::TextureView,
     width: u32,
     height: u32,
-    source_orientation: RawOrientation,
+    source_orientation: Orientation,
     white_balance: WhiteBalance,
     white_balance_dynamic: bool,
     white_balance_gains: WhiteBalanceGains,
@@ -94,7 +95,7 @@ pub struct GpuPreviewUpload {
     texels: Vec<u16>,
     width: u32,
     height: u32,
-    source_orientation: RawOrientation,
+    source_orientation: Orientation,
     white_balance: WhiteBalance,
     white_balance_dynamic: bool,
     white_balance_gains: WhiteBalanceGains,
@@ -920,7 +921,7 @@ fn pack_rgba16f(
                 reason: "linear base row stride is shorter than its active RGB samples".to_owned(),
             });
         }
-        for pixel in row[..width_samples].chunks_exact(3) {
+        for pixel in row[..width_samples].as_chunks::<3>().0 {
             let mut encoded = [0_u16; 4];
             for (channel, value) in pixel.iter().copied().enumerate() {
                 if !value.is_finite() {
@@ -952,7 +953,7 @@ fn pack_rgba16f(
 fn build_parameters(
     source_dimensions: (u32, u32),
     output_dimensions: (u32, u32),
-    orientation: RawOrientation,
+    orientation: Orientation,
     recipe: &EditRecipe,
     white_balance_gains: WhiteBalanceGains,
     camera_to_linear_rec2020: Matrix3,
@@ -994,16 +995,16 @@ fn write_matrix_rows(destination: &mut [u32], matrix: Matrix3) {
     }
 }
 
-fn orientation_code(orientation: RawOrientation) -> u32 {
+fn orientation_code(orientation: Orientation) -> u32 {
     match orientation {
-        RawOrientation::Normal | RawOrientation::Unknown => 0,
-        RawOrientation::HorizontalFlip => 1,
-        RawOrientation::Rotate180 => 2,
-        RawOrientation::VerticalFlip => 3,
-        RawOrientation::Transpose => 4,
-        RawOrientation::Rotate90 => 5,
-        RawOrientation::Transverse => 6,
-        RawOrientation::Rotate270 => 7,
+        Orientation::Normal | Orientation::Unknown => 0,
+        Orientation::HorizontalFlip => 1,
+        Orientation::Rotate180 => 2,
+        Orientation::VerticalFlip => 3,
+        Orientation::Transpose => 4,
+        Orientation::Rotate90 => 5,
+        Orientation::Transverse => 6,
+        Orientation::Rotate270 => 7,
     }
 }
 
@@ -1011,7 +1012,8 @@ fn orientation_code(orientation: RawOrientation) -> u32 {
 mod tests {
     use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
-    use rohditor_core::{CpuPipeline, PreviewOptions, ToneCurve};
+    use rohditor_core::{CpuPipeline, PreviewOptions};
+    use rohditor_edit::ToneCurve;
     use rohditor_raw::{
         CameraColorMatrix, CaptureMetadata, CfaPattern, LevelPattern, PhotometricInterpretation,
         RawDecoder, RawFileInfo, RawFrame, RawlerDecoder,
@@ -1032,11 +1034,11 @@ mod tests {
         recipe.light.tone_curve.highlights = -0.04;
         recipe.color.saturation = 1.25;
         recipe.color.vibrance = 0.4;
-        recipe.geometry.orientation_override = Some(RawOrientation::Rotate90);
+        recipe.geometry.orientation_override = Some(Orientation::Rotate90);
         let parameters = build_parameters(
             (7, 5),
             (5, 7),
-            RawOrientation::Rotate90,
+            Orientation::Rotate90,
             &recipe,
             WhiteBalanceGains {
                 red: 1.0,
@@ -1221,7 +1223,7 @@ mod tests {
         let Some(processor) = gpu_test_processor() else {
             return;
         };
-        let frame = synthetic_frame(RawOrientation::Normal);
+        let frame = synthetic_frame(Orientation::Normal);
         let options = PreviewOptions {
             max_long_edge: 8,
             ..PreviewOptions::default()
@@ -1265,7 +1267,7 @@ mod tests {
         let Some(processor) = gpu_test_processor() else {
             return;
         };
-        let frame = synthetic_frame(RawOrientation::Normal);
+        let frame = synthetic_frame(Orientation::Normal);
         let initial_recipe = EditRecipe::default();
         let base = CpuPipeline
             .prepare_preview_base(
@@ -1684,8 +1686,10 @@ mod tests {
         );
         let mut stats = GpuParityStats::default();
         for (pixel_index, (cpu_pixel, gpu_pixel)) in cpu
-            .chunks_exact(3)
-            .zip(gpu.rgba.chunks_exact(4))
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .zip(gpu.rgba.as_chunks::<4>().0.iter())
             .enumerate()
         {
             for channel in 0..3 {
@@ -1790,20 +1794,20 @@ mod tests {
         controls
     }
 
-    fn all_test_orientations() -> [RawOrientation; 8] {
+    fn all_test_orientations() -> [Orientation; 8] {
         [
-            RawOrientation::Normal,
-            RawOrientation::HorizontalFlip,
-            RawOrientation::Rotate180,
-            RawOrientation::VerticalFlip,
-            RawOrientation::Transpose,
-            RawOrientation::Rotate90,
-            RawOrientation::Transverse,
-            RawOrientation::Rotate270,
+            Orientation::Normal,
+            Orientation::HorizontalFlip,
+            Orientation::Rotate180,
+            Orientation::VerticalFlip,
+            Orientation::Transpose,
+            Orientation::Rotate90,
+            Orientation::Transverse,
+            Orientation::Rotate270,
         ]
     }
 
-    fn synthetic_frame(orientation: RawOrientation) -> RawFrame {
+    fn synthetic_frame(orientation: Orientation) -> RawFrame {
         let width = 8;
         let height = 6;
         let mosaic = (0..width * height)

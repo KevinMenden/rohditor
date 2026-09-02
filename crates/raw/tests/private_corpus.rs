@@ -3,10 +3,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use rohditor_image::Orientation;
 use rohditor_raw::{
     CameraColorMatrix, DecoderLimits, EmbeddedPreviewInfo, EncodedPreviewFormat, ImageRect,
-    LevelPattern, PhotometricInterpretation, RationalValue, RawDecoder, RawError, RawOrientation,
-    RawlerDecoder,
+    LevelPattern, PhotometricInterpretation, RationalValue, RawDecoder, RawError, RawlerDecoder,
 };
 use serde::Deserialize;
 
@@ -46,7 +46,7 @@ struct SampleExpectation {
     file_name: String,
     source_bits_per_sample: usize,
     as_shot_white_balance: [Option<f32>; 4],
-    orientation: RawOrientation,
+    orientation: Orientation,
     iso: Option<u32>,
     exposure_time: Option<RationalValue>,
     aperture: Option<RationalValue>,

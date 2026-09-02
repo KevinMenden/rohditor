@@ -1,7 +1,7 @@
 use rayon::prelude::*;
+use rohditor_image::{LinearRgbImage, allocate_zeroed_f32};
 
-use crate::image::allocate_zeroed_f32;
-use crate::{CancellationToken, LinearRgbImage, PipelineError};
+use crate::{CancellationToken, PipelineError};
 
 #[derive(Debug)]
 struct AreaSample {
@@ -64,7 +64,8 @@ pub(crate) fn resize_area_cancellable(
         .try_for_each(|(source_y, output_row)| -> Result<(), PipelineError> {
             cancellation.checkpoint()?;
             let source_row_start = source_y * image.row_stride();
-            for (target_x, destination) in output_row.chunks_exact_mut(3).enumerate() {
+            for (target_x, destination) in output_row.as_chunks_mut::<3>().0.iter_mut().enumerate()
+            {
                 let sample = &horizontal_samples[target_x];
                 for (offset, &weight) in sample.weights.iter().enumerate() {
                     let source_x = sample.first + offset;
@@ -109,6 +110,7 @@ pub(crate) fn resize_area_cancellable(
     cancellation.checkpoint()?;
 
     LinearRgbImage::new(target_width, target_height, output_stride, space, output)
+        .map_err(Into::into)
 }
 
 fn area_samples(source_length: usize, target_length: usize) -> Vec<AreaSample> {
@@ -149,7 +151,7 @@ mod tests {
     use rayon::ThreadPoolBuilder;
 
     use super::*;
-    use crate::LinearRgbSpace;
+    use rohditor_image::LinearRgbSpace;
 
     #[test]
     fn exact_two_by_two_reduction_averages_each_source_block() {
@@ -183,7 +185,7 @@ mod tests {
         let reduced = resize_area_cancellable(image, 3, 2, &CancellationToken::new())
             .expect("valid reduction");
         assert_eq!(reduced.space(), LinearRgbSpace::Rec2020D65);
-        for pixel in reduced.data().chunks_exact(3) {
+        for pixel in reduced.data().as_chunks::<3>().0 {
             for (actual, expected) in pixel.iter().zip([0.25, -0.5, 1.5]) {
                 assert!((actual - expected).abs() <= 2.0e-7);
             }

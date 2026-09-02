@@ -1,8 +1,19 @@
-use rohditor_raw::RawOrientation;
+use rohditor_image::Orientation;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
+use thiserror::Error;
 
-use crate::PipelineError;
+mod light;
+
+pub use light::{LIGHT_TONE_LUT_SIZE, LightToneLut};
+
+/// Validation errors for serialized, non-destructive edit recipes.
+#[derive(Debug, Error, PartialEq, Eq)]
+#[error("invalid edit recipe field {field}: {reason}")]
+pub struct EditError {
+    pub field: &'static str,
+    pub reason: String,
+}
 
 /// Schema version of the current non-destructive edit recipe.
 pub const EDIT_RECIPE_SCHEMA_VERSION: u32 = 2;
@@ -270,7 +281,7 @@ impl Default for ColorAdjustments {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct GeometryAdjustments {
     #[serde(default)]
-    pub orientation_override: Option<RawOrientation>,
+    pub orientation_override: Option<Orientation>,
 }
 
 /// Serializable, non-destructive global edits.
@@ -294,9 +305,9 @@ impl Default for EditRecipe {
 }
 
 impl EditRecipe {
-    pub fn validate(&self) -> Result<(), PipelineError> {
+    pub fn validate(&self) -> Result<(), EditError> {
         if self.schema_version != EDIT_RECIPE_SCHEMA_VERSION {
-            return Err(PipelineError::InvalidRecipe {
+            return Err(EditError {
                 field: "schema_version",
                 reason: format!(
                     "version {} is not supported; expected {}",
@@ -375,8 +386,8 @@ impl EditRecipe {
             )?;
             validate_parameter("color.white_balance.tint", tint, TINT_RANGE)?;
         }
-        if self.geometry.orientation_override == Some(RawOrientation::Unknown) {
-            return Err(PipelineError::InvalidRecipe {
+        if self.geometry.orientation_override == Some(Orientation::Unknown) {
+            return Err(EditError {
                 field: "geometry.orientation_override",
                 reason: "unknown is metadata state, not a usable override".to_owned(),
             });
@@ -404,7 +415,7 @@ struct RecipeFields {
     #[serde(default, alias = "saturation")]
     legacy_saturation: Option<f32>,
     #[serde(default, alias = "orientation_override")]
-    legacy_orientation_override: Option<RawOrientation>,
+    legacy_orientation_override: Option<Orientation>,
 }
 
 impl<'de> Deserialize<'de> for EditRecipe {
@@ -453,11 +464,11 @@ fn validate_parameter(
     field: &'static str,
     value: f32,
     range: ParameterRange,
-) -> Result<(), PipelineError> {
+) -> Result<(), EditError> {
     if range.contains(value) {
         Ok(())
     } else {
-        Err(PipelineError::InvalidRecipe {
+        Err(EditError {
             field,
             reason: format!(
                 "{value} is outside the inclusive range {}..={}",

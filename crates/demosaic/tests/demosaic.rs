@@ -1,10 +1,8 @@
 use std::error::Error;
 
 use rayon::ThreadPoolBuilder;
-use rohditor_core::{
-    BayerPattern, CfaColor, DemosaicAlgorithm, MosaicImage, PipelineError, WhiteBalanceGains,
-    demosaic,
-};
+use rohditor_demosaic::{DemosaicAlgorithm, DemosaicError, WhiteBalanceGains, demosaic};
+use rohditor_image::{BayerPattern, CfaColor, ImageError, MosaicImage};
 
 const PATTERNS: [BayerPattern; 4] = [
     BayerPattern::Rggb,
@@ -22,7 +20,7 @@ fn mhc_reconstructs_constants_for_every_bayer_layout() -> Result<(), Box<dyn Err
             WhiteBalanceGains::identity(),
             DemosaicAlgorithm::MalvarHeCutler,
         )?;
-        for pixel in image.data().chunks_exact(3) {
+        for pixel in image.data().as_chunks::<3>().0 {
             assert_close(pixel, &[0.2, 0.4, 0.8], 1.0e-6);
         }
     }
@@ -126,7 +124,7 @@ fn mhc_retains_negative_values_and_over_range_highlights() -> Result<(), Box<dyn
         },
         DemosaicAlgorithm::MalvarHeCutler,
     )?;
-    for pixel in image.data().chunks_exact(3) {
+    for pixel in image.data().as_chunks::<3>().0 {
         assert_close(pixel, &[-0.5, 1.25, 3.0], 1.0e-6);
     }
     Ok(())
@@ -145,7 +143,7 @@ fn demosaic_rejects_non_finite_mosaic_samples() {
     .expect_err("non-finite normalized input must be rejected");
     assert!(matches!(
         error,
-        PipelineError::NonFiniteImageData {
+        DemosaicError::NonFiniteImageData {
             stage: "demosaicing",
             x: 4,
             y: 3
@@ -189,7 +187,7 @@ fn mosaic_from_rgb(
     height: usize,
     pattern: BayerPattern,
     rgb_at: impl Fn(usize, usize) -> [f32; 3],
-) -> Result<MosaicImage<f32>, PipelineError> {
+) -> Result<MosaicImage<f32>, ImageError> {
     let mut data = Vec::with_capacity(width * height);
     for y in 0..height {
         for x in 0..width {

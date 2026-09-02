@@ -1,9 +1,7 @@
 use std::error::Error;
 
-use rohditor_core::{
-    BayerPattern, CfaColor, DemosaicAlgorithm, LinearRgbImage, MosaicImage, WhiteBalanceGains,
-    demosaic,
-};
+use rohditor_demosaic::{DemosaicAlgorithm, WhiteBalanceGains, demosaic};
+use rohditor_image::{BayerPattern, CfaColor, LinearRgbImage, MosaicImage};
 
 const WIDTH: usize = 96;
 const HEIGHT: usize = 80;

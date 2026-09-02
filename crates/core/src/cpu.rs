@@ -1,25 +1,27 @@
 use rayon::prelude::*;
-use rohditor_raw::{
-    ImageRect, LevelPattern, PhotometricInterpretation, RawFileInfo, RawFrame, RawOrientation,
+use rohditor_demosaic::WhiteBalanceGains;
+use rohditor_edit::{
+    ColorGradingAdjustments, EditRecipe, HSL_CHANNEL_COUNT, HslAdjustments, LightToneLut,
+    TEMPERATURE_RANGE, TINT_RANGE, ToneCurve, WHITE_BALANCE_MULTIPLIER_RANGE, WhiteBalance,
 };
+use rohditor_image::{
+    BayerPattern, CfaColor, DisplayRgbImage, DisplayTransfer, ImageRegion, LinearRgbImage,
+    LinearRgbSpace, MosaicImage, Orientation, OrientationMap, allocate_zeroed_f32,
+    allocate_zeroed_u8, allocate_zeroed_u16,
+};
+use rohditor_raw::{ImageRect, LevelPattern, PhotometricInterpretation, RawFileInfo, RawFrame};
 
 use crate::color::{
     CameraColorTransform, LINEAR_REC2020_TO_XYZ_D65, XYZ_D65_TO_LINEAR_SRGB,
     camera_color_transform, encode_rec2020_for_srgb_output,
 };
-use crate::image::{allocate_zeroed_f32, allocate_zeroed_u8, allocate_zeroed_u16};
-use crate::{
-    BayerPattern, CancellationToken, CfaColor, CropPolicy, DisplayRgbImage, DisplayTransfer,
-    DitherMode, EditRecipe, ImageRegion, LightToneLut, LinearRgbImage, LinearRgbSpace, MosaicImage,
-    OrientationMap, OutputPolicy, PipelineError, TEMPERATURE_RANGE, TINT_RANGE,
-    WHITE_BALANCE_MULTIPLIER_RANGE, WhiteBalance, WhiteBalanceGains,
-};
+use crate::{CancellationToken, CropPolicy, DitherMode, OutputPolicy, PipelineError};
 
 const REC2020_LUMINANCE: [f32; 3] = [0.2627, 0.6780, 0.0593];
 /// Conventional Red, Orange, Yellow, Green, Aqua, Blue, Purple, and Magenta
 /// centers on a normalized hue circle. The unequal spacing is intentional:
 /// it matches the named color slices users see in mainstream RAW editors.
-pub const HSL_CHANNEL_CENTERS: [f32; crate::HSL_CHANNEL_COUNT] = [
+pub const HSL_CHANNEL_CENTERS: [f32; HSL_CHANNEL_COUNT] = [
     0.0,
     30.0 / 360.0,
     60.0 / 360.0,
@@ -133,6 +135,7 @@ fn normalize_raw_impl(
         pattern.shifted(crop.x, crop.y),
         normalized,
     )
+    .map_err(Into::into)
 }
 
 pub(crate) fn preview_dimensions(
@@ -364,7 +367,7 @@ pub(crate) fn apply_camera_color_transform_cancellable(
     image.data_mut().par_chunks_mut(row_stride).try_for_each(
         |row| -> Result<(), PipelineError> {
             cancellation.checkpoint()?;
-            for pixel in row[..width_samples].chunks_exact_mut(3) {
+            for pixel in row[..width_samples].as_chunks_mut::<3>().0 {
                 let converted = transform
                     .camera_to_linear_rec2020
                     .transform([pixel[0], pixel[1], pixel[2]]);
@@ -391,7 +394,7 @@ pub(crate) fn apply_white_balance_cancellable(
     image.data_mut().par_chunks_mut(row_stride).try_for_each(
         |row| -> Result<(), PipelineError> {
             cancellation.checkpoint()?;
-            for pixel in row[..width_samples].chunks_exact_mut(3) {
+            for pixel in row[..width_samples].as_chunks_mut::<3>().0 {
                 pixel[0] *= gains.red;
                 pixel[1] *= gains.green;
                 pixel[2] *= gains.blue;
@@ -468,7 +471,7 @@ pub(crate) fn apply_adjustments_cancellable(
     image.data_mut().par_chunks_mut(row_stride).try_for_each(
         |row| -> Result<(), PipelineError> {
             cancellation.checkpoint()?;
-            for pixel in row[..width_samples].chunks_exact_mut(3) {
+            for pixel in row[..width_samples].as_chunks_mut::<3>().0 {
                 if light.exposure_ev != 0.0 {
                     for value in pixel.iter_mut() {
                         *value *= exposure_gain;
@@ -513,7 +516,7 @@ fn apply_light_tone(pixel: &mut [f32], light_tone_lut: &LightToneLut) {
     apply_luminance_delta(pixel, current, target);
 }
 
-fn apply_tone_curve(pixel: &mut [f32], curve: &crate::ToneCurve) {
+fn apply_tone_curve(pixel: &mut [f32], curve: &ToneCurve) {
     if curve.shadows == 0.0 && curve.darks == 0.0 && curve.lights == 0.0 && curve.highlights == 0.0
     {
         return;
@@ -531,7 +534,7 @@ fn apply_tone_curve(pixel: &mut [f32], curve: &crate::ToneCurve) {
 /// output points are projected into a non-decreasing curve so crossing
 /// controls cannot invert tonal order. Values outside [0, 1] are left on the
 /// identity extension to preserve HDR and negative working samples.
-pub fn evaluate_tone_curve(curve: &crate::ToneCurve, input: f32) -> f32 {
+pub fn evaluate_tone_curve(curve: &ToneCurve, input: f32) -> f32 {
     if !input.is_finite() || !(0.0..=1.0).contains(&input) {
         return input;
     }
@@ -605,7 +608,7 @@ fn apply_luminance_delta(pixel: &mut [f32], current: f32, target: f32) {
     }
 }
 
-fn apply_hsl_adjustments(pixel: &mut [f32], adjustments: &crate::HslAdjustments) {
+fn apply_hsl_adjustments(pixel: &mut [f32], adjustments: &HslAdjustments) {
     let [red, green, blue] = [pixel[0], pixel[1], pixel[2]];
     if [red, green, blue]
         .into_iter()
@@ -663,8 +666,8 @@ fn apply_hsl_adjustments(pixel: &mut [f32], adjustments: &crate::HslAdjustments)
 /// weights always sum to one, including across the Magenta/Red wraparound, so
 /// applying the same value to every band has exactly one adjustment's effect.
 #[must_use]
-pub fn hsl_channel_weights(hue: f32) -> [f32; crate::HSL_CHANNEL_COUNT] {
-    let mut weights = [0.0; crate::HSL_CHANNEL_COUNT];
+pub fn hsl_channel_weights(hue: f32) -> [f32; HSL_CHANNEL_COUNT] {
+    let mut weights = [0.0; HSL_CHANNEL_COUNT];
     if !hue.is_finite() {
         return weights;
     }
@@ -696,7 +699,7 @@ pub fn hsl_channel_weights(hue: f32) -> [f32; crate::HSL_CHANNEL_COUNT] {
 #[must_use]
 pub fn hsl_channel_weights_from_display_rgb(
     display_rgb: [u8; 3],
-) -> Option<[f32; crate::HSL_CHANNEL_COUNT]> {
+) -> Option<[f32; HSL_CHANNEL_COUNT]> {
     let linear_srgb = display_rgb.map(|value| crate::srgb_to_linear_srgb(f32::from(value) / 255.0));
     let linear_srgb_to_rec2020 = crate::XYZ_D65_TO_LINEAR_SRGB
         .inverse()
@@ -717,7 +720,7 @@ pub fn hsl_channel_weights_from_display_rgb(
     (saturation >= 0.02).then(|| hsl_channel_weights(hue))
 }
 
-fn apply_color_grading(pixel: &mut [f32], grading: &crate::ColorGradingAdjustments) {
+fn apply_color_grading(pixel: &mut [f32], grading: &ColorGradingAdjustments) {
     if grading.shadows == [0.0; 3] && grading.midtones == [0.0; 3] && grading.highlights == [0.0; 3]
     {
         return;
@@ -817,7 +820,7 @@ fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
 /// applying the requested EXIF orientation. Quantization uses nearest code value.
 pub fn render_display_srgb8(
     image: &LinearRgbImage<f32>,
-    orientation: RawOrientation,
+    orientation: Orientation,
     output_policy: OutputPolicy,
 ) -> Result<DisplayRgbImage<u8>, PipelineError> {
     render_display_srgb8_dithered(image, orientation, output_policy, DitherMode::None)
@@ -827,7 +830,7 @@ pub fn render_display_srgb8(
 /// deterministic output dithering.
 pub fn render_display_srgb8_dithered(
     image: &LinearRgbImage<f32>,
-    orientation: RawOrientation,
+    orientation: Orientation,
     output_policy: OutputPolicy,
     dithering: DitherMode,
 ) -> Result<DisplayRgbImage<u8>, PipelineError> {
@@ -842,7 +845,7 @@ pub fn render_display_srgb8_dithered(
 
 pub(crate) fn render_display_srgb8_cancellable(
     image: &LinearRgbImage<f32>,
-    orientation: RawOrientation,
+    orientation: Orientation,
     output_policy: OutputPolicy,
     cancellation: &CancellationToken,
 ) -> Result<DisplayRgbImage<u8>, PipelineError> {
@@ -857,7 +860,7 @@ pub(crate) fn render_display_srgb8_cancellable(
 
 fn render_display_srgb8_dithered_cancellable(
     image: &LinearRgbImage<f32>,
-    orientation: RawOrientation,
+    orientation: Orientation,
     output_policy: OutputPolicy,
     dithering: DitherMode,
     cancellation: &CancellationToken,
@@ -890,7 +893,8 @@ fn render_display_srgb8_dithered_cancellable(
     output.par_chunks_mut(row_stride).enumerate().try_for_each(
         |(output_y, output_row)| -> Result<(), PipelineError> {
             cancellation.checkpoint()?;
-            for (output_x, destination) in output_row.chunks_exact_mut(3).enumerate() {
+            for (output_x, destination) in output_row.as_chunks_mut::<3>().0.iter_mut().enumerate()
+            {
                 let (source_x, source_y) =
                     orientation_map.source_coordinate_in_bounds(output_x, output_y);
                 let start = source_y * image.row_stride() + source_x * 3;
@@ -917,13 +921,14 @@ fn render_display_srgb8_dithered_cancellable(
         DisplayTransfer::Srgb,
         output,
     )
+    .map_err(Into::into)
 }
 
 /// Convert linear Rec.2020 directly to clipped, transfer-encoded sRGB16 while
 /// physically applying the requested EXIF orientation.
 pub fn render_display_srgb16(
     image: &LinearRgbImage<f32>,
-    orientation: RawOrientation,
+    orientation: Orientation,
     output_policy: OutputPolicy,
     dithering: DitherMode,
 ) -> Result<DisplayRgbImage<u16>, PipelineError> {
@@ -955,7 +960,8 @@ pub fn render_display_srgb16(
         .par_chunks_mut(row_stride)
         .enumerate()
         .for_each(|(output_y, output_row)| {
-            for (output_x, destination) in output_row.chunks_exact_mut(3).enumerate() {
+            for (output_x, destination) in output_row.as_chunks_mut::<3>().0.iter_mut().enumerate()
+            {
                 let (source_x, source_y) =
                     orientation_map.source_coordinate_in_bounds(output_x, output_y);
                 let start = source_y * image.row_stride() + source_x * 3;
@@ -979,6 +985,7 @@ pub fn render_display_srgb16(
         DisplayTransfer::Srgb,
         output,
     )
+    .map_err(Into::into)
 }
 
 fn quantization_dither(mode: DitherMode, x: usize, y: usize) -> f32 {
@@ -1210,7 +1217,7 @@ mod tests {
     use rohditor_raw::{CameraColorMatrix, CaptureMetadata, CfaPattern, LevelPattern, RawFileInfo};
 
     use super::*;
-    use crate::{DemosaicAlgorithm, ToneCurve, demosaic};
+    use rohditor_demosaic::{DemosaicAlgorithm, demosaic};
 
     fn test_info(width: usize, height: usize, pattern: &str) -> RawFileInfo {
         RawFileInfo {
@@ -1254,7 +1261,7 @@ mod tests {
                 illuminant: "D65".to_owned(),
                 values: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
             }],
-            orientation: RawOrientation::Normal,
+            orientation: Orientation::Normal,
             capture: CaptureMetadata::default(),
             embedded_preview: None,
         }
@@ -1406,8 +1413,8 @@ mod tests {
                 DemosaicAlgorithm::Bilinear,
             )
             .expect("demosaic succeeds");
-            for pixel in rgb.data().chunks_exact(3) {
-                assert_eq!(pixel, [0.2, 0.4, 0.8]);
+            for pixel in rgb.data().as_chunks::<3>().0 {
+                assert_eq!(*pixel, [0.2, 0.4, 0.8]);
             }
         }
     }
@@ -1589,7 +1596,7 @@ mod tests {
         recipe.light.tone_curve.darks = 0.1;
         recipe.light.tone_curve.highlights = -0.1;
         apply_adjustments(&mut image, &recipe).expect("tone curve adjustment");
-        for pixel in image.data().chunks_exact(3) {
+        for pixel in image.data().as_chunks::<3>().0 {
             assert!((pixel[0] - pixel[1]).abs() < 1.0e-6);
             assert!((pixel[1] - pixel[2]).abs() < 1.0e-6);
         }
@@ -1662,7 +1669,7 @@ mod tests {
         let source_hsl = [45.0 / 360.0, 0.5, 0.5];
         let source = hsl_to_rgb(source_hsl);
         let mut pixel = source;
-        let mut adjustments = crate::HslAdjustments::default();
+        let mut adjustments = HslAdjustments::default();
         for channel in &mut adjustments.channels {
             channel.hue = 0.4;
         }
@@ -1676,7 +1683,7 @@ mod tests {
     #[test]
     fn hsl_mixer_does_not_assign_a_hue_to_neutral_pixels() {
         let mut pixel = [0.4; 3];
-        let mut adjustments = crate::HslAdjustments::default();
+        let mut adjustments = HslAdjustments::default();
         for channel in &mut adjustments.channels {
             channel.hue = 1.0;
             channel.saturation = 1.0;
@@ -1821,11 +1828,10 @@ mod tests {
         let data = values.into_iter().flat_map(|value| [value; 3]).collect();
         let image =
             LinearRgbImage::new(2, 3, 6, LinearRgbSpace::Rec2020D65, data).expect("valid image");
-        let normal = render_display_srgb8(&image, RawOrientation::Normal, OutputPolicy::ClipToSrgb)
+        let normal = render_display_srgb8(&image, Orientation::Normal, OutputPolicy::ClipToSrgb)
             .expect("normal output");
-        let rotated =
-            render_display_srgb8(&image, RawOrientation::Rotate90, OutputPolicy::ClipToSrgb)
-                .expect("rotated output");
+        let rotated = render_display_srgb8(&image, Orientation::Rotate90, OutputPolicy::ClipToSrgb)
+            .expect("rotated output");
         assert_eq!((rotated.width(), rotated.height()), (3, 2));
         assert_eq!(rotated.pixel(0, 0), normal.pixel(0, 2));
         assert_eq!(rotated.pixel(2, 0), normal.pixel(0, 0));
@@ -1843,11 +1849,11 @@ mod tests {
             .collect();
         let image = LinearRgbImage::new(width, 1, width * 3, LinearRgbSpace::Rec2020D65, data)
             .expect("valid gradient");
-        let eight = render_display_srgb8(&image, RawOrientation::Normal, OutputPolicy::ClipToSrgb)
+        let eight = render_display_srgb8(&image, Orientation::Normal, OutputPolicy::ClipToSrgb)
             .expect("8-bit output");
         let sixteen = render_display_srgb16(
             &image,
-            RawOrientation::Normal,
+            Orientation::Normal,
             OutputPolicy::ClipToSrgb,
             DitherMode::None,
         )
@@ -1884,21 +1890,21 @@ mod tests {
             .expect("valid dither fixture");
         let without = render_display_srgb8_dithered(
             &image,
-            RawOrientation::Normal,
+            Orientation::Normal,
             OutputPolicy::ClipToSrgb,
             DitherMode::None,
         )
         .expect("undithered output");
         let with = render_display_srgb8_dithered(
             &image,
-            RawOrientation::Normal,
+            Orientation::Normal,
             OutputPolicy::ClipToSrgb,
             DitherMode::Ordered8x8,
         )
         .expect("dithered output");
         let repeated = render_display_srgb8_dithered(
             &image,
-            RawOrientation::Normal,
+            Orientation::Normal,
             OutputPolicy::ClipToSrgb,
             DitherMode::Ordered8x8,
         )
@@ -1916,45 +1922,45 @@ mod tests {
 
     #[test]
     fn every_exif_orientation_has_the_expected_coordinate_map() {
-        type OrientationCase = (RawOrientation, (usize, usize), &'static [(usize, usize)]);
+        type OrientationCase = (Orientation, (usize, usize), &'static [(usize, usize)]);
         let cases: [OrientationCase; 8] = [
             (
-                RawOrientation::Normal,
+                Orientation::Normal,
                 (2, 3),
                 &[(0, 0), (1, 0), (0, 1), (1, 1), (0, 2), (1, 2)],
             ),
             (
-                RawOrientation::HorizontalFlip,
+                Orientation::HorizontalFlip,
                 (2, 3),
                 &[(1, 0), (0, 0), (1, 1), (0, 1), (1, 2), (0, 2)],
             ),
             (
-                RawOrientation::Rotate180,
+                Orientation::Rotate180,
                 (2, 3),
                 &[(1, 2), (0, 2), (1, 1), (0, 1), (1, 0), (0, 0)],
             ),
             (
-                RawOrientation::VerticalFlip,
+                Orientation::VerticalFlip,
                 (2, 3),
                 &[(0, 2), (1, 2), (0, 1), (1, 1), (0, 0), (1, 0)],
             ),
             (
-                RawOrientation::Transpose,
+                Orientation::Transpose,
                 (3, 2),
                 &[(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)],
             ),
             (
-                RawOrientation::Rotate90,
+                Orientation::Rotate90,
                 (3, 2),
                 &[(0, 2), (0, 1), (0, 0), (1, 2), (1, 1), (1, 0)],
             ),
             (
-                RawOrientation::Transverse,
+                Orientation::Transverse,
                 (3, 2),
                 &[(1, 2), (1, 1), (1, 0), (0, 2), (0, 1), (0, 0)],
             ),
             (
-                RawOrientation::Rotate270,
+                Orientation::Rotate270,
                 (3, 2),
                 &[(1, 0), (1, 1), (1, 2), (0, 0), (0, 1), (0, 2)],
             ),

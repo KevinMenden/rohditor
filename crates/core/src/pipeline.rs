@@ -1,7 +1,10 @@
 use std::mem::size_of;
 use std::time::{Duration, Instant};
 
-use rohditor_raw::{RawFileInfo, RawFrame, RawOrientation};
+use rohditor_demosaic::{DemosaicAlgorithm, WhiteBalanceGains};
+use rohditor_edit::{EditRecipe, WhiteBalance};
+use rohditor_image::{DisplayRgbImage, LinearRgbImage, Orientation};
+use rohditor_raw::{RawFileInfo, RawFrame};
 
 use crate::analysis::Histogram;
 use crate::color::{CameraColorTransform, camera_color_transform};
@@ -13,9 +16,8 @@ use crate::cpu::{
 use crate::demosaic::demosaic_cancellable;
 use crate::resample::resize_area_cancellable;
 use crate::{
-    CancellationToken, DemosaicAlgorithm, DisplayRgbImage, DitherMode, EditRecipe, ExportImage,
-    LinearRgbImage, OutputBitDepth, PipelineError, WhiteBalance, WhiteBalanceGains,
-    apply_adjustments, render_display_srgb8, render_display_srgb8_dithered, render_display_srgb16,
+    CancellationToken, DitherMode, ExportImage, OutputBitDepth, PipelineError, apply_adjustments,
+    render_display_srgb8, render_display_srgb8_dithered, render_display_srgb16,
 };
 
 /// Default longest edge of an interactively developed preview.
@@ -113,7 +115,7 @@ impl ReconstructedPreview {
 
     /// Source EXIF orientation for the reconstructed camera-native image.
     #[must_use]
-    pub const fn source_orientation(&self) -> RawOrientation {
+    pub const fn source_orientation(&self) -> Orientation {
         self.info.orientation
     }
 
@@ -201,7 +203,7 @@ pub struct ExportRenderResult {
 #[derive(Debug, Clone)]
 pub struct DemosaicedBase {
     image: LinearRgbImage<f32>,
-    source_orientation: RawOrientation,
+    source_orientation: Orientation,
     white_balance: WhiteBalance,
     timings: StageTimings,
     decoded_raw_bytes: usize,
@@ -218,7 +220,7 @@ impl DemosaicedBase {
     }
 
     #[must_use]
-    pub const fn source_orientation(&self) -> RawOrientation {
+    pub const fn source_orientation(&self) -> Orientation {
         self.source_orientation
     }
 

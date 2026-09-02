@@ -1,8 +1,10 @@
 use rayon::prelude::*;
+use rohditor_image::{
+    DisplayRgbImage, DisplayTransfer, LinearRgbImage, LinearRgbSpace, allocate_zeroed_f32,
+};
 use rohditor_raw::{CameraColorMatrix, RawFileInfo};
 
-use crate::image::allocate_zeroed_f32;
-use crate::{DisplayRgbImage, DisplayTransfer, LinearRgbImage, LinearRgbSpace, PipelineError};
+use crate::PipelineError;
 
 const D65_WHITE: [f32; 3] = [0.950_455_9, 1.0, 1.089_057_8];
 const D50_WHITE: [f32; 3] = [0.964_22, 1.0, 0.825_21];
@@ -210,8 +212,10 @@ pub fn convert_rec2020_to_display_srgb(
             let source_start = y * input.row_stride();
             let source_row = &input.data()[source_start..source_start + row_stride];
             for (source, destination) in source_row
-                .chunks_exact(3)
-                .zip(output_row.chunks_exact_mut(3))
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .zip(output_row.as_chunks_mut::<3>().0.iter_mut())
             {
                 destination.copy_from_slice(&encode_rec2020_for_srgb_output(
                     rec2020_to_srgb,
@@ -226,6 +230,7 @@ pub fn convert_rec2020_to_display_srgb(
         DisplayTransfer::Srgb,
         output,
     )
+    .map_err(Into::into)
 }
 
 /// The shared per-pixel output transform used by float display conversion and
@@ -363,7 +368,7 @@ mod tests {
         clip_linear_srgb_for_output, convert_rec2020_to_display_srgb, linear_srgb_to_srgb,
         srgb_to_linear_srgb,
     };
-    use crate::{DisplayTransfer, LinearRgbImage, LinearRgbSpace};
+    use rohditor_image::{DisplayTransfer, LinearRgbImage, LinearRgbSpace};
 
     fn assert_close(actual: f32, expected: f32, tolerance: f32) {
         assert!(
