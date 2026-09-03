@@ -1,11 +1,13 @@
 use eframe::egui;
 
+use super::ViewMode;
 use super::icons::Icon;
 use super::theme::{self, colors, metrics};
 use super::widgets;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ToolbarModel {
+    pub mode: ViewMode,
     pub document_name: Option<String>,
     pub can_undo: bool,
     pub can_redo: bool,
@@ -25,6 +27,7 @@ pub(crate) struct ToolbarModel {
 #[derive(Debug, Default)]
 pub(crate) struct ToolbarOutput {
     pub open: bool,
+    pub open_folder: bool,
     pub close: bool,
     pub undo: bool,
     pub redo: bool,
@@ -34,11 +37,13 @@ pub(crate) struct ToolbarOutput {
     pub crop: bool,
     pub toggle_diagnostics: bool,
     pub export: bool,
+    pub view_mode: Option<ViewMode>,
 }
 
 impl ToolbarOutput {
     fn merge(&mut self, other: Self) {
         self.open |= other.open;
+        self.open_folder |= other.open_folder;
         self.close |= other.close;
         self.undo |= other.undo;
         self.redo |= other.redo;
@@ -48,6 +53,7 @@ impl ToolbarOutput {
         self.crop |= other.crop;
         self.toggle_diagnostics |= other.toggle_diagnostics;
         self.export |= other.export;
+        self.view_mode = other.view_mode.or(self.view_mode);
     }
 }
 
@@ -71,6 +77,7 @@ pub(crate) struct StatusBarModel {
     pub ui_renderer: String,
     pub activity: Option<String>,
     pub busy: bool,
+    pub catalog: Option<String>,
     pub preview_dimensions: Option<(usize, usize)>,
     pub preview_milliseconds: Option<f64>,
     pub startup_error: Option<String>,
@@ -102,22 +109,34 @@ pub(crate) fn show_top(context: &egui::Context, model: &ToolbarModel) -> Toolbar
                     output
                 },
                 |ui| {
-                    let mut output = ToolbarOutput {
-                        export: widgets::primary_button(ui, "Export", model.export_ready)
-                            .on_hover_text("Export the developed full-resolution image")
-                            .clicked(),
-                        toggle_diagnostics: widgets::icon_button(
-                            ui,
-                            Icon::Diagnostics,
-                            "Developer diagnostics",
-                            model.diagnostics_open,
-                            true,
-                        )
-                        .clicked(),
-                        ..ToolbarOutput::default()
-                    };
+                    let mut output = ToolbarOutput::default();
 
-                    if model.document_name.is_some() {
+                    if widgets::toolbar_button(ui, "Library", model.mode == ViewMode::Library, true)
+                        .on_hover_text("Browse a folder of photos")
+                        .clicked()
+                    {
+                        output.view_mode = Some(ViewMode::Library);
+                    }
+                    if widgets::toolbar_button(ui, "Develop", model.mode == ViewMode::Develop, true)
+                        .on_hover_text("Edit the opened photo")
+                        .clicked()
+                    {
+                        output.view_mode = Some(ViewMode::Develop);
+                    }
+                    ui.add(egui::Separator::default().vertical().spacing(8.0));
+                    output.export = widgets::primary_button(ui, "Export", model.export_ready)
+                        .on_hover_text("Export the developed full-resolution image")
+                        .clicked();
+                    output.toggle_diagnostics = widgets::icon_button(
+                        ui,
+                        Icon::Diagnostics,
+                        "Developer diagnostics",
+                        model.diagnostics_open,
+                        true,
+                    )
+                    .clicked();
+
+                    if model.mode == ViewMode::Develop && model.document_name.is_some() {
                         let before_after = widgets::icon_button(
                             ui,
                             Icon::BeforeAfter,
@@ -180,6 +199,10 @@ fn show_app_menu(ui: &mut egui::Ui, model: &ToolbarModel, output: &mut ToolbarOu
         ui.set_min_width(190.0);
         if ui.button("Open RAW…").clicked() {
             output.open = true;
+            ui.close();
+        }
+        if ui.button("Open Folder…").clicked() {
+            output.open_folder = true;
             ui.close();
         }
         if ui
@@ -339,6 +362,17 @@ pub(crate) fn show_status(context: &egui::Context, model: &StatusBarModel) {
                                 ui.spinner();
                             }
                             ui.add(egui::Label::new(activity).truncate());
+                        }
+                        if let Some(catalog) = &model.catalog {
+                            ui.separator();
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(catalog)
+                                        .small()
+                                        .color(colors::TEXT_MUTED),
+                                )
+                                .truncate(),
+                            );
                         }
                         if let Some(error) = &model.startup_error {
                             ui.separator();

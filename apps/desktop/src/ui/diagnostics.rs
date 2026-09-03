@@ -58,12 +58,23 @@ pub(crate) struct PreviewModel {
     pub gpu: Option<GpuModel>,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct CatalogModel {
+    pub photos: usize,
+    pub thumbnails_ready: usize,
+    pub thumbnails_placeholder: usize,
+    pub thumbnails_pending: usize,
+    pub thumbnails_failed: usize,
+    pub resident_bytes: usize,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct DiagnosticsModel {
     pub processor: String,
     pub ui_renderer: String,
     pub gpu_device: Option<String>,
     pub queue: QueueModel,
+    pub catalog: Option<CatalogModel>,
     pub preview: Option<PreviewModel>,
     pub messages: DiagnosticsMessages,
 }
@@ -125,6 +136,25 @@ pub(crate) fn show(
                     diagnostic_row(ui, "Active", model.queue.active);
                     diagnostic_row(ui, "Pending", model.queue.pending);
                 });
+
+            if let Some(catalog) = model.catalog {
+                ui.add_space(6.0);
+                ui.strong("Catalog");
+                egui::Grid::new("catalog_diagnostics")
+                    .num_columns(2)
+                    .show(ui, |ui| {
+                        diagnostic_row(ui, "Photos", catalog.photos);
+                        diagnostic_row(ui, "Thumbnails ready", catalog.thumbnails_ready);
+                        diagnostic_row(
+                            ui,
+                            "Thumbnails placeholder",
+                            catalog.thumbnails_placeholder,
+                        );
+                        diagnostic_row(ui, "Thumbnails pending", catalog.thumbnails_pending);
+                        diagnostic_row(ui, "Thumbnails failed", catalog.thumbnails_failed);
+                        diagnostic_row(ui, "Encoded bytes", format_bytes(catalog.resident_bytes));
+                    });
+            }
 
             let Some(preview) = &model.preview else {
                 ui.add_space(6.0);
@@ -228,7 +258,7 @@ pub(crate) fn show(
 /// the JSON is portable and readable without Rust-specific encodings.
 pub(crate) fn report(model: &DiagnosticsModel) -> DiagnosticsReport<'_> {
     DiagnosticsReport {
-        format_version: 3,
+        format_version: 4,
         application: ApplicationReport {
             name: "Rohditor",
             version: env!("CARGO_PKG_VERSION"),
@@ -239,6 +269,7 @@ pub(crate) fn report(model: &DiagnosticsModel) -> DiagnosticsReport<'_> {
         },
         gpu_device: model.gpu_device.as_deref(),
         queue: QueueReport::from(model.queue),
+        catalog: model.catalog.map(CatalogReport::from),
         preview: model.preview.as_ref().map(PreviewReport::from),
         messages: MessageReport::from(&model.messages),
     }
@@ -250,6 +281,7 @@ pub(crate) struct DiagnosticsReport<'a> {
     pub application: ApplicationReport<'a>,
     pub gpu_device: Option<&'a str>,
     pub queue: QueueReport,
+    pub catalog: Option<CatalogReport>,
     pub preview: Option<PreviewReport<'a>>,
     pub messages: MessageReport<'a>,
 }
@@ -314,6 +346,29 @@ impl<'a> From<&'a PreviewModel> for PreviewReport<'a> {
             cache_resident_bytes: value.cache_resident_bytes,
             estimated_peak_bytes: value.estimated_peak_bytes,
             gpu: value.gpu.map(GpuReport::from),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct CatalogReport {
+    pub photos: usize,
+    pub thumbnails_ready: usize,
+    pub thumbnails_placeholder: usize,
+    pub thumbnails_pending: usize,
+    pub thumbnails_failed: usize,
+    pub resident_bytes: usize,
+}
+
+impl From<CatalogModel> for CatalogReport {
+    fn from(value: CatalogModel) -> Self {
+        Self {
+            photos: value.photos,
+            thumbnails_ready: value.thumbnails_ready,
+            thumbnails_placeholder: value.thumbnails_placeholder,
+            thumbnails_pending: value.thumbnails_pending,
+            thumbnails_failed: value.thumbnails_failed,
+            resident_bytes: value.resident_bytes,
         }
     }
 }
@@ -481,6 +536,7 @@ mod tests {
             ui_renderer: "glow".to_owned(),
             gpu_device: None,
             queue: QueueModel::default(),
+            catalog: None,
             preview: None,
             messages: DiagnosticsMessages {
                 error: Some("decoder rejected malformed input".to_owned()),
