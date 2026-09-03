@@ -2807,6 +2807,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3582f63211428f83597b51b2ddb88e2a91a9d52d12831f9d08f5e624e8977422"
 
 [[package]]
+name = "rohditor-catalog"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "rohditor-image",
+ "rohditor-raw",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "rohditor-cli"
 version = "0.1.0"
 dependencies = [
