@@ -2,8 +2,8 @@
 members = [
     "apps/cli",
     "apps/desktop",
-    "crates/core",
     "crates/catalog",
+    "crates/core",
     "crates/demosaic",
     "crates/edit",
     "crates/gpu",

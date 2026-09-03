@@ -1,4 +1,5 @@
 mod app;
+mod catalog;
 mod coordinator;
 mod document;
 mod preview_cache;

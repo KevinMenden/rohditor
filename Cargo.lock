@@ -2872,6 +2872,7 @@ dependencies = [
  "eframe",
  "image",
  "rfd",
+ "rohditor-catalog",
  "rohditor-core",
  "rohditor-demosaic",
  "rohditor-edit",

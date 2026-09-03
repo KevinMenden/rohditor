@@ -25,6 +25,7 @@ pub(crate) struct ToolbarModel {
 #[derive(Debug, Default)]
 pub(crate) struct ToolbarOutput {
     pub open: bool,
+    pub open_folder: bool,
     pub close: bool,
     pub undo: bool,
     pub redo: bool,
@@ -39,6 +40,7 @@ pub(crate) struct ToolbarOutput {
 impl ToolbarOutput {
     fn merge(&mut self, other: Self) {
         self.open |= other.open;
+        self.open_folder |= other.open_folder;
         self.close |= other.close;
         self.undo |= other.undo;
         self.redo |= other.redo;
@@ -71,6 +73,7 @@ pub(crate) struct StatusBarModel {
     pub ui_renderer: String,
     pub activity: Option<String>,
     pub busy: bool,
+    pub catalog: Option<String>,
     pub preview_dimensions: Option<(usize, usize)>,
     pub preview_milliseconds: Option<f64>,
     pub startup_error: Option<String>,
@@ -180,6 +183,10 @@ fn show_app_menu(ui: &mut egui::Ui, model: &ToolbarModel, output: &mut ToolbarOu
         ui.set_min_width(190.0);
         if ui.button("Open RAW…").clicked() {
             output.open = true;
+            ui.close();
+        }
+        if ui.button("Open Folder…").clicked() {
+            output.open_folder = true;
             ui.close();
         }
         if ui
@@ -339,6 +346,17 @@ pub(crate) fn show_status(context: &egui::Context, model: &StatusBarModel) {
                                 ui.spinner();
                             }
                             ui.add(egui::Label::new(activity).truncate());
+                        }
+                        if let Some(catalog) = &model.catalog {
+                            ui.separator();
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(catalog)
+                                        .small()
+                                        .color(colors::TEXT_MUTED),
+                                )
+                                .truncate(),
+                            );
                         }
                         if let Some(error) = &model.startup_error {
                             ui.separator();

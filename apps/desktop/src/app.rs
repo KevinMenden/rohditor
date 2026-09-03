@@ -21,6 +21,7 @@ use rohditor_raw::{RawFileInfo, RawFrame};
 use tracing::{info, warn};
 
 use crate::ProcessorPreference;
+use crate::catalog::{CatalogCoordinator, CatalogState};
 use crate::coordinator::{
     PreviewBackend, PreviewResolution, RenderCoordinator, WorkerImage, WorkerPreviewDiagnostics,
 };
@@ -33,8 +34,8 @@ use crate::ui::adjustment_panel::{
 };
 use crate::ui::crop::{CropOverlayModel, CropPanelModel};
 use crate::ui::diagnostics::{
-    self, CacheModel, DiagnosticsMessages, DiagnosticsModel, GpuModel, PreviewModel, QueueModel,
-    TimingModel,
+    self, CacheModel, CatalogModel, DiagnosticsMessages, DiagnosticsModel, GpuModel, PreviewModel,
+    QueueModel, TimingModel,
 };
 use crate::ui::theme;
 use crate::ui::toolbar::{self, FilePanelModel, StatusBarModel, ToolbarModel};
@@ -217,6 +218,8 @@ impl ExportUiSettings {
 
 pub(crate) struct RohditorApp {
     coordinator: RenderCoordinator,
+    catalog_coordinator: CatalogCoordinator,
+    catalog: CatalogState,
     document: Option<Document>,
     next_document_id: u64,
     next_export_id: u64,
@@ -339,8 +342,12 @@ impl RohditorApp {
             },
         )
         .map_err(std::io::Error::other)?;
+        let catalog_coordinator =
+            CatalogCoordinator::new(context.egui_ctx.clone()).map_err(std::io::Error::other)?;
         let mut application = Self {
             coordinator,
+            catalog_coordinator,
+            catalog: CatalogState::default(),
             document: None,
             next_document_id: 1,
             next_export_id: 1,
@@ -372,6 +379,36 @@ impl RohditorApp {
         if let Some(path) = selected {
             self.open_path(context, path);
         }
+    }
+
+    fn open_folder_dialog(&mut self) {
+        let Some(folder) = rfd::FileDialog::new()
+            .set_title("Open photo folder")
+            .pick_folder()
+        else {
+            return;
+        };
+        if let Err(error) = self.catalog_coordinator.scan_folder(folder) {
+            warn!(%error, "could not start the catalog scan");
+        }
+    }
+
+    /// Apply pending catalog events and keep the catalog worker paused
+    /// exactly while document work would contend with it.
+    fn update_catalog(&mut self) {
+        for event in self.catalog_coordinator.try_events() {
+            self.catalog.apply_event(event);
+        }
+        self.catalog_coordinator
+            .set_paused(self.document_work_in_flight());
+    }
+
+    fn document_work_in_flight(&self) -> bool {
+        self.document.as_ref().is_some_and(|document| {
+            document.open_status.is_some()
+                || document.preview_status.is_some()
+                || document.export_status.is_some()
+        }) || self.pending_white_balance_pick.is_some()
     }
 
     fn open_path(&mut self, context: &egui::Context, path: PathBuf) {
@@ -1229,6 +1266,9 @@ impl RohditorApp {
         } else if actions.close {
             self.close_document(context);
         }
+        if actions.open_folder {
+            self.open_folder_dialog();
+        }
         if actions.crop {
             self.enter_crop_tool(context);
         }
@@ -1592,6 +1632,7 @@ impl RohditorApp {
                 busy = true;
             }
         }
+        busy |= self.catalog.pending_count() > 0;
         toolbar::show_status(
             context,
             &StatusBarModel {
@@ -1599,6 +1640,7 @@ impl RohditorApp {
                 ui_renderer: format!("{} UI", self.ui_renderer),
                 activity: (!activities.is_empty()).then(|| activities.join("  ·  ")),
                 busy,
+                catalog: self.catalog_status_text(),
                 preview_dimensions: self
                     .document
                     .as_ref()
@@ -1614,6 +1656,32 @@ impl RohditorApp {
         );
     }
 
+    /// One status-bar sentence describing the catalog, if one is open.
+    fn catalog_status_text(&self) -> Option<String> {
+        if let Some(failure) = self.catalog.failure() {
+            return Some(format!("Catalog: {failure}"));
+        }
+        let folder = self.catalog.folder_name()?;
+        let total = self.catalog.entry_count();
+        let pending = self.catalog.pending_count();
+        let mut text = if pending > 0 {
+            format!(
+                "Catalog: {} · {} photos · {}/{} thumbnails",
+                folder,
+                total,
+                self.catalog.displayable_count(),
+                total
+            )
+        } else {
+            format!("Catalog: {} · {total} photos", folder)
+        };
+        if let Some(failures) = self.catalog.failure_summary() {
+            text.push_str(" · ");
+            text.push_str(&failures);
+        }
+        Some(text)
+    }
+
     fn background_work_is_active(&self) -> bool {
         self.document.as_ref().is_some_and(|document| {
             document.open_status.is_some()
@@ -1621,6 +1689,7 @@ impl RohditorApp {
                 || document.export_status.is_some()
                 || document.pending_gpu_histogram.is_some()
         }) || self.pending_white_balance_pick.is_some()
+            || self.catalog.pending_count() > 0
     }
 
     fn show_developer_diagnostics(&mut self, context: &egui::Context) {
@@ -1689,6 +1758,17 @@ impl RohditorApp {
                     resident_bytes: preview.gpu_resident_bytes,
                 }),
             });
+        let catalog =
+            (self.catalog.entry_count() > 0 || self.catalog.failure().is_some()).then(|| {
+                CatalogModel {
+                    photos: self.catalog.entry_count(),
+                    thumbnails_ready: self.catalog.ready_count(),
+                    thumbnails_placeholder: self.catalog.placeholder_count(),
+                    thumbnails_pending: self.catalog.pending_count(),
+                    thumbnails_failed: self.catalog.failure_count(),
+                    resident_bytes: self.catalog.resident_thumbnail_bytes(),
+                }
+            });
         DiagnosticsModel {
             processor: self.processor_description(),
             ui_renderer: self.ui_renderer.to_owned(),
@@ -1703,6 +1783,7 @@ impl RohditorApp {
                 active: queue.active,
                 pending: queue.pending,
             },
+            catalog,
             preview,
             messages: DiagnosticsMessages {
                 processor_note: self.processor_note.clone(),
@@ -2195,6 +2276,7 @@ fn apply_adjustment_interaction(
 impl eframe::App for RohditorApp {
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
         self.process_worker_events(context);
+        self.update_catalog();
         self.refresh_gpu_queue_completion(context);
         self.refresh_gpu_histogram(context);
         self.show_top_bar(context);
