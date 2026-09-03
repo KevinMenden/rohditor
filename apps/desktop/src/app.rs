@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -21,28 +22,41 @@ use rohditor_raw::{RawFileInfo, RawFrame};
 use tracing::{info, warn};
 
 use crate::ProcessorPreference;
+use crate::catalog::{CatalogCoordinator, CatalogState, ThumbnailSlot};
 use crate::coordinator::{
     PreviewBackend, PreviewResolution, RenderCoordinator, WorkerImage, WorkerPreviewDiagnostics,
 };
 use crate::document::{EditSession, PreviewIntent, PreviewTicket};
 use crate::preview_cache::PreviewCacheHits;
-use crate::ui::PickerMode;
+use crate::session;
 use crate::ui::adjustment_panel::{
     self, AdjustmentInteraction, AdjustmentRange, AdjustmentRanges, AdjustmentTarget,
     AdjustmentValues, DocumentPanelModel, ExportKind, ExportUiSettings, PngDepth, WhiteBalanceMode,
 };
+use crate::ui::catalog::{
+    self, FilmstripModel, LibraryEntryModel, LibraryEntryState, LibraryModel, LibrarySort,
+};
 use crate::ui::crop::{CropOverlayModel, CropPanelModel};
 use crate::ui::diagnostics::{
-    self, CacheModel, DiagnosticsMessages, DiagnosticsModel, GpuModel, PreviewModel, QueueModel,
-    TimingModel,
+    self, CacheModel, CatalogModel, DiagnosticsMessages, DiagnosticsModel, GpuModel, PreviewModel,
+    QueueModel, TimingModel,
 };
 use crate::ui::theme;
 use crate::ui::toolbar::{self, FilePanelModel, StatusBarModel, ToolbarModel};
 use crate::ui::viewport::{self, PreviewSource, PreviewTexture, ViewState, ViewportModel};
+use crate::ui::{PickerMode, ViewMode};
 use rohditor_gpu::GpuPreviewUpload;
 
 const GPU_HISTOGRAM_DEBOUNCE: Duration = Duration::from_millis(75);
 const AUTO_TONE_EXPOSURE_EPSILON_EV: f32 = 0.01;
+/// Longest grid texture edge; thumbnails decode down to this size.
+const LIBRARY_TEXTURE_LONG_EDGE: u32 = 256;
+/// Maximum resident grid textures before the least recently used are evicted.
+const LIBRARY_TEXTURE_CAP: usize = 256;
+/// Grid textures decoded per frame, so a folder fill never blocks a frame.
+const LIBRARY_DECODE_BUDGET: usize = 8;
+/// Extra entries around the visible range kept warm for smooth scrolling.
+const LIBRARY_VISIBLE_MARGIN: usize = 24;
 
 #[path = "app/crop.rs"]
 pub(crate) mod crop;
@@ -217,6 +231,8 @@ impl ExportUiSettings {
 
 pub(crate) struct RohditorApp {
     coordinator: RenderCoordinator,
+    catalog_coordinator: CatalogCoordinator,
+    catalog: CatalogState,
     document: Option<Document>,
     next_document_id: u64,
     next_export_id: u64,
@@ -233,6 +249,27 @@ pub(crate) struct RohditorApp {
     pending_white_balance_pick: Option<PreviewTicket>,
     white_balance_memory: WhiteBalanceModeMemory,
     crop_tool: Option<CropToolSession>,
+    view_mode: ViewMode,
+    /// Folder of the last applied scan, used to reset library selection when
+    /// the catalog switches folders.
+    library_folder: Option<PathBuf>,
+    library_selection: Option<usize>,
+    /// Display order of catalog entries for the current sort mode, mapping
+    /// grid positions to catalog entry indices.
+    library_order: Vec<usize>,
+    library_sort: LibrarySort,
+    /// Grid textures keyed by source path with their last-use frame.
+    library_textures: HashMap<PathBuf, (egui::TextureHandle, u64)>,
+    /// Paths whose thumbnail bytes could not be decoded, so failures are not
+    /// retried every frame.
+    library_texture_failures: std::collections::HashSet<PathBuf>,
+    library_visible: (usize, usize),
+    library_columns: usize,
+    library_frame: u64,
+    library_decode_pending: bool,
+    library_scroll_to_selection: bool,
+    filmstrip_visible: (usize, usize),
+    filmstrip_active: Option<usize>,
 }
 
 /// Keep the last values for the two editable WB modes while the user switches
@@ -339,8 +376,20 @@ impl RohditorApp {
             },
         )
         .map_err(std::io::Error::other)?;
+        let catalog_coordinator =
+            CatalogCoordinator::new(context.egui_ctx.clone()).map_err(std::io::Error::other)?;
+        // Restore the last browsed folder when the app was not given a file.
+        let mut view_mode = ViewMode::default();
+        if initial_path.is_none()
+            && let Some(folder) = session::load_last_folder()
+            && catalog_coordinator.scan_folder(folder).is_ok()
+        {
+            view_mode = ViewMode::Library;
+        }
         let mut application = Self {
             coordinator,
+            catalog_coordinator,
+            catalog: CatalogState::default(),
             document: None,
             next_document_id: 1,
             next_export_id: 1,
@@ -357,6 +406,20 @@ impl RohditorApp {
             pending_white_balance_pick: None,
             white_balance_memory: WhiteBalanceModeMemory::default(),
             crop_tool: None,
+            view_mode,
+            library_folder: None,
+            library_selection: None,
+            library_order: Vec::new(),
+            library_sort: LibrarySort::default(),
+            library_textures: HashMap::new(),
+            library_texture_failures: std::collections::HashSet::new(),
+            library_visible: (0, LIBRARY_VISIBLE_MARGIN),
+            library_columns: 1,
+            library_frame: 0,
+            library_decode_pending: false,
+            library_scroll_to_selection: false,
+            filmstrip_visible: (0, 0),
+            filmstrip_active: None,
         };
         if let Some(path) = initial_path {
             application.open_path(&context.egui_ctx, path);
@@ -372,6 +435,38 @@ impl RohditorApp {
         if let Some(path) = selected {
             self.open_path(context, path);
         }
+    }
+
+    fn open_folder_dialog(&mut self) {
+        let Some(folder) = rfd::FileDialog::new()
+            .set_title("Open photo folder")
+            .pick_folder()
+        else {
+            return;
+        };
+        if let Err(error) = self.catalog_coordinator.scan_folder(folder.clone()) {
+            warn!(%error, "could not start the catalog scan");
+            return;
+        }
+        session::store_last_folder(&folder);
+    }
+
+    /// Apply pending catalog events and keep the catalog worker paused
+    /// exactly while document work would contend with it.
+    fn update_catalog(&mut self) {
+        for event in self.catalog_coordinator.try_events() {
+            self.catalog.apply_event(event);
+        }
+        self.catalog_coordinator
+            .set_paused(self.document_work_in_flight());
+    }
+
+    fn document_work_in_flight(&self) -> bool {
+        self.document.as_ref().is_some_and(|document| {
+            document.open_status.is_some()
+                || document.preview_status.is_some()
+                || document.export_status.is_some()
+        }) || self.pending_white_balance_pick.is_some()
     }
 
     fn open_path(&mut self, context: &egui::Context, path: PathBuf) {
@@ -1196,6 +1291,7 @@ impl RohditorApp {
 
     fn show_top_bar(&mut self, context: &egui::Context) {
         let model = ToolbarModel {
+            mode: self.view_mode,
             document_name: self.document.as_ref().map(Document::file_name),
             can_undo: self
                 .document
@@ -1216,11 +1312,23 @@ impl RohditorApp {
                 .as_ref()
                 .map_or_else(|| "FIT".to_owned(), |document| document.view.zoom_label()),
             diagnostics_open: self.show_diagnostics,
-            export_ready: self.document.as_ref().is_some_and(|document| {
-                document.frame.is_some() && document.export_status.is_none()
-            }),
+            export_ready: self.view_mode == ViewMode::Develop
+                && self.document.as_ref().is_some_and(|document| {
+                    document.frame.is_some() && document.export_status.is_none()
+                }),
         };
         let actions = toolbar::show_top(context, &model);
+        if let Some(mode) = actions.view_mode
+            && mode != self.view_mode
+        {
+            if mode == ViewMode::Library {
+                // The crop overlay and pickers belong to the develop viewport.
+                self.crop_tool = None;
+                self.picker_mode = None;
+                self.pending_white_balance_pick = None;
+            }
+            self.view_mode = mode;
+        }
         if actions.toggle_diagnostics {
             self.show_diagnostics = !self.show_diagnostics;
         }
@@ -1228,6 +1336,9 @@ impl RohditorApp {
             self.open_dialog(context);
         } else if actions.close {
             self.close_document(context);
+        }
+        if actions.open_folder {
+            self.open_folder_dialog();
         }
         if actions.crop {
             self.enter_crop_tool(context);
@@ -1592,6 +1703,7 @@ impl RohditorApp {
                 busy = true;
             }
         }
+        busy |= self.catalog.pending_count() > 0;
         toolbar::show_status(
             context,
             &StatusBarModel {
@@ -1599,6 +1711,7 @@ impl RohditorApp {
                 ui_renderer: format!("{} UI", self.ui_renderer),
                 activity: (!activities.is_empty()).then(|| activities.join("  ·  ")),
                 busy,
+                catalog: self.catalog_status_text(),
                 preview_dimensions: self
                     .document
                     .as_ref()
@@ -1614,6 +1727,320 @@ impl RohditorApp {
         );
     }
 
+    /// One status-bar sentence describing the catalog, if one is open.
+    fn catalog_status_text(&self) -> Option<String> {
+        if let Some(failure) = self.catalog.failure() {
+            return Some(format!("Catalog: {failure}"));
+        }
+        let folder = self.catalog.folder_name()?;
+        let total = self.catalog.entry_count();
+        let pending = self.catalog.pending_count();
+        let mut text = if pending > 0 {
+            format!(
+                "Catalog: {} · {} photos · {}/{} thumbnails",
+                folder,
+                total,
+                self.catalog.displayable_count(),
+                total
+            )
+        } else {
+            format!("Catalog: {} · {total} photos", folder)
+        };
+        if let Some(failures) = self.catalog.failure_summary() {
+            text.push_str(" · ");
+            text.push_str(&failures);
+        }
+        Some(text)
+    }
+
+    /// Library-mode central panel: lazy textures, model, grid, and actions.
+    fn show_library(&mut self, context: &egui::Context) {
+        if self.catalog.folder() != self.library_folder.as_deref() {
+            self.library_folder = self.catalog.folder().map(Path::to_path_buf);
+            self.library_selection = None;
+            self.library_textures.clear();
+            self.library_texture_failures.clear();
+        }
+        let count = self.catalog.entry_count();
+        self.library_selection = self.library_selection.filter(|index| *index < count);
+        self.library_order = self.sorted_catalog_indices();
+        let opened_by_keyboard = self.handle_library_keyboard(context);
+        self.decode_library_textures_for_range(context, self.library_visible);
+        let model = self.library_model();
+        let output = catalog::show(context, &model);
+        self.library_visible = (output.visible_range.start, output.visible_range.end);
+        self.library_columns = output.columns.max(1);
+        if let Some(sort) = output.sort_changed {
+            self.library_sort = sort;
+        }
+        if let Some(index) = output.selected_entry {
+            self.library_selection = Some(index);
+        }
+        if let Some(index) = opened_by_keyboard.or(output.open_entry) {
+            self.open_catalog_entry(context, index);
+        }
+        if output.open_folder {
+            self.open_folder_dialog();
+        }
+    }
+
+    /// Open a catalog entry for editing, unless it is already open.
+    fn open_catalog_entry(&mut self, context: &egui::Context, grid_index: usize) {
+        let Some(&catalog_index) = self.library_order.get(grid_index) else {
+            return;
+        };
+        let Some(path) = self
+            .catalog
+            .entry_path(catalog_index)
+            .map(Path::to_path_buf)
+        else {
+            return;
+        };
+        if self
+            .document
+            .as_ref()
+            .is_some_and(|document| document.path == path)
+        {
+            return;
+        }
+        self.view_mode = ViewMode::Develop;
+        self.open_path(context, path);
+    }
+
+    /// Display order of catalog entries: scan order for filename sort, or
+    /// capture-date order with undated entries last.
+    fn sorted_catalog_indices(&self) -> Vec<usize> {
+        let count = self.catalog.entry_count();
+        let mut order: Vec<usize> = (0..count).collect();
+        if self.library_sort == LibrarySort::CaptureDate {
+            order.sort_by(|&left, &right| {
+                match (
+                    self.catalog.capture_date(left),
+                    self.catalog.capture_date(right),
+                ) {
+                    (Some(left_date), Some(right_date)) => {
+                        left_date.cmp(right_date).then_with(|| {
+                            self.catalog
+                                .entry_name(left)
+                                .cmp(&self.catalog.entry_name(right))
+                        })
+                    }
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => self
+                        .catalog
+                        .entry_name(left)
+                        .cmp(&self.catalog.entry_name(right)),
+                }
+            });
+        }
+        order
+    }
+
+    /// Apply library keyboard navigation; returns the entry to open on Enter.
+    fn handle_library_keyboard(&mut self, context: &egui::Context) -> Option<usize> {
+        let count = self.catalog.entry_count();
+        if count == 0 {
+            return None;
+        }
+        let key = context.input(|input| {
+            if input.key_pressed(egui::Key::ArrowLeft) {
+                Some(LibraryNavigation::Left)
+            } else if input.key_pressed(egui::Key::ArrowRight) {
+                Some(LibraryNavigation::Right)
+            } else if input.key_pressed(egui::Key::ArrowUp) {
+                Some(LibraryNavigation::Up)
+            } else if input.key_pressed(egui::Key::ArrowDown) {
+                Some(LibraryNavigation::Down)
+            } else if input.key_pressed(egui::Key::Home) {
+                Some(LibraryNavigation::Home)
+            } else if input.key_pressed(egui::Key::End) {
+                Some(LibraryNavigation::End)
+            } else {
+                None
+            }
+        });
+        if let Some(key) = key {
+            self.library_selection = Some(moved_library_selection(
+                self.library_selection,
+                self.library_columns,
+                count,
+                key,
+            ));
+            self.library_scroll_to_selection = true;
+            None
+        } else if context.input(|input| input.key_pressed(egui::Key::Enter)) {
+            self.library_selection
+        } else {
+            None
+        }
+    }
+
+    /// Decode textures for grid positions around `range`, with a per-frame
+    /// budget so large folders never block a frame.
+    fn decode_library_textures_for_range(
+        &mut self,
+        context: &egui::Context,
+        (start, end): (usize, usize),
+    ) {
+        self.library_decode_pending = false;
+        let count = self.library_order.len();
+        if count == 0 {
+            return;
+        }
+        let start = start.saturating_sub(LIBRARY_VISIBLE_MARGIN).min(count);
+        let end = (end + LIBRARY_VISIBLE_MARGIN).min(count);
+        let candidates: Vec<(PathBuf, Vec<u8>)> = (start..end)
+            .filter_map(|grid_index| {
+                let catalog_index = *self.library_order.get(grid_index)?;
+                let path = self.catalog.entry_path(catalog_index)?.to_path_buf();
+                match self.catalog.slot(catalog_index) {
+                    Some(ThumbnailSlot::Ready(thumbnail)) => {
+                        Some((path, thumbnail.bytes().to_vec()))
+                    }
+                    _ => None,
+                }
+            })
+            .collect();
+
+        let frame = self.library_frame;
+        let mut budget = LIBRARY_DECODE_BUDGET;
+        for (path, bytes) in candidates {
+            if let Some(entry) = self.library_textures.get_mut(&path) {
+                entry.1 = frame;
+                continue;
+            }
+            if budget == 0 {
+                self.library_decode_pending = true;
+                continue;
+            }
+            if self.library_texture_failures.contains(&path) {
+                continue;
+            }
+            match decode_library_texture(&bytes) {
+                Ok(image) => {
+                    let texture = context.load_texture(
+                        path.to_string_lossy().into_owned(),
+                        image,
+                        egui::TextureOptions::LINEAR,
+                    );
+                    self.library_textures.insert(path, (texture, frame));
+                    budget -= 1;
+                }
+                Err(error) => {
+                    warn!(
+                        %error,
+                        path = %path.display(),
+                        "library grid texture decoding failed"
+                    );
+                    self.library_texture_failures.insert(path);
+                }
+            }
+        }
+        evict_least_recently_used(&mut self.library_textures, LIBRARY_TEXTURE_CAP);
+    }
+
+    fn library_model(&mut self) -> LibraryModel {
+        let selection = self.library_selection;
+        let scroll_to_selection = self.library_scroll_to_selection;
+        self.library_scroll_to_selection = false;
+        let entries = self
+            .library_order
+            .iter()
+            .filter_map(|&catalog_index| self.library_entry_model(catalog_index))
+            .collect();
+        LibraryModel {
+            folder_name: self.catalog.folder_name(),
+            entries,
+            selection,
+            scroll_to_selection,
+            sort: self.library_sort,
+            failure: self.catalog.failure().map(str::to_owned),
+            loading_thumbnails: self.catalog.pending_count() > 0,
+        }
+    }
+
+    fn library_entry_model(&self, catalog_index: usize) -> Option<LibraryEntryModel> {
+        let name = self.catalog.entry_name(catalog_index)?.to_owned();
+        let state = match self.catalog.slot(catalog_index) {
+            Some(ThumbnailSlot::Ready(_)) => LibraryEntryState::Ready,
+            Some(ThumbnailSlot::Placeholder(_)) => LibraryEntryState::Placeholder,
+            Some(ThumbnailSlot::Failed(_)) => LibraryEntryState::Failed,
+            _ => LibraryEntryState::Pending,
+        };
+        let texture = self
+            .catalog
+            .entry_path(catalog_index)
+            .and_then(|path| self.library_textures.get(path))
+            .map(|(texture, _)| texture.clone());
+        Some(LibraryEntryModel {
+            name,
+            state,
+            texture,
+        })
+    }
+
+    /// Develop-mode filmstrip below the viewport; clicking a thumbnail opens
+    /// that photo, and PageUp/PageDown walk through the folder.
+    fn show_filmstrip(&mut self, context: &egui::Context) {
+        if self.catalog.entry_count() == 0 {
+            return;
+        }
+        self.library_order = self.sorted_catalog_indices();
+        let active_catalog_index = self
+            .document
+            .as_ref()
+            .and_then(|document| self.catalog.entry_index_for_path(&document.path));
+        let active_grid = active_catalog_index.and_then(|catalog_index| {
+            self.library_order
+                .iter()
+                .position(|&index| index == catalog_index)
+        });
+        let scroll_to_active = active_grid != self.filmstrip_active;
+        self.filmstrip_active = active_grid;
+
+        if let Some(catalog_index) = self.navigate_filmstrip(context, active_catalog_index) {
+            self.open_catalog_entry(context, catalog_index);
+        }
+
+        self.decode_library_textures_for_range(context, self.filmstrip_visible);
+        let model = FilmstripModel {
+            entries: self
+                .library_order
+                .iter()
+                .filter_map(|&catalog_index| self.library_entry_model(catalog_index))
+                .collect(),
+            active: active_grid,
+            scroll_to_active,
+        };
+        let output = catalog::show_filmstrip(context, &model);
+        self.filmstrip_visible = (output.visible_range.start, output.visible_range.end);
+        if let Some(grid_index) = output.open_entry {
+            self.open_catalog_entry(context, grid_index);
+        }
+    }
+
+    /// PageUp/PageDown move to the previous/next photo in display order.
+    fn navigate_filmstrip(
+        &mut self,
+        context: &egui::Context,
+        active_catalog_index: Option<usize>,
+    ) -> Option<usize> {
+        let forward = context.input(|input| {
+            if input.key_pressed(egui::Key::PageDown) {
+                Some(true)
+            } else if input.key_pressed(egui::Key::PageUp) {
+                Some(false)
+            } else {
+                None
+            }
+        })?;
+        let target =
+            adjacent_catalog_index(active_catalog_index, self.catalog.entry_count(), forward)?;
+        // Convert the catalog index into the display-order grid index.
+        self.library_order.iter().position(|&index| index == target)
+    }
+
     fn background_work_is_active(&self) -> bool {
         self.document.as_ref().is_some_and(|document| {
             document.open_status.is_some()
@@ -1621,6 +2048,8 @@ impl RohditorApp {
                 || document.export_status.is_some()
                 || document.pending_gpu_histogram.is_some()
         }) || self.pending_white_balance_pick.is_some()
+            || self.catalog.pending_count() > 0
+            || self.library_decode_pending
     }
 
     fn show_developer_diagnostics(&mut self, context: &egui::Context) {
@@ -1689,6 +2118,17 @@ impl RohditorApp {
                     resident_bytes: preview.gpu_resident_bytes,
                 }),
             });
+        let catalog =
+            (self.catalog.entry_count() > 0 || self.catalog.failure().is_some()).then(|| {
+                CatalogModel {
+                    photos: self.catalog.entry_count(),
+                    thumbnails_ready: self.catalog.ready_count(),
+                    thumbnails_placeholder: self.catalog.placeholder_count(),
+                    thumbnails_pending: self.catalog.pending_count(),
+                    thumbnails_failed: self.catalog.failure_count(),
+                    resident_bytes: self.catalog.resident_thumbnail_bytes(),
+                }
+            });
         DiagnosticsModel {
             processor: self.processor_description(),
             ui_renderer: self.ui_renderer.to_owned(),
@@ -1703,6 +2143,7 @@ impl RohditorApp {
                 active: queue.active,
                 pending: queue.pending,
             },
+            catalog,
             preview,
             messages: DiagnosticsMessages {
                 processor_note: self.processor_note.clone(),
@@ -1780,6 +2221,97 @@ impl RohditorApp {
 
 fn source_scale_selected(document: Option<&Document>) -> bool {
     document.is_some_and(|document| document.source_scale_requested)
+}
+
+/// Keyboard navigation steps in the library grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LibraryNavigation {
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+}
+
+/// Move a library selection one grid step; `count` must be at least one entry.
+/// Without a selection, any key selects the first entry.
+fn moved_library_selection(
+    current: Option<usize>,
+    columns: usize,
+    count: usize,
+    key: LibraryNavigation,
+) -> usize {
+    let columns = columns.max(1);
+    let last = count - 1;
+    let Some(current) = current.map(|current| current.min(last)) else {
+        return 0;
+    };
+    match key {
+        LibraryNavigation::Left => current.saturating_sub(1),
+        LibraryNavigation::Right => (current + 1).min(last),
+        LibraryNavigation::Up => current.saturating_sub(columns),
+        LibraryNavigation::Down => (current + columns).min(last),
+        LibraryNavigation::Home => 0,
+        LibraryNavigation::End => last,
+    }
+}
+
+/// Step to the previous or next catalog entry in display order. Returns
+/// `None` at the ends or when nothing is active.
+fn adjacent_catalog_index(current: Option<usize>, count: usize, forward: bool) -> Option<usize> {
+    let current = current?;
+    if forward {
+        (current + 1 < count).then_some(current + 1)
+    } else {
+        current.checked_sub(1)
+    }
+}
+
+/// Decode encoded thumbnail bytes into a bounded grid texture image.
+fn decode_library_texture(bytes: &[u8]) -> Result<egui::ColorImage, String> {
+    let decoded = image::load_from_memory_with_format(bytes, image::ImageFormat::Jpeg)
+        .map_err(|error| format!("thumbnail JPEG decoding failed: {error}"))?
+        .to_rgb8();
+    let (width, height) = decoded.dimensions();
+    let long_edge = width.max(height);
+    let resized = if long_edge <= LIBRARY_TEXTURE_LONG_EDGE {
+        decoded
+    } else {
+        let scale = f64::from(LIBRARY_TEXTURE_LONG_EDGE) / f64::from(long_edge);
+        let target_width = ((f64::from(width) * scale).round() as u32).max(1);
+        let target_height = ((f64::from(height) * scale).round() as u32).max(1);
+        image::imageops::resize(
+            &decoded,
+            target_width,
+            target_height,
+            image::imageops::FilterType::Triangle,
+        )
+    };
+    let (width, height) = resized.dimensions();
+    Ok(egui::ColorImage::from_rgb(
+        [width as usize, height as usize],
+        &resized.into_raw(),
+    ))
+}
+
+/// Evict least-recently-used textures until the map fits within `cap`.
+fn evict_least_recently_used(
+    textures: &mut HashMap<PathBuf, (egui::TextureHandle, u64)>,
+    cap: usize,
+) {
+    if textures.len() <= cap {
+        return;
+    }
+    let mut order: Vec<(u64, PathBuf)> = textures
+        .iter()
+        .map(|(path, (_, frame))| (*frame, path.clone()))
+        .collect();
+    order.sort_unstable();
+    let evict = order.len() - cap;
+    for (_, path) in order.into_iter().take(evict) {
+        textures.remove(&path);
+    }
 }
 
 fn document_panel_model(
@@ -2195,14 +2727,22 @@ fn apply_adjustment_interaction(
 impl eframe::App for RohditorApp {
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
         self.process_worker_events(context);
+        self.update_catalog();
+        self.library_frame = self.library_frame.wrapping_add(1);
         self.refresh_gpu_queue_completion(context);
         self.refresh_gpu_histogram(context);
         self.show_top_bar(context);
         self.show_status_bar(context);
-        self.show_file_panel(context);
-        self.show_adjustment_panel(context);
-        self.show_crop_tool(context);
-        self.show_viewport(context);
+        match self.view_mode {
+            ViewMode::Develop => {
+                self.show_file_panel(context);
+                self.show_adjustment_panel(context);
+                self.show_crop_tool(context);
+                self.show_filmstrip(context);
+                self.show_viewport(context);
+            }
+            ViewMode::Library => self.show_library(context),
+        }
         self.show_developer_diagnostics(context);
         // eframe normally wakes the event loop from the worker's
         // `request_repaint` callback. Keep a short polling repaint while work
@@ -2265,9 +2805,77 @@ fn display_file_name(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
 
+    use image::{Rgb, RgbImage};
     use rohditor_image::{DisplayRgbImage, DisplayTransfer};
 
     use super::*;
+
+    #[test]
+    fn library_selection_moves_by_grid_steps_and_clamps() {
+        use LibraryNavigation::{Down, End, Home, Left, Right, Up};
+
+        assert_eq!(moved_library_selection(None, 3, 10, Right), 0);
+        assert_eq!(moved_library_selection(None, 3, 10, Left), 0);
+        assert_eq!(moved_library_selection(Some(4), 3, 10, Down), 7);
+        assert_eq!(moved_library_selection(Some(4), 3, 10, Up), 1);
+        assert_eq!(moved_library_selection(Some(4), 3, 10, Left), 3);
+        assert_eq!(moved_library_selection(Some(9), 3, 10, Right), 9);
+        assert_eq!(moved_library_selection(Some(9), 3, 10, Down), 9);
+        assert_eq!(moved_library_selection(Some(5), 3, 10, Home), 0);
+        assert_eq!(moved_library_selection(Some(5), 3, 10, End), 9);
+        assert_eq!(moved_library_selection(Some(5), 1, 1, End), 0);
+    }
+
+    #[test]
+    fn filmstrip_navigation_steps_and_stops_at_the_ends() {
+        assert_eq!(adjacent_catalog_index(None, 10, true), None);
+        assert_eq!(adjacent_catalog_index(Some(0), 10, false), None);
+        assert_eq!(adjacent_catalog_index(Some(0), 10, true), Some(1));
+        assert_eq!(adjacent_catalog_index(Some(8), 10, true), Some(9));
+        assert_eq!(adjacent_catalog_index(Some(9), 10, true), None);
+        assert_eq!(adjacent_catalog_index(Some(9), 10, false), Some(8));
+        assert_eq!(adjacent_catalog_index(Some(0), 0, true), None);
+    }
+
+    #[test]
+    fn library_texture_decoding_reduces_long_edges() {
+        let image = RgbImage::from_pixel(400, 300, Rgb([200, 10, 10]));
+        let mut bytes = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 85)
+            .encode_image(&image)
+            .expect("encode grid texture source");
+        let decoded = decode_library_texture(&bytes).expect("decode grid texture");
+        assert_eq!(decoded.size, [256, 192]);
+
+        let small = RgbImage::from_pixel(64, 64, Rgb([10, 200, 10]));
+        let mut small_bytes = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut small_bytes, 85)
+            .encode_image(&small)
+            .expect("encode small grid texture source");
+        let small_decoded =
+            decode_library_texture(&small_bytes).expect("decode small grid texture");
+        assert_eq!(small_decoded.size, [64, 64]);
+    }
+
+    #[test]
+    fn library_textures_evict_least_recently_used_beyond_the_cap() {
+        let context = egui::Context::default();
+        let mut textures = HashMap::new();
+        for (frame, path) in [(1_u64, "a"), (2, "b"), (3, "c")] {
+            let texture = context.load_texture(
+                path,
+                egui::ColorImage::from_rgb([1, 1], &[255, 0, 0]),
+                egui::TextureOptions::LINEAR,
+            );
+            textures.insert(PathBuf::from(path), (texture, frame));
+        }
+
+        evict_least_recently_used(&mut textures, 2);
+
+        assert_eq!(textures.len(), 2);
+        assert!(!textures.contains_key(&PathBuf::from("a")));
+        assert!(textures.contains_key(&PathBuf::from("c")));
+    }
 
     #[test]
     fn export_ui_settings_map_to_ui_independent_core_settings() {

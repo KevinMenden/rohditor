@@ -2,6 +2,7 @@
 members = [
     "apps/cli",
     "apps/desktop",
+    "crates/catalog",
     "crates/core",
     "crates/demosaic",
     "crates/edit",
