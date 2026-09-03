@@ -8,6 +8,7 @@
 use eframe::egui;
 use std::ops::Range;
 
+use super::icons::{self, Icon};
 use super::theme::{self, colors, metrics};
 use super::widgets;
 
@@ -32,6 +33,24 @@ pub(crate) enum LibraryEntryState {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum LibrarySort {
+    #[default]
+    Filename,
+    CaptureDate,
+}
+
+impl LibrarySort {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Filename => "Filename",
+            Self::CaptureDate => "Capture date",
+        }
+    }
+
+    const ALL: [Self; 2] = [Self::Filename, Self::CaptureDate];
+}
+
 #[derive(Clone)]
 pub(crate) struct LibraryEntryModel {
     pub name: String,
@@ -46,6 +65,7 @@ pub(crate) struct LibraryModel {
     pub selection: Option<usize>,
     /// Scroll the selected entry into view once, after keyboard navigation.
     pub scroll_to_selection: bool,
+    pub sort: LibrarySort,
     pub failure: Option<String>,
     pub loading_thumbnails: bool,
 }
@@ -55,6 +75,7 @@ pub(crate) struct LibraryOutput {
     pub open_folder: bool,
     pub selected_entry: Option<usize>,
     pub open_entry: Option<usize>,
+    pub sort_changed: Option<LibrarySort>,
     /// Index range whose cells intersected the visible viewport.
     pub visible_range: Range<usize>,
     /// Column count of the laid-out grid, for keyboard navigation.
@@ -112,8 +133,21 @@ fn show_header(ui: &mut egui::Ui, model: &LibraryModel, output: &mut LibraryOutp
             output.open_folder = widgets::toolbar_button(ui, "Open Folder…", false, true)
                 .on_hover_text("Choose a folder of Sony ARW photos to browse")
                 .clicked();
+            if !model.entries.is_empty() {
+                output.sort_changed = show_sort_selector(ui, model.sort);
+            }
         });
     });
+}
+
+fn show_sort_selector(ui: &mut egui::Ui, current: LibrarySort) -> Option<LibrarySort> {
+    let mut selected = current;
+    widgets::dropdown(ui, "library_sort", "Sort", current.label(), |ui| {
+        for option in LibrarySort::ALL {
+            ui.selectable_value(&mut selected, option, option.label());
+        }
+    });
+    (selected != current).then_some(selected)
 }
 
 fn show_empty_state(ui: &mut egui::Ui, model: &LibraryModel, output: &mut LibraryOutput) {
@@ -144,6 +178,72 @@ fn show_empty_state(ui: &mut egui::Ui, model: &LibraryModel, output: &mut Librar
             }
         });
     });
+}
+
+/// Cell size in the Develop-mode filmstrip.
+pub(crate) const FILMSTRIP_CELL: egui::Vec2 = egui::vec2(96.0, 84.0);
+
+#[derive(Default)]
+pub(crate) struct FilmstripModel {
+    pub entries: Vec<LibraryEntryModel>,
+    /// Grid-space index of the photo open in the develop viewport.
+    pub active: Option<usize>,
+    /// Scroll the active entry into view once, when the active photo changes.
+    pub scroll_to_active: bool,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct FilmstripOutput {
+    pub open_entry: Option<usize>,
+    /// Index range whose cells intersected the visible viewport.
+    pub visible_range: Range<usize>,
+}
+
+/// Horizontal thumbnail strip below the develop viewport.
+pub(crate) fn show_filmstrip(context: &egui::Context, model: &FilmstripModel) -> FilmstripOutput {
+    let mut output = FilmstripOutput::default();
+    egui::TopBottomPanel::bottom("filmstrip")
+        .exact_height(FILMSTRIP_CELL.y + 24.0)
+        .frame(theme::side_panel_frame())
+        .show(context, |ui| {
+            let mut next_index = 0_usize;
+            let mut visible = Range { start: 0, end: 0 };
+            egui::ScrollArea::horizontal()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        while next_index < model.entries.len() {
+                            let index = next_index;
+                            next_index += 1;
+                            let entry = &model.entries[index];
+                            let (rect, response) =
+                                ui.allocate_exact_size(FILMSTRIP_CELL, egui::Sense::click());
+                            let active = model.active == Some(index);
+                            paint_entry_card(ui, rect, entry, active);
+                            let response = if response.hovered() {
+                                response.on_hover_text(&entry.name)
+                            } else {
+                                response
+                            };
+                            if response.clicked() {
+                                output.open_entry = Some(index);
+                            }
+                            if active && model.scroll_to_active {
+                                response.scroll_to_me(Some(egui::Align::Center));
+                            }
+                            if rect.intersects(ui.clip_rect()) {
+                                if visible.is_empty() || index < visible.start {
+                                    visible.start = index;
+                                }
+                                visible.end = index + 1;
+                            }
+                        }
+                    });
+                });
+            output.visible_range = visible;
+        });
+    output
 }
 
 fn show_grid(ui: &mut egui::Ui, model: &LibraryModel, output: &mut LibraryOutput) {
@@ -198,6 +298,32 @@ fn show_grid(ui: &mut egui::Ui, model: &LibraryModel, output: &mut LibraryOutput
 }
 
 fn paint_cell(ui: &mut egui::Ui, rect: egui::Rect, entry: &LibraryEntryModel, selected: bool) {
+    paint_entry_card(ui, rect, entry, selected);
+
+    let caption_rect = egui::Rect::from_min_max(
+        rect.left_bottom() + egui::vec2(CELL_PADDING, -(CAPTION_HEIGHT - CELL_PADDING)),
+        rect.right_bottom() - egui::vec2(CELL_PADDING, CELL_PADDING),
+    );
+    let _ = ui.scope_builder(egui::UiBuilder::new().max_rect(caption_rect), |ui| {
+        ui.add(
+            egui::Label::new(egui::RichText::new(&entry.name).small().color(if selected {
+                colors::TEXT
+            } else {
+                colors::TEXT_MUTED
+            }))
+            .truncate(),
+        );
+    });
+}
+
+/// Card background plus the thumbnail area content, shared by the library
+/// grid and the develop filmstrip.
+fn paint_entry_card(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    entry: &LibraryEntryModel,
+    selected: bool,
+) {
     let hovered = ui.rect_contains_pointer(rect);
     let fill = if selected {
         colors::ACCENT_MUTED
@@ -221,7 +347,7 @@ fn paint_cell(ui: &mut egui::Ui, rect: egui::Rect, entry: &LibraryEntryModel, se
 
     let image_rect = egui::Rect::from_min_max(
         rect.left_top() + egui::vec2(CELL_PADDING, CELL_PADDING),
-        rect.right_bottom() - egui::vec2(CELL_PADDING, CAPTION_HEIGHT),
+        rect.right_bottom() - egui::vec2(CELL_PADDING, CELL_PADDING),
     );
     match (&entry.state, &entry.texture) {
         (LibraryEntryState::Ready, Some(texture)) => {
@@ -238,7 +364,18 @@ fn paint_cell(ui: &mut egui::Ui, rect: egui::Rect, entry: &LibraryEntryModel, se
             paint_centered_hint(ui, image_rect, "Decoding…", colors::TEXT_DISABLED);
         }
         (LibraryEntryState::Placeholder, _) => {
-            paint_centered_hint(ui, image_rect, "No preview", colors::TEXT_DISABLED);
+            let icon_rect = egui::Rect::from_center_size(
+                image_rect.center() - egui::vec2(0.0, 7.0),
+                egui::vec2(22.0, 22.0),
+            );
+            icons::paint(ui.painter(), icon_rect, Icon::Photo, colors::TEXT_DISABLED);
+            ui.painter().text(
+                image_rect.center() + egui::vec2(0.0, 12.0),
+                egui::Align2::CENTER_CENTER,
+                "No preview",
+                egui::FontId::proportional(10.0),
+                colors::TEXT_DISABLED,
+            );
         }
         (LibraryEntryState::Failed, _) => {
             paint_centered_hint(ui, image_rect, "Unreadable", colors::ERROR);
@@ -247,21 +384,6 @@ fn paint_cell(ui: &mut egui::Ui, rect: egui::Rect, entry: &LibraryEntryModel, se
             paint_centered_hint(ui, image_rect, "Loading…", colors::TEXT_DISABLED);
         }
     }
-
-    let caption_rect = egui::Rect::from_min_max(
-        rect.left_bottom() + egui::vec2(CELL_PADDING, -(CAPTION_HEIGHT - CELL_PADDING)),
-        rect.right_bottom() - egui::vec2(CELL_PADDING, CELL_PADDING),
-    );
-    let _ = ui.scope_builder(egui::UiBuilder::new().max_rect(caption_rect), |ui| {
-        ui.add(
-            egui::Label::new(egui::RichText::new(&entry.name).small().color(if selected {
-                colors::TEXT
-            } else {
-                colors::TEXT_MUTED
-            }))
-            .truncate(),
-        );
-    });
 }
 
 fn paint_centered_hint(ui: &egui::Ui, rect: egui::Rect, text: &str, color: egui::Color32) {

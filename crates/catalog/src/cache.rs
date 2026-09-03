@@ -10,7 +10,7 @@ use thiserror::Error;
 
 use crate::{CatalogEntry, Thumbnail, ThumbnailOptions};
 
-const CACHE_VERSION: u32 = 1;
+const CACHE_VERSION: u32 = 2;
 static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(0);
 
 /// Errors while locating or writing the thumbnail cache.
@@ -49,6 +49,13 @@ impl ThumbnailCacheKey {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+/// A loaded cache entry with the metadata stored beside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CachedThumbnail {
+    pub thumbnail: Thumbnail,
+    pub captured_at: Option<String>,
 }
 
 /// Persistent thumbnail storage.
@@ -91,7 +98,7 @@ impl ThumbnailCache {
         &self,
         entry: &CatalogEntry,
         options: ThumbnailOptions,
-    ) -> Result<Option<Thumbnail>, CacheError> {
+    ) -> Result<Option<CachedThumbnail>, CacheError> {
         let key = self.key_for(entry, options);
         let metadata_path = self.metadata_path(&key);
         let metadata_bytes = match fs::read(&metadata_path) {
@@ -133,7 +140,10 @@ impl ThumbnailCache {
         if decoded.dimensions() != (metadata.width, metadata.height) {
             return Ok(None);
         }
-        Ok(Some(Thumbnail::new(metadata.width, metadata.height, bytes)))
+        Ok(Some(CachedThumbnail {
+            thumbnail: Thumbnail::new(metadata.width, metadata.height, bytes),
+            captured_at: metadata.captured_at,
+        }))
     }
 
     /// Store a thumbnail using sibling temporary files and atomic renames.
@@ -142,6 +152,7 @@ impl ThumbnailCache {
         entry: &CatalogEntry,
         options: ThumbnailOptions,
         thumbnail: &Thumbnail,
+        captured_at: Option<&str>,
     ) -> Result<(), CacheError> {
         if thumbnail.width() == 0 || thumbnail.height() == 0 {
             return Err(CacheError::InvalidDimensions {
@@ -172,11 +183,13 @@ impl ThumbnailCache {
 
         let metadata = CacheMetadata {
             version: CACHE_VERSION,
+            source_path: entry.path().to_path_buf(),
             source_identity: entry.source_identity(),
             max_long_edge: options.max_long_edge(),
             jpeg_quality: options.jpeg_quality(),
             width: thumbnail.width(),
             height: thumbnail.height(),
+            captured_at: captured_at.map(str::to_owned),
         };
         let metadata_path = self.metadata_path(&key);
         let metadata_bytes =
@@ -194,16 +207,66 @@ impl ThumbnailCache {
     fn metadata_path(&self, key: &ThumbnailCacheKey) -> PathBuf {
         self.root.join(format!("{}.json", key.as_str()))
     }
+
+    /// Remove cache entries whose source lived in `folder` but has since been
+    /// deleted or modified.
+    ///
+    /// The cache is keyed by content fingerprints, so modified files leave
+    /// orphaned pairs behind. This pass walks the cache directory, inspects
+    /// sidecars belonging to `folder`, and deletes pairs whose source is gone
+    /// or whose fingerprint no longer matches the current scan. Entries for
+    /// other folders are left untouched. Individual failures (unreadable
+    /// sidecars, permission errors) are skipped silently; the cache is
+    /// best-effort. Returns the number of removed pairs.
+    pub fn cleanup_folder(&self, folder: &Path, current_entries: &[CatalogEntry]) -> usize {
+        let Ok(directory) = fs::read_dir(&self.root) else {
+            return 0;
+        };
+        let mut removed = 0;
+        for directory_entry in directory.flatten() {
+            let sidecar_path = directory_entry.path();
+            if sidecar_path
+                .extension()
+                .is_none_or(|extension| extension != "json")
+            {
+                continue;
+            }
+            let Ok(metadata_bytes) = fs::read(&sidecar_path) else {
+                continue;
+            };
+            let Ok(metadata) = serde_json::from_slice::<CacheMetadata>(&metadata_bytes) else {
+                continue;
+            };
+            if metadata.source_path.parent() != Some(folder) {
+                continue;
+            }
+            let still_current = current_entries
+                .iter()
+                .find(|entry| entry.path() == metadata.source_path)
+                .is_some_and(|entry| entry.source_identity() == metadata.source_identity);
+            if still_current {
+                continue;
+            }
+            if fs::remove_file(&sidecar_path).is_ok() {
+                removed += 1;
+            }
+            // The sibling image shares the sidecar's `<hash>` stem.
+            drop(fs::remove_file(sidecar_path.with_extension("jpg")));
+        }
+        removed
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct CacheMetadata {
     version: u32,
+    source_path: PathBuf,
     source_identity: SourceIdentity,
     max_long_edge: u32,
     jpeg_quality: u8,
     width: u32,
     height: u32,
+    captured_at: Option<String>,
 }
 
 impl CacheMetadata {
@@ -360,16 +423,23 @@ mod tests {
         let entry = directory.entry(10);
         let options = ThumbnailOptions::default();
         let expected = thumbnail();
+        let captured_at = "2024:01:02 03:04:05";
 
         assert_eq!(cache.load(&entry, options).expect("cache miss"), None);
         cache
-            .store(&entry, options, &expected)
+            .store(&entry, options, &expected, Some(captured_at))
             .expect("store thumbnail");
         let loaded = cache
             .load(&entry, options)
             .expect("load thumbnail")
             .expect("cached thumbnail");
-        assert_eq!(loaded, expected);
+        assert_eq!(
+            loaded,
+            CachedThumbnail {
+                thumbnail: expected,
+                captured_at: Some(captured_at.to_owned()),
+            }
+        );
 
         let changed = directory.entry(11);
         assert_eq!(
@@ -407,7 +477,7 @@ mod tests {
         );
 
         cache
-            .store(&entry, options, &thumbnail())
+            .store(&entry, options, &thumbnail(), None)
             .expect("store valid thumbnail");
         fs::write(cache.image_path(&key), b"not an image").expect("write bad image");
         assert_eq!(cache.load(&entry, options).expect("bad image miss"), None);
@@ -421,8 +491,85 @@ mod tests {
         let invalid = Thumbnail::new(3, 2, vec![1, 2, 3]);
 
         assert!(matches!(
-            cache.store(&entry, ThumbnailOptions::default(), &invalid),
+            cache.store(&entry, ThumbnailOptions::default(), &invalid, None),
             Err(CacheError::InvalidThumbnail { .. })
         ));
+    }
+
+    #[test]
+    fn cleanup_folder_removes_stale_entries_and_keeps_current_and_foreign_ones() {
+        let directory = TestDirectory::new();
+        let other_directory = TestDirectory::new();
+        let cache = ThumbnailCache::new(directory.path().join("thumbs"));
+        let options = ThumbnailOptions::default();
+
+        // Current file, deleted file, modified file, and a file in another
+        // folder that this cleanup must never touch.
+        let current = directory.entry(10);
+        let deleted = {
+            let path = directory.path().join("gone.ARW");
+            File::create(&path).expect("create deleted source");
+            scan_folder(directory.path())
+                .expect("scan before deletion")
+                .into_iter()
+                .find(|entry| entry.path() == path)
+                .expect("find deleted entry")
+        };
+        let modified = {
+            let path = directory.path().join("changed.ARW");
+            let file = File::create(&path).expect("create changed source");
+            file.set_len(20).expect("set changed source size");
+            scan_folder(directory.path())
+                .expect("scan before modification")
+                .into_iter()
+                .find(|entry| entry.path() == path)
+                .expect("find changed entry")
+        };
+        let foreign = other_directory.entry(30);
+
+        for entry in [&current, &deleted, &modified, &foreign] {
+            cache
+                .store(entry, options, &thumbnail(), None)
+                .expect("store cleanup fixture");
+        }
+        fs::remove_file(deleted.path()).expect("delete the gone source");
+        let file = File::options()
+            .append(true)
+            .open(modified.path())
+            .expect("open changed source");
+        file.set_len(40).expect("modify the changed source");
+
+        let current_entries = scan_folder(directory.path()).expect("scan current folder contents");
+        let removed = cache.cleanup_folder(directory.path(), &current_entries);
+        assert_eq!(removed, 2);
+        assert_eq!(
+            cache
+                .load(&current, options)
+                .expect("current entry survives"),
+            Some(CachedThumbnail {
+                thumbnail: thumbnail(),
+                captured_at: None,
+            })
+        );
+        assert_eq!(
+            cache
+                .load(&foreign, options)
+                .expect("foreign entry survives"),
+            Some(CachedThumbnail {
+                thumbnail: thumbnail(),
+                captured_at: None,
+            })
+        );
+        assert_eq!(
+            cache.load(&deleted, options).expect("deleted is gone"),
+            None
+        );
+        assert_eq!(
+            cache.load(&modified, options).expect("modified is stale"),
+            None
+        );
+
+        // A second pass finds nothing left to remove.
+        assert_eq!(cache.cleanup_folder(directory.path(), &current_entries), 0);
     }
 }

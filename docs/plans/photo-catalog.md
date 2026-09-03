@@ -48,7 +48,7 @@ staleness checks, editing, and export remain in their current pipeline.
 3. **Library UI**: add the mode switch, folder picker, responsive thumbnail
    grid, selection/open behavior, empty states, and catalog activity status.
 4. **Polish**: add capture-date sorting, remembered last folder, stale-cache
-   cleanup, and better placeholder presentation.
+   cleanup, a Develop filmstrip, and better placeholder presentation.
 
 ## Explicitly out of scope for the first version
 
@@ -57,7 +57,6 @@ staleness checks, editing, and export remain in their current pipeline.
 - Multi-selection, batch processing, and batch export.
 - XMP sidecars or catalog database persistence.
 - JPEG/PNG catalog items or non-RAW editing.
-- A Develop filmstrip.
 - GPU thumbnail generation.
 
 ## Verification

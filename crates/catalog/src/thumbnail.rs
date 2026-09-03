@@ -122,6 +122,16 @@ pub enum ThumbnailOutcome {
     Placeholder(PlaceholderReason),
 }
 
+/// A generated thumbnail outcome plus metadata read from the source.
+///
+/// Capture dates travel with the thumbnail so catalogs can sort without a
+/// second metadata pass, including for cache hits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeneratedThumbnail {
+    pub outcome: ThumbnailOutcome,
+    pub captured_at: Option<String>,
+}
+
 /// Errors while opening, decoding, orienting, or encoding a thumbnail.
 #[derive(Debug, Error)]
 pub enum ThumbnailError {
@@ -185,7 +195,7 @@ where
     }
 
     /// Generate one thumbnail without decoding the source sensor buffer.
-    pub fn generate(&self, path: impl AsRef<Path>) -> Result<ThumbnailOutcome, ThumbnailError> {
+    pub fn generate(&self, path: impl AsRef<Path>) -> Result<GeneratedThumbnail, ThumbnailError> {
         let path = path.as_ref();
         let mut session = self
             .decoder
@@ -198,6 +208,7 @@ where
             path: path.to_path_buf(),
             source,
         })?;
+        let captured_at = info.capture.captured_at.clone();
         let Some(preview) =
             session
                 .embedded_preview()
@@ -206,9 +217,10 @@ where
                     source,
                 })?
         else {
-            return Ok(ThumbnailOutcome::Placeholder(
-                PlaceholderReason::NoEmbeddedPreview,
-            ));
+            return Ok(GeneratedThumbnail {
+                outcome: ThumbnailOutcome::Placeholder(PlaceholderReason::NoEmbeddedPreview),
+                captured_at,
+            });
         };
 
         let decoded = image::load_from_memory(&preview.bytes)
@@ -236,11 +248,14 @@ where
                 path: path.to_path_buf(),
                 source,
             })?;
-        Ok(ThumbnailOutcome::Ready(Thumbnail::new(
-            resized.width(),
-            resized.height(),
-            bytes,
-        )))
+        Ok(GeneratedThumbnail {
+            outcome: ThumbnailOutcome::Ready(Thumbnail::new(
+                resized.width(),
+                resized.height(),
+                bytes,
+            )),
+            captured_at,
+        })
     }
 }
 
@@ -462,8 +477,8 @@ mod tests {
         let options = ThumbnailOptions::new(2, 90).expect("valid options");
         let generator = ThumbnailGenerator::new(decoder, options);
 
-        let outcome = generator.generate("mock.ARW").expect("generate thumbnail");
-        let ThumbnailOutcome::Ready(thumbnail) = outcome else {
+        let generated = generator.generate("mock.ARW").expect("generate thumbnail");
+        let ThumbnailOutcome::Ready(thumbnail) = generated.outcome else {
             panic!("expected generated thumbnail");
         };
         assert_eq!((thumbnail.width(), thumbnail.height()), (2, 1));
@@ -484,7 +499,8 @@ mod tests {
         assert_eq!(
             generator
                 .generate("missing-preview.ARW")
-                .expect("generate result"),
+                .expect("generate result")
+                .outcome,
             ThumbnailOutcome::Placeholder(PlaceholderReason::NoEmbeddedPreview)
         );
     }

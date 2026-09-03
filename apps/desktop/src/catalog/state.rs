@@ -25,6 +25,8 @@ pub(crate) struct CatalogState {
     folder: Option<PathBuf>,
     entries: Vec<CatalogEntry>,
     slots: Vec<ThumbnailSlot>,
+    /// EXIF capture date per entry, filled as thumbnails resolve.
+    captured_at: Vec<Option<String>>,
     index_by_path: HashMap<PathBuf, usize>,
     failure: Option<String>,
 }
@@ -36,6 +38,7 @@ impl CatalogState {
                 self.folder = Some(folder);
                 self.entries.clear();
                 self.slots.clear();
+                self.captured_at.clear();
                 self.index_by_path.clear();
                 self.failure = None;
             }
@@ -49,6 +52,7 @@ impl CatalogState {
                     .map(|(index, entry)| (entry.path().to_path_buf(), index))
                     .collect();
                 self.slots = entries.iter().map(|_| ThumbnailSlot::Pending).collect();
+                self.captured_at = entries.iter().map(|_| None).collect();
                 self.entries = entries;
             }
             CatalogEvent::ScanFailed { folder, reason } => {
@@ -61,8 +65,9 @@ impl CatalogState {
                 path,
                 identity,
                 outcome,
+                captured_at,
             } => {
-                self.apply_thumbnail(folder, path, identity, outcome);
+                self.apply_thumbnail(folder, path, identity, outcome, captured_at);
             }
             CatalogEvent::WorkerStopped { message } => {
                 self.failure = Some(message);
@@ -76,6 +81,7 @@ impl CatalogState {
         path: PathBuf,
         identity: SourceIdentity,
         outcome: ThumbnailResult,
+        captured_at: Option<String>,
     ) {
         if !self.is_current_folder(&folder) {
             return;
@@ -93,6 +99,7 @@ impl CatalogState {
             ThumbnailResult::Placeholder(reason) => ThumbnailSlot::Placeholder(reason),
             ThumbnailResult::Failed(message) => ThumbnailSlot::Failed(message),
         };
+        self.captured_at[index] = captured_at;
     }
 
     fn is_current_folder(&self, folder: &Path) -> bool {
@@ -113,6 +120,15 @@ impl CatalogState {
 
     pub(crate) fn slot(&self, index: usize) -> Option<&ThumbnailSlot> {
         self.slots.get(index)
+    }
+
+    /// EXIF capture date for one entry, available once its thumbnail resolved.
+    pub(crate) fn capture_date(&self, index: usize) -> Option<&str> {
+        self.captured_at.get(index).and_then(|date| date.as_deref())
+    }
+
+    pub(crate) fn entry_index_for_path(&self, path: &Path) -> Option<usize> {
+        self.index_by_path.get(path).copied()
     }
 
     pub(crate) fn folder_name(&self) -> Option<String> {
@@ -322,6 +338,7 @@ mod tests {
             path: first.path().to_path_buf(),
             identity: first.source_identity(),
             outcome: ThumbnailResult::Failed("other folder".to_owned()),
+            captured_at: None,
         });
         assert_eq!(state.resolved_count(), 0);
 
@@ -333,6 +350,7 @@ mod tests {
             path: first.path().to_path_buf(),
             identity: replaced,
             outcome: ThumbnailResult::Failed("changed file".to_owned()),
+            captured_at: None,
         });
         assert_eq!(state.resolved_count(), 0);
 
@@ -342,6 +360,7 @@ mod tests {
             path: second.path().to_path_buf(),
             identity: second.source_identity(),
             outcome: ThumbnailResult::Failed("unreadable".to_owned()),
+            captured_at: Some("2024:05:06 07:08:09".to_owned()),
         });
         assert_eq!(state.resolved_count(), 1);
         assert!(matches!(
@@ -349,6 +368,8 @@ mod tests {
             ThumbnailSlot::Failed(ref reason) if reason == "unreadable"
         ));
         assert!(matches!(state.slots[0], ThumbnailSlot::Pending));
+        assert_eq!(state.capture_date(1), Some("2024:05:06 07:08:09"));
+        assert_eq!(state.capture_date(0), None);
     }
 
     #[test]
