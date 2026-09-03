@@ -167,5 +167,7 @@ impl PreviewMailbox {
 }
 
 pub(crate) fn should_replace_preview(current: PreviewTicket, candidate: PreviewTicket) -> bool {
-    current.document_id == candidate.document_id && candidate.revision >= current.revision
+    current.document_id == candidate.document_id
+        && (candidate.revision > current.revision
+            || (candidate.revision == current.revision && candidate.sequence >= current.sequence))
 }

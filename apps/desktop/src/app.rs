@@ -24,13 +24,14 @@ use crate::ProcessorPreference;
 use crate::coordinator::{
     PreviewBackend, PreviewResolution, RenderCoordinator, WorkerImage, WorkerPreviewDiagnostics,
 };
-use crate::document::{EditSession, PreviewTicket};
+use crate::document::{EditSession, PreviewIntent, PreviewTicket};
 use crate::preview_cache::PreviewCacheHits;
 use crate::ui::PickerMode;
 use crate::ui::adjustment_panel::{
     self, AdjustmentInteraction, AdjustmentRange, AdjustmentRanges, AdjustmentTarget,
     AdjustmentValues, DocumentPanelModel, ExportKind, ExportUiSettings, PngDepth, WhiteBalanceMode,
 };
+use crate::ui::crop::{CropOverlayModel, CropPanelModel};
 use crate::ui::diagnostics::{
     self, CacheModel, DiagnosticsMessages, DiagnosticsModel, GpuModel, PreviewModel, QueueModel,
     TimingModel,
@@ -43,11 +44,14 @@ use rohditor_gpu::GpuPreviewUpload;
 const GPU_HISTOGRAM_DEBOUNCE: Duration = Duration::from_millis(75);
 const AUTO_TONE_EXPOSURE_EPSILON_EV: f32 = 0.01;
 
+#[path = "app/crop.rs"]
+pub(crate) mod crop;
 #[path = "app/events.rs"]
 mod events;
 #[path = "app/gpu.rs"]
 mod gpu;
 
+use crop::CropToolSession;
 use gpu::{
     GpuDocumentPreview, GpuRuntime, PendingGpuHistogram, gpu_output_size, initialize_gpu_runtime,
     register_or_update_gpu_texture,
@@ -99,6 +103,8 @@ struct Document {
     pending_gpu_histogram: Option<PendingGpuHistogram>,
     gpu_histogram_due: Option<(PreviewTicket, Instant)>,
     source_scale_requested: bool,
+    preview_sequence: u64,
+    preview_intent: PreviewIntent,
     gpu_preview: Option<GpuDocumentPreview>,
     view: ViewState,
     open_status: Option<String>,
@@ -134,6 +140,8 @@ impl Document {
             pending_gpu_histogram: None,
             gpu_histogram_due: None,
             source_scale_requested: false,
+            preview_sequence: 0,
+            preview_intent: PreviewIntent::CommittedFit,
             gpu_preview: None,
             view: ViewState::default(),
             open_status: Some("Opening RAW file".to_owned()),
@@ -155,7 +163,19 @@ impl Document {
         PreviewTicket {
             document_id: self.id,
             revision: self.edits.revision(),
+            sequence: self.preview_sequence,
         }
+    }
+
+    fn begin_preview_request(&mut self, intent: PreviewIntent) -> PreviewTicket {
+        self.preview_sequence = self.preview_sequence.saturating_add(1);
+        self.preview_intent = intent;
+        self.ticket()
+    }
+
+    fn accepts_preview(&self, ticket: PreviewTicket, intent: PreviewIntent) -> bool {
+        ticket.is_current(self.id, self.edits.revision(), self.preview_sequence)
+            && self.preview_intent == intent
     }
 }
 
@@ -212,6 +232,7 @@ pub(crate) struct RohditorApp {
     color_mixer_channel: usize,
     pending_white_balance_pick: Option<PreviewTicket>,
     white_balance_memory: WhiteBalanceModeMemory,
+    crop_tool: Option<CropToolSession>,
 }
 
 /// Keep the last values for the two editable WB modes while the user switches
@@ -335,6 +356,7 @@ impl RohditorApp {
             color_mixer_channel: 0,
             pending_white_balance_pick: None,
             white_balance_memory: WhiteBalanceModeMemory::default(),
+            crop_tool: None,
         };
         if let Some(path) = initial_path {
             application.open_path(&context.egui_ctx, path);
@@ -379,6 +401,7 @@ impl RohditorApp {
         self.color_mixer_channel = 0;
         self.pending_white_balance_pick = None;
         self.white_balance_memory = WhiteBalanceModeMemory::default();
+        self.crop_tool = None;
         if let Some(mut document) = self.document.take() {
             self.release_gpu_preview(&mut document);
             self.coordinator.abandon(document.id);
@@ -404,24 +427,26 @@ impl RohditorApp {
         }
         let request = self
             .document
-            .as_ref()
+            .as_mut()
             .filter(|document| document.id == document_id)
             .and_then(|document| {
-                document.frame.as_ref().map(|frame| {
-                    (
-                        document.ticket(),
-                        Arc::clone(frame),
-                        document.edits.recipe().clone(),
-                    )
-                })
+                let frame = document.frame.as_ref().map(Arc::clone)?;
+                let source_scale_requested = document.source_scale_requested;
+                let intent = if source_scale_requested {
+                    PreviewIntent::SourceScale
+                } else {
+                    PreviewIntent::CommittedFit
+                };
+                Some((
+                    document.begin_preview_request(intent),
+                    frame,
+                    document.edits.recipe().clone(),
+                    source_scale_requested,
+                ))
             });
-        let Some((ticket, frame, recipe)) = request else {
+        let Some((ticket, frame, recipe, source_scale_requested)) = request else {
             return;
         };
-        let source_scale_requested = self
-            .document
-            .as_ref()
-            .is_some_and(|document| document.source_scale_requested);
         if let Some(document) = self
             .document
             .as_mut()
@@ -508,6 +533,104 @@ impl RohditorApp {
                     document.error = Some(error);
                 }
             }
+        }
+    }
+
+    fn enter_crop_tool(&mut self, context: &egui::Context) {
+        if self.crop_tool.is_some() {
+            return;
+        }
+        let request = self.document.as_mut().and_then(|document| {
+            let frame = document.frame.as_ref().map(Arc::clone)?;
+            document.source_scale_requested = false;
+            document.view.fit(context.input(|input| input.time));
+            let (width, height) = document
+                .texture
+                .as_ref()
+                .map(PreviewTexture::dimensions)
+                .unwrap_or((frame.info.width, frame.info.height));
+            let session =
+                CropToolSession::new(document.edits.recipe().geometry.crop, width, height);
+            let ticket = document.begin_preview_request(PreviewIntent::CropToolFullFrame);
+            let recipe = document.edits.recipe().clone();
+            document.preview_status =
+                Some((ticket.revision, "Preparing full image for crop".to_owned()));
+            Some((document.id, ticket, frame, recipe, session))
+        });
+        let Some((document_id, ticket, frame, recipe, session)) = request else {
+            return;
+        };
+        self.picker_mode = None;
+        self.pending_white_balance_pick = None;
+        self.crop_tool = Some(session);
+        if let Err(error) = self.coordinator.crop_tool_preview(ticket, frame, recipe) {
+            self.crop_tool = None;
+            if let Some(document) = self
+                .document
+                .as_mut()
+                .filter(|document| document.id == document_id)
+            {
+                document.preview_status = None;
+                document.error = Some(error);
+            }
+        }
+    }
+
+    fn finish_crop_tool(&mut self, context: &egui::Context, apply: bool) {
+        let Some(session) = self.crop_tool.take() else {
+            return;
+        };
+        let mut changed_document = None;
+        if apply
+            && session.full_frame_ready()
+            && let Some(document) = self.document.as_mut()
+        {
+            let mut next = document.edits.recipe().clone();
+            next.geometry.crop = session.committed_crop();
+            if session.is_modified() && document.edits.set_discrete(next) {
+                document.notice = None;
+                changed_document = Some(document.id);
+            }
+        }
+        let document_id =
+            changed_document.or_else(|| self.document.as_ref().map(|document| document.id));
+        if let Some(document_id) = document_id {
+            self.queue_preview(context, document_id);
+        }
+    }
+
+    fn show_crop_tool(&mut self, context: &egui::Context) {
+        let panel = self.crop_tool.as_ref().map(|session| CropPanelModel {
+            aspect: session.aspect(),
+            locked: session.locked(),
+            portrait: session.portrait(),
+            dimensions: session.output_dimensions(),
+            ready: session.full_frame_ready(),
+        });
+        let Some(panel) = panel else {
+            return;
+        };
+        let output = crate::ui::crop::show_panel(context, &panel);
+        if let Some(session) = self.crop_tool.as_mut() {
+            if let Some(aspect) = output.aspect {
+                session.set_aspect(aspect);
+            }
+            if let Some(locked) = output.locked {
+                session.set_locked(locked);
+            }
+            if output.toggle_orientation {
+                session.toggle_orientation();
+            }
+            if output.reset {
+                session.reset();
+            }
+        }
+        let keyboard_apply = context.input(|input| input.key_pressed(egui::Key::Enter));
+        let keyboard_cancel = context.input(|input| input.key_pressed(egui::Key::Escape));
+        if output.cancel || keyboard_cancel {
+            self.finish_crop_tool(context, false);
+        } else if output.apply || keyboard_apply {
+            self.finish_crop_tool(context, true);
         }
     }
 
@@ -635,6 +758,7 @@ impl RohditorApp {
         let texture_id = preview.texture_id;
         let recipe = document.edits.recipe().clone();
         let revision = document.edits.revision();
+        let current_ticket = document.ticket();
         let previous_worker_diagnostics = document
             .preview_diagnostics
             .map(|diagnostics| diagnostics.worker);
@@ -703,12 +827,9 @@ impl RohditorApp {
                     submission_us = frame.submission_time().as_micros(),
                     "GPU preview adjustment complete"
                 );
-                let current_ticket = PreviewTicket {
-                    document_id,
-                    revision,
-                };
                 if let Some(document) = self.document.as_mut().filter(|document| {
-                    document.id == document_id && document.ticket() == current_ticket
+                    document.ticket() == current_ticket
+                        && document.preview_intent == PreviewIntent::CommittedFit
                 }) {
                     document.gpu_preview = Some(GpuDocumentPreview {
                         ticket: current_ticket,
@@ -1089,6 +1210,7 @@ impl RohditorApp {
                 .as_ref()
                 .is_none_or(|document| document.view.is_fit()),
             source_scale_selected: source_scale_selected(self.document.as_ref()),
+            crop_active: self.crop_tool.is_some(),
             zoom_label: self
                 .document
                 .as_ref()
@@ -1106,6 +1228,9 @@ impl RohditorApp {
             self.open_dialog(context);
         } else if actions.close {
             self.close_document(context);
+        }
+        if actions.crop {
+            self.enter_crop_tool(context);
         }
 
         let now = context.input(|input| input.time);
@@ -1134,7 +1259,7 @@ impl RohditorApp {
                     view_changed_document = Some(document.id);
                 }
             }
-            if actions.actual_size {
+            if actions.actual_size && self.crop_tool.is_none() {
                 let changed_mode = !document.source_scale_requested;
                 document.source_scale_requested = true;
                 document.view.actual_size(now);
@@ -1251,6 +1376,14 @@ impl RohditorApp {
     }
 
     fn show_viewport(&mut self, context: &egui::Context) {
+        let crop_overlay = self
+            .crop_tool
+            .as_ref()
+            .filter(|session| session.full_frame_ready())
+            .map(|session| CropOverlayModel {
+                crop: session.draft(),
+                active_handle: session.active_handle(),
+            });
         let output = if let Some(document) = self.document.as_mut() {
             let preparing = document.open_status.is_some() || document.preview_status.is_some();
             viewport::show(
@@ -1261,6 +1394,7 @@ impl RohditorApp {
                     texture: document.texture.as_ref(),
                     source: document.preview_source,
                     picker_mode: self.picker_mode,
+                    crop: crop_overlay,
                 },
                 &mut document.view,
             )
@@ -1274,6 +1408,7 @@ impl RohditorApp {
                     texture: None,
                     source: None,
                     picker_mode: None,
+                    crop: None,
                 },
                 &mut empty_view,
             )
@@ -1286,6 +1421,21 @@ impl RohditorApp {
                 PickerMode::WhiteBalance => self.apply_white_balance_pick(context, normalized),
                 PickerMode::ColorMixer => self.apply_color_mixer_pick(normalized),
             }
+        }
+        if let Some((handle, point)) = output.crop.drag_started
+            && let Some(session) = self.crop_tool.as_mut()
+        {
+            session.begin_drag(handle, point);
+        }
+        if let Some(point) = output.crop.dragged_to
+            && let Some(session) = self.crop_tool.as_mut()
+        {
+            session.drag_to(point);
+        }
+        if output.crop.drag_stopped
+            && let Some(session) = self.crop_tool.as_mut()
+        {
+            session.finish_drag();
         }
     }
 
@@ -1504,6 +1654,7 @@ impl RohditorApp {
                 algorithm: preview.worker.algorithm.stable_name().to_owned(),
                 source_state: match preview.worker.resolution {
                     PreviewResolution::SourceScale => "1:1",
+                    PreviewResolution::CropToolFullFrame => "crop authoring",
                     PreviewResolution::Fit => match preview.worker.algorithm {
                         DemosaicAlgorithm::Bilinear => "fast",
                         DemosaicAlgorithm::MalvarHeCutler => "high-quality",
@@ -1925,6 +2076,7 @@ fn gpu_supports_recipe(recipe: &EditRecipe) -> bool {
 fn gpu_upload_matches_document(document: &Document, ticket: PreviewTicket) -> bool {
     document.id == ticket.document_id
         && document.ticket() == ticket
+        && document.preview_intent == PreviewIntent::CommittedFit
         && !document.source_scale_requested
         && gpu_supports_recipe(document.edits.recipe())
 }
@@ -2049,6 +2201,7 @@ impl eframe::App for RohditorApp {
         self.show_status_bar(context);
         self.show_file_panel(context);
         self.show_adjustment_panel(context);
+        self.show_crop_tool(context);
         self.show_viewport(context);
         self.show_developer_diagnostics(context);
         // eframe normally wakes the event loop from the worker's

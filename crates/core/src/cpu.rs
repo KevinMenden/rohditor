@@ -6,8 +6,8 @@ use rohditor_edit::{
 };
 use rohditor_image::{
     BayerPattern, CfaColor, DisplayRgbImage, DisplayTransfer, ImageRegion, LinearRgbImage,
-    LinearRgbSpace, MosaicImage, Orientation, OrientationMap, allocate_zeroed_f32,
-    allocate_zeroed_u8, allocate_zeroed_u16,
+    LinearRgbSpace, MosaicImage, Orientation, allocate_zeroed_f32, allocate_zeroed_u8,
+    allocate_zeroed_u16,
 };
 use rohditor_raw::{ImageRect, LevelPattern, PhotometricInterpretation, RawFileInfo, RawFrame};
 
@@ -15,7 +15,9 @@ use crate::color::{
     CameraColorTransform, LINEAR_REC2020_TO_XYZ_D65, XYZ_D65_TO_LINEAR_SRGB,
     camera_color_transform, encode_rec2020_for_srgb_output,
 };
-use crate::{CancellationToken, CropPolicy, DitherMode, OutputPolicy, PipelineError};
+use crate::{
+    CancellationToken, DitherMode, OutputGeometry, OutputPolicy, PipelineError, RawCropPolicy,
+};
 
 const REC2020_LUMINANCE: [f32; 3] = [0.2627, 0.6780, 0.0593];
 /// Conventional Red, Orange, Yellow, Green, Aqua, Blue, Purple, and Magenta
@@ -41,14 +43,14 @@ const LUMINANCE_RATIO_TRANSITION: f32 = 0.02;
 /// highlight handling. Level patterns remain indexed in original sensor coordinates.
 pub fn normalize_raw(
     frame: &RawFrame,
-    crop_policy: CropPolicy,
+    crop_policy: RawCropPolicy,
 ) -> Result<MosaicImage<f32>, PipelineError> {
     normalize_raw_impl(frame, crop_policy, None, &CancellationToken::new())
 }
 
 pub(crate) fn normalize_raw_cancellable(
     frame: &RawFrame,
-    crop_policy: CropPolicy,
+    crop_policy: RawCropPolicy,
     cancellation: &CancellationToken,
 ) -> Result<MosaicImage<f32>, PipelineError> {
     normalize_raw_impl(frame, crop_policy, None, cancellation)
@@ -62,7 +64,7 @@ pub(crate) fn normalize_raw_cancellable(
 /// `max_long_edge` on its longest side.
 pub fn normalize_raw_preview(
     frame: &RawFrame,
-    crop_policy: CropPolicy,
+    crop_policy: RawCropPolicy,
     max_long_edge: usize,
 ) -> Result<MosaicImage<f32>, PipelineError> {
     normalize_raw_impl(
@@ -75,7 +77,7 @@ pub fn normalize_raw_preview(
 
 fn normalize_raw_impl(
     frame: &RawFrame,
-    crop_policy: CropPolicy,
+    crop_policy: RawCropPolicy,
     max_long_edge: Option<usize>,
     cancellation: &CancellationToken,
 ) -> Result<MosaicImage<f32>, PipelineError> {
@@ -826,6 +828,16 @@ pub fn render_display_srgb8(
     render_display_srgb8_dithered(image, orientation, output_policy, DitherMode::None)
 }
 
+/// Convert through an already-resolved output geometry. This is the pipeline
+/// entry point for recipe-aware orientation and user crop output.
+pub fn render_display_srgb8_with_geometry(
+    image: &LinearRgbImage<f32>,
+    geometry: OutputGeometry,
+    output_policy: OutputPolicy,
+) -> Result<DisplayRgbImage<u8>, PipelineError> {
+    render_display_srgb8_dithered_with_geometry(image, geometry, output_policy, DitherMode::None)
+}
+
 /// Convert linear Rec.2020 to clipped, transfer-encoded sRGB8 with explicit
 /// deterministic output dithering.
 pub fn render_display_srgb8_dithered(
@@ -834,33 +846,43 @@ pub fn render_display_srgb8_dithered(
     output_policy: OutputPolicy,
     dithering: DitherMode,
 ) -> Result<DisplayRgbImage<u8>, PipelineError> {
-    render_display_srgb8_dithered_cancellable(
-        image,
-        orientation,
-        output_policy,
-        dithering,
-        &CancellationToken::new(),
-    )
+    let geometry = OutputGeometry::new(image.width(), image.height(), orientation, None)?;
+    render_display_srgb8_dithered_with_geometry(image, geometry, output_policy, dithering)
 }
 
-pub(crate) fn render_display_srgb8_cancellable(
+pub(crate) fn render_display_srgb8_cancellable_with_geometry(
     image: &LinearRgbImage<f32>,
-    orientation: Orientation,
+    geometry: OutputGeometry,
     output_policy: OutputPolicy,
     cancellation: &CancellationToken,
 ) -> Result<DisplayRgbImage<u8>, PipelineError> {
-    render_display_srgb8_dithered_cancellable(
+    render_display_srgb8_dithered_cancellable_with_geometry(
         image,
-        orientation,
+        geometry,
         output_policy,
         DitherMode::None,
         cancellation,
     )
 }
 
-fn render_display_srgb8_dithered_cancellable(
+pub fn render_display_srgb8_dithered_with_geometry(
     image: &LinearRgbImage<f32>,
-    orientation: Orientation,
+    geometry: OutputGeometry,
+    output_policy: OutputPolicy,
+    dithering: DitherMode,
+) -> Result<DisplayRgbImage<u8>, PipelineError> {
+    render_display_srgb8_dithered_cancellable_with_geometry(
+        image,
+        geometry,
+        output_policy,
+        dithering,
+        &CancellationToken::new(),
+    )
+}
+
+fn render_display_srgb8_dithered_cancellable_with_geometry(
+    image: &LinearRgbImage<f32>,
+    geometry: OutputGeometry,
     output_policy: OutputPolicy,
     dithering: DitherMode,
     cancellation: &CancellationToken,
@@ -870,13 +892,13 @@ fn render_display_srgb8_dithered_cancellable(
         width = image.width(),
         height = image.height(),
         bit_depth = 8,
-        orientation = %orientation
+        output_width = geometry.output_dimensions().0,
+        output_height = geometry.output_dimensions().1
     );
     let _guard = span.enter();
     cancellation.checkpoint()?;
     require_space(image, LinearRgbSpace::Rec2020D65)?;
-    let orientation_map = OrientationMap::new(image.width(), image.height(), orientation)?;
-    let (output_width, output_height) = orientation_map.output_dimensions();
+    let (output_width, output_height) = geometry.output_dimensions();
     let row_stride = output_width.checked_mul(3).ok_or_else(|| {
         invalid_dimensions(output_width, output_height, 0, "RGB stride overflowed")
     })?;
@@ -895,8 +917,7 @@ fn render_display_srgb8_dithered_cancellable(
             cancellation.checkpoint()?;
             for (output_x, destination) in output_row.as_chunks_mut::<3>().0.iter_mut().enumerate()
             {
-                let (source_x, source_y) =
-                    orientation_map.source_coordinate_in_bounds(output_x, output_y);
+                let (source_x, source_y) = geometry.source_coordinate_in_bounds(output_x, output_y);
                 let start = source_y * image.row_stride() + source_x * 3;
                 let source = &image.data()[start..start + 3];
                 let encoded = match output_policy {
@@ -932,17 +953,28 @@ pub fn render_display_srgb16(
     output_policy: OutputPolicy,
     dithering: DitherMode,
 ) -> Result<DisplayRgbImage<u16>, PipelineError> {
+    let geometry = OutputGeometry::new(image.width(), image.height(), orientation, None)?;
+    render_display_srgb16_with_geometry(image, geometry, output_policy, dithering)
+}
+
+/// 16-bit counterpart to [`render_display_srgb8_with_geometry`].
+pub fn render_display_srgb16_with_geometry(
+    image: &LinearRgbImage<f32>,
+    geometry: OutputGeometry,
+    output_policy: OutputPolicy,
+    dithering: DitherMode,
+) -> Result<DisplayRgbImage<u16>, PipelineError> {
     let span = tracing::info_span!(
         "cpu.output_conversion",
         width = image.width(),
         height = image.height(),
         bit_depth = 16,
-        orientation = %orientation
+        output_width = geometry.output_dimensions().0,
+        output_height = geometry.output_dimensions().1
     );
     let _guard = span.enter();
     require_space(image, LinearRgbSpace::Rec2020D65)?;
-    let orientation_map = OrientationMap::new(image.width(), image.height(), orientation)?;
-    let (output_width, output_height) = orientation_map.output_dimensions();
+    let (output_width, output_height) = geometry.output_dimensions();
     let row_stride = output_width.checked_mul(3).ok_or_else(|| {
         invalid_dimensions(output_width, output_height, 0, "RGB stride overflowed")
     })?;
@@ -962,8 +994,7 @@ pub fn render_display_srgb16(
         .for_each(|(output_y, output_row)| {
             for (output_x, destination) in output_row.as_chunks_mut::<3>().0.iter_mut().enumerate()
             {
-                let (source_x, source_y) =
-                    orientation_map.source_coordinate_in_bounds(output_x, output_y);
+                let (source_x, source_y) = geometry.source_coordinate_in_bounds(output_x, output_y);
                 let start = source_y * image.row_stride() + source_x * 3;
                 let source = &image.data()[start..start + 3];
                 let encoded = match output_policy {
@@ -1050,7 +1081,7 @@ fn validate_raw_layout(frame: &RawFrame) -> Result<(), PipelineError> {
 
 fn development_geometry(
     info: &RawFileInfo,
-    policy: CropPolicy,
+    policy: RawCropPolicy,
 ) -> Result<(BayerPattern, ImageRegion), PipelineError> {
     let pattern = match &info.photometric_interpretation {
         PhotometricInterpretation::Cfa { pattern } => {
@@ -1073,8 +1104,8 @@ fn development_geometry(
     let active = info.active_area.map_or(full, image_region);
     validate_region(active, full, "active_area")?;
     let crop = match policy {
-        CropPolicy::ActiveArea => active,
-        CropPolicy::Recommended => info.crop_area.map_or(active, image_region),
+        RawCropPolicy::ActiveArea => active,
+        RawCropPolicy::Recommended => info.crop_area.map_or(active, image_region),
     };
     validate_region(crop, active, "crop_area")?;
     Ok((pattern, crop))
@@ -1214,6 +1245,7 @@ fn invalid_dimensions(
 mod tests {
     use std::sync::Arc;
 
+    use rohditor_image::OrientationMap;
     use rohditor_raw::{CameraColorMatrix, CaptureMetadata, CfaPattern, LevelPattern, RawFileInfo};
 
     use super::*;
@@ -1297,7 +1329,7 @@ mod tests {
             mosaic: Arc::from(samples),
         };
 
-        let normalized = normalize_raw(&frame, CropPolicy::Recommended).expect("valid fixture");
+        let normalized = normalize_raw(&frame, RawCropPolicy::Recommended).expect("valid fixture");
         assert_eq!((normalized.width(), normalized.height()), (2, 2));
         assert_eq!(normalized.pattern(), BayerPattern::Bggr);
         assert_eq!(normalized.get(0, 0), Some(&1.3));
@@ -1305,7 +1337,7 @@ mod tests {
         assert_eq!(normalized.get(0, 1), Some(&0.5));
         assert_eq!(normalized.get(1, 1), Some(&0.5));
 
-        let active = normalize_raw(&frame, CropPolicy::ActiveArea).expect("valid active area");
+        let active = normalize_raw(&frame, RawCropPolicy::ActiveArea).expect("valid active area");
         assert_eq!((active.width(), active.height()), (4, 4));
         assert_eq!(active.pattern(), BayerPattern::Rggb);
     }
@@ -1320,7 +1352,7 @@ mod tests {
             row_stride: 2,
             mosaic: Arc::from(vec![60, 110, 110, 210]),
         };
-        let normalized = normalize_raw(&frame, CropPolicy::ActiveArea).expect("valid levels");
+        let normalized = normalize_raw(&frame, RawCropPolicy::ActiveArea).expect("valid levels");
         assert_eq!(normalized.data(), [0.5; 4]);
     }
 
@@ -1345,8 +1377,8 @@ mod tests {
             mosaic: Arc::from(samples),
         };
 
-        let preview =
-            normalize_raw_preview(&frame, CropPolicy::ActiveArea, 6).expect("valid scaled preview");
+        let preview = normalize_raw_preview(&frame, RawCropPolicy::ActiveArea, 6)
+            .expect("valid scaled preview");
         assert_eq!((preview.width(), preview.height()), (6, 4));
         assert_eq!(preview.pattern(), pattern);
         for y in 0..preview.height() {
@@ -1369,7 +1401,7 @@ mod tests {
             mosaic: Arc::from(vec![50; 16]),
         };
 
-        let error = normalize_raw_preview(&frame, CropPolicy::ActiveArea, 1)
+        let error = normalize_raw_preview(&frame, RawCropPolicy::ActiveArea, 1)
             .expect_err("one-pixel preview target must fail");
         assert!(error.to_string().contains("at least 2 pixels"));
     }
@@ -1382,7 +1414,7 @@ mod tests {
             mosaic: Arc::from(vec![50; 4]),
         };
 
-        let error = normalize_raw_preview(&frame, CropPolicy::ActiveArea, 2_560)
+        let error = normalize_raw_preview(&frame, RawCropPolicy::ActiveArea, 2_560)
             .expect_err("one-pixel crop must fail");
         assert!(error.to_string().contains("at least 2x2"));
     }

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
 use rohditor_core::{
-    CropPolicy, OutputPolicy, apply_adjustments, normalize_raw_preview, render_display_srgb8,
+    OutputPolicy, RawCropPolicy, apply_adjustments, normalize_raw_preview, render_display_srgb8,
 };
 use rohditor_edit::EditRecipe;
 use rohditor_image::{LinearRgbImage, LinearRgbSpace, Orientation};
@@ -27,7 +27,7 @@ fn benchmark_normalization(criterion: &mut Criterion) {
         bencher.iter(|| {
             must(normalize_raw_preview(
                 black_box(&frame),
-                CropPolicy::Recommended,
+                RawCropPolicy::Recommended,
                 PREVIEW_WIDTH,
             ))
         });

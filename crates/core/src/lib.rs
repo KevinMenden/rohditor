@@ -11,6 +11,7 @@ mod cpu;
 mod demosaic;
 mod error;
 mod export;
+mod geometry;
 mod output;
 mod pipeline;
 mod resample;
@@ -25,8 +26,10 @@ pub use color::{
 pub use cpu::{
     HSL_CHANNEL_CENTERS, apply_adjustments, evaluate_tone_curve, hsl_channel_weights,
     hsl_channel_weights_from_display_rgb, normalize_raw, normalize_raw_preview,
-    render_display_srgb8, render_display_srgb8_dithered, render_display_srgb16,
-    white_balance_gains, white_balance_gains_from_calibration,
+    render_display_srgb8, render_display_srgb8_dithered,
+    render_display_srgb8_dithered_with_geometry, render_display_srgb8_with_geometry,
+    render_display_srgb16, render_display_srgb16_with_geometry, white_balance_gains,
+    white_balance_gains_from_calibration,
 };
 pub use error::PipelineError;
 pub use export::{
@@ -34,9 +37,10 @@ pub use export::{
     ExportSettings, JPEG_QUALITY_DEFAULT, JPEG_QUALITY_MAX, JPEG_QUALITY_MIN, OutputBitDepth,
     PngBitDepth, export_image,
 };
+pub use geometry::{OutputGeometry, ResolvedCropRect};
 pub use output::{paths_refer_to_same_file, write_output_bytes};
 pub use pipeline::{
-    CPU_WORKING_SET_LIMIT_BYTES, CpuPipeline, CpuPreviewWorkspace, CropPolicy,
-    DEFAULT_PREVIEW_LONG_EDGE, DemosaicedBase, ExportRenderResult, MemoryEstimate, OutputPolicy,
-    PreviewOptions, ReconstructedPreview, RenderOptions, RenderResult, StageTimings,
+    CPU_WORKING_SET_LIMIT_BYTES, CpuPipeline, CpuPreviewWorkspace, DEFAULT_PREVIEW_LONG_EDGE,
+    DemosaicedBase, ExportRenderResult, MemoryEstimate, OutputPolicy, PreviewOptions,
+    RawCropPolicy, ReconstructedPreview, RenderOptions, RenderResult, StageTimings,
 };

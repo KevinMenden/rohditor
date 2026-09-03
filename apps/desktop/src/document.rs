@@ -9,12 +9,25 @@ const HISTORY_LIMIT: usize = 100;
 pub(crate) struct PreviewTicket {
     pub document_id: u64,
     pub revision: u64,
+    /// Monotonic presentation identity. A crop-tool full-frame request may
+    /// share a recipe revision with a committed fit request, so revision alone
+    /// is not sufficient to reject stale results.
+    pub sequence: u64,
 }
 
 impl PreviewTicket {
-    pub(crate) const fn is_current(self, document_id: u64, revision: u64) -> bool {
-        self.document_id == document_id && self.revision == revision
+    pub(crate) const fn is_current(self, document_id: u64, revision: u64, sequence: u64) -> bool {
+        self.document_id == document_id && self.revision == revision && self.sequence == sequence
     }
+}
+
+/// The presentation expected by the viewport for its current preview ticket.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum PreviewIntent {
+    #[default]
+    CommittedFit,
+    CropToolFullFrame,
+    SourceScale,
 }
 
 #[derive(Debug, Clone)]
@@ -215,13 +228,31 @@ mod tests {
     }
 
     #[test]
+    fn an_applied_crop_is_one_discrete_undo_step() {
+        let mut edits = EditSession::default();
+        let mut cropped = EditRecipe::default();
+        cropped.geometry.crop = Some(rohditor_edit::NormalizedCropRect {
+            left: 0.1,
+            top: 0.2,
+            right: 0.9,
+            bottom: 0.8,
+        });
+        assert!(edits.set_discrete(cropped));
+        assert!(edits.undo());
+        assert_eq!(edits.recipe().geometry.crop, None);
+        assert!(!edits.undo());
+    }
+
+    #[test]
     fn stale_or_foreign_preview_tickets_are_rejected() {
         let ticket = PreviewTicket {
             document_id: 7,
             revision: 3,
+            sequence: 11,
         };
-        assert!(ticket.is_current(7, 3));
-        assert!(!ticket.is_current(7, 4));
-        assert!(!ticket.is_current(8, 3));
+        assert!(ticket.is_current(7, 3, 11));
+        assert!(!ticket.is_current(7, 3, 12));
+        assert!(!ticket.is_current(7, 4, 11));
+        assert!(!ticket.is_current(8, 3, 11));
     }
 }

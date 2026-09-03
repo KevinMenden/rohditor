@@ -4,10 +4,10 @@ use std::time::Duration;
 
 use rayon::ThreadPoolBuilder;
 use rohditor_core::{
-    CancellationToken, CpuPipeline, CropPolicy, DitherMode, ExportImage, OutputBitDepth,
-    PipelineError, PreviewOptions, RenderOptions, camera_color_transform,
+    CancellationToken, CpuPipeline, DitherMode, ExportImage, OutputBitDepth, PipelineError,
+    PreviewOptions, RawCropPolicy, RenderOptions, camera_color_transform,
 };
-use rohditor_edit::{EditRecipe, WhiteBalance};
+use rohditor_edit::{EditRecipe, NormalizedCropRect, WhiteBalance};
 use rohditor_image::{BayerPattern, CfaColor, LinearRgbSpace, Orientation};
 use rohditor_raw::{
     CameraColorMatrix, CaptureMetadata, CfaPattern, ImageRect, LevelPattern,
@@ -28,7 +28,7 @@ fn synthetic_pipeline_is_identical_with_one_and_multiple_rayon_threads()
     recipe.light.contrast = 0.25;
     recipe.color.saturation = 1.2;
     let options = RenderOptions {
-        crop_policy: CropPolicy::Recommended,
+        raw_crop_policy: RawCropPolicy::Recommended,
         ..RenderOptions::default()
     };
     let single_pool = ThreadPoolBuilder::new().num_threads(1).build()?;
@@ -45,6 +45,52 @@ fn synthetic_pipeline_is_identical_with_one_and_multiple_rayon_threads()
     assert_eq!(single.memory.linear_rgb_bytes, 288);
     assert_eq!(single.memory.display_rgb_bytes, 72);
     assert_eq!(single.memory.estimated_peak_bytes, 480);
+    Ok(())
+}
+
+#[test]
+fn user_crop_is_late_and_consistent_for_render_source_scale_and_export()
+-> Result<(), Box<dyn Error>> {
+    let frame = synthetic_rggb_frame();
+    let full = CpuPipeline.render(&frame, &EditRecipe::default(), RenderOptions::default())?;
+    let mut recipe = EditRecipe::default();
+    recipe.geometry.crop = Some(NormalizedCropRect {
+        left: 0.25,
+        top: 0.25,
+        right: 0.75,
+        bottom: 0.75,
+    });
+    let cropped = CpuPipeline.render(&frame, &recipe, RenderOptions::default())?;
+    assert_eq!((full.image.width(), full.image.height()), (4, 6));
+    assert_eq!((cropped.image.width(), cropped.image.height()), (2, 3));
+    for y in 0..cropped.image.height() {
+        let source = &full.image.data()[((y + 2) * full.image.width() + 1) * 3..];
+        let actual = &cropped.image.data()[y * cropped.image.width() * 3..];
+        assert_eq!(&actual[..6], &source[..6]);
+    }
+    assert_eq!(cropped.memory.display_rgb_bytes, 18);
+
+    let source_scale = CpuPipeline.render_source_scale_preview_cancellable(
+        &frame,
+        &recipe,
+        RenderOptions::default(),
+        &CancellationToken::new(),
+    )?;
+    assert_eq!(
+        (source_scale.image.width(), source_scale.image.height()),
+        (cropped.image.width(), cropped.image.height())
+    );
+    let export = CpuPipeline.render_export(
+        &frame,
+        &recipe,
+        RenderOptions::default(),
+        OutputBitDepth::Sixteen,
+        DitherMode::None,
+    )?;
+    let ExportImage::Rgb16(export) = export.image else {
+        panic!("requested 16-bit export");
+    };
+    assert_eq!((export.width(), export.height()), (2, 3));
     Ok(())
 }
 
