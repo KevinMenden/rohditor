@@ -13,11 +13,11 @@ use std::thread::{self, JoinHandle};
 
 use eframe::egui;
 use rohditor_catalog::{
-    CatalogEntry, PlaceholderReason, Thumbnail, ThumbnailCache, ThumbnailGenerator,
-    ThumbnailOptions, ThumbnailOutcome, scan_folder,
+    CachedThumbnail, CatalogEntry, GeneratedThumbnail, PlaceholderReason, Thumbnail,
+    ThumbnailCache, ThumbnailGenerator, ThumbnailOptions, ThumbnailOutcome, scan_folder,
 };
 use rohditor_raw::{RawDecoder, RawError, RawSession, RawlerDecoder, SourceIdentity};
-use tracing::warn;
+use tracing::{info, warn};
 
 #[path = "catalog/state.rs"]
 mod state;
@@ -42,6 +42,7 @@ pub(crate) enum CatalogEvent {
         path: PathBuf,
         identity: SourceIdentity,
         outcome: ThumbnailResult,
+        captured_at: Option<String>,
     },
     WorkerStopped {
         message: String,
@@ -247,6 +248,16 @@ impl CatalogWorker {
         match scan_folder(&folder) {
             Ok(entries) => {
                 self.entries = entries;
+                if let Some(cache) = &self.cache {
+                    let removed = cache.cleanup_folder(&folder, &self.entries);
+                    if removed > 0 {
+                        info!(
+                            removed,
+                            folder = %folder.display(),
+                            "removed stale catalog thumbnails"
+                        );
+                    }
+                }
                 send_event(
                     &self.sender,
                     &self.context,
@@ -301,7 +312,7 @@ impl CatalogWorker {
             return;
         };
         let entry = &self.entries[index];
-        let outcome = self.generate(entry);
+        let (outcome, captured_at) = self.generate(entry);
         send_event(
             &self.sender,
             &self.context,
@@ -310,16 +321,21 @@ impl CatalogWorker {
                 path: entry.path().to_path_buf(),
                 identity: entry.source_identity(),
                 outcome,
+                captured_at,
             },
         );
     }
 
     /// Cache-first thumbnail generation; cache failures degrade to direct
-    /// generation instead of blocking the catalog.
-    fn generate(&self, entry: &CatalogEntry) -> ThumbnailResult {
+    /// generation instead of blocking the catalog. Capture dates travel with
+    /// the thumbnail, from either the cache or the fresh probe.
+    fn generate(&self, entry: &CatalogEntry) -> (ThumbnailResult, Option<String>) {
         if let Some(cache) = &self.cache {
             match cache.load(entry, self.options) {
-                Ok(Some(thumbnail)) => return ThumbnailResult::Ready(thumbnail),
+                Ok(Some(CachedThumbnail {
+                    thumbnail,
+                    captured_at,
+                })) => return (ThumbnailResult::Ready(thumbnail), captured_at),
                 Ok(None) => {}
                 Err(error) => {
                     warn!(
@@ -331,9 +347,13 @@ impl CatalogWorker {
             }
         }
         match self.generator.generate(entry.path()) {
-            Ok(ThumbnailOutcome::Ready(thumbnail)) => {
+            Ok(GeneratedThumbnail {
+                outcome: ThumbnailOutcome::Ready(thumbnail),
+                captured_at,
+            }) => {
                 if let Some(cache) = &self.cache
-                    && let Err(error) = cache.store(entry, self.options, &thumbnail)
+                    && let Err(error) =
+                        cache.store(entry, self.options, &thumbnail, captured_at.as_deref())
                 {
                     warn!(
                         %error,
@@ -341,10 +361,13 @@ impl CatalogWorker {
                         "catalog thumbnail cache write failed"
                     );
                 }
-                ThumbnailResult::Ready(thumbnail)
+                (ThumbnailResult::Ready(thumbnail), captured_at)
             }
-            Ok(ThumbnailOutcome::Placeholder(reason)) => ThumbnailResult::Placeholder(reason),
-            Err(error) => ThumbnailResult::Failed(error.to_string()),
+            Ok(GeneratedThumbnail {
+                outcome: ThumbnailOutcome::Placeholder(reason),
+                captured_at,
+            }) => (ThumbnailResult::Placeholder(reason), captured_at),
+            Err(error) => (ThumbnailResult::Failed(error.to_string()), None),
         }
     }
 }
@@ -559,7 +582,7 @@ mod tests {
             .expect("find seeded entry");
         let expected = test_thumbnail();
         cache
-            .store(seeded, options, &expected)
+            .store(seeded, options, &expected, None)
             .expect("seed the thumbnail cache");
 
         let catalog = coordinator(Some(cache));

@@ -3,6 +3,7 @@ mod catalog;
 mod coordinator;
 mod document;
 mod preview_cache;
+mod session;
 mod ui;
 
 use clap::{Parser, ValueEnum};
