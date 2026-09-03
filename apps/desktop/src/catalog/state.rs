@@ -12,7 +12,7 @@ use rohditor_raw::SourceIdentity;
 
 use super::{CatalogEvent, ThumbnailResult};
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub(crate) enum ThumbnailSlot {
     Pending,
     Ready(Thumbnail),
@@ -97,6 +97,22 @@ impl CatalogState {
 
     fn is_current_folder(&self, folder: &Path) -> bool {
         self.folder.as_deref() == Some(folder)
+    }
+
+    pub(crate) fn folder(&self) -> Option<&Path> {
+        self.folder.as_deref()
+    }
+
+    pub(crate) fn entry_path(&self, index: usize) -> Option<&Path> {
+        self.entries.get(index).map(CatalogEntry::path)
+    }
+
+    pub(crate) fn entry_name(&self, index: usize) -> Option<&str> {
+        self.entries.get(index).map(CatalogEntry::file_name)
+    }
+
+    pub(crate) fn slot(&self, index: usize) -> Option<&ThumbnailSlot> {
+        self.slots.get(index)
     }
 
     pub(crate) fn folder_name(&self) -> Option<String> {
@@ -241,6 +257,24 @@ mod tests {
             folder: folder.to_path_buf(),
             entries,
         });
+    }
+
+    #[test]
+    fn entry_accessors_mirror_scan_results() {
+        let directory = TestDirectory::new();
+        directory.create_arw("a.arw");
+        let entries = directory.scan();
+
+        let mut state = CatalogState::default();
+        apply_scan(&mut state, directory.path(), entries);
+
+        assert_eq!(state.entry_name(0), Some("a.arw"));
+        assert!(state.entry_path(0).expect("entry path").ends_with("a.arw"));
+        assert_eq!(state.folder(), Some(directory.path()));
+        assert!(matches!(state.slot(0), Some(ThumbnailSlot::Pending)));
+        assert_eq!(state.entry_name(1), None);
+        assert_eq!(state.entry_path(1), None);
+        assert_eq!(state.slot(1), None);
     }
 
     #[test]
