@@ -22,7 +22,7 @@ use tracing::warn;
 #[path = "catalog/state.rs"]
 mod state;
 
-pub(crate) use state::CatalogState;
+pub(crate) use state::{CatalogState, ThumbnailSlot};
 
 #[derive(Debug)]
 pub(crate) enum CatalogEvent {

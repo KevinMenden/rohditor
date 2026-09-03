@@ -12,7 +12,17 @@ pub(crate) enum PickerMode {
     ColorMixer,
 }
 
+/// Top-level workspace modes, following the familiar library/develop split.
+/// The library browses a folder; the develop mode edits one photo.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum ViewMode {
+    #[default]
+    Develop,
+    Library,
+}
+
 pub(crate) mod adjustment_panel;
+pub(crate) mod catalog;
 pub(crate) mod crop;
 pub(crate) mod diagnostics;
 pub(crate) mod icons;
