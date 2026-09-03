@@ -3,8 +3,10 @@ use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
+mod geometry;
 mod light;
 
+pub use geometry::{GeometryAdjustments, NormalizedCropRect};
 pub use light::{LIGHT_TONE_LUT_SIZE, LightToneLut};
 
 /// Validation errors for serialized, non-destructive edit recipes.
@@ -16,8 +18,9 @@ pub struct EditError {
 }
 
 /// Schema version of the current non-destructive edit recipe.
-pub const EDIT_RECIPE_SCHEMA_VERSION: u32 = 2;
+pub const EDIT_RECIPE_SCHEMA_VERSION: u32 = 3;
 const LEGACY_EDIT_RECIPE_SCHEMA_VERSION: u32 = 1;
+const PREVIOUS_EDIT_RECIPE_SCHEMA_VERSION: u32 = 2;
 
 /// Inclusive range and neutral value for one adjustment parameter.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -277,13 +280,6 @@ impl Default for ColorAdjustments {
     }
 }
 
-/// Geometry controls which affect the final display coordinate mapping.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-pub struct GeometryAdjustments {
-    #[serde(default)]
-    pub orientation_override: Option<Orientation>,
-}
-
 /// Serializable, non-destructive global edits.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct EditRecipe {
@@ -392,6 +388,9 @@ impl EditRecipe {
                 reason: "unknown is metadata state, not a usable override".to_owned(),
             });
         }
+        if let Some(crop) = self.geometry.crop {
+            crop.validate()?;
+        }
         Ok(())
     }
 }
@@ -437,7 +436,15 @@ impl<'de> Deserialize<'de> for EditRecipe {
                 color,
                 geometry: GeometryAdjustments {
                     orientation_override: fields.legacy_orientation_override,
+                    crop: None,
                 },
+            }
+        } else if fields.schema_version == PREVIOUS_EDIT_RECIPE_SCHEMA_VERSION {
+            Self {
+                schema_version: EDIT_RECIPE_SCHEMA_VERSION,
+                light: fields.light,
+                color: fields.color,
+                geometry: fields.geometry,
             }
         } else {
             Self {
@@ -480,7 +487,7 @@ fn validate_parameter(
 
 #[cfg(test)]
 mod tests {
-    use super::{EDIT_RECIPE_SCHEMA_VERSION, EditRecipe, WhiteBalance};
+    use super::{EDIT_RECIPE_SCHEMA_VERSION, EditRecipe, NormalizedCropRect, WhiteBalance};
 
     #[test]
     fn neutral_recipe_has_documented_identity_values() {
@@ -496,7 +503,7 @@ mod tests {
     #[test]
     fn deserialization_rejects_unknown_schema_versions() {
         let json = r#"{
-            "schema_version": 3,
+            "schema_version": 4,
             "light": {},
             "color": {},
             "geometry": {}
@@ -518,6 +525,42 @@ mod tests {
         assert_eq!(recipe.schema_version, EDIT_RECIPE_SCHEMA_VERSION);
         assert_eq!(recipe.light.exposure_ev, 1.0);
         assert_eq!(recipe.color.saturation, 1.25);
+    }
+
+    #[test]
+    fn version_two_recipe_migrates_with_a_neutral_crop() {
+        let json = r#"{
+            "schema_version": 2,
+            "light": {},
+            "color": {},
+            "geometry": { "orientation_override": null }
+        }"#;
+        let recipe = serde_json::from_str::<EditRecipe>(json).expect("v2 migration");
+        assert_eq!(recipe.schema_version, EDIT_RECIPE_SCHEMA_VERSION);
+        assert_eq!(recipe.geometry.crop, None);
+    }
+
+    #[test]
+    fn crop_round_trips_and_is_validated() {
+        let mut recipe = EditRecipe::default();
+        recipe.geometry.crop = Some(NormalizedCropRect {
+            left: 0.1,
+            top: 0.2,
+            right: 0.9,
+            bottom: 0.8,
+        });
+        let round_trip = serde_json::from_str::<EditRecipe>(
+            &serde_json::to_string(&recipe).expect("serialize recipe"),
+        )
+        .expect("deserialize recipe");
+        assert_eq!(round_trip, recipe);
+        recipe.geometry.crop = Some(NormalizedCropRect {
+            left: 1.0,
+            top: 0.0,
+            right: 0.5,
+            bottom: 1.0,
+        });
+        assert!(recipe.validate().is_err());
     }
 
     #[test]

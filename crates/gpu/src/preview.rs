@@ -4,17 +4,21 @@ use std::time::{Duration, Instant};
 
 use half::f16;
 use rohditor_core::{
-    CancellationToken, DemosaicedBase, LINEAR_REC2020_TO_XYZ_D65, Matrix3, ReconstructedPreview,
-    XYZ_D65_TO_LINEAR_SRGB,
+    CancellationToken, DemosaicedBase, LINEAR_REC2020_TO_XYZ_D65, Matrix3, OutputGeometry,
+    ReconstructedPreview, XYZ_D65_TO_LINEAR_SRGB,
 };
 use rohditor_demosaic::WhiteBalanceGains;
 use rohditor_edit::{EditRecipe, LIGHT_TONE_LUT_SIZE, LightToneLut, WhiteBalance};
-use rohditor_image::{LinearRgbSpace, Orientation, OrientationMap};
+use rohditor_image::{LinearRgbSpace, Orientation};
 
 use crate::{GpuCapabilities, GpuPreviewError};
 
 const WORKGROUP_EDGE: u32 = 16;
-const PARAMETER_WORDS: usize = 48;
+// Keep this in sync with PreviewParameters in preview.wgsl. The vec2 crop
+// origin begins after 17 scalar words and is therefore aligned to word 18;
+// the following vec4 values begin at word 24. That makes the uniform 208
+// bytes, including the padding required by WGSL uniform layout rules.
+const PARAMETER_WORDS: usize = 52;
 
 /// One uploaded, immutable camera-native preview source. White balance and the
 /// camera transform are applied by the downstream shader, so changing either
@@ -601,11 +605,16 @@ impl GpuPreviewProcessor {
             usize::try_from(source.height).map_err(|_| GpuPreviewError::InvalidInput {
                 reason: "source height does not fit this platform's usize".to_owned(),
             })?;
-        let orientation_map = OrientationMap::new(source_width, source_height, orientation)
-            .map_err(|error| GpuPreviewError::InvalidInput {
-                reason: error.to_string(),
-            })?;
-        let (output_width, output_height) = orientation_map.output_dimensions();
+        let output_geometry = OutputGeometry::new(
+            source_width,
+            source_height,
+            orientation,
+            recipe.geometry.crop,
+        )
+        .map_err(|error| GpuPreviewError::InvalidInput {
+            reason: error.to_string(),
+        })?;
+        let (output_width, output_height) = output_geometry.output_dimensions();
         let (output_width, output_height) = self
             .capabilities
             .validate_dimensions(output_width, output_height)?;
@@ -638,6 +647,7 @@ impl GpuPreviewProcessor {
             source_dimensions,
             output_dimensions,
             orientation,
+            output_geometry,
             recipe,
             white_balance_gains,
             source.camera_to_linear_rec2020,
@@ -954,6 +964,7 @@ fn build_parameters(
     source_dimensions: (u32, u32),
     output_dimensions: (u32, u32),
     orientation: Orientation,
+    output_geometry: OutputGeometry,
     recipe: &EditRecipe,
     white_balance_gains: WhiteBalanceGains,
     camera_to_linear_rec2020: Matrix3,
@@ -977,11 +988,16 @@ fn build_parameters(
     words[14] = source_dimensions.1;
     words[15] = output_dimensions.0;
     words[16] = output_dimensions.1;
-    words[20] = white_balance_gains.red.to_bits();
-    words[21] = white_balance_gains.green.to_bits();
-    words[22] = white_balance_gains.blue.to_bits();
-    write_matrix_rows(&mut words[24..36], camera_to_linear_rec2020);
-    write_matrix_rows(&mut words[36..48], rec2020_to_srgb);
+    let crop = output_geometry.crop();
+    // Word 17 is padding inserted to align crop_origin: vec2<u32> to eight
+    // bytes. Words 21 through 23 align white_balance: vec4<f32> to sixteen.
+    words[18] = u32::try_from(crop.left).expect("GPU crop origin was dimension-validated");
+    words[19] = u32::try_from(crop.top).expect("GPU crop origin was dimension-validated");
+    words[24] = white_balance_gains.red.to_bits();
+    words[25] = white_balance_gains.green.to_bits();
+    words[26] = white_balance_gains.blue.to_bits();
+    write_matrix_rows(&mut words[28..40], camera_to_linear_rec2020);
+    write_matrix_rows(&mut words[40..52], rec2020_to_srgb);
     words
 }
 
@@ -1013,7 +1029,7 @@ mod tests {
     use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
     use rohditor_core::{CpuPipeline, PreviewOptions};
-    use rohditor_edit::ToneCurve;
+    use rohditor_edit::{NormalizedCropRect, ToneCurve};
     use rohditor_raw::{
         CameraColorMatrix, CaptureMetadata, CfaPattern, LevelPattern, PhotometricInterpretation,
         RawDecoder, RawFileInfo, RawFrame, RawlerDecoder,
@@ -1035,10 +1051,13 @@ mod tests {
         recipe.color.saturation = 1.25;
         recipe.color.vibrance = 0.4;
         recipe.geometry.orientation_override = Some(Orientation::Rotate90);
+        let geometry =
+            OutputGeometry::new(7, 5, Orientation::Rotate90, None).expect("full-frame geometry");
         let parameters = build_parameters(
             (7, 5),
             (5, 7),
             Orientation::Rotate90,
+            geometry,
             &recipe,
             WhiteBalanceGains {
                 red: 1.0,
@@ -1049,6 +1068,16 @@ mod tests {
         );
         assert_eq!(parameters[12], 5);
         assert_eq!(parameters[13..17], [7, 5, 5, 7]);
+        assert_eq!(parameters.len(), 52);
+        assert_eq!(parameters[18..20], [0, 0]);
+        assert_eq!(f32::from_bits(parameters[24]), 1.0);
+        assert_eq!(f32::from_bits(parameters[25]), 1.0);
+        assert_eq!(f32::from_bits(parameters[26]), 1.0);
+        assert_eq!(parameters[27], 0);
+        assert_eq!(
+            parameters[28..32],
+            [1.0_f32.to_bits(), 0.0_f32.to_bits(), 0.0_f32.to_bits(), 0]
+        );
         assert_eq!(f32::from_bits(parameters[0]), 2.0);
         assert_eq!(f32::from_bits(parameters[1]), 2_f32.powf(-0.5));
         assert_eq!(f32::from_bits(parameters[2]), 1.25);
@@ -1129,6 +1158,61 @@ mod tests {
                 .render(&source, &recipe, None)
                 .expect("GPU preview should render");
             assert_gpu_reconstructed_frame_matches_cpu(&processor, &frame, options, &recipe, &gpu);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a locally available Vulkan-capable GPU; run cargo test -p rohditor-gpu -- --ignored"]
+    fn gpu_crop_matches_cpu_for_all_orientations_and_reuses_compatible_output_textures() {
+        let _gpu_test_guard = gpu_test_guard();
+        let Some(processor) = gpu_test_processor() else {
+            return;
+        };
+        let options = PreviewOptions {
+            max_long_edge: 8,
+            ..PreviewOptions::default()
+        };
+        for orientation in all_test_orientations() {
+            let frame = synthetic_frame(orientation);
+            let reconstructed = CpuPipeline
+                .prepare_preview_reconstruction(&frame, options)
+                .expect("synthetic reconstruction should develop");
+            let source = processor
+                .upload_prepared(
+                    GpuPreviewUpload::from_reconstructed_preview(
+                        &reconstructed,
+                        WhiteBalance::AsShot,
+                    )
+                    .expect("camera-native source upload should work"),
+                )
+                .expect("camera-native source should upload");
+            let mut recipe = EditRecipe::default();
+            recipe.geometry.crop = Some(NormalizedCropRect {
+                left: 0.125,
+                top: 0.125,
+                right: 0.625,
+                bottom: 0.625,
+            });
+            let first = processor
+                .render(&source, &recipe, None)
+                .expect("cropped GPU preview should render");
+            assert_gpu_reconstructed_frame_matches_cpu(
+                &processor, &frame, options, &recipe, &first,
+            );
+
+            recipe.geometry.crop = Some(NormalizedCropRect {
+                left: 0.25,
+                top: 0.25,
+                right: 0.75,
+                bottom: 0.75,
+            });
+            let second = processor
+                .render(&source, &recipe, Some(first))
+                .expect("shifted crop should render from the resident source");
+            assert!(second.textures_reused());
+            assert_gpu_reconstructed_frame_matches_cpu(
+                &processor, &frame, options, &recipe, &second,
+            );
         }
     }
 

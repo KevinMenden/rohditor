@@ -4,6 +4,7 @@ use eframe::egui;
 use rohditor_demosaic::DemosaicAlgorithm;
 
 use super::PickerMode;
+use super::crop::{CropOverlayModel, CropOverlayOutput, interact_and_paint};
 use super::theme::{self, colors};
 use super::widgets;
 
@@ -210,12 +211,14 @@ pub(crate) struct ViewportModel<'a> {
     pub texture: Option<&'a PreviewTexture>,
     pub source: Option<PreviewSource>,
     pub picker_mode: Option<PickerMode>,
+    pub crop: Option<CropOverlayModel>,
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct ViewportOutput {
     pub open: bool,
     pub picker_sample: Option<(PickerMode, egui::Pos2)>,
+    pub crop: CropOverlayOutput,
 }
 
 pub(crate) fn show(
@@ -238,7 +241,10 @@ pub(crate) fn show(
             let image_size = texture.size_vec2();
             let fit_scale = fit_scale(padded.size(), image_size);
             let now = context.input(|input| input.time);
-            if model.picker_mode.is_none() && response.dragged_by(egui::PointerButton::Primary) {
+            if model.picker_mode.is_none()
+                && model.crop.is_none()
+                && response.dragged_by(egui::PointerButton::Primary)
+            {
                 view.pan_by(fit_scale, viewport, image_size, response.drag_delta());
             }
             if response.hovered() {
@@ -291,6 +297,10 @@ pub(crate) fn show(
                 egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(18)),
                 egui::StrokeKind::Inside,
             );
+
+            if let Some(crop) = model.crop {
+                output.crop = interact_and_paint(context, ui, &response, image_rect, crop);
+            }
 
             if let Some(source) = model.source
                 && (source == PreviewSource::Embedded || response.hovered())

@@ -13,6 +13,7 @@ pub(crate) enum PickerMode {
 }
 
 pub(crate) mod adjustment_panel;
+pub(crate) mod crop;
 pub(crate) mod diagnostics;
 pub(crate) mod icons;
 pub(crate) mod theme;

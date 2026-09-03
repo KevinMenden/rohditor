@@ -11,13 +11,14 @@ use crate::color::{CameraColorTransform, camera_color_transform};
 use crate::cpu::{
     apply_adjustments_cancellable, apply_camera_color_transform_cancellable,
     apply_white_balance_cancellable, normalize_raw_cancellable, preview_dimensions,
-    render_display_srgb8_cancellable, white_balance_gains_with_transform,
+    render_display_srgb8_cancellable_with_geometry, white_balance_gains_with_transform,
 };
 use crate::demosaic::demosaic_cancellable;
 use crate::resample::resize_area_cancellable;
 use crate::{
-    CancellationToken, DitherMode, ExportImage, OutputBitDepth, PipelineError, apply_adjustments,
-    render_display_srgb8, render_display_srgb8_dithered, render_display_srgb16,
+    CancellationToken, DitherMode, ExportImage, OutputBitDepth, OutputGeometry, PipelineError,
+    apply_adjustments, render_display_srgb8_dithered_with_geometry,
+    render_display_srgb8_with_geometry, render_display_srgb16_with_geometry,
 };
 
 /// Default longest edge of an interactively developed preview.
@@ -28,7 +29,7 @@ pub const CPU_WORKING_SET_LIMIT_BYTES: usize = 2 * 1_024 * 1_024 * 1_024;
 
 /// Sensor crop selected before normalization.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum CropPolicy {
+pub enum RawCropPolicy {
     ActiveArea,
     #[default]
     Recommended,
@@ -44,7 +45,7 @@ pub enum OutputPolicy {
 /// Stable options that are not edits to the image itself.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RenderOptions {
-    pub crop_policy: CropPolicy,
+    pub raw_crop_policy: RawCropPolicy,
     pub demosaic: DemosaicAlgorithm,
     pub output_policy: OutputPolicy,
 }
@@ -461,7 +462,8 @@ impl CpuPipeline {
             .len()
             .checked_mul(size_of::<f32>())
             .ok_or_else(|| dimension_overflow(base.image.width(), base.image.height()))?;
-        let mut memory = memory_estimate(base, size_of::<u8>())?;
+        let geometry = output_geometry(base.image(), base.source_orientation, recipe)?;
+        let mut memory = memory_estimate(base, size_of::<u8>(), geometry)?;
         let retained_peak = base
             .decoded_raw_bytes
             .checked_add(retained_base_bytes)
@@ -478,13 +480,13 @@ impl CpuPipeline {
         apply_adjustments_cancellable(working, recipe, cancellation)?;
         timings.adjustments = adjustments_started.elapsed();
 
-        let orientation = recipe
-            .geometry
-            .orientation_override
-            .unwrap_or(base.source_orientation);
         let output_started = Instant::now();
-        let image =
-            render_display_srgb8_cancellable(working, orientation, output_policy, cancellation)?;
+        let image = render_display_srgb8_cancellable_with_geometry(
+            working,
+            geometry,
+            output_policy,
+            cancellation,
+        )?;
         let histogram = Histogram::from_display_rgb8(&image);
         timings.output_conversion = output_started.elapsed();
         timings.total = total_started.elapsed();
@@ -528,18 +530,15 @@ impl CpuPipeline {
     ) -> Result<RenderResult, PipelineError> {
         let total_started = Instant::now();
         let mut base = prepare_base_cancellable(frame, recipe, options, cancellation)?;
-        let memory = memory_estimate(&base, size_of::<u8>())?;
+        let geometry = output_geometry(&base.image, base.source_orientation, recipe)?;
+        let memory = memory_estimate(&base, size_of::<u8>(), geometry)?;
         let adjustments_started = Instant::now();
         apply_adjustments_cancellable(&mut base.image, recipe, cancellation)?;
         base.timings.adjustments = adjustments_started.elapsed();
-        let orientation = recipe
-            .geometry
-            .orientation_override
-            .unwrap_or(base.source_orientation);
         let output_started = Instant::now();
-        let image = render_display_srgb8_cancellable(
+        let image = render_display_srgb8_cancellable_with_geometry(
             &base.image,
-            orientation,
+            geometry,
             options.output_policy,
             cancellation,
         )?;
@@ -565,26 +564,24 @@ impl CpuPipeline {
     ) -> Result<ExportRenderResult, PipelineError> {
         let total_started = Instant::now();
         let mut base = prepare_base(frame, recipe, options)?;
-        let memory = memory_estimate(&base, bit_depth.bytes_per_sample())?;
+        let geometry = output_geometry(&base.image, base.source_orientation, recipe)?;
+        let memory = memory_estimate(&base, bit_depth.bytes_per_sample(), geometry)?;
         let adjustments_started = Instant::now();
         apply_adjustments(&mut base.image, recipe)?;
         base.timings.adjustments = adjustments_started.elapsed();
-        let orientation = recipe
-            .geometry
-            .orientation_override
-            .unwrap_or(base.source_orientation);
-
         let output_started = Instant::now();
         let image = match bit_depth {
-            OutputBitDepth::Eight => ExportImage::Rgb8(render_display_srgb8_dithered(
+            OutputBitDepth::Eight => {
+                ExportImage::Rgb8(render_display_srgb8_dithered_with_geometry(
+                    &base.image,
+                    geometry,
+                    options.output_policy,
+                    dithering,
+                )?)
+            }
+            OutputBitDepth::Sixteen => ExportImage::Rgb16(render_display_srgb16_with_geometry(
                 &base.image,
-                orientation,
-                options.output_policy,
-                dithering,
-            )?),
-            OutputBitDepth::Sixteen => ExportImage::Rgb16(render_display_srgb16(
-                &base.image,
-                orientation,
+                geometry,
                 options.output_policy,
                 dithering,
             )?),
@@ -622,7 +619,7 @@ fn prepare_reconstructed_preview(
     drop(metadata_guard);
 
     let normalization_started = Instant::now();
-    let mosaic = normalize_raw_cancellable(frame, options.render.crop_policy, cancellation)?;
+    let mosaic = normalize_raw_cancellable(frame, options.render.raw_crop_policy, cancellation)?;
     let normalization = normalization_started.elapsed();
     let decoded_raw_bytes = frame
         .mosaic
@@ -788,7 +785,7 @@ fn prepare_base_cancellable(
     drop(metadata_guard);
 
     let normalization_started = Instant::now();
-    let normalized = normalize_raw_cancellable(frame, options.crop_policy, cancellation)?;
+    let normalized = normalize_raw_cancellable(frame, options.raw_crop_policy, cancellation)?;
     let normalization = normalization_started.elapsed();
     let normalized_mosaic_bytes = normalized
         .data()
@@ -860,18 +857,15 @@ fn render_base(
     output_policy: OutputPolicy,
 ) -> Result<RenderResult, PipelineError> {
     validate_base_recipe(&base, recipe)?;
-    let memory = memory_estimate(&base, size_of::<u8>())?;
+    let geometry = output_geometry(&base.image, base.source_orientation, recipe)?;
+    let memory = memory_estimate(&base, size_of::<u8>(), geometry)?;
 
     let adjustments_started = Instant::now();
     apply_adjustments(&mut base.image, recipe)?;
     base.timings.adjustments = adjustments_started.elapsed();
 
     let output_started = Instant::now();
-    let orientation = recipe
-        .geometry
-        .orientation_override
-        .unwrap_or(base.source_orientation);
-    let image = render_display_srgb8(&base.image, orientation, output_policy)?;
+    let image = render_display_srgb8_with_geometry(&base.image, geometry, output_policy)?;
     base.timings.output_conversion = output_started.elapsed();
     base.timings.total = base.timings.metadata
         + base.timings.normalization
@@ -892,6 +886,7 @@ fn render_base(
 fn memory_estimate(
     base: &DemosaicedBase,
     display_sample_bytes: usize,
+    output_geometry: OutputGeometry,
 ) -> Result<MemoryEstimate, PipelineError> {
     let width = base.image.width();
     let height = base.image.height();
@@ -905,7 +900,11 @@ fn memory_estimate(
         .checked_mul(3)
         .and_then(|elements| elements.checked_mul(size_of::<f32>()))
         .ok_or_else(|| dimension_overflow(width, height))?;
-    let display_rgb_bytes = pixels
+    let (output_width, output_height) = output_geometry.output_dimensions();
+    let output_pixels = output_width
+        .checked_mul(output_height)
+        .ok_or_else(|| dimension_overflow(output_width, output_height))?;
+    let display_rgb_bytes = output_pixels
         .checked_mul(3)
         .and_then(|elements| elements.checked_mul(display_sample_bytes))
         .ok_or_else(|| dimension_overflow(width, height))?;
@@ -924,6 +923,23 @@ fn memory_estimate(
     };
     validate_working_set(estimate.estimated_peak_bytes)?;
     Ok(estimate)
+}
+
+fn output_geometry(
+    image: &LinearRgbImage<f32>,
+    source_orientation: Orientation,
+    recipe: &EditRecipe,
+) -> Result<OutputGeometry, PipelineError> {
+    let orientation = recipe
+        .geometry
+        .orientation_override
+        .unwrap_or(source_orientation);
+    OutputGeometry::new(
+        image.width(),
+        image.height(),
+        orientation,
+        recipe.geometry.crop,
+    )
 }
 
 fn validate_base_working_set(frame: &RawFrame) -> Result<(), PipelineError> {

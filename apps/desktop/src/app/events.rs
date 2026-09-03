@@ -26,6 +26,7 @@ impl RohditorApp {
                 document_id,
                 job,
                 revision,
+                preview_ticket,
                 export_id,
                 detail,
             } => {
@@ -36,7 +37,10 @@ impl RohditorApp {
                 match job {
                     JobKind::Open => document.open_status = Some(detail),
                     JobKind::Preview => {
-                        if revision == Some(document.edits.revision()) {
+                        if preview_ticket.is_some_and(|ticket| document.ticket() == ticket)
+                            || (preview_ticket.is_none()
+                                && revision == Some(document.edits.revision()))
+                        {
                             document.preview_status = Some((document.edits.revision(), detail));
                         }
                     }
@@ -86,21 +90,40 @@ impl RohditorApp {
                 histogram,
                 diagnostics,
             } => {
+                let intent = match resolution {
+                    PreviewResolution::Fit => crate::document::PreviewIntent::CommittedFit,
+                    PreviewResolution::CropToolFullFrame => {
+                        crate::document::PreviewIntent::CropToolFullFrame
+                    }
+                    PreviewResolution::SourceScale => crate::document::PreviewIntent::SourceScale,
+                };
                 let should_install = self.document.as_ref().is_some_and(|document| {
-                    ticket.is_current(document.id, document.edits.revision())
-                        && document.source_scale_requested
-                            == (resolution == PreviewResolution::SourceScale)
-                        && (resolution == PreviewResolution::SourceScale
-                            || document
-                                .gpu_preview
-                                .as_ref()
-                                .is_none_or(|preview| preview.ticket != ticket))
+                    document.accepts_preview(ticket, intent)
+                        && match resolution {
+                            PreviewResolution::Fit => {
+                                !document.source_scale_requested && self.crop_tool.is_none()
+                            }
+                            PreviewResolution::CropToolFullFrame => self.crop_tool.is_some(),
+                            PreviewResolution::SourceScale => document.source_scale_requested,
+                        }
+                        && (matches!(
+                            resolution,
+                            PreviewResolution::SourceScale | PreviewResolution::CropToolFullFrame
+                        ) || document
+                            .gpu_preview
+                            .as_ref()
+                            .is_none_or(|preview| preview.ticket != ticket))
                 });
                 if should_install {
                     // Swap directly from the retained GPU frame to the ready
                     // CPU frame during one update, so an unsupported edit such
                     // as HSL never exposes an empty viewport between backends.
-                    self.release_document_gpu_preview(ticket.document_id);
+                    // A crop-tool frame is a temporary CPU presentation. Keep
+                    // the resident uncropped GPU source so Apply/Cancel can
+                    // return to an interactive GPU crop without another upload.
+                    if resolution != PreviewResolution::CropToolFullFrame {
+                        self.release_document_gpu_preview(ticket.document_id);
+                    }
                     let Some(document) = self.document.as_mut() else {
                         return;
                     };
@@ -110,8 +133,10 @@ impl RohditorApp {
                         PreviewSource::developed(diagnostics.algorithm, false)
                     };
                     install_texture(context, document, image, source);
-                    document.histogram = Some(*histogram);
-                    document.histogram_revision = Some(ticket.revision);
+                    if resolution != PreviewResolution::CropToolFullFrame {
+                        document.histogram = Some(*histogram);
+                        document.histogram_revision = Some(ticket.revision);
+                    }
                     if resolution == PreviewResolution::SourceScale {
                         document.view.actual_size(context.input(|input| input.time));
                     }
@@ -120,6 +145,20 @@ impl RohditorApp {
                     document.preview_diagnostics =
                         Some(DocumentPreviewDiagnostics::cpu(diagnostics));
                     document.error = None;
+                    if resolution == PreviewResolution::CropToolFullFrame
+                        && let Some(session) = self.crop_tool.as_mut()
+                    {
+                        session.set_full_dimensions(
+                            document
+                                .texture
+                                .as_ref()
+                                .map_or(1, |texture| texture.dimensions().0),
+                            document
+                                .texture
+                                .as_ref()
+                                .map_or(1, |texture| texture.dimensions().1),
+                        );
+                    }
                 }
             }
             WorkerEvent::GpuUploadReady {
@@ -142,7 +181,7 @@ impl RohditorApp {
                     self.pending_white_balance_pick = None;
                     return;
                 }
-                if current_document.edits.revision() != ticket.revision {
+                if current_document.ticket() != ticket {
                     self.pending_white_balance_pick = None;
                     if current_document
                         .preview_status
@@ -206,7 +245,7 @@ impl RohditorApp {
                     self.pending_white_balance_pick = None;
                     return;
                 }
-                if document.edits.revision() != ticket.revision {
+                if document.ticket() != ticket {
                     self.pending_white_balance_pick = None;
                     if document
                         .preview_status

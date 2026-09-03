@@ -16,6 +16,7 @@ pub(crate) struct ToolbarModel {
     /// scrolling after entering Source 1:1 changes the zoom percentage but
     /// must not make the resolution-mode button appear inactive.
     pub source_scale_selected: bool,
+    pub crop_active: bool,
     pub zoom_label: String,
     pub diagnostics_open: bool,
     pub export_ready: bool,
@@ -30,6 +31,7 @@ pub(crate) struct ToolbarOutput {
     pub reset: bool,
     pub fit: bool,
     pub actual_size: bool,
+    pub crop: bool,
     pub toggle_diagnostics: bool,
     pub export: bool,
 }
@@ -43,6 +45,7 @@ impl ToolbarOutput {
         self.reset |= other.reset;
         self.fit |= other.fit;
         self.actual_size |= other.actual_size;
+        self.crop |= other.crop;
         self.toggle_diagnostics |= other.toggle_diagnostics;
         self.export |= other.export;
     }
@@ -150,6 +153,9 @@ pub(crate) fn show_top(context: &egui::Context, model: &ToolbarModel) -> Toolbar
                             model.can_redo,
                         )
                         .clicked();
+                        output.crop = widgets::toolbar_button(ui, "Crop", model.crop_active, true)
+                            .on_hover_text("Crop non-destructively")
+                            .clicked();
                         output.undo = widgets::icon_button(
                             ui,
                             Icon::Undo,

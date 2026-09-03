@@ -8,9 +8,9 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use rohditor_core::{
-    CpuPipeline, CropPolicy, DitherMode, ExportFormat, ExportImage, ExportMetadataPolicy,
-    ExportSettings, JPEG_QUALITY_DEFAULT, JPEG_QUALITY_MAX, JPEG_QUALITY_MIN, OutputPolicy,
-    PngBitDepth, RenderOptions, StageTimings, export_image, paths_refer_to_same_file,
+    CpuPipeline, DitherMode, ExportFormat, ExportImage, ExportMetadataPolicy, ExportSettings,
+    JPEG_QUALITY_DEFAULT, JPEG_QUALITY_MAX, JPEG_QUALITY_MIN, OutputPolicy, PngBitDepth,
+    RawCropPolicy, RenderOptions, StageTimings, export_image, paths_refer_to_same_file,
     write_output_bytes,
 };
 use rohditor_demosaic::DemosaicAlgorithm;
@@ -140,7 +140,7 @@ enum Command {
         #[arg(long, default_value_t = TINT_RANGE.neutral, allow_hyphen_values = true)]
         tint: f32,
 
-        /// Sensor crop policy.
+        /// RAW sensor crop policy, applied before normalization.
         #[arg(long, value_enum, default_value_t = CliCropPolicy::Recommended)]
         crop: CliCropPolicy,
 
@@ -230,7 +230,7 @@ enum CliCropPolicy {
     Recommended,
 }
 
-impl From<CliCropPolicy> for CropPolicy {
+impl From<CliCropPolicy> for RawCropPolicy {
     fn from(value: CliCropPolicy) -> Self {
         match value {
             CliCropPolicy::ActiveArea => Self::ActiveArea,
@@ -747,7 +747,7 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
             &frame,
             &recipe,
             RenderOptions {
-                crop_policy: arguments.crop.into(),
+                raw_crop_policy: arguments.crop.into(),
                 demosaic: arguments.demosaic.into(),
                 output_policy: OutputPolicy::ClipToSrgb,
             },
@@ -823,7 +823,7 @@ fn quality_crops(
     let decoder = RawlerDecoder::default();
     let algorithm: DemosaicAlgorithm = demosaic.into();
     let render_options = RenderOptions {
-        crop_policy: CropPolicy::Recommended,
+        raw_crop_policy: RawCropPolicy::Recommended,
         demosaic: algorithm,
         output_policy: OutputPolicy::ClipToSrgb,
     };

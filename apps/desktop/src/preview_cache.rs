@@ -2,8 +2,8 @@ use std::mem::size_of;
 use std::sync::Arc;
 
 use rohditor_core::{
-    CpuPreviewWorkspace, CropPolicy, DemosaicedBase, MemoryEstimate, OutputPolicy, PreviewOptions,
-    ReconstructedPreview,
+    CpuPreviewWorkspace, DemosaicedBase, MemoryEstimate, OutputPolicy, PreviewOptions,
+    RawCropPolicy, ReconstructedPreview,
 };
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_edit::{EditRecipe, WhiteBalance};
@@ -36,7 +36,7 @@ impl PreviewCacheKeys {
         };
         let reconstructed = ReconstructedCameraRgbKey {
             decoded: decoded.clone(),
-            crop_policy: options.render.crop_policy,
+            raw_crop_policy: options.render.raw_crop_policy,
             max_long_edge: options.max_long_edge,
             algorithm: options.render.demosaic,
             // Bump when the retained source representation changes. The GPU
@@ -84,6 +84,14 @@ impl PreviewCacheKeys {
                 .geometry
                 .orientation_override
                 .unwrap_or(frame.info.orientation),
+            crop_bits: recipe.geometry.crop.map(|crop| {
+                [
+                    crop.left.to_bits(),
+                    crop.top.to_bits(),
+                    crop.right.to_bits(),
+                    crop.bottom.to_bits(),
+                ]
+            }),
             output_policy: options.render.output_policy,
         };
         Self {
@@ -108,7 +116,7 @@ struct DecodedRawKey {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ReconstructedCameraRgbKey {
     decoded: DecodedRawKey,
-    crop_policy: CropPolicy,
+    raw_crop_policy: RawCropPolicy,
     max_long_edge: usize,
     algorithm: DemosaicAlgorithm,
     reconstruction_version: u8,
@@ -170,6 +178,7 @@ struct AdjustedPreviewKey {
     hsl_bits: Vec<u32>,
     grading_bits: Vec<u32>,
     orientation: Orientation,
+    crop_bits: Option<[u64; 4]>,
     output_policy: OutputPolicy,
 }
 

@@ -16,6 +16,8 @@ struct PreviewParameters {
     source_height: u32,
     output_width: u32,
     output_height: u32,
+    crop_origin: vec2<u32>,
+    _crop_padding: u32,
     white_balance: vec4<f32>,
     camera_to_rec2020_row0: vec4<f32>,
     camera_to_rec2020_row1: vec4<f32>,
@@ -43,28 +45,29 @@ var<storage, read> light_tone_lut: array<f32, 4096>;
 const LUMINANCE_RATIO_TRANSITION: f32 = 0.02;
 
 fn source_coordinate(output: vec2<u32>) -> vec2<u32> {
+    let oriented = output + parameters.crop_origin;
     switch parameters.orientation {
-        case 0u: { return output; }
-        case 1u: { return vec2<u32>(parameters.source_width - 1u - output.x, output.y); }
+        case 0u: { return oriented; }
+        case 1u: { return vec2<u32>(parameters.source_width - 1u - oriented.x, oriented.y); }
         case 2u: {
             return vec2<u32>(
-                parameters.source_width - 1u - output.x,
-                parameters.source_height - 1u - output.y,
+                parameters.source_width - 1u - oriented.x,
+                parameters.source_height - 1u - oriented.y,
             );
         }
-        case 3u: { return vec2<u32>(output.x, parameters.source_height - 1u - output.y); }
-        case 4u: { return vec2<u32>(output.y, output.x); }
+        case 3u: { return vec2<u32>(oriented.x, parameters.source_height - 1u - oriented.y); }
+        case 4u: { return vec2<u32>(oriented.y, oriented.x); }
         case 5u: {
-            return vec2<u32>(output.y, parameters.source_height - 1u - output.x);
+            return vec2<u32>(oriented.y, parameters.source_height - 1u - oriented.x);
         }
         case 6u: {
             return vec2<u32>(
-                parameters.source_width - 1u - output.y,
-                parameters.source_height - 1u - output.x,
+                parameters.source_width - 1u - oriented.y,
+                parameters.source_height - 1u - oriented.x,
             );
         }
         default: {
-            return vec2<u32>(parameters.source_width - 1u - output.y, output.x);
+            return vec2<u32>(parameters.source_width - 1u - oriented.y, oriented.x);
         }
     }
 }

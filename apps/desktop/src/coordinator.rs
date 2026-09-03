@@ -48,6 +48,7 @@ pub(crate) enum PreviewBackend {
 pub(crate) enum PreviewResolution {
     #[default]
     Fit,
+    CropToolFullFrame,
     SourceScale,
 }
 
@@ -150,6 +151,7 @@ pub(crate) enum WorkerEvent {
         document_id: u64,
         job: JobKind,
         revision: Option<u64>,
+        preview_ticket: Option<PreviewTicket>,
         export_id: Option<u64>,
         detail: String,
     },
@@ -346,6 +348,28 @@ impl RenderCoordinator {
                 recipe,
                 backend: PreviewBackend::Cpu,
                 resolution: PreviewResolution::SourceScale,
+            },
+            &self.requests,
+        )
+    }
+
+    /// Develop a temporary uncropped fit preview for the crop authoring tool.
+    /// The caller retains the committed recipe and filters this result by its
+    /// presentation state, so it can never become an undoable edit itself.
+    pub(crate) fn crop_tool_preview(
+        &self,
+        ticket: PreviewTicket,
+        frame: Arc<RawFrame>,
+        mut recipe: EditRecipe,
+    ) -> Result<(), String> {
+        recipe.geometry.crop = None;
+        self.previews.queue(
+            PreviewJob {
+                ticket,
+                frame,
+                recipe,
+                backend: PreviewBackend::Cpu,
+                resolution: PreviewResolution::CropToolFullFrame,
             },
             &self.requests,
         )
@@ -724,13 +748,10 @@ fn process_preview(
     let _guard = span.enter();
     let keys = PreviewCacheKeys::new(job.ticket.document_id, &job.frame, &job.recipe, options);
     let cache_hits = preview_cache.prepare(&keys, &job.frame);
-    send_progress(
+    send_preview_progress(
         sender,
         context,
-        job.ticket.document_id,
-        JobKind::Preview,
-        Some(job.ticket.revision),
-        None,
+        job.ticket,
         if cache_hits.adjusted {
             "Restoring cached adjusted CPU preview"
         } else if cache_hits.demosaiced {
@@ -812,13 +833,10 @@ fn process_source_scale_preview(
     );
     let _guard = span.enter();
     preview_cache.clear_document(job.ticket.document_id);
-    send_progress(
+    send_preview_progress(
         sender,
         context,
-        job.ticket.document_id,
-        JobKind::Preview,
-        Some(job.ticket.revision),
-        None,
+        job.ticket,
         "Developing full-resolution 1:1 inspection",
     );
     match CpuPipeline.render_source_scale_preview_cancellable(
@@ -906,13 +924,10 @@ fn process_gpu_base(
     let _guard = span.enter();
     let keys = PreviewCacheKeys::new(job.ticket.document_id, &job.frame, &job.recipe, options);
     let cache_hits = preview_cache.prepare(&keys, &job.frame);
-    send_progress(
+    send_preview_progress(
         sender,
         context,
-        job.ticket.document_id,
-        JobKind::Preview,
-        Some(job.ticket.revision),
-        None,
+        job.ticket,
         if cache_hits.reconstructed {
             "Packing cached camera-native source for GPU preview"
         } else {
@@ -988,7 +1003,7 @@ fn process_gpu_base(
     let memory = gpu_base_memory(&job.frame, reconstructed, cache_resident_bytes);
     let diagnostics = WorkerPreviewDiagnostics {
         backend: PreviewBackend::GpuBase,
-        resolution: PreviewResolution::Fit,
+        resolution: job.resolution,
         algorithm: options.render.demosaic,
         cache_hits,
         timings,
@@ -1032,7 +1047,7 @@ fn develop_preview(
             histogram,
             WorkerPreviewDiagnostics {
                 backend: PreviewBackend::Cpu,
-                resolution: PreviewResolution::Fit,
+                resolution: job.resolution,
                 algorithm: options.render.demosaic,
                 cache_hits,
                 timings,
@@ -1064,7 +1079,7 @@ fn develop_preview(
     preview_cache.insert_adjusted(keys, result.image.clone(), memory);
     let diagnostics = WorkerPreviewDiagnostics {
         backend: PreviewBackend::Cpu,
-        resolution: PreviewResolution::Fit,
+        resolution: job.resolution,
         algorithm: options.render.demosaic,
         cache_hits,
         timings,
@@ -1478,7 +1493,28 @@ fn send_progress(
             document_id,
             job,
             revision,
+            preview_ticket: None,
             export_id,
+            detail: detail.to_owned(),
+        },
+    );
+}
+
+fn send_preview_progress(
+    sender: &mpsc::Sender<WorkerEvent>,
+    context: &egui::Context,
+    ticket: PreviewTicket,
+    detail: &str,
+) {
+    send_event(
+        sender,
+        context,
+        WorkerEvent::Progress {
+            document_id: ticket.document_id,
+            job: JobKind::Preview,
+            revision: Some(ticket.revision),
+            preview_ticket: Some(ticket),
+            export_id: None,
             detail: detail.to_owned(),
         },
     );
@@ -1551,12 +1587,14 @@ mod tests {
         let current = PreviewTicket {
             document_id: 4,
             revision: 8,
+            sequence: 8,
         };
         assert!(should_replace_preview(
             current,
             PreviewTicket {
                 document_id: 4,
                 revision: 9,
+                sequence: 9,
             }
         ));
         assert!(!should_replace_preview(
@@ -1564,6 +1602,7 @@ mod tests {
             PreviewTicket {
                 document_id: 4,
                 revision: 7,
+                sequence: 7,
             }
         ));
         assert!(!should_replace_preview(
@@ -1571,6 +1610,15 @@ mod tests {
             PreviewTicket {
                 document_id: 5,
                 revision: 9,
+                sequence: 9,
+            }
+        ));
+        assert!(should_replace_preview(
+            current,
+            PreviewTicket {
+                document_id: 4,
+                revision: 8,
+                sequence: 9,
             }
         ));
     }
@@ -1582,6 +1630,7 @@ mod tests {
             ticket: PreviewTicket {
                 document_id,
                 revision,
+                sequence: revision,
             },
             frame: Arc::clone(&frame),
             recipe: EditRecipe::default(),
@@ -1619,6 +1668,7 @@ mod tests {
             ticket: PreviewTicket {
                 document_id: 4,
                 revision,
+                sequence: revision,
             },
             frame: Arc::clone(&frame),
             recipe: EditRecipe::default(),
@@ -1659,6 +1709,7 @@ mod tests {
             ticket: PreviewTicket {
                 document_id: 9,
                 revision: 0,
+                sequence: 0,
             },
             frame: Arc::clone(&frame),
             recipe: EditRecipe::default(),
@@ -1682,6 +1733,7 @@ mod tests {
             ticket: PreviewTicket {
                 document_id: 9,
                 revision: 1,
+                sequence: 1,
             },
             frame,
             recipe: {
@@ -1720,6 +1772,20 @@ mod tests {
         assert_eq!(second.2.timings.color_conversion, Duration::ZERO);
         assert!(second.2.workspace_reused);
 
+        let mut cropped_recipe = adjusted.recipe.clone();
+        cropped_recipe.geometry.crop = Some(rohditor_edit::NormalizedCropRect {
+            left: 0.25,
+            top: 0.25,
+            right: 0.75,
+            bottom: 0.75,
+        });
+        let cropped_keys = PreviewCacheKeys::new(9, &adjusted.frame, &cropped_recipe, options);
+        let cropped_hits = cache.prepare(&cropped_keys, &adjusted.frame);
+        assert!(cropped_hits.decoded);
+        assert!(cropped_hits.reconstructed);
+        assert!(cropped_hits.demosaiced);
+        assert!(!cropped_hits.adjusted);
+
         let mut invalid_schema_recipe = adjusted.recipe.clone();
         invalid_schema_recipe.schema_version = u32::MAX;
         let invalid_schema_keys =
@@ -1747,6 +1813,7 @@ mod tests {
             ticket: PreviewTicket {
                 document_id: 9,
                 revision: 2,
+                sequence: 2,
             },
             frame: Arc::clone(&adjusted.frame),
             recipe: white_balance_recipe,
@@ -1793,6 +1860,7 @@ mod tests {
             ticket: PreviewTicket {
                 document_id: 12,
                 revision: 3,
+                sequence: 3,
             },
             frame: Arc::new(fake_frame()),
             recipe: EditRecipe::default(),
@@ -1816,6 +1884,7 @@ mod tests {
                     == PreviewTicket {
                         document_id: 12,
                         revision: 3,
+                        sequence: 3,
                     } =>
             {
                 Some(upload)
@@ -1856,6 +1925,7 @@ mod tests {
             ticket: PreviewTicket {
                 document_id: 13,
                 revision: 4,
+                sequence: 4,
             },
             frame: Arc::new(fake_frame()),
             recipe: EditRecipe::default(),
@@ -2117,6 +2187,7 @@ mod tests {
                 PreviewTicket {
                     document_id: 17,
                     revision: 0,
+                    sequence: 0,
                 },
                 Arc::clone(&frame),
                 snapshot.clone(),
@@ -2200,6 +2271,7 @@ mod tests {
             ticket: PreviewTicket {
                 document_id: 71,
                 revision: 0,
+                sequence: 0,
             },
             frame: Arc::clone(&frame),
             recipe: EditRecipe::default(),
@@ -2231,6 +2303,7 @@ mod tests {
                 ticket: PreviewTicket {
                     document_id: 71,
                     revision,
+                    sequence: revision,
                 },
                 frame: Arc::clone(&frame),
                 recipe,
