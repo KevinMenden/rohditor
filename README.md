@@ -79,7 +79,7 @@ Status: MVP implemented and validated on the current Sony ILCE-6400 corpus.
 
 ### Other deferred work
 
-- [ ] Select and document the project license; distribution remains disabled.
+- [x] License the project under GNU GPL v3 or any later version; distribution remains disabled.
 - [ ] Catalog/library features: folders, ratings, tags, search, and batch work.
 - [ ] Camera profiles, highlight reconstruction, sensor cleanup, and advanced
       rendering beyond the basic controls above.
@@ -89,3 +89,7 @@ Status: MVP implemented and validated on the current Sony ILCE-6400 corpus.
 
 The private corpus and hardware-GPU tests are opt-in and are not required for
 the normal check suite. The current target is not arbitrary hostile RAW input.
+
+## License
+
+Rohditor is licensed under the GNU General Public License, version 3 or (at your option) any later version. See [LICENSE](LICENSE).
