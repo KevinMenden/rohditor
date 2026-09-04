@@ -427,12 +427,13 @@ impl RohditorApp {
         Ok(application)
     }
 
-    fn open_dialog(&mut self, context: &egui::Context) {
+    fn open_file_dialog(&mut self, context: &egui::Context) {
         let selected = rfd::FileDialog::new()
-            .set_title("Open Sony RAW")
-            .add_filter("Sony RAW", &["arw"])
+            .set_title("Open Sony ARW photo")
+            .add_filter("Sony ARW photos", &["arw"])
             .pick_file();
         if let Some(path) = selected {
+            self.view_mode = ViewMode::Develop;
             self.open_path(context, path);
         }
     }
@@ -449,6 +450,7 @@ impl RohditorApp {
             return;
         }
         session::store_last_folder(&folder);
+        self.view_mode = ViewMode::Library;
     }
 
     /// Apply pending catalog events and keep the catalog worker paused
@@ -1332,8 +1334,8 @@ impl RohditorApp {
         if actions.toggle_diagnostics {
             self.show_diagnostics = !self.show_diagnostics;
         }
-        if actions.open {
-            self.open_dialog(context);
+        if actions.open_file {
+            self.open_file_dialog(context);
         } else if actions.close {
             self.close_document(context);
         }
@@ -1413,9 +1415,7 @@ impl RohditorApp {
                 .map(|source| source.short_label().to_owned()),
         };
         let output = toolbar::show_file_panel(context, &model);
-        if output.open {
-            self.open_dialog(context);
-        } else if output.close {
+        if output.close {
             self.close_document(context);
         }
     }
@@ -1524,9 +1524,6 @@ impl RohditorApp {
                 &mut empty_view,
             )
         };
-        if output.open {
-            self.open_dialog(context);
-        }
         if let Some((mode, normalized)) = output.picker_sample {
             match mode {
                 PickerMode::WhiteBalance => self.apply_white_balance_pick(context, normalized),
@@ -1711,7 +1708,6 @@ impl RohditorApp {
                 ui_renderer: format!("{} UI", self.ui_renderer),
                 activity: (!activities.is_empty()).then(|| activities.join("  ·  ")),
                 busy,
-                catalog: self.catalog_status_text(),
                 preview_dimensions: self
                     .document
                     .as_ref()
@@ -1725,32 +1721,6 @@ impl RohditorApp {
                 startup_error: self.startup_error.clone(),
             },
         );
-    }
-
-    /// One status-bar sentence describing the catalog, if one is open.
-    fn catalog_status_text(&self) -> Option<String> {
-        if let Some(failure) = self.catalog.failure() {
-            return Some(format!("Catalog: {failure}"));
-        }
-        let folder = self.catalog.folder_name()?;
-        let total = self.catalog.entry_count();
-        let pending = self.catalog.pending_count();
-        let mut text = if pending > 0 {
-            format!(
-                "Catalog: {} · {} photos · {}/{} thumbnails",
-                folder,
-                total,
-                self.catalog.displayable_count(),
-                total
-            )
-        } else {
-            format!("Catalog: {} · {total} photos", folder)
-        };
-        if let Some(failures) = self.catalog.failure_summary() {
-            text.push_str(" · ");
-            text.push_str(&failures);
-        }
-        Some(text)
     }
 
     /// Library-mode central panel: lazy textures, model, grid, and actions.
@@ -1778,9 +1748,6 @@ impl RohditorApp {
         }
         if let Some(index) = opened_by_keyboard.or(output.open_entry) {
             self.open_catalog_entry(context, index);
-        }
-        if output.open_folder {
-            self.open_folder_dialog();
         }
     }
 
@@ -1951,12 +1918,20 @@ impl RohditorApp {
             .collect();
         LibraryModel {
             folder_name: self.catalog.folder_name(),
+            folder_path: self
+                .catalog
+                .folder()
+                .map(|folder| folder.to_string_lossy().into_owned()),
             entries,
             selection,
             scroll_to_selection,
             sort: self.library_sort,
             failure: self.catalog.failure().map(str::to_owned),
-            loading_thumbnails: self.catalog.pending_count() > 0,
+            scanning: self.catalog.scanning(),
+            thumbnail_progress: self
+                .catalog
+                .folder()
+                .map(|_| (self.catalog.resolved_count(), self.catalog.entry_count())),
         }
     }
 
@@ -2048,6 +2023,7 @@ impl RohditorApp {
                 || document.export_status.is_some()
                 || document.pending_gpu_histogram.is_some()
         }) || self.pending_white_balance_pick.is_some()
+            || self.catalog.scanning()
             || self.catalog.pending_count() > 0
             || self.library_decode_pending
     }

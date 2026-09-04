@@ -29,6 +29,7 @@ pub(crate) struct CatalogState {
     captured_at: Vec<Option<String>>,
     index_by_path: HashMap<PathBuf, usize>,
     failure: Option<String>,
+    scanning: bool,
 }
 
 impl CatalogState {
@@ -41,6 +42,7 @@ impl CatalogState {
                 self.captured_at.clear();
                 self.index_by_path.clear();
                 self.failure = None;
+                self.scanning = true;
             }
             CatalogEvent::ScanEntries { folder, entries } => {
                 if !self.is_current_folder(&folder) {
@@ -54,10 +56,12 @@ impl CatalogState {
                 self.slots = entries.iter().map(|_| ThumbnailSlot::Pending).collect();
                 self.captured_at = entries.iter().map(|_| None).collect();
                 self.entries = entries;
+                self.scanning = false;
             }
             CatalogEvent::ScanFailed { folder, reason } => {
                 if self.is_current_folder(&folder) {
                     self.failure = Some(reason);
+                    self.scanning = false;
                 }
             }
             CatalogEvent::ThumbnailReady {
@@ -71,6 +75,7 @@ impl CatalogState {
             }
             CatalogEvent::WorkerStopped { message } => {
                 self.failure = Some(message);
+                self.scanning = false;
             }
         }
     }
@@ -108,6 +113,10 @@ impl CatalogState {
 
     pub(crate) fn folder(&self) -> Option<&Path> {
         self.folder.as_deref()
+    }
+
+    pub(crate) fn scanning(&self) -> bool {
+        self.scanning
     }
 
     pub(crate) fn entry_path(&self, index: usize) -> Option<&Path> {
@@ -152,19 +161,6 @@ impl CatalogState {
             .count()
     }
 
-    /// Entries with a displayable thumbnail, ready or placeholder.
-    pub(crate) fn displayable_count(&self) -> usize {
-        self.slots
-            .iter()
-            .filter(|slot| {
-                matches!(
-                    slot,
-                    ThumbnailSlot::Ready(_) | ThumbnailSlot::Placeholder(_)
-                )
-            })
-            .count()
-    }
-
     pub(crate) fn ready_count(&self) -> usize {
         self.slots
             .iter()
@@ -199,21 +195,6 @@ impl CatalogState {
                 _ => None,
             })
             .sum()
-    }
-
-    /// Compact summary of thumbnail failures, including one concrete reason.
-    pub(crate) fn failure_summary(&self) -> Option<String> {
-        let mut reasons = self.slots.iter().filter_map(|slot| match slot {
-            ThumbnailSlot::Failed(reason) => Some(reason.as_str()),
-            _ => None,
-        });
-        let first = reasons.next()?.to_owned();
-        let count = 1 + reasons.count();
-        Some(if count == 1 {
-            first
-        } else {
-            format!("{count} photos failed · e.g. {first}")
-        })
     }
 
     pub(crate) fn failure(&self) -> Option<&str> {
@@ -313,6 +294,7 @@ mod tests {
         assert_eq!(state.entry_count(), 1);
         assert_eq!(state.resolved_count(), 0);
         assert_eq!(state.pending_count(), 1);
+        assert!(!state.scanning());
         assert_eq!(state.failure(), None);
     }
 
@@ -381,6 +363,7 @@ mod tests {
         state.apply_event(CatalogEvent::ScanStarted {
             folder: directory.path().to_path_buf(),
         });
+        assert!(state.scanning());
         state.apply_event(CatalogEvent::ScanFailed {
             folder: directory.path().to_path_buf(),
             reason: "permission denied".to_owned(),
@@ -388,6 +371,7 @@ mod tests {
         assert_eq!(state.failure(), Some("permission denied"));
         assert_eq!(state.entry_count(), 0);
         assert_eq!(state.pending_count(), 0);
+        assert!(!state.scanning());
 
         apply_scan(&mut state, directory.path(), entries);
         assert_eq!(state.failure(), None);

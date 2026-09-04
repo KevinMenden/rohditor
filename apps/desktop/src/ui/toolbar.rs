@@ -26,7 +26,7 @@ pub(crate) struct ToolbarModel {
 
 #[derive(Debug, Default)]
 pub(crate) struct ToolbarOutput {
-    pub open: bool,
+    pub open_file: bool,
     pub open_folder: bool,
     pub close: bool,
     pub undo: bool,
@@ -42,7 +42,7 @@ pub(crate) struct ToolbarOutput {
 
 impl ToolbarOutput {
     fn merge(&mut self, other: Self) {
-        self.open |= other.open;
+        self.open_file |= other.open_file;
         self.open_folder |= other.open_folder;
         self.close |= other.close;
         self.undo |= other.undo;
@@ -67,7 +67,6 @@ pub(crate) struct FilePanelModel {
 
 #[derive(Debug, Default)]
 pub(crate) struct FilePanelOutput {
-    pub open: bool,
     pub close: bool,
 }
 
@@ -77,7 +76,6 @@ pub(crate) struct StatusBarModel {
     pub ui_renderer: String,
     pub activity: Option<String>,
     pub busy: bool,
-    pub catalog: Option<String>,
     pub preview_dimensions: Option<(usize, usize)>,
     pub preview_milliseconds: Option<f64>,
     pub startup_error: Option<String>,
@@ -85,7 +83,7 @@ pub(crate) struct StatusBarModel {
 
 pub(crate) fn show_top(context: &egui::Context, model: &ToolbarModel) -> ToolbarOutput {
     let mut output = ToolbarOutput::default();
-    let narrow = context.content_rect().width() < metrics::NARROW_TOOLBAR_BREAKPOINT;
+    let narrow = source_actions_compact(context.content_rect().width());
     egui::TopBottomPanel::top("top_bar")
         .exact_height(metrics::TOOLBAR_HEIGHT)
         .frame(theme::toolbar_frame())
@@ -102,6 +100,23 @@ pub(crate) fn show_top(context: &egui::Context, model: &ToolbarModel) -> Toolbar
                             .size(14.0)
                             .color(colors::TEXT),
                     );
+                    ui.add_space(8.0);
+                    output.open_file = widgets::icon_toolbar_button(
+                        ui,
+                        Icon::File,
+                        "Open File…",
+                        "Open a Sony ARW photo in Develop",
+                        narrow,
+                    )
+                    .clicked();
+                    output.open_folder = widgets::icon_toolbar_button(
+                        ui,
+                        Icon::Folder,
+                        "Open Folder…",
+                        "Choose a folder of Sony ARW photos to browse",
+                        narrow,
+                    )
+                    .clicked();
                     if let Some(name) = &model.document_name {
                         ui.add(egui::Separator::default().vertical().spacing(10.0));
                         ui.add(egui::Label::new(name).truncate());
@@ -197,8 +212,8 @@ fn show_app_menu(ui: &mut egui::Ui, model: &ToolbarModel, output: &mut ToolbarOu
     let menu_button = widgets::icon_button(ui, Icon::Menu, "Application menu", false, true);
     let _ = egui::Popup::menu(&menu_button).show(|ui| {
         ui.set_min_width(190.0);
-        if ui.button("Open RAW…").clicked() {
-            output.open = true;
+        if ui.button("Open File…").clicked() {
+            output.open_file = true;
             ui.close();
         }
         if ui.button("Open Folder…").clicked() {
@@ -262,8 +277,6 @@ pub(crate) fn show_file_panel(context: &egui::Context, model: &FilePanelModel) -
         .frame(theme::side_panel_frame())
         .show(context, |ui| {
             widgets::section_header(ui, "Files");
-            output.open = widgets::toolbar_button(ui, "Open RAW…", false, true).clicked();
-            ui.add_space(6.0);
             match &model.file_name {
                 Some(file_name) => {
                     theme::card_frame().show(ui, |ui| {
@@ -363,17 +376,6 @@ pub(crate) fn show_status(context: &egui::Context, model: &StatusBarModel) {
                             }
                             ui.add(egui::Label::new(activity).truncate());
                         }
-                        if let Some(catalog) = &model.catalog {
-                            ui.separator();
-                            ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(catalog)
-                                        .small()
-                                        .color(colors::TEXT_MUTED),
-                                )
-                                .truncate(),
-                            );
-                        }
                         if let Some(error) = &model.startup_error {
                             ui.separator();
                             ui.colored_label(colors::ERROR, error);
@@ -411,6 +413,10 @@ const fn file_panel_visible(window_width: f32) -> bool {
     window_width >= metrics::FILE_PANEL_BREAKPOINT
 }
 
+const fn source_actions_compact(window_width: f32) -> bool {
+    window_width < metrics::NARROW_TOOLBAR_BREAKPOINT
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -421,5 +427,13 @@ mod tests {
         assert!(!file_panel_visible(metrics::FILE_PANEL_BREAKPOINT - 1.0));
         assert!(file_panel_visible(metrics::FILE_PANEL_BREAKPOINT));
         assert!(file_panel_visible(1_440.0));
+    }
+
+    #[test]
+    fn source_actions_switch_to_icon_presentation_only_below_breakpoint() {
+        assert!(source_actions_compact(
+            metrics::NARROW_TOOLBAR_BREAKPOINT - 1.0
+        ));
+        assert!(!source_actions_compact(metrics::NARROW_TOOLBAR_BREAKPOINT));
     }
 }

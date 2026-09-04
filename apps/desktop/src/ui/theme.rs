@@ -39,6 +39,10 @@ pub(crate) mod metrics {
     pub(crate) const FILE_PANEL_WIDTH: f32 = 190.0;
     pub(crate) const FILE_PANEL_BREAKPOINT: f32 = 1_120.0;
     pub(crate) const NARROW_TOOLBAR_BREAKPOINT: f32 = 1_020.0;
+    /// Horizontal and vertical inset around the Library browsing surface.
+    pub(crate) const LIBRARY_CONTENT_PADDING: i8 = 22;
+    pub(crate) const LIBRARY_HEADER_SPACING: f32 = 10.0;
+    pub(crate) const LIBRARY_GRID_GAP: f32 = 12.0;
 }
 
 /// Install the complete Rohditor visual language on an egui context.
@@ -180,6 +184,12 @@ pub(crate) fn viewport_frame() -> egui::Frame {
     egui::Frame::new().fill(colors::VIEWPORT)
 }
 
+pub(crate) fn library_frame() -> egui::Frame {
+    egui::Frame::new()
+        .fill(colors::VIEWPORT)
+        .inner_margin(egui::Margin::same(metrics::LIBRARY_CONTENT_PADDING))
+}
+
 pub(crate) fn card_frame() -> egui::Frame {
     egui::Frame::new()
         .fill(colors::PANEL_RAISED)
@@ -220,5 +230,14 @@ mod tests {
             );
             assert!(style.spacing.item_spacing.y < style.spacing.interact_size.y);
         }
+    }
+
+    #[test]
+    fn library_frame_has_a_consistent_content_inset() {
+        let frame = library_frame();
+        assert_eq!(
+            frame.inner_margin,
+            egui::Margin::same(metrics::LIBRARY_CONTENT_PADDING)
+        );
     }
 }
