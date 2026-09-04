@@ -162,6 +162,52 @@ pub(crate) fn icon_button(
     response.on_hover_text(tooltip)
 }
 
+/// A source action uses the same framed treatment at every toolbar width.
+/// Narrow toolbars keep the icon and tooltip while dropping the text label.
+pub(crate) fn icon_toolbar_button(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    label: &str,
+    tooltip: &str,
+    compact: bool,
+) -> egui::Response {
+    let font = egui::FontId::proportional(12.5);
+    let text_width = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), font.clone(), colors::TEXT)
+        .size()
+        .x;
+    let width = if compact {
+        28.0
+    } else {
+        text_width + 15.0 + 7.0 + 18.0
+    };
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 28.0), egui::Sense::click());
+    let visuals = ui.style().interact(&response);
+    ui.painter().rect(
+        rect,
+        metrics::RADIUS_SMALL,
+        visuals.bg_fill,
+        visuals.bg_stroke,
+        egui::StrokeKind::Inside,
+    );
+    let icon_rect = egui::Rect::from_center_size(
+        egui::pos2(rect.left() + 14.0, rect.center().y),
+        egui::Vec2::splat(15.0),
+    );
+    icons::paint(ui.painter(), icon_rect, icon, visuals.fg_stroke.color);
+    if !compact {
+        ui.painter().text(
+            egui::pos2(icon_rect.right() + 7.0, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            label,
+            font,
+            visuals.fg_stroke.color,
+        );
+    }
+    response.on_hover_text(tooltip)
+}
+
 pub(crate) fn toolbar_button(
     ui: &mut egui::Ui,
     label: &str,

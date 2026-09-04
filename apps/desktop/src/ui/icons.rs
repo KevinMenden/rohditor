@@ -9,6 +9,7 @@ pub(crate) enum Icon {
     Diagnostics,
     BeforeAfter,
     File,
+    Folder,
     Photo,
 }
 
@@ -90,6 +91,27 @@ pub(crate) fn paint(painter: &egui::Painter, rect: egui::Rect, icon: Icon, color
                 [
                     egui::pos2(page.left() + 3.0, page.top() + 8.5),
                     egui::pos2(page.right() - 3.0, page.top() + 8.5),
+                ],
+                stroke,
+            );
+        }
+        Icon::Folder => {
+            let body = egui::Rect::from_min_max(
+                egui::pos2(rect.left() + 2.0, rect.top() + 5.0),
+                egui::pos2(rect.right() - 2.0, rect.bottom() - 2.0),
+            );
+            painter.rect_stroke(body, 1.5, stroke, egui::StrokeKind::Inside);
+            painter.line_segment(
+                [
+                    egui::pos2(body.left() + 1.0, body.top()),
+                    egui::pos2(body.left() + 3.5, rect.top() + 2.5),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    egui::pos2(body.left() + 3.5, rect.top() + 2.5),
+                    egui::pos2(body.left() + 8.0, rect.top() + 2.5),
                 ],
                 stroke,
             );

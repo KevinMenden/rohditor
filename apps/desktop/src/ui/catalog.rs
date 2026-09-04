@@ -12,8 +12,6 @@ use super::icons::{self, Icon};
 use super::theme::{self, colors, metrics};
 use super::widgets;
 
-/// Widest allowed grid cell before columns stop stretching.
-const MAX_CELL_WIDTH: f32 = 240.0;
 /// Narrowest cell the grid will use; columns are derived from this.
 const MIN_CELL_WIDTH: f32 = 150.0;
 /// Caption band under each thumbnail.
@@ -61,18 +59,19 @@ pub(crate) struct LibraryEntryModel {
 #[derive(Default)]
 pub(crate) struct LibraryModel {
     pub folder_name: Option<String>,
+    pub folder_path: Option<String>,
     pub entries: Vec<LibraryEntryModel>,
     pub selection: Option<usize>,
     /// Scroll the selected entry into view once, after keyboard navigation.
     pub scroll_to_selection: bool,
     pub sort: LibrarySort,
     pub failure: Option<String>,
-    pub loading_thumbnails: bool,
+    pub scanning: bool,
+    pub thumbnail_progress: Option<(usize, usize)>,
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct LibraryOutput {
-    pub open_folder: bool,
     pub selected_entry: Option<usize>,
     pub open_entry: Option<usize>,
     pub sort_changed: Option<LibrarySort>,
@@ -85,16 +84,25 @@ pub(crate) struct LibraryOutput {
 pub(crate) fn show(context: &egui::Context, model: &LibraryModel) -> LibraryOutput {
     let mut output = LibraryOutput::default();
     egui::CentralPanel::default()
-        .frame(theme::viewport_frame())
+        .frame(theme::library_frame())
         .show(context, |ui| {
             show_header(ui, model, &mut output);
-            ui.add_space(6.0);
+            ui.add_space(metrics::LIBRARY_HEADER_SPACING);
             if let Some(failure) = &model.failure {
-                ui.colored_label(colors::ERROR, format!("Catalog: {failure}"));
+                theme::card_frame().show(ui, |ui| {
+                    ui.colored_label(colors::ERROR, format!("Catalog scan failed: {failure}"));
+                    ui.label(
+                        egui::RichText::new(
+                            "Choose another folder with Open Folder… in the toolbar.",
+                        )
+                        .small()
+                        .color(colors::TEXT_MUTED),
+                    );
+                });
                 return;
             }
             if model.entries.is_empty() {
-                show_empty_state(ui, model, &mut output);
+                show_empty_state(ui, model);
                 return;
             }
             show_grid(ui, model, &mut output);
@@ -103,41 +111,56 @@ pub(crate) fn show(context: &egui::Context, model: &LibraryModel) -> LibraryOutp
 }
 
 fn show_header(ui: &mut egui::Ui, model: &LibraryModel, output: &mut LibraryOutput) {
-    ui.horizontal(|ui| {
-        let title = model
-            .folder_name
-            .clone()
-            .unwrap_or_else(|| "Library".to_owned());
-        ui.label(
-            egui::RichText::new(title)
-                .strong()
-                .size(15.0)
-                .color(colors::TEXT),
-        );
-        if model.folder_name.is_some() {
-            ui.label(
-                egui::RichText::new(format!("{} photos", model.entries.len()))
-                    .small()
-                    .color(colors::TEXT_MUTED),
-            );
-            if model.loading_thumbnails {
-                ui.spinner();
-                ui.label(
-                    egui::RichText::new("Loading thumbnails…")
-                        .small()
-                        .color(colors::TEXT_MUTED),
+    egui::Sides::new().shrink_left().truncate().show(
+        ui,
+        |ui| {
+            ui.vertical(|ui| {
+                let title = model.folder_name.as_deref().unwrap_or("No folder open");
+                let title_response = ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(title)
+                            .strong()
+                            .size(15.0)
+                            .color(colors::TEXT),
+                    )
+                    .truncate(),
                 );
-            }
-        }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            output.open_folder = widgets::toolbar_button(ui, "Open Folder…", false, true)
-                .on_hover_text("Choose a folder of Sony ARW photos to browse")
-                .clicked();
-            if !model.entries.is_empty() {
+                if let Some(path) = &model.folder_path {
+                    let _ = title_response.on_hover_text(path);
+                }
+                if model.folder_name.is_some() {
+                    ui.horizontal(|ui| {
+                        let mut summary = format!("{} photos", model.entries.len());
+                        let loading = if model.scanning {
+                            summary.push_str(" · Scanning folder…");
+                            true
+                        } else if let Some((resolved, total)) = model.thumbnail_progress
+                            && resolved < total
+                        {
+                            summary
+                                .push_str(&format!(" · Loading thumbnails… ({resolved}/{total})"));
+                            true
+                        } else {
+                            false
+                        };
+                        ui.label(
+                            egui::RichText::new(summary)
+                                .small()
+                                .color(colors::TEXT_MUTED),
+                        );
+                        if loading {
+                            ui.spinner();
+                        }
+                    });
+                }
+            });
+        },
+        |ui| {
+            if model.folder_name.is_some() {
                 output.sort_changed = show_sort_selector(ui, model.sort);
             }
-        });
-    });
+        },
+    );
 }
 
 fn show_sort_selector(ui: &mut egui::Ui, current: LibrarySort) -> Option<LibrarySort> {
@@ -150,32 +173,25 @@ fn show_sort_selector(ui: &mut egui::Ui, current: LibrarySort) -> Option<Library
     (selected != current).then_some(selected)
 }
 
-fn show_empty_state(ui: &mut egui::Ui, model: &LibraryModel, output: &mut LibraryOutput) {
+fn show_empty_state(ui: &mut egui::Ui, model: &LibraryModel) {
     ui.centered_and_justified(|ui| {
-        ui.vertical(|ui| {
-            ui.label(
-                egui::RichText::new("Library")
-                    .strong()
-                    .size(22.0)
-                    .color(colors::TEXT),
-            );
-            let message = if model.folder_name.is_some() {
-                "This folder contains no supported photos (Sony ARW)."
+        ui.vertical_centered(|ui| {
+            if model.scanning {
+                ui.spinner();
+                ui.add_space(6.0);
+            }
+            let message = if model.scanning {
+                "Scanning folder for supported Sony ARW photos…"
+            } else if model.folder_name.is_some() {
+                "No supported Sony ARW photos were found in this folder."
             } else {
-                "Open a folder with Sony ARW photos to browse them here."
+                "Use Open Folder… in the toolbar to browse Sony ARW photos."
             };
             ui.label(
                 egui::RichText::new(message)
                     .small()
                     .color(colors::TEXT_MUTED),
             );
-            ui.add_space(8.0);
-            if widgets::primary_button(ui, "Open Folder…", true)
-                .on_hover_text("Choose a folder of Sony ARW photos to browse")
-                .clicked()
-            {
-                output.open_folder = true;
-            }
         });
     });
 }
@@ -258,7 +274,7 @@ fn show_grid(ui: &mut egui::Ui, model: &LibraryModel, output: &mut LibraryOutput
         .show_viewport(ui, |ui, _viewport| {
             while next_index < model.entries.len() {
                 ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 8.0;
+                    ui.spacing_mut().item_spacing.x = metrics::LIBRARY_GRID_GAP;
                     for _ in 0..columns {
                         if next_index >= model.entries.len() {
                             break;
@@ -291,7 +307,7 @@ fn show_grid(ui: &mut egui::Ui, model: &LibraryModel, output: &mut LibraryOutput
                         }
                     }
                 });
-                ui.add_space(8.0);
+                ui.add_space(metrics::LIBRARY_GRID_GAP);
             }
         });
     output.visible_range = visible;
@@ -398,16 +414,21 @@ fn paint_centered_hint(ui: &egui::Ui, rect: egui::Rect, text: &str, color: egui:
     );
 }
 
-/// Column count derived from the available width and the minimum cell size.
+/// Column count derived from the available width, minimum cell size, and the
+/// gutter between cells.
 pub(crate) fn column_count(available_width: f32) -> usize {
-    (available_width / MIN_CELL_WIDTH).floor().max(1.0) as usize
+    ((available_width.max(0.0) + metrics::LIBRARY_GRID_GAP)
+        / (MIN_CELL_WIDTH + metrics::LIBRARY_GRID_GAP))
+        .floor()
+        .max(1.0) as usize
 }
 
-/// Cell size for a given available width: columns stretch but never above
-/// [`MAX_CELL_WIDTH`], and the caption band sits below the thumbnail.
+/// Cell size for a given available width. Gaps are removed before the
+/// remaining width is shared, so the last column ends at the content frame.
 pub(crate) fn cell_size(available_width: f32) -> egui::Vec2 {
     let columns = column_count(available_width);
-    let width = (available_width / columns as f32).min(MAX_CELL_WIDTH);
+    let gaps = metrics::LIBRARY_GRID_GAP * columns.saturating_sub(1) as f32;
+    let width = ((available_width.max(0.0) - gaps) / columns as f32).max(0.0);
     egui::vec2(width, width + CAPTION_HEIGHT)
 }
 
@@ -421,18 +442,28 @@ mod tests {
         assert_eq!(column_count(-30.0), 1);
         assert_eq!(column_count(150.0), 1);
         assert_eq!(column_count(299.0), 1);
-        assert_eq!(column_count(300.0), 2);
-        assert_eq!(column_count(1_500.0), 10);
+        assert_eq!(column_count(311.0), 1);
+        assert_eq!(column_count(312.0), 2);
+        assert_eq!(column_count(1_500.0), 9);
     }
 
     #[test]
-    fn cells_stretch_to_columns_but_are_capped() {
+    fn cells_include_gutters_and_fill_the_content_width() {
         let narrow = cell_size(160.0);
         assert_eq!(narrow, egui::vec2(160.0, 160.0 + CAPTION_HEIGHT));
         let stretched = cell_size(450.0);
-        assert_eq!(stretched.x, 150.0);
+        assert_eq!(stretched.x, (450.0 - metrics::LIBRARY_GRID_GAP) / 2.0);
         let capped = cell_size(299.0);
-        assert_eq!(capped.x, MAX_CELL_WIDTH);
-        assert_eq!(capped.y, MAX_CELL_WIDTH + CAPTION_HEIGHT);
+        assert_eq!(capped.x, 299.0);
+        assert_eq!(capped.y, 299.0 + CAPTION_HEIGHT);
+        let columns = column_count(1_500.0);
+        let cell = cell_size(1_500.0);
+        assert!(
+            (cell.x * columns as f32
+                + metrics::LIBRARY_GRID_GAP * columns.saturating_sub(1) as f32
+                - 1_500.0)
+                .abs()
+                < f32::EPSILON
+        );
     }
 }

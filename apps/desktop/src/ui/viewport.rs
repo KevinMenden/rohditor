@@ -6,7 +6,6 @@ use rohditor_demosaic::DemosaicAlgorithm;
 use super::PickerMode;
 use super::crop::{CropOverlayModel, CropOverlayOutput, interact_and_paint};
 use super::theme::{self, colors};
-use super::widgets;
 
 #[derive(Clone)]
 pub(crate) enum PreviewTexture {
@@ -220,7 +219,6 @@ pub(crate) struct ViewportModel<'a> {
 
 #[derive(Debug, Default)]
 pub(crate) struct ViewportOutput {
-    pub open: bool,
     pub picker_sample: Option<(PickerMode, egui::Pos2)>,
     pub crop: CropOverlayOutput,
 }
@@ -237,7 +235,7 @@ pub(crate) fn show(
             let viewport = ui.max_rect();
             let response = ui.allocate_rect(viewport, egui::Sense::click_and_drag());
             let Some(texture) = model.texture else {
-                show_empty_state(ui, model.has_document, model.preparing, &mut output);
+                show_empty_state(ui, model.has_document, model.preparing);
                 return;
             };
 
@@ -336,12 +334,7 @@ pub(crate) fn show(
     output
 }
 
-fn show_empty_state(
-    ui: &mut egui::Ui,
-    has_document: bool,
-    preparing: bool,
-    output: &mut ViewportOutput,
-) {
+fn show_empty_state(ui: &mut egui::Ui, has_document: bool, preparing: bool) {
     ui.centered_and_justified(|ui| {
         ui.vertical_centered(|ui| {
             if preparing {
@@ -365,8 +358,6 @@ fn show_empty_state(
                     egui::RichText::new("Non-destructive edits · GPU-resident previews")
                         .color(colors::TEXT_MUTED),
                 );
-                ui.add_space(12.0);
-                output.open = widgets::primary_button(ui, "Open RAW…", true).clicked();
             }
         });
     });
