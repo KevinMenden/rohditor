@@ -19,6 +19,8 @@ fn benchmark_demosaic(criterion: &mut Criterion) {
         for (algorithm_name, algorithm) in [
             ("bilinear", DemosaicAlgorithm::Bilinear),
             ("mhc", DemosaicAlgorithm::MalvarHeCutler),
+            ("rcd", DemosaicAlgorithm::Rcd),
+            ("amaze", DemosaicAlgorithm::Amaze),
         ] {
             group.bench_function(algorithm_name, |bencher| {
                 bencher.iter(|| {

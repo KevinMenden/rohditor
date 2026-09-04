@@ -244,6 +244,10 @@ enum CliDemosaic {
     Bilinear,
     #[value(name = "mhc")]
     MalvarHeCutler,
+    #[value(name = "rcd")]
+    Rcd,
+    #[value(name = "amaze")]
+    Amaze,
 }
 
 impl CliDemosaic {
@@ -251,6 +255,8 @@ impl CliDemosaic {
         match self {
             Self::Bilinear => "bilinear",
             Self::MalvarHeCutler => "mhc",
+            Self::Rcd => "rcd",
+            Self::Amaze => "amaze",
         }
     }
 }
@@ -260,6 +266,8 @@ impl From<CliDemosaic> for DemosaicAlgorithm {
         match value {
             CliDemosaic::Bilinear => Self::Bilinear,
             CliDemosaic::MalvarHeCutler => Self::MalvarHeCutler,
+            CliDemosaic::Rcd => Self::Rcd,
+            CliDemosaic::Amaze => Self::Amaze,
         }
     }
 }
@@ -1518,9 +1526,10 @@ mod tests {
     use rohditor_raw::{CfaPattern, EncodedPreviewFormat, PhotometricInterpretation};
 
     use super::{
-        Cli, CliCropPolicy, CliDemosaic, CliMetadata, Command, DevelopArguments, QualityCropSpec,
-        RgbMultipliers, crop_display_image, develop_export_settings, extract_preview,
-        format_photometric, nearest_neighbor_2x, parse_libraw_pgm, validate_preview_extension,
+        Cli, CliCropPolicy, CliDemosaic, CliMetadata, Command, DemosaicAlgorithm, DevelopArguments,
+        QualityCropSpec, RgbMultipliers, crop_display_image, develop_export_settings,
+        extract_preview, format_photometric, nearest_neighbor_2x, parse_libraw_pgm,
+        validate_preview_extension,
     };
 
     #[test]
@@ -1599,6 +1608,36 @@ mod tests {
             panic!("expected develop command");
         };
         assert!(matches!(demosaic, CliDemosaic::MalvarHeCutler));
+
+        let rcd = Cli::try_parse_from([
+            "rohditor-cli",
+            "develop",
+            "input.arw",
+            "output.jpg",
+            "--demosaic",
+            "rcd",
+        ])
+        .expect("rcd is a supported development algorithm");
+        let Command::Develop { demosaic, .. } = rcd.command else {
+            panic!("expected develop command");
+        };
+        assert!(matches!(demosaic, CliDemosaic::Rcd));
+        assert_eq!(DemosaicAlgorithm::from(demosaic), DemosaicAlgorithm::Rcd);
+
+        let amaze = Cli::try_parse_from([
+            "rohditor-cli",
+            "develop",
+            "input.arw",
+            "output.jpg",
+            "--demosaic",
+            "amaze",
+        ])
+        .expect("amaze is a supported development algorithm");
+        let Command::Develop { demosaic, .. } = amaze.command else {
+            panic!("expected develop command");
+        };
+        assert!(matches!(demosaic, CliDemosaic::Amaze));
+        assert_eq!(DemosaicAlgorithm::from(demosaic), DemosaicAlgorithm::Amaze);
 
         let defaulted = Cli::try_parse_from(["rohditor-cli", "develop", "input.arw", "output.jpg"])
             .expect("development defaults parse");

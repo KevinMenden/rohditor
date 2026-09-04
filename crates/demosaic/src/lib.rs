@@ -5,8 +5,12 @@
 //! cancellation contracts are shared here; each implementation only fills
 //! camera-native linear RGB rows.
 
+mod amaze;
+mod amaze_stages;
 mod bilinear;
 mod malvar_he_cutler;
+mod rcd;
+mod rcd_stages;
 
 use rohditor_image::{
     Halo, ImageError, LinearRgbImage, LinearRgbSpace, MosaicImage, allocate_zeroed_f32,
@@ -63,6 +67,22 @@ pub const MALVAR_HE_CUTLER_HALO: Halo = Halo {
     bottom: 2,
 };
 
+/// Neighborhood required to reconstruct an RCD output region.
+pub const RCD_HALO: Halo = Halo {
+    left: 10,
+    right: 10,
+    top: 10,
+    bottom: 10,
+};
+
+/// Neighborhood required to reconstruct an AMaZE output region.
+pub const AMAZE_HALO: Halo = Halo {
+    left: 16,
+    right: 16,
+    top: 16,
+    bottom: 16,
+};
+
 /// Selectable CPU Bayer reconstruction algorithms.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum DemosaicAlgorithm {
@@ -71,6 +91,10 @@ pub enum DemosaicAlgorithm {
     /// Malvar-He-Cutler gradient-corrected linear interpolation.
     #[default]
     MalvarHeCutler,
+    /// Ratio-corrected directional interpolation.
+    Rcd,
+    /// Aliasing Minimization and Zipper Elimination interpolation.
+    Amaze,
 }
 
 impl DemosaicAlgorithm {
@@ -79,6 +103,8 @@ impl DemosaicAlgorithm {
         match self {
             Self::Bilinear => "bilinear",
             Self::MalvarHeCutler => "mhc",
+            Self::Rcd => "rcd",
+            Self::Amaze => "amaze",
         }
     }
 }
@@ -158,6 +184,12 @@ pub fn demosaic_cancellable(
         }
         DemosaicAlgorithm::MalvarHeCutler => {
             malvar_he_cutler::reconstruct(mosaic, gains, cancellation, row_stride, &mut output)?
+        }
+        DemosaicAlgorithm::Rcd => {
+            rcd::reconstruct(mosaic, gains, cancellation, row_stride, &mut output)?
+        }
+        DemosaicAlgorithm::Amaze => {
+            amaze::reconstruct(mosaic, gains, cancellation, row_stride, &mut output)?
         }
     }
     checkpoint(cancellation)?;

@@ -47,6 +47,10 @@ enum DemosaicPreference {
     #[value(name = "mhc")]
     #[default]
     MalvarHeCutler,
+    #[value(name = "rcd")]
+    Rcd,
+    #[value(name = "amaze")]
+    Amaze,
 }
 
 impl From<DemosaicPreference> for DemosaicAlgorithm {
@@ -54,6 +58,8 @@ impl From<DemosaicPreference> for DemosaicAlgorithm {
         match value {
             DemosaicPreference::Bilinear => Self::Bilinear,
             DemosaicPreference::MalvarHeCutler => Self::MalvarHeCutler,
+            DemosaicPreference::Rcd => Self::Rcd,
+            DemosaicPreference::Amaze => Self::Amaze,
         }
     }
 }
@@ -205,7 +211,8 @@ mod tests {
     use clap::Parser;
 
     use super::{
-        APPLICATION_ID, Arguments, DemosaicPreference, ProcessorPreference, RendererPreference,
+        APPLICATION_ID, Arguments, DemosaicAlgorithm, DemosaicPreference, ProcessorPreference,
+        RendererPreference,
     };
 
     #[test]
@@ -229,6 +236,28 @@ mod tests {
             .expect("default desktop arguments parse");
         assert_eq!(defaults.demosaic, DemosaicPreference::MalvarHeCutler);
         assert!(arguments.diagnostics);
+    }
+
+    #[test]
+    fn rcd_is_a_desktop_demosaic_choice() {
+        let arguments = Arguments::try_parse_from(["rohditor-desktop", "--demosaic", "rcd"])
+            .expect("rcd should be a supported desktop demosaic choice");
+        assert_eq!(arguments.demosaic, DemosaicPreference::Rcd);
+        assert_eq!(
+            DemosaicAlgorithm::from(arguments.demosaic),
+            DemosaicAlgorithm::Rcd
+        );
+    }
+
+    #[test]
+    fn amaze_is_a_desktop_demosaic_choice() {
+        let arguments = Arguments::try_parse_from(["rohditor-desktop", "--demosaic", "amaze"])
+            .expect("amaze should be a supported desktop demosaic choice");
+        assert_eq!(arguments.demosaic, DemosaicPreference::Amaze);
+        assert_eq!(
+            DemosaicAlgorithm::from(arguments.demosaic),
+            DemosaicAlgorithm::Amaze
+        );
     }
 
     #[test]
