@@ -506,35 +506,33 @@ fn worker_loop(
                 let ticket = scheduled.job.ticket;
                 let completion = if abandoned.contains(&ticket.document_id) {
                     PreviewCompletion::Cancelled
+                } else if scheduled.job.resolution == PreviewResolution::SourceScale {
+                    process_source_scale_preview(
+                        scheduled.job,
+                        &sender,
+                        &context,
+                        &scheduled.cancellation,
+                        &mut preview_cache,
+                        preview_options.render,
+                    )
                 } else {
-                    if scheduled.job.resolution == PreviewResolution::SourceScale {
-                        process_source_scale_preview(
+                    match scheduled.job.backend {
+                        PreviewBackend::Cpu => process_preview(
                             scheduled.job,
                             &sender,
                             &context,
                             &scheduled.cancellation,
                             &mut preview_cache,
-                            preview_options.render,
-                        )
-                    } else {
-                        match scheduled.job.backend {
-                            PreviewBackend::Cpu => process_preview(
-                                scheduled.job,
-                                &sender,
-                                &context,
-                                &scheduled.cancellation,
-                                &mut preview_cache,
-                                preview_options,
-                            ),
-                            PreviewBackend::GpuBase => process_gpu_base(
-                                scheduled.job,
-                                &sender,
-                                &context,
-                                &scheduled.cancellation,
-                                &mut preview_cache,
-                                preview_options,
-                            ),
-                        }
+                            preview_options,
+                        ),
+                        PreviewBackend::GpuBase => process_gpu_base(
+                            scheduled.job,
+                            &sender,
+                            &context,
+                            &scheduled.cancellation,
+                            &mut preview_cache,
+                            preview_options,
+                        ),
                     }
                 };
                 previews.finish(ticket, completion);

@@ -150,7 +150,8 @@ fn launch(
         viewport: egui::ViewportBuilder::default()
             .with_title("Rohditor")
             .with_app_id(APPLICATION_ID)
-            .with_inner_size([1_280.0, 800.0])
+            .with_inner_size([1_600.0, 1_000.0])
+            .with_maximized(true)
             .with_min_inner_size([900.0, 600.0]),
         ..eframe::NativeOptions::default()
     };
