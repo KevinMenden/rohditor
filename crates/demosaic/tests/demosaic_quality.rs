@@ -25,6 +25,7 @@ const FIXTURES: [Fixture; 7] = [
 fn generated_ground_truth_suite_records_demosaic_quality() -> Result<(), Box<dyn Error>> {
     let mut bilinear_error = 0.0_f64;
     let mut mhc_error = 0.0_f64;
+    let mut amaze_error = 0.0_f64;
     let mut sample_count = 0_usize;
     let mut worst_regression = ("", f64::NEG_INFINITY);
 
@@ -32,9 +33,11 @@ fn generated_ground_truth_suite_records_demosaic_quality() -> Result<(), Box<dyn
         let ground_truth = fixture.generate();
         let mut fixture_bilinear_error = 0.0_f64;
         let mut fixture_mhc_error = 0.0_f64;
+        let mut fixture_amaze_error = 0.0_f64;
         let mut fixture_samples = 0_usize;
         let mut bilinear_channel_error = [0.0_f64; 3];
         let mut mhc_channel_error = [0.0_f64; 3];
+        let mut amaze_channel_error = [0.0_f64; 3];
 
         for pattern in PATTERNS {
             let mosaic = mosaic_ground_truth(&ground_truth, pattern)?;
@@ -48,6 +51,11 @@ fn generated_ground_truth_suite_records_demosaic_quality() -> Result<(), Box<dyn
                 WhiteBalanceGains::identity(),
                 DemosaicAlgorithm::MalvarHeCutler,
             )?;
+            let amaze = demosaic(
+                &mosaic,
+                WhiteBalanceGains::identity(),
+                DemosaicAlgorithm::Amaze,
+            )?;
             accumulate_squared_error(
                 &ground_truth,
                 &bilinear,
@@ -60,19 +68,28 @@ fn generated_ground_truth_suite_records_demosaic_quality() -> Result<(), Box<dyn
                 &mut fixture_mhc_error,
                 &mut mhc_channel_error,
             );
+            accumulate_squared_error(
+                &ground_truth,
+                &amaze,
+                &mut fixture_amaze_error,
+                &mut amaze_channel_error,
+            );
             fixture_samples += (WIDTH - 4) * (HEIGHT - 4) * 3;
         }
 
         let bilinear_psnr = psnr(fixture_bilinear_error, fixture_samples);
         let mhc_psnr = psnr(fixture_mhc_error, fixture_samples);
+        let amaze_psnr = psnr(fixture_amaze_error, fixture_samples);
         let channel_samples = fixture_samples / 3;
         println!(
-            "{:<18} bilinear {:>7.3} dB RMSE {:?}; mhc {:>7.3} dB RMSE {:?}; delta {:+.3} dB",
+            "{:<18} bilinear {:>7.3} dB RMSE {:?}; mhc {:>7.3} dB RMSE {:?}; amaze {:>7.3} dB RMSE {:?}; delta {:+.3} dB",
             fixture.name(),
             bilinear_psnr,
             channel_rmse(bilinear_channel_error, channel_samples),
             mhc_psnr,
             channel_rmse(mhc_channel_error, channel_samples),
+            amaze_psnr,
+            channel_rmse(amaze_channel_error, channel_samples),
             mhc_psnr - bilinear_psnr,
         );
 
@@ -90,13 +107,15 @@ fn generated_ground_truth_suite_records_demosaic_quality() -> Result<(), Box<dyn
         );
         bilinear_error += fixture_bilinear_error;
         mhc_error += fixture_mhc_error;
+        amaze_error += fixture_amaze_error;
         sample_count += fixture_samples;
     }
 
     let bilinear_psnr = psnr(bilinear_error, sample_count);
     let mhc_psnr = psnr(mhc_error, sample_count);
+    let amaze_psnr = psnr(amaze_error, sample_count);
     println!(
-        "aggregate          bilinear {bilinear_psnr:>7.3} dB; mhc {mhc_psnr:>7.3} dB; delta {:+.3} dB",
+        "aggregate          bilinear {bilinear_psnr:>7.3} dB; mhc {mhc_psnr:>7.3} dB; amaze {amaze_psnr:>7.3} dB; delta {:+.3} dB",
         mhc_psnr - bilinear_psnr
     );
     // This report is also the executable Phase 9 acceptance gate.

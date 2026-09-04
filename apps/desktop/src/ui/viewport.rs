@@ -65,6 +65,10 @@ impl PreviewSource {
             (DemosaicAlgorithm::Bilinear, true) => Self::FastGpu,
             (DemosaicAlgorithm::MalvarHeCutler, false) => Self::HighQualityCpu,
             (DemosaicAlgorithm::MalvarHeCutler, true) => Self::HighQualityGpu,
+            (DemosaicAlgorithm::Rcd, false) => Self::HighQualityCpu,
+            (DemosaicAlgorithm::Rcd, true) => Self::HighQualityGpu,
+            (DemosaicAlgorithm::Amaze, false) => Self::HighQualityCpu,
+            (DemosaicAlgorithm::Amaze, true) => Self::HighQualityGpu,
         }
     }
 

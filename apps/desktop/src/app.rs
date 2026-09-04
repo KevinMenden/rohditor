@@ -2087,6 +2087,8 @@ impl RohditorApp {
                     PreviewResolution::Fit => match preview.worker.algorithm {
                         DemosaicAlgorithm::Bilinear => "fast",
                         DemosaicAlgorithm::MalvarHeCutler => "high-quality",
+                        DemosaicAlgorithm::Rcd => "high-quality",
+                        DemosaicAlgorithm::Amaze => "high-quality",
                     },
                 }
                 .to_owned(),
