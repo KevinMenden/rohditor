@@ -1,0 +1,21 @@
+[package]
+name = "rohditor-highlight"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+rayon.workspace = true
+rohditor-image = { path = "../image" }
+thiserror.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "clip"
+harness = false
+
+[lints]
+workspace = true

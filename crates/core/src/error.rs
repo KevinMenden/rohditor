@@ -2,6 +2,7 @@ use thiserror::Error;
 
 use rohditor_demosaic::DemosaicError;
 use rohditor_edit::EditError;
+use rohditor_highlight::HighlightError;
 use rohditor_image::ImageError;
 
 /// Errors from validation or execution of Rohditor's CPU image pipeline.
@@ -116,6 +117,24 @@ impl From<DemosaicError> for PipelineError {
                 Self::NonFiniteImageData { stage, x, y }
             }
             DemosaicError::Image(error) => error.into(),
+        }
+    }
+}
+
+impl From<HighlightError> for PipelineError {
+    fn from(error: HighlightError) -> Self {
+        match error {
+            HighlightError::Cancelled => Self::Cancelled,
+            HighlightError::InvalidLevel { channel, value } => Self::InvalidMetadata {
+                field: "raw.highlights",
+                reason: format!("invalid {channel} clipping level {value}"),
+            },
+            HighlightError::NonFiniteSample { x, y } => Self::NonFiniteImageData {
+                stage: "highlight clipping",
+                x,
+                y,
+            },
+            HighlightError::Image(error) => error.into(),
         }
     }
 }

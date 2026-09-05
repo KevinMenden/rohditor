@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use image::RgbImage;
 use rohditor_core::{
-    CancellationToken, CpuPipeline, ExportReport, ExportSettings, Histogram, MemoryEstimate,
-    PipelineError, PreviewOptions, RenderOptions, StageTimings, export_image,
+    CancellationToken, ClipStats, CpuPipeline, ExportReport, ExportSettings, Histogram,
+    MemoryEstimate, PipelineError, PreviewOptions, RenderOptions, StageTimings, export_image,
 };
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_edit::EditRecipe;
@@ -80,6 +80,7 @@ pub(crate) struct WorkerPreviewDiagnostics {
     pub algorithm: DemosaicAlgorithm,
     pub cache_hits: PreviewCacheHits,
     pub timings: StageTimings,
+    pub highlight_stats: ClipStats,
     pub memory: MemoryEstimate,
     pub cache_resident_bytes: usize,
     pub workspace_reused: bool,
@@ -853,6 +854,7 @@ fn process_source_scale_preview(
                     ..PreviewCacheHits::default()
                 },
                 timings: result.timings,
+                highlight_stats: result.highlight_stats,
                 memory: result.memory,
                 cache_resident_bytes: 0,
                 workspace_reused: false,
@@ -1005,6 +1007,7 @@ fn process_gpu_base(
         algorithm: options.render.demosaic,
         cache_hits,
         timings,
+        highlight_stats: reconstructed.highlight_stats(),
         memory,
         cache_resident_bytes,
         workspace_reused: false,
@@ -1036,6 +1039,9 @@ fn develop_preview(
         let image = cached.image.clone();
         let histogram = Histogram::from_display_rgb8(&image);
         let memory = cached.memory;
+        let highlight_stats = preview_cache
+            .demosaiced(keys)
+            .map_or_else(ClipStats::default, |base| base.highlight_stats());
         let timings = StageTimings {
             total: copy_started.elapsed(),
             ..StageTimings::default()
@@ -1049,6 +1055,7 @@ fn develop_preview(
                 algorithm: options.render.demosaic,
                 cache_hits,
                 timings,
+                highlight_stats,
                 memory,
                 cache_resident_bytes: preview_cache.resident_bytes(),
                 workspace_reused: false,
@@ -1074,6 +1081,7 @@ fn develop_preview(
     add_stage_timings(&mut result.timings, base_timings);
     let memory = result.memory;
     let timings = result.timings;
+    let highlight_stats = result.highlight_stats;
     preview_cache.insert_adjusted(keys, result.image.clone(), memory);
     let diagnostics = WorkerPreviewDiagnostics {
         backend: PreviewBackend::Cpu,
@@ -1081,6 +1089,7 @@ fn develop_preview(
         algorithm: options.render.demosaic,
         cache_hits,
         timings,
+        highlight_stats,
         memory,
         cache_resident_bytes: preview_cache.resident_bytes(),
         workspace_reused,
@@ -1126,6 +1135,7 @@ fn ensure_preview_reconstruction(
     if !cache_hits.reconstructed {
         let reconstructed = CpuPipeline.prepare_preview_reconstruction_cancellable(
             &job.frame,
+            &job.recipe,
             options,
             cancellation,
         )?;
@@ -1276,6 +1286,7 @@ fn sample_camera_native_patch(
 fn add_stage_timings(target: &mut StageTimings, additional: StageTimings) {
     target.metadata += additional.metadata;
     target.normalization += additional.normalization;
+    target.highlight_clipping += additional.highlight_clipping;
     target.demosaic += additional.demosaic;
     target.resampling += additional.resampling;
     target.color_conversion += additional.color_conversion;
@@ -1920,8 +1931,9 @@ mod tests {
     #[test]
     fn white_balance_picker_samples_camera_native_patch_and_rejects_clipping() {
         let frame = fake_frame();
+        let recipe = EditRecipe::default();
         let reconstructed = CpuPipeline
-            .prepare_preview_reconstruction(&frame, PreviewOptions::default())
+            .prepare_preview_reconstruction(&frame, &recipe, PreviewOptions::default())
             .expect("fixture reconstruction should succeed");
         let sample = sample_camera_native_patch(&reconstructed, None, (0.5, 0.5))
             .expect("unclipped fixture patch should be sampleable");
@@ -1930,7 +1942,7 @@ mod tests {
         let mut clipped = frame;
         clipped.mosaic = Arc::from(vec![u16::MAX; clipped.info.width * clipped.info.height]);
         let reconstructed = CpuPipeline
-            .prepare_preview_reconstruction(&clipped, PreviewOptions::default())
+            .prepare_preview_reconstruction(&clipped, &recipe, PreviewOptions::default())
             .expect("clipped fixture reconstruction should succeed");
         assert!(sample_camera_native_patch(&reconstructed, None, (0.5, 0.5)).is_err());
     }
