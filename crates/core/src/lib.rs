@@ -12,6 +12,7 @@ mod demosaic;
 mod error;
 mod export;
 mod geometry;
+mod highlight;
 mod output;
 mod pipeline;
 mod resample;
@@ -44,3 +45,4 @@ pub use pipeline::{
     DemosaicedBase, ExportRenderResult, MemoryEstimate, OutputPolicy, PreviewOptions,
     RawCropPolicy, ReconstructedPreview, RenderOptions, RenderResult, StageTimings,
 };
+pub use rohditor_highlight::ClipStats;

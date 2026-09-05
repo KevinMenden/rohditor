@@ -6,7 +6,7 @@ use rohditor_core::{
     RawCropPolicy, ReconstructedPreview,
 };
 use rohditor_demosaic::DemosaicAlgorithm;
-use rohditor_edit::{EditRecipe, WhiteBalance};
+use rohditor_edit::{EditRecipe, HighlightMethod, WhiteBalance};
 use rohditor_image::{DisplayRgbImage, Orientation};
 use rohditor_raw::{RawFrame, SourceIdentity};
 
@@ -39,10 +39,11 @@ impl PreviewCacheKeys {
             raw_crop_policy: options.render.raw_crop_policy,
             max_long_edge: options.max_long_edge,
             algorithm: options.render.demosaic,
+            highlight: HighlightKey::from_recipe(recipe),
             // Bump when the retained source representation changes. The GPU
             // boundary now consumes camera-native samples rather than a
             // camera-converted base.
-            reconstruction_version: 3,
+            reconstruction_version: 4,
         };
         let demosaiced = DemosaicedBaseKey {
             reconstructed: reconstructed.clone(),
@@ -119,7 +120,29 @@ struct ReconstructedCameraRgbKey {
     raw_crop_policy: RawCropPolicy,
     max_long_edge: usize,
     algorithm: DemosaicAlgorithm,
+    highlight: HighlightKey,
     reconstruction_version: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HighlightKey {
+    Off,
+    Clip {
+        threshold_bits: u32,
+        white_balance: WhiteBalanceKey,
+    },
+}
+
+impl HighlightKey {
+    fn from_recipe(recipe: &EditRecipe) -> Self {
+        match recipe.raw.highlights.method {
+            HighlightMethod::Off => Self::Off,
+            HighlightMethod::Clip => Self::Clip {
+                threshold_bits: recipe.raw.highlights.threshold.to_bits(),
+                white_balance: WhiteBalanceKey::from(recipe.color.white_balance),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -390,5 +413,97 @@ impl PreviewCache {
             .saturating_add(demosaiced)
             .saturating_add(adjusted)
             .saturating_add(self.workspace.buffer_bytes())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rohditor_image::{BayerPattern, Orientation};
+    use rohditor_raw::{
+        CaptureMetadata, CfaPattern, LevelPattern, PhotometricInterpretation, RawFileInfo,
+    };
+
+    fn frame() -> RawFrame {
+        RawFrame {
+            info: RawFileInfo {
+                format: "fixture".to_owned(),
+                make: "Rohditor".to_owned(),
+                model: "cache fixture".to_owned(),
+                clean_make: "Rohditor".to_owned(),
+                clean_model: "cache fixture".to_owned(),
+                source_size_bytes: 0,
+                source_identity: None,
+                width: 2,
+                height: 2,
+                components_per_pixel: 1,
+                source_bits_per_sample: Some(12),
+                decoded_bits_per_sample: 16,
+                compression: None,
+                active_area: None,
+                crop_area: None,
+                photometric_interpretation: PhotometricInterpretation::Cfa {
+                    pattern: CfaPattern {
+                        name: BayerPattern::Rggb.name().to_owned(),
+                        width: 2,
+                        height: 2,
+                    },
+                },
+                black_levels: LevelPattern {
+                    values: vec![0.0; 4],
+                    repeat_width: 2,
+                    repeat_height: 2,
+                    components_per_pixel: 1,
+                },
+                white_levels: vec![1.0; 4],
+                as_shot_white_balance: [Some(2.0), Some(1.0), Some(1.5), None],
+                xyz_to_camera: [[0.0; 3]; 4],
+                color_matrices: Vec::new(),
+                orientation: Orientation::Normal,
+                capture: CaptureMetadata::default(),
+                embedded_preview: None,
+            },
+            row_stride: 2,
+            mosaic: Arc::from([0_u16, 0, 0, 0]),
+        }
+    }
+
+    fn keys(recipe: &EditRecipe) -> PreviewCacheKeys {
+        PreviewCacheKeys::new(7, &frame(), recipe, PreviewOptions::default())
+    }
+
+    #[test]
+    fn highlight_cache_key_tracks_only_the_dependencies_of_reconstruction() {
+        let off = EditRecipe::default();
+        let mut off_wb = off.clone();
+        off_wb.color.white_balance = WhiteBalance::ManualMultipliers {
+            red: 1.2,
+            green: 1.0,
+            blue: 0.8,
+        };
+        let off_keys = keys(&off);
+        let off_wb_keys = keys(&off_wb);
+        assert_eq!(off_keys.reconstructed, off_wb_keys.reconstructed);
+        assert_ne!(off_keys.demosaiced, off_wb_keys.demosaiced);
+
+        let mut off_threshold = off.clone();
+        off_threshold.raw.highlights.threshold = 1.25;
+        assert_eq!(off_keys.reconstructed, keys(&off_threshold).reconstructed);
+
+        let mut clip = off.clone();
+        clip.raw.highlights.method = HighlightMethod::Clip;
+        let clip_keys = keys(&clip);
+        assert_ne!(off_keys.reconstructed, clip_keys.reconstructed);
+
+        let same_clip_keys = keys(&clip);
+        assert_eq!(clip_keys.reconstructed, same_clip_keys.reconstructed);
+
+        let mut clip_wb = clip.clone();
+        clip_wb.color.white_balance = off_wb.color.white_balance;
+        assert_ne!(clip_keys.reconstructed, keys(&clip_wb).reconstructed);
+
+        let mut clip_threshold = clip.clone();
+        clip_threshold.raw.highlights.threshold = 1.25;
+        assert_ne!(clip_keys.reconstructed, keys(&clip_threshold).reconstructed);
     }
 }

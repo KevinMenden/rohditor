@@ -1,6 +1,6 @@
 use eframe::egui;
 use rohditor_core::{Histogram, evaluate_tone_curve};
-use rohditor_edit::ToneCurve;
+use rohditor_edit::{HighlightMethod, ToneCurve};
 
 use super::PickerMode;
 use super::theme::{self, colors, metrics};
@@ -23,6 +23,7 @@ pub(crate) enum AdjustmentTarget {
     Shadows,
     Whites,
     Blacks,
+    HighlightThreshold,
     ToneCurveShadows,
     ToneCurveDarks,
     ToneCurveLights,
@@ -62,6 +63,7 @@ pub(crate) struct AdjustmentRanges {
     pub shadows: AdjustmentRange,
     pub whites: AdjustmentRange,
     pub blacks: AdjustmentRange,
+    pub highlight_threshold: AdjustmentRange,
     pub tone_curve: AdjustmentRange,
     pub saturation: AdjustmentRange,
     pub vibrance: AdjustmentRange,
@@ -85,6 +87,8 @@ pub(crate) struct AdjustmentValues {
     pub shadows: f32,
     pub whites: f32,
     pub blacks: f32,
+    pub highlight_method: HighlightMethod,
+    pub highlight_threshold: f32,
     pub tone_curve_shadows: f32,
     pub tone_curve_darks: f32,
     pub tone_curve_lights: f32,
@@ -129,6 +133,7 @@ pub(crate) struct AdjustmentInteraction {
 #[derive(Debug, Default)]
 pub(crate) struct AdjustmentPanelOutput {
     pub white_balance_mode: Option<WhiteBalanceMode>,
+    pub highlight_method: Option<HighlightMethod>,
     pub picker_mode: Option<Option<PickerMode>>,
     pub color_mixer_channel: Option<usize>,
     pub interactions: Vec<AdjustmentInteraction>,
@@ -546,6 +551,42 @@ fn show_light_controls(
     output: &mut AdjustmentPanelOutput,
 ) {
     widgets::section_header(ui, "Light");
+    let mut highlight_method = document.values.highlight_method;
+    widgets::dropdown(
+        ui,
+        "highlight_reconstruction_method",
+        "Highlight reconstruction",
+        match highlight_method {
+            HighlightMethod::Off => "Off",
+            HighlightMethod::Clip => "Clip",
+        },
+        |ui| {
+            ui.selectable_value(&mut highlight_method, HighlightMethod::Off, "Off");
+            ui.selectable_value(&mut highlight_method, HighlightMethod::Clip, "Clip");
+        },
+    );
+    if highlight_method != document.values.highlight_method {
+        document.values.highlight_method = highlight_method;
+        output.highlight_method = Some(highlight_method);
+    }
+    if highlight_method == HighlightMethod::Clip {
+        record_slider(
+            ui,
+            &mut output.interactions,
+            AdjustmentTarget::HighlightThreshold,
+            &mut document.values.highlight_threshold,
+            AdjustmentSpec {
+                label: "Effective threshold",
+                minimum: document.ranges.highlight_threshold.minimum,
+                maximum: document.ranges.highlight_threshold.maximum,
+                neutral: document.ranges.highlight_threshold.neutral,
+                decimals: 2,
+                step: 0.01,
+                suffix: "× white",
+                scale: ValueScale::Raw,
+            },
+        );
+    }
     let auto_tone_response = ui
         .add_enabled_ui(document.auto_tone_available, |ui| {
             ui.small_button("Auto tone")

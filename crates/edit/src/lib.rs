@@ -18,9 +18,10 @@ pub struct EditError {
 }
 
 /// Schema version of the current non-destructive edit recipe.
-pub const EDIT_RECIPE_SCHEMA_VERSION: u32 = 3;
+pub const EDIT_RECIPE_SCHEMA_VERSION: u32 = 4;
 const LEGACY_EDIT_RECIPE_SCHEMA_VERSION: u32 = 1;
 const PREVIOUS_EDIT_RECIPE_SCHEMA_VERSION: u32 = 2;
+const PREVIOUS_RAW_EDIT_RECIPE_SCHEMA_VERSION: u32 = 3;
 
 /// Inclusive range and neutral value for one adjustment parameter.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -92,6 +93,11 @@ pub const TINT_RANGE: ParameterRange = ParameterRange {
     maximum: 1.0,
     neutral: 0.0,
 };
+pub const HIGHLIGHT_THRESHOLD_RANGE: ParameterRange = ParameterRange {
+    minimum: 0.5,
+    maximum: 1.5,
+    neutral: 1.0,
+};
 pub const TONE_CURVE_RANGE: ParameterRange = ParameterRange {
     minimum: -0.25,
     maximum: 0.25,
@@ -135,6 +141,39 @@ pub enum WhiteBalance {
         temperature: f32,
         tint: f32,
     },
+}
+
+/// Destructive RAW-stage highlight handling. `Off` remains the default so
+/// normalized over-range samples are retained for later processing stages.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HighlightMethod {
+    #[default]
+    Off,
+    Clip,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct HighlightAdjustments {
+    #[serde(default)]
+    pub method: HighlightMethod,
+    #[serde(default = "default_highlight_threshold")]
+    pub threshold: f32,
+}
+
+impl Default for HighlightAdjustments {
+    fn default() -> Self {
+        Self {
+            method: HighlightMethod::Off,
+            threshold: HIGHLIGHT_THRESHOLD_RANGE.neutral,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct RawAdjustments {
+    #[serde(default)]
+    pub highlights: HighlightAdjustments,
 }
 
 /// Scene-light controls applied after camera color conversion.
@@ -284,6 +323,8 @@ impl Default for ColorAdjustments {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct EditRecipe {
     pub schema_version: u32,
+    #[serde(default)]
+    pub raw: RawAdjustments,
     pub light: LightAdjustments,
     pub color: ColorAdjustments,
     pub geometry: GeometryAdjustments,
@@ -293,6 +334,7 @@ impl Default for EditRecipe {
     fn default() -> Self {
         Self {
             schema_version: EDIT_RECIPE_SCHEMA_VERSION,
+            raw: RawAdjustments::default(),
             light: LightAdjustments::default(),
             color: ColorAdjustments::default(),
             geometry: GeometryAdjustments::default(),
@@ -311,6 +353,11 @@ impl EditRecipe {
                 ),
             });
         }
+        validate_parameter(
+            "raw.highlights.threshold",
+            self.raw.highlights.threshold,
+            HIGHLIGHT_THRESHOLD_RANGE,
+        )?;
         validate_parameter(
             "light.exposure_ev",
             self.light.exposure_ev,
@@ -399,6 +446,8 @@ impl EditRecipe {
 struct RecipeFields {
     schema_version: u32,
     #[serde(default)]
+    raw: RawAdjustments,
+    #[serde(default)]
     light: LightAdjustments,
     #[serde(default)]
     color: ColorAdjustments,
@@ -432,6 +481,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
             color.saturation = fields.legacy_saturation.unwrap_or(color.saturation);
             Self {
                 schema_version: EDIT_RECIPE_SCHEMA_VERSION,
+                raw: RawAdjustments::default(),
                 light,
                 color,
                 geometry: GeometryAdjustments {
@@ -439,9 +489,13 @@ impl<'de> Deserialize<'de> for EditRecipe {
                     crop: None,
                 },
             }
-        } else if fields.schema_version == PREVIOUS_EDIT_RECIPE_SCHEMA_VERSION {
+        } else if matches!(
+            fields.schema_version,
+            PREVIOUS_EDIT_RECIPE_SCHEMA_VERSION | PREVIOUS_RAW_EDIT_RECIPE_SCHEMA_VERSION
+        ) {
             Self {
                 schema_version: EDIT_RECIPE_SCHEMA_VERSION,
+                raw: RawAdjustments::default(),
                 light: fields.light,
                 color: fields.color,
                 geometry: fields.geometry,
@@ -449,6 +503,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
         } else {
             Self {
                 schema_version: fields.schema_version,
+                raw: fields.raw,
                 light: fields.light,
                 color: fields.color,
                 geometry: fields.geometry,
@@ -461,6 +516,10 @@ impl<'de> Deserialize<'de> for EditRecipe {
 
 const fn neutral_saturation() -> f32 {
     SATURATION_RANGE.neutral
+}
+
+const fn default_highlight_threshold() -> f32 {
+    HIGHLIGHT_THRESHOLD_RANGE.neutral
 }
 
 fn default_hsl_channels() -> [HslChannelAdjustments; HSL_CHANNEL_COUNT] {
@@ -487,7 +546,10 @@ fn validate_parameter(
 
 #[cfg(test)]
 mod tests {
-    use super::{EDIT_RECIPE_SCHEMA_VERSION, EditRecipe, NormalizedCropRect, WhiteBalance};
+    use super::{
+        EDIT_RECIPE_SCHEMA_VERSION, EditRecipe, HIGHLIGHT_THRESHOLD_RANGE, HighlightMethod,
+        NormalizedCropRect, WhiteBalance,
+    };
 
     #[test]
     fn neutral_recipe_has_documented_identity_values() {
@@ -497,13 +559,43 @@ mod tests {
         assert_eq!(recipe.light.exposure_ev, 0.0);
         assert_eq!(recipe.light.contrast, 0.0);
         assert_eq!(recipe.color.saturation, 1.0);
+        assert_eq!(recipe.raw.highlights.method, HighlightMethod::Off);
+        assert_eq!(
+            recipe.raw.highlights.threshold,
+            HIGHLIGHT_THRESHOLD_RANGE.neutral
+        );
         assert!(recipe.validate().is_ok());
     }
 
     #[test]
     fn deserialization_rejects_unknown_schema_versions() {
         let json = r#"{
+            "schema_version": 5,
+            "light": {},
+            "color": {},
+            "geometry": {}
+        }"#;
+        assert!(serde_json::from_str::<EditRecipe>(json).is_err());
+    }
+
+    #[test]
+    fn missing_highlight_fields_receive_the_current_defaults() {
+        let json = r#"{
             "schema_version": 4,
+            "light": {},
+            "color": {},
+            "geometry": {}
+        }"#;
+        let recipe = serde_json::from_str::<EditRecipe>(json).expect("current default fields");
+        assert_eq!(recipe.raw.highlights.method, HighlightMethod::Off);
+        assert_eq!(recipe.raw.highlights.threshold, 1.0);
+    }
+
+    #[test]
+    fn deserialization_rejects_unknown_highlight_methods() {
+        let json = r#"{
+            "schema_version": 4,
+            "raw": { "highlights": { "method": "guided_laplacian", "threshold": 1.0 } },
             "light": {},
             "color": {},
             "geometry": {}
@@ -541,6 +633,20 @@ mod tests {
     }
 
     #[test]
+    fn version_three_recipe_migrates_with_highlight_clipping_off() {
+        let json = r#"{
+            "schema_version": 3,
+            "light": {},
+            "color": {},
+            "geometry": {}
+        }"#;
+        let recipe = serde_json::from_str::<EditRecipe>(json).expect("v3 migration");
+        assert_eq!(recipe.schema_version, EDIT_RECIPE_SCHEMA_VERSION);
+        assert_eq!(recipe.raw.highlights.method, HighlightMethod::Off);
+        assert_eq!(recipe.raw.highlights.threshold, 1.0);
+    }
+
+    #[test]
     fn crop_round_trips_and_is_validated() {
         let mut recipe = EditRecipe::default();
         recipe.geometry.crop = Some(NormalizedCropRect {
@@ -574,6 +680,12 @@ mod tests {
             green: 1.0,
             blue: 1.0,
         };
+        assert!(recipe.validate().is_err());
+
+        recipe.color.white_balance = WhiteBalance::AsShot;
+        recipe.raw.highlights.threshold = f32::INFINITY;
+        assert!(recipe.validate().is_err());
+        recipe.raw.highlights.threshold = 2.0;
         assert!(recipe.validate().is_err());
     }
 }

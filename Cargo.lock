@@ -2846,6 +2846,7 @@ dependencies = [
  "rayon",
  "rohditor-demosaic",
  "rohditor-edit",
+ "rohditor-highlight",
  "rohditor-image",
  "rohditor-raw",
  "serde",
@@ -2911,6 +2912,16 @@ dependencies = [
  "rohditor-raw",
  "thiserror 2.0.20",
  "wgpu",
+]
+
+[[package]]
+name = "rohditor-highlight"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "rayon",
+ "rohditor-image",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
