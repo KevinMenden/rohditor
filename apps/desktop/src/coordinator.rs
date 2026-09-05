@@ -217,6 +217,7 @@ struct PreviewJob {
     ticket: PreviewTicket,
     frame: Arc<RawFrame>,
     recipe: EditRecipe,
+    options: PreviewOptions,
     backend: PreviewBackend,
     resolution: PreviewResolution,
 }
@@ -260,17 +261,13 @@ pub(crate) struct RenderCoordinator {
 }
 
 impl RenderCoordinator {
-    pub(crate) fn new(
-        context: egui::Context,
-        preview_options: PreviewOptions,
-    ) -> Result<Self, String> {
-        Self::new_with_decoder(context, Arc::new(RawlerDecoder::default()), preview_options)
+    pub(crate) fn new(context: egui::Context) -> Result<Self, String> {
+        Self::new_with_decoder(context, Arc::new(RawlerDecoder::default()))
     }
 
     fn new_with_decoder(
         context: egui::Context,
         decoder: Arc<dyn RawDecoder>,
-        preview_options: PreviewOptions,
     ) -> Result<Self, String> {
         let (request_sender, request_receiver) = mpsc::channel();
         let (event_sender, event_receiver) = mpsc::channel();
@@ -288,7 +285,6 @@ impl RenderCoordinator {
                         context,
                         decoder,
                         worker_previews,
-                        preview_options,
                     );
                 }));
                 if let Err(payload) = result {
@@ -322,12 +318,14 @@ impl RenderCoordinator {
         ticket: PreviewTicket,
         frame: Arc<RawFrame>,
         recipe: EditRecipe,
+        options: PreviewOptions,
     ) -> Result<(), String> {
         self.previews.queue(
             PreviewJob {
                 ticket,
                 frame,
                 recipe,
+                options,
                 backend: PreviewBackend::Cpu,
                 resolution: PreviewResolution::Fit,
             },
@@ -340,12 +338,14 @@ impl RenderCoordinator {
         ticket: PreviewTicket,
         frame: Arc<RawFrame>,
         recipe: EditRecipe,
+        options: PreviewOptions,
     ) -> Result<(), String> {
         self.previews.queue(
             PreviewJob {
                 ticket,
                 frame,
                 recipe,
+                options,
                 backend: PreviewBackend::Cpu,
                 resolution: PreviewResolution::SourceScale,
             },
@@ -361,6 +361,7 @@ impl RenderCoordinator {
         ticket: PreviewTicket,
         frame: Arc<RawFrame>,
         mut recipe: EditRecipe,
+        options: PreviewOptions,
     ) -> Result<(), String> {
         recipe.geometry.crop = None;
         self.previews.queue(
@@ -368,6 +369,7 @@ impl RenderCoordinator {
                 ticket,
                 frame,
                 recipe,
+                options,
                 backend: PreviewBackend::Cpu,
                 resolution: PreviewResolution::CropToolFullFrame,
             },
@@ -380,12 +382,14 @@ impl RenderCoordinator {
         ticket: PreviewTicket,
         frame: Arc<RawFrame>,
         recipe: EditRecipe,
+        options: PreviewOptions,
     ) -> Result<(), String> {
         self.previews.queue(
             PreviewJob {
                 ticket,
                 frame,
                 recipe,
+                options,
                 backend: PreviewBackend::GpuBase,
                 resolution: PreviewResolution::Fit,
             },
@@ -484,7 +488,6 @@ fn worker_loop(
     context: egui::Context,
     decoder: Arc<dyn RawDecoder>,
     previews: Arc<PreviewMailbox>,
-    preview_options: PreviewOptions,
 ) {
     let mut abandoned = HashSet::new();
     let mut preview_cache = PreviewCache::default();
@@ -513,7 +516,6 @@ fn worker_loop(
                         &context,
                         &scheduled.cancellation,
                         &mut preview_cache,
-                        preview_options.render,
                     )
                 } else {
                     match scheduled.job.backend {
@@ -523,7 +525,6 @@ fn worker_loop(
                             &context,
                             &scheduled.cancellation,
                             &mut preview_cache,
-                            preview_options,
                         ),
                         PreviewBackend::GpuBase => process_gpu_base(
                             scheduled.job,
@@ -531,7 +532,6 @@ fn worker_loop(
                             &context,
                             &scheduled.cancellation,
                             &mut preview_cache,
-                            preview_options,
                         ),
                     }
                 };
@@ -736,8 +736,8 @@ fn process_preview(
     context: &egui::Context,
     cancellation: &CancellationToken,
     preview_cache: &mut PreviewCache,
-    options: PreviewOptions,
 ) -> PreviewCompletion {
+    let options = job.options;
     let span = info_span!(
         "desktop.preview",
         document_id = job.ticket.document_id,
@@ -822,8 +822,8 @@ fn process_source_scale_preview(
     context: &egui::Context,
     cancellation: &CancellationToken,
     preview_cache: &mut PreviewCache,
-    options: RenderOptions,
 ) -> PreviewCompletion {
+    let options = job.options.render;
     let span = info_span!(
         "desktop.source_scale_preview",
         document_id = job.ticket.document_id,
@@ -912,8 +912,8 @@ fn process_gpu_base(
     context: &egui::Context,
     cancellation: &CancellationToken,
     preview_cache: &mut PreviewCache,
-    options: PreviewOptions,
 ) -> PreviewCompletion {
+    let options = job.options;
     let span = info_span!(
         "desktop.gpu_base",
         document_id = job.ticket.document_id,
@@ -1177,6 +1177,7 @@ fn sample_white_balance_patch(
         ticket: job.ticket,
         frame: Arc::clone(&job.frame),
         recipe: job.recipe.clone(),
+        options: job.options,
         backend: PreviewBackend::Cpu,
         resolution: PreviewResolution::Fit,
     };
@@ -1632,6 +1633,7 @@ mod tests {
             },
             frame: Arc::clone(&frame),
             recipe: EditRecipe::default(),
+            options: PreviewOptions::default(),
             backend: PreviewBackend::Cpu,
             resolution: PreviewResolution::Fit,
         };
@@ -1670,6 +1672,7 @@ mod tests {
             },
             frame: Arc::clone(&frame),
             recipe: EditRecipe::default(),
+            options: PreviewOptions::default(),
             backend: PreviewBackend::Cpu,
             resolution: PreviewResolution::Fit,
         };
@@ -1711,6 +1714,7 @@ mod tests {
             },
             frame: Arc::clone(&frame),
             recipe: EditRecipe::default(),
+            options,
             backend: PreviewBackend::Cpu,
             resolution: PreviewResolution::Fit,
         };
@@ -1739,6 +1743,7 @@ mod tests {
                 recipe.light.exposure_ev = 1.0;
                 recipe
             },
+            options,
             backend: PreviewBackend::Cpu,
             resolution: PreviewResolution::Fit,
         };
@@ -1815,6 +1820,7 @@ mod tests {
             },
             frame: Arc::clone(&adjusted.frame),
             recipe: white_balance_recipe,
+            options,
             backend: PreviewBackend::Cpu,
             resolution: PreviewResolution::Fit,
         };
@@ -1833,7 +1839,7 @@ mod tests {
 
         let alternate_options = PreviewOptions {
             render: rohditor_core::RenderOptions {
-                demosaic: DemosaicAlgorithm::Bilinear,
+                demosaic: DemosaicAlgorithm::Rcd,
                 ..options.render
             },
             ..options
@@ -1854,6 +1860,13 @@ mod tests {
     #[test]
     fn gpu_preview_request_hands_a_prepared_upload_to_the_ui_without_cpu_display_conversion() {
         let (sender, receiver) = mpsc::channel();
+        let options = PreviewOptions {
+            render: RenderOptions {
+                demosaic: DemosaicAlgorithm::Rcd,
+                ..RenderOptions::default()
+            },
+            ..PreviewOptions::default()
+        };
         let job = PreviewJob {
             ticket: PreviewTicket {
                 document_id: 12,
@@ -1862,6 +1875,7 @@ mod tests {
             },
             frame: Arc::new(fake_frame()),
             recipe: EditRecipe::default(),
+            options,
             backend: PreviewBackend::GpuBase,
             resolution: PreviewResolution::Fit,
         };
@@ -1872,25 +1886,30 @@ mod tests {
             &egui::Context::default(),
             &CancellationToken::new(),
             &mut PreviewCache::default(),
-            PreviewOptions::default(),
         );
         assert_eq!(completion, PreviewCompletion::Completed);
         let events = receiver.try_iter().collect::<Vec<_>>();
         let upload = events.iter().find_map(|event| match event {
-            WorkerEvent::GpuUploadReady { ticket, upload, .. }
-                if *ticket
-                    == PreviewTicket {
-                        document_id: 12,
-                        revision: 3,
-                        sequence: 3,
-                    } =>
+            WorkerEvent::GpuUploadReady {
+                ticket,
+                upload,
+                diagnostics,
+                ..
+            } if *ticket
+                == PreviewTicket {
+                    document_id: 12,
+                    revision: 3,
+                    sequence: 3,
+                } =>
             {
-                Some(upload)
+                Some((upload, diagnostics))
             }
             _ => None,
         });
-        let upload = upload.expect("GPU preview request should return a prepared upload");
+        let (upload, diagnostics) =
+            upload.expect("GPU preview request should return a prepared upload");
         assert_eq!(upload.source_dimensions(), (4, 4));
+        assert_eq!(diagnostics.algorithm, DemosaicAlgorithm::Rcd);
         assert!(
             !events
                 .iter()
@@ -1919,6 +1938,13 @@ mod tests {
     #[test]
     fn source_scale_request_returns_full_crop_and_marks_one_to_one_diagnostics() {
         let (sender, receiver) = mpsc::channel();
+        let options = PreviewOptions {
+            render: RenderOptions {
+                demosaic: DemosaicAlgorithm::Amaze,
+                ..RenderOptions::default()
+            },
+            ..PreviewOptions::default()
+        };
         let job = PreviewJob {
             ticket: PreviewTicket {
                 document_id: 13,
@@ -1927,6 +1953,7 @@ mod tests {
             },
             frame: Arc::new(fake_frame()),
             recipe: EditRecipe::default(),
+            options,
             backend: PreviewBackend::Cpu,
             resolution: PreviewResolution::SourceScale,
         };
@@ -1936,7 +1963,6 @@ mod tests {
             &egui::Context::default(),
             &CancellationToken::new(),
             &mut PreviewCache::default(),
-            RenderOptions::default(),
         );
         assert_eq!(completion, PreviewCompletion::Completed);
         let event = receiver
@@ -1954,6 +1980,7 @@ mod tests {
         assert_eq!(event.0, PreviewResolution::SourceScale);
         assert_eq!((event.1.width, event.1.height), (4, 4));
         assert_eq!(event.2.resolution, PreviewResolution::SourceScale);
+        assert_eq!(event.2.algorithm, DemosaicAlgorithm::Amaze);
         assert_eq!(event.2.cache_resident_bytes, 0);
     }
 
@@ -2150,8 +2177,7 @@ mod tests {
         }
 
         let coordinator =
-            RenderCoordinator::new(egui::Context::default(), PreviewOptions::default())
-                .map_err(std::io::Error::other)?;
+            RenderCoordinator::new(egui::Context::default()).map_err(std::io::Error::other)?;
         coordinator
             .open(17, source)
             .map_err(std::io::Error::other)?;
@@ -2189,6 +2215,7 @@ mod tests {
                 },
                 Arc::clone(&frame),
                 snapshot.clone(),
+                PreviewOptions::default(),
             )
             .map_err(std::io::Error::other)?;
         coordinator
@@ -2273,6 +2300,7 @@ mod tests {
             },
             frame: Arc::clone(&frame),
             recipe: EditRecipe::default(),
+            options,
             backend: PreviewBackend::Cpu,
             resolution: PreviewResolution::Fit,
         };
@@ -2305,6 +2333,7 @@ mod tests {
                 },
                 frame: Arc::clone(&frame),
                 recipe,
+                options,
                 backend: PreviewBackend::Cpu,
                 resolution: PreviewResolution::Fit,
             };

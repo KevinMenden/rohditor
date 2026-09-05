@@ -4,6 +4,7 @@
 //! resources that must stay tied to eframe's adapter, device, and renderer.
 
 use eframe::egui;
+use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_gpu::{
     GpuCapabilities, GpuDisplayReadbackPending, GpuPreviewFrame, GpuPreviewProcessor,
     GpuPreviewSource,
@@ -16,6 +17,7 @@ use crate::document::PreviewTicket;
 
 pub(super) struct GpuDocumentPreview {
     pub(super) ticket: PreviewTicket,
+    pub(super) algorithm: DemosaicAlgorithm,
     pub(super) source: GpuPreviewSource,
     pub(super) frame: GpuPreviewFrame,
     pub(super) texture_id: egui::TextureId,

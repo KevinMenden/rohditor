@@ -4,6 +4,8 @@ mod coordinator;
 mod document;
 mod preview_cache;
 mod session;
+mod settings;
+mod storage;
 mod ui;
 
 use clap::{Parser, ValueEnum};
@@ -14,6 +16,7 @@ use tracing::warn;
 use tracing_subscriber::EnvFilter;
 
 use crate::app::RohditorApp;
+use crate::settings::{AppSettings, SettingsLoad, resolve_startup_settings};
 
 /// Stable Freedesktop/Wayland identity. Keep this equal to the installed
 /// desktop-file basename and icon name.
@@ -86,8 +89,8 @@ struct Arguments {
     processor: ProcessorPreference,
 
     /// Preview and export demosaic algorithm for development comparisons.
-    #[arg(long, value_enum, default_value_t)]
-    demosaic: DemosaicPreference,
+    #[arg(long, value_enum)]
+    demosaic: Option<DemosaicPreference>,
 
     /// Sony RAW file to open at startup.
     file: Option<PathBuf>,
@@ -100,12 +103,21 @@ struct Arguments {
 fn main() -> eframe::Result {
     init_tracing();
     let arguments = Arguments::parse();
+    let SettingsLoad {
+        settings: persisted_settings,
+        warning: settings_warning,
+    } = settings::load();
+    let effective_settings = resolve_startup_settings(
+        persisted_settings,
+        arguments.demosaic.map(DemosaicAlgorithm::from),
+    );
     match arguments.renderer {
         RendererPreference::Auto => match launch(
             eframe::Renderer::Wgpu,
             arguments.file.clone(),
             arguments.processor,
-            arguments.demosaic.into(),
+            effective_settings,
+            settings_warning.clone(),
             arguments.diagnostics,
         ) {
             Ok(()) => Ok(()),
@@ -116,7 +128,8 @@ fn main() -> eframe::Result {
                     eframe::Renderer::Glow,
                     arguments.file,
                     arguments.processor,
-                    arguments.demosaic.into(),
+                    effective_settings,
+                    settings_warning,
                     arguments.diagnostics,
                 )
             }
@@ -125,14 +138,16 @@ fn main() -> eframe::Result {
             eframe::Renderer::Wgpu,
             arguments.file,
             arguments.processor,
-            arguments.demosaic.into(),
+            effective_settings,
+            settings_warning,
             arguments.diagnostics,
         ),
         RendererPreference::Glow => launch(
             eframe::Renderer::Glow,
             arguments.file,
             arguments.processor,
-            arguments.demosaic.into(),
+            effective_settings,
+            settings_warning,
             arguments.diagnostics,
         ),
     }
@@ -142,7 +157,8 @@ fn launch(
     renderer: eframe::Renderer,
     initial_path: Option<PathBuf>,
     processor: ProcessorPreference,
-    demosaic: DemosaicAlgorithm,
+    settings: AppSettings,
+    settings_warning: Option<String>,
     show_diagnostics: bool,
 ) -> eframe::Result {
     let mut options = eframe::NativeOptions {
@@ -164,7 +180,8 @@ fn launch(
                 context,
                 initial_path.clone(),
                 processor,
-                demosaic,
+                settings,
+                settings_warning.clone(),
                 show_diagnostics,
             )?))
         }),
@@ -231,11 +248,11 @@ mod tests {
         .expect("valid desktop preferences should parse");
         assert_eq!(arguments.renderer, RendererPreference::Glow);
         assert_eq!(arguments.processor, ProcessorPreference::Cpu);
-        assert_eq!(arguments.demosaic, DemosaicPreference::MalvarHeCutler);
+        assert_eq!(arguments.demosaic, Some(DemosaicPreference::MalvarHeCutler));
 
         let defaults = Arguments::try_parse_from(["rohditor-desktop"])
             .expect("default desktop arguments parse");
-        assert_eq!(defaults.demosaic, DemosaicPreference::MalvarHeCutler);
+        assert_eq!(defaults.demosaic, None);
         assert!(arguments.diagnostics);
     }
 
@@ -243,10 +260,10 @@ mod tests {
     fn rcd_is_a_desktop_demosaic_choice() {
         let arguments = Arguments::try_parse_from(["rohditor-desktop", "--demosaic", "rcd"])
             .expect("rcd should be a supported desktop demosaic choice");
-        assert_eq!(arguments.demosaic, DemosaicPreference::Rcd);
+        assert_eq!(arguments.demosaic, Some(DemosaicPreference::Rcd));
         assert_eq!(
-            DemosaicAlgorithm::from(arguments.demosaic),
-            DemosaicAlgorithm::Rcd
+            arguments.demosaic.map(DemosaicAlgorithm::from),
+            Some(DemosaicAlgorithm::Rcd)
         );
     }
 
@@ -254,10 +271,10 @@ mod tests {
     fn amaze_is_a_desktop_demosaic_choice() {
         let arguments = Arguments::try_parse_from(["rohditor-desktop", "--demosaic", "amaze"])
             .expect("amaze should be a supported desktop demosaic choice");
-        assert_eq!(arguments.demosaic, DemosaicPreference::Amaze);
+        assert_eq!(arguments.demosaic, Some(DemosaicPreference::Amaze));
         assert_eq!(
-            DemosaicAlgorithm::from(arguments.demosaic),
-            DemosaicAlgorithm::Amaze
+            arguments.demosaic.map(DemosaicAlgorithm::from),
+            Some(DemosaicAlgorithm::Amaze)
         );
     }
 
