@@ -203,6 +203,10 @@ impl<T> MosaicImage<T> {
         &self.data
     }
 
+    pub fn data_mut(&mut self) -> &mut [T] {
+        &mut self.data
+    }
+
     #[must_use]
     pub fn into_data(self) -> Vec<T> {
         self.data
@@ -523,5 +527,17 @@ mod tests {
     #[test]
     fn public_buffer_rejects_an_incomplete_stride() {
         assert!(MosaicImage::new(2, 2, 2, BayerPattern::Rggb, vec![0_u16; 3]).is_err());
+    }
+
+    #[test]
+    fn mosaic_data_mut_can_change_visible_samples_without_changing_layout() {
+        let mut mosaic = MosaicImage::new(2, 2, 3, BayerPattern::Rggb, vec![1_u16, 2, 9, 3, 4, 9])
+            .expect("valid padded mosaic");
+
+        mosaic.data_mut()[0] = 7;
+
+        assert_eq!(mosaic.sample(0, 0), &7);
+        assert_eq!(mosaic.row_stride(), 3);
+        assert_eq!(mosaic.data()[2], 9);
     }
 }

@@ -2,7 +2,7 @@ use std::mem::size_of;
 use std::time::{Duration, Instant};
 
 use rohditor_demosaic::{DemosaicAlgorithm, WhiteBalanceGains};
-use rohditor_edit::{EditRecipe, WhiteBalance};
+use rohditor_edit::{EditRecipe, HighlightAdjustments, HighlightMethod, WhiteBalance};
 use rohditor_image::{DisplayRgbImage, LinearRgbImage, Orientation};
 use rohditor_raw::{RawFileInfo, RawFrame};
 
@@ -14,6 +14,7 @@ use crate::cpu::{
     render_display_srgb8_cancellable_with_geometry, white_balance_gains_with_transform,
 };
 use crate::demosaic::demosaic_cancellable;
+use crate::highlight::apply_cancellable as apply_highlight_cancellable;
 use crate::resample::resize_area_cancellable;
 use crate::{
     CancellationToken, DitherMode, ExportImage, OutputBitDepth, OutputGeometry, PipelineError,
@@ -71,6 +72,7 @@ impl Default for PreviewOptions {
 pub struct StageTimings {
     pub metadata: Duration,
     pub normalization: Duration,
+    pub highlight_clipping: Duration,
     pub demosaic: Duration,
     pub resampling: Duration,
     pub color_conversion: Duration,
@@ -100,6 +102,10 @@ pub struct ReconstructedPreview {
     image: LinearRgbImage<f32>,
     info: RawFileInfo,
     camera_transform: CameraColorTransform,
+    highlight_method: HighlightMethod,
+    highlight_threshold: f32,
+    highlight_white_balance: WhiteBalance,
+    highlight_stats: crate::ClipStats,
     timings: StageTimings,
     decoded_raw_bytes: usize,
     normalized_mosaic_bytes: usize,
@@ -136,6 +142,48 @@ impl ReconstructedPreview {
     #[must_use]
     pub const fn as_shot_white_balance(&self) -> [Option<f32>; 4] {
         self.info.as_shot_white_balance
+    }
+
+    /// Whether changing recipe white balance can reuse this camera-native
+    /// reconstruction without rebuilding the RAW-stage highlight result.
+    #[must_use]
+    pub fn supports_dynamic_white_balance(&self) -> bool {
+        self.highlight_method == HighlightMethod::Off
+    }
+
+    /// White balance used to derive Clip's pre-WB channel ceilings.
+    #[must_use]
+    pub const fn highlight_white_balance(&self) -> WhiteBalance {
+        self.highlight_white_balance
+    }
+
+    /// RAW highlight operation that produced this retained camera-native
+    /// source. This provenance is part of the source identity at the GPU
+    /// boundary; it must not be inferred from the current downstream recipe.
+    #[must_use]
+    pub const fn highlight_adjustments(&self) -> HighlightAdjustments {
+        HighlightAdjustments {
+            method: self.highlight_method,
+            threshold: self.highlight_threshold,
+        }
+    }
+
+    #[must_use]
+    pub const fn highlight_stats(&self) -> crate::ClipStats {
+        self.highlight_stats
+    }
+
+    pub(crate) fn matches_highlight_recipe(&self, recipe: &EditRecipe) -> bool {
+        if self.highlight_method != recipe.raw.highlights.method {
+            return false;
+        }
+        if self.highlight_method == HighlightMethod::Clip
+            && self.highlight_threshold.to_bits() != recipe.raw.highlights.threshold.to_bits()
+        {
+            return false;
+        }
+        self.supports_dynamic_white_balance()
+            || self.highlight_white_balance == recipe.color.white_balance
     }
 
     /// Resolve a recipe white balance against this reconstruction's camera
@@ -184,6 +232,7 @@ pub struct RenderResult {
     pub image: DisplayRgbImage<u8>,
     pub histogram: Histogram,
     pub timings: StageTimings,
+    pub highlight_stats: crate::ClipStats,
     pub memory: MemoryEstimate,
 }
 
@@ -192,6 +241,7 @@ pub struct RenderResult {
 pub struct ExportRenderResult {
     pub image: ExportImage,
     pub timings: StageTimings,
+    pub highlight_stats: crate::ClipStats,
     pub memory: MemoryEstimate,
 }
 
@@ -206,6 +256,10 @@ pub struct DemosaicedBase {
     image: LinearRgbImage<f32>,
     source_orientation: Orientation,
     white_balance: WhiteBalance,
+    highlight_method: HighlightMethod,
+    highlight_threshold: f32,
+    highlight_white_balance: WhiteBalance,
+    highlight_stats: crate::ClipStats,
     timings: StageTimings,
     decoded_raw_bytes: usize,
     normalized_mosaic_bytes: usize,
@@ -228,6 +282,20 @@ impl DemosaicedBase {
     #[must_use]
     pub const fn white_balance(&self) -> WhiteBalance {
         self.white_balance
+    }
+
+    #[must_use]
+    pub const fn highlight_stats(&self) -> crate::ClipStats {
+        self.highlight_stats
+    }
+
+    /// RAW highlight operation that produced this linear preview base.
+    #[must_use]
+    pub const fn highlight_adjustments(&self) -> HighlightAdjustments {
+        HighlightAdjustments {
+            method: self.highlight_method,
+            threshold: self.highlight_threshold,
+        }
     }
 
     #[must_use]
@@ -348,7 +416,7 @@ impl CpuPipeline {
         cancellation: &CancellationToken,
     ) -> Result<DemosaicedBase, PipelineError> {
         let reconstructed =
-            self.prepare_preview_reconstruction_cancellable(frame, options, cancellation)?;
+            self.prepare_preview_reconstruction_cancellable(frame, recipe, options, cancellation)?;
         let mut base = self.prepare_preview_base_from_reconstruction_cancellable(
             &reconstructed,
             recipe,
@@ -356,6 +424,7 @@ impl CpuPipeline {
         )?;
         base.timings.metadata += reconstructed.timings.metadata;
         base.timings.normalization = reconstructed.timings.normalization;
+        base.timings.highlight_clipping = reconstructed.timings.highlight_clipping;
         base.timings.demosaic = reconstructed.timings.demosaic;
         base.timings.resampling = reconstructed.timings.resampling;
         base.timings.total += reconstructed.timings.total;
@@ -367,19 +436,26 @@ impl CpuPipeline {
     pub fn prepare_preview_reconstruction(
         &self,
         frame: &RawFrame,
+        recipe: &EditRecipe,
         options: PreviewOptions,
     ) -> Result<ReconstructedPreview, PipelineError> {
-        self.prepare_preview_reconstruction_cancellable(frame, options, &CancellationToken::new())
+        self.prepare_preview_reconstruction_cancellable(
+            frame,
+            recipe,
+            options,
+            &CancellationToken::new(),
+        )
     }
 
     /// Cancellable form of [`Self::prepare_preview_reconstruction`].
     pub fn prepare_preview_reconstruction_cancellable(
         &self,
         frame: &RawFrame,
+        recipe: &EditRecipe,
         options: PreviewOptions,
         cancellation: &CancellationToken,
     ) -> Result<ReconstructedPreview, PipelineError> {
-        prepare_reconstructed_preview(frame, options, cancellation)
+        prepare_reconstructed_preview(frame, recipe, options, cancellation)
     }
 
     /// Apply white balance and camera color conversion to a retained
@@ -495,6 +571,7 @@ impl CpuPipeline {
             image,
             histogram,
             timings,
+            highlight_stats: base.highlight_stats,
             memory,
         })
     }
@@ -549,6 +626,7 @@ impl CpuPipeline {
             image,
             histogram,
             timings: base.timings,
+            highlight_stats: base.highlight_stats,
             memory,
         })
     }
@@ -592,6 +670,7 @@ impl CpuPipeline {
         Ok(ExportRenderResult {
             image,
             timings: base.timings,
+            highlight_stats: base.highlight_stats,
             memory,
         })
     }
@@ -599,6 +678,7 @@ impl CpuPipeline {
 
 fn prepare_reconstructed_preview(
     frame: &RawFrame,
+    recipe: &EditRecipe,
     options: PreviewOptions,
     cancellation: &CancellationToken,
 ) -> Result<ReconstructedPreview, PipelineError> {
@@ -614,7 +694,19 @@ fn prepare_reconstructed_preview(
         purpose = "preview reconstruction"
     );
     let metadata_guard = metadata_span.enter();
+    recipe.validate()?;
     let camera_transform = camera_color_transform(&frame.info)?;
+    let highlight_gains = (recipe.raw.highlights.method == HighlightMethod::Clip).then(|| {
+        white_balance_gains_with_transform(
+            &frame.info,
+            &camera_transform,
+            recipe.color.white_balance,
+        )
+    });
+    let highlight_gains = match highlight_gains {
+        Some(result) => Some(result?),
+        None => None,
+    };
     let metadata = metadata_started.elapsed();
     drop(metadata_guard);
 
@@ -633,6 +725,17 @@ fn prepare_reconstructed_preview(
         .len()
         .checked_mul(size_of::<f32>())
         .ok_or_else(|| dimension_overflow(source_width, source_height))?;
+
+    let highlight_started = Instant::now();
+    let highlighted = apply_highlight_cancellable(
+        mosaic,
+        recipe.raw.highlights,
+        highlight_gains.unwrap_or(WhiteBalanceGains::identity()),
+        cancellation,
+    )?;
+    let highlight_clipping = highlight_started.elapsed();
+    let highlight_stats = highlighted.stats;
+    let mosaic = highlighted.mosaic;
 
     let demosaic_started = Instant::now();
     let full_linear = demosaic_cancellable(
@@ -679,6 +782,7 @@ fn prepare_reconstructed_preview(
     let timings = StageTimings {
         metadata,
         normalization,
+        highlight_clipping,
         demosaic,
         resampling,
         total: total_started.elapsed(),
@@ -689,6 +793,10 @@ fn prepare_reconstructed_preview(
         image,
         info: frame.info.clone(),
         camera_transform,
+        highlight_method: recipe.raw.highlights.method,
+        highlight_threshold: recipe.raw.highlights.threshold,
+        highlight_white_balance: recipe.color.white_balance,
+        highlight_stats,
         timings,
         decoded_raw_bytes,
         normalized_mosaic_bytes,
@@ -713,6 +821,13 @@ fn prepare_demosaiced_preview(
     );
     let metadata_guard = metadata_span.enter();
     recipe.validate()?;
+    if !reconstructed.matches_highlight_recipe(recipe) {
+        return Err(PipelineError::InvalidRecipe {
+            field: "raw.highlights",
+            reason: "the recipe does not match the RAW highlight result used to build the reconstruction"
+                .to_owned(),
+        });
+    }
     let gains = white_balance_gains_with_transform(
         &reconstructed.info,
         &reconstructed.camera_transform,
@@ -741,6 +856,10 @@ fn prepare_demosaiced_preview(
         image,
         source_orientation: reconstructed.info.orientation,
         white_balance: recipe.color.white_balance,
+        highlight_method: reconstructed.highlight_method,
+        highlight_threshold: reconstructed.highlight_threshold,
+        highlight_white_balance: reconstructed.highlight_white_balance,
+        highlight_stats: reconstructed.highlight_stats,
         timings,
         decoded_raw_bytes: reconstructed.decoded_raw_bytes,
         normalized_mosaic_bytes: reconstructed.normalized_mosaic_bytes,
@@ -793,6 +912,13 @@ fn prepare_base_cancellable(
         .checked_mul(size_of::<f32>())
         .ok_or_else(|| dimension_overflow(normalized.width(), normalized.height()))?;
 
+    let highlight_started = Instant::now();
+    let highlighted =
+        apply_highlight_cancellable(normalized, recipe.raw.highlights, gains, cancellation)?;
+    let highlight_clipping = highlight_started.elapsed();
+    let highlight_stats = highlighted.stats;
+    let normalized = highlighted.mosaic;
+
     let demosaic_started = Instant::now();
     let mut linear = demosaic_cancellable(&normalized, gains, options.demosaic, cancellation)?;
     let demosaic = demosaic_started.elapsed();
@@ -820,6 +946,7 @@ fn prepare_base_cancellable(
     let mut timings = StageTimings {
         metadata,
         normalization,
+        highlight_clipping,
         demosaic,
         color_conversion,
         ..StageTimings::default()
@@ -830,6 +957,10 @@ fn prepare_base_cancellable(
         image: linear,
         source_orientation: frame.info.orientation,
         white_balance: recipe.color.white_balance,
+        highlight_method: recipe.raw.highlights.method,
+        highlight_threshold: recipe.raw.highlights.threshold,
+        highlight_white_balance: recipe.color.white_balance,
+        highlight_stats,
         timings,
         decoded_raw_bytes,
         normalized_mosaic_bytes,
@@ -840,7 +971,19 @@ fn prepare_base_cancellable(
 
 fn validate_base_recipe(base: &DemosaicedBase, recipe: &EditRecipe) -> Result<(), PipelineError> {
     recipe.validate()?;
-    if recipe.color.white_balance == base.white_balance {
+    if base.highlight_method != recipe.raw.highlights.method
+        || (base.highlight_method == HighlightMethod::Clip
+            && base.highlight_threshold.to_bits() != recipe.raw.highlights.threshold.to_bits())
+    {
+        Err(PipelineError::InvalidRecipe {
+            field: "raw.highlights",
+            reason: "the recipe does not match the RAW highlight result used to build the demosaiced base"
+                .to_owned(),
+        })
+    } else if recipe.color.white_balance == base.white_balance
+        && (base.highlight_method == HighlightMethod::Off
+            || recipe.color.white_balance == base.highlight_white_balance)
+    {
         Ok(())
     } else {
         Err(PipelineError::InvalidRecipe {
@@ -869,6 +1012,7 @@ fn render_base(
     base.timings.output_conversion = output_started.elapsed();
     base.timings.total = base.timings.metadata
         + base.timings.normalization
+        + base.timings.highlight_clipping
         + base.timings.demosaic
         + base.timings.resampling
         + base.timings.color_conversion
@@ -879,6 +1023,7 @@ fn render_base(
         histogram: Histogram::from_display_rgb8(&image),
         image,
         timings: base.timings,
+        highlight_stats: base.highlight_stats,
         memory,
     })
 }

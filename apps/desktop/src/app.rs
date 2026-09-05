@@ -14,7 +14,8 @@ use rohditor_core::{
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_edit::{
     BLACKS_RANGE, COLOR_GRADING_RANGE, CONTRAST_RANGE, EXPOSURE_EV_RANGE, EditRecipe,
-    HIGHLIGHTS_RANGE, HSL_CHANNEL_COUNT, HSL_HUE_RANGE, HSL_LUMINANCE_RANGE, HSL_SATURATION_RANGE,
+    HIGHLIGHT_THRESHOLD_RANGE, HIGHLIGHTS_RANGE, HSL_CHANNEL_COUNT, HSL_HUE_RANGE,
+    HSL_LUMINANCE_RANGE, HSL_SATURATION_RANGE, HighlightAdjustments, HighlightMethod,
     SATURATION_RANGE, SHADOWS_RANGE, TEMPERATURE_RANGE, TINT_RANGE, TONE_CURVE_RANGE,
     VIBRANCE_RANGE, WHITE_BALANCE_MULTIPLIER_RANGE, WHITES_RANGE, WhiteBalance,
 };
@@ -39,8 +40,8 @@ use crate::ui::catalog::{
 };
 use crate::ui::crop::{CropOverlayModel, CropPanelModel};
 use crate::ui::diagnostics::{
-    self, CacheModel, CatalogModel, DiagnosticsMessages, DiagnosticsModel, GpuModel, PreviewModel,
-    QueueModel, TimingModel,
+    self, CacheModel, CatalogModel, DiagnosticsMessages, DiagnosticsModel, GpuModel,
+    HighlightStatsModel, PreviewModel, QueueModel, TimingModel,
 };
 use crate::ui::settings as settings_ui;
 use crate::ui::theme;
@@ -595,6 +596,10 @@ impl RohditorApp {
                 .and_then(|document| document.gpu_preview.as_ref())
                 .is_some_and(|preview| {
                     gpu_base_algorithm_matches(preview.algorithm, options.render.demosaic)
+                        && gpu_base_highlights_match(
+                            preview.source.highlight_adjustments(),
+                            recipe.raw.highlights,
+                        )
                         && (preview.source.supports_dynamic_white_balance()
                             || preview.source.white_balance() == recipe.color.white_balance)
                 });
@@ -1008,6 +1013,7 @@ impl RohditorApp {
                     algorithm: preview.algorithm,
                     cache_hits: PreviewCacheHits::default(),
                     timings: StageTimings::default(),
+                    highlight_stats: Default::default(),
                     memory: MemoryEstimate::default(),
                     cache_resident_bytes: 0,
                     workspace_reused: false,
@@ -1563,6 +1569,9 @@ impl RohditorApp {
 
             let mut changed = false;
             let mut auto_tone_applied = false;
+            if let Some(method) = output.highlight_method {
+                changed |= set_highlight_method(&mut document.edits, method);
+            }
             if let Some(mode) = output.white_balance_mode {
                 changed |=
                     set_white_balance_mode(&mut document.edits, mode, &mut white_balance_memory);
@@ -2200,12 +2209,22 @@ impl RohditorApp {
                 timings: TimingModel {
                     metadata: preview.worker.timings.metadata,
                     normalization: preview.worker.timings.normalization,
+                    highlight_clipping: preview.worker.timings.highlight_clipping,
                     demosaic: preview.worker.timings.demosaic,
                     resampling: preview.worker.timings.resampling,
                     color_conversion: preview.worker.timings.color_conversion,
                     adjustments: preview.worker.timings.adjustments,
                     output_conversion: preview.worker.timings.output_conversion,
                     total: preview.worker.timings.total,
+                },
+                highlight: HighlightStatsModel {
+                    affected_sites: preview.worker.highlight_stats.affected_sites,
+                    changed_sites: preview.worker.highlight_stats.changed_sites,
+                    nominal_over_white_sites: preview
+                        .worker
+                        .highlight_stats
+                        .nominal_over_white_sites,
+                    affected_by_channel: preview.worker.highlight_stats.affected_by_channel,
                 },
                 cache_resident_bytes: preview.worker.cache_resident_bytes,
                 estimated_peak_bytes: preview.worker.memory.estimated_peak_bytes,
@@ -2478,6 +2497,8 @@ fn document_panel_model(
             shadows: document.edits.recipe().light.shadows,
             whites: document.edits.recipe().light.whites,
             blacks: document.edits.recipe().light.blacks,
+            highlight_method: document.edits.recipe().raw.highlights.method,
+            highlight_threshold: document.edits.recipe().raw.highlights.threshold,
             tone_curve_shadows: document.edits.recipe().light.tone_curve.shadows,
             tone_curve_darks: document.edits.recipe().light.tone_curve.darks,
             tone_curve_lights: document.edits.recipe().light.tone_curve.lights,
@@ -2542,6 +2563,11 @@ fn document_panel_model(
                 minimum: BLACKS_RANGE.minimum,
                 maximum: BLACKS_RANGE.maximum,
                 neutral: BLACKS_RANGE.neutral,
+            },
+            highlight_threshold: AdjustmentRange {
+                minimum: HIGHLIGHT_THRESHOLD_RANGE.minimum,
+                maximum: HIGHLIGHT_THRESHOLD_RANGE.maximum,
+                neutral: HIGHLIGHT_THRESHOLD_RANGE.neutral,
             },
             tone_curve: AdjustmentRange {
                 minimum: TONE_CURVE_RANGE.minimum,
@@ -2670,6 +2696,12 @@ fn set_white_balance_mode(
     edits.set_discrete(next)
 }
 
+fn set_highlight_method(edits: &mut EditSession, method: HighlightMethod) -> bool {
+    let mut next = edits.recipe().clone();
+    next.raw.highlights.method = method;
+    edits.set_discrete(next)
+}
+
 fn apply_auto_tone(edits: &mut EditSession, histogram: &Histogram) -> bool {
     let midpoint = histogram.luminance_percentile(0.5);
     let midpoint_linear = srgb_to_linear_srgb(f32::from(midpoint) / 255.0);
@@ -2707,6 +2739,15 @@ fn apply_auto_tone(edits: &mut EditSession, histogram: &Histogram) -> bool {
 
 fn gpu_supports_recipe(recipe: &EditRecipe) -> bool {
     rohditor_gpu::GpuPreviewProcessor::supports_recipe(recipe)
+}
+
+fn gpu_base_highlights_match(
+    retained: HighlightAdjustments,
+    requested: HighlightAdjustments,
+) -> bool {
+    retained.method == requested.method
+        && (requested.method == HighlightMethod::Off
+            || retained.threshold.to_bits() == requested.threshold.to_bits())
 }
 
 fn gpu_upload_matches_document(document: &Document, ticket: PreviewTicket) -> bool {
@@ -2753,7 +2794,8 @@ fn apply_adjustment_interaction(
                 | AdjustmentTarget::HslLuminance(_)
                 | AdjustmentTarget::GradingShadows(_)
                 | AdjustmentTarget::GradingMidtones(_)
-                | AdjustmentTarget::GradingHighlights(_) => {}
+                | AdjustmentTarget::GradingHighlights(_)
+                | AdjustmentTarget::HighlightThreshold => {}
                 AdjustmentTarget::Exposure
                 | AdjustmentTarget::Contrast
                 | AdjustmentTarget::Highlights
@@ -2783,6 +2825,7 @@ fn apply_adjustment_interaction(
         AdjustmentTarget::Shadows => next.light.shadows = interaction.value,
         AdjustmentTarget::Whites => next.light.whites = interaction.value,
         AdjustmentTarget::Blacks => next.light.blacks = interaction.value,
+        AdjustmentTarget::HighlightThreshold => next.raw.highlights.threshold = interaction.value,
         AdjustmentTarget::ToneCurveShadows => next.light.tone_curve.shadows = interaction.value,
         AdjustmentTarget::ToneCurveDarks => next.light.tone_curve.darks = interaction.value,
         AdjustmentTarget::ToneCurveLights => next.light.tone_curve.lights = interaction.value,
@@ -3229,6 +3272,22 @@ mod tests {
         assert!(document.edits.set_discrete(recipe));
         assert!(gpu_upload_matches_document(&document, document.ticket()));
         assert!(!gpu_upload_matches_document(&document, current));
+    }
+
+    #[test]
+    fn gpu_base_reuse_requires_matching_raw_highlight_semantics() {
+        let off = HighlightAdjustments::default();
+        let mut clip = off;
+        clip.method = HighlightMethod::Clip;
+
+        assert!(gpu_base_highlights_match(off, off));
+        assert!(!gpu_base_highlights_match(off, clip));
+        assert!(!gpu_base_highlights_match(clip, off));
+        assert!(gpu_base_highlights_match(clip, clip));
+
+        let mut different_threshold = clip;
+        different_threshold.threshold = 1.25;
+        assert!(!gpu_base_highlights_match(clip, different_threshold));
     }
 
     #[test]
