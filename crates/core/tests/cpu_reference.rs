@@ -7,7 +7,7 @@ use rohditor_core::{
     CancellationToken, CpuPipeline, DitherMode, ExportImage, OutputBitDepth, PipelineError,
     PreviewOptions, RawCropPolicy, RenderOptions, camera_color_transform,
 };
-use rohditor_edit::{EditRecipe, NormalizedCropRect, WhiteBalance};
+use rohditor_edit::{EditRecipe, HighlightMethod, NormalizedCropRect, WhiteBalance};
 use rohditor_image::{BayerPattern, CfaColor, LinearRgbSpace, Orientation};
 use rohditor_raw::{
     CameraColorMatrix, CaptureMetadata, CfaPattern, ImageRect, LevelPattern,
@@ -182,7 +182,7 @@ fn split_reconstruction_and_color_stages_match_the_combined_preview_base()
         ..PreviewOptions::default()
     };
     let recipe = EditRecipe::default();
-    let reconstructed = CpuPipeline.prepare_preview_reconstruction(&frame, options)?;
+    let reconstructed = CpuPipeline.prepare_preview_reconstruction(&frame, &recipe, options)?;
     let split = CpuPipeline.prepare_preview_base_from_reconstruction(&reconstructed, &recipe)?;
     let combined = CpuPipeline.prepare_preview_base(&frame, &recipe, options)?;
 
@@ -196,6 +196,79 @@ fn split_reconstruction_and_color_stages_match_the_combined_preview_base()
 }
 
 #[test]
+fn clip_uses_active_wb_limits_and_reaches_a_common_post_wb_ceiling() -> Result<(), Box<dyn Error>> {
+    let frame = constant_normalized_frame(1.2);
+    let mut recipe = EditRecipe::default();
+    recipe.raw.highlights.method = HighlightMethod::Clip;
+    let options = PreviewOptions {
+        render: RenderOptions {
+            demosaic: rohditor_demosaic::DemosaicAlgorithm::Bilinear,
+            ..RenderOptions::default()
+        },
+        max_long_edge: usize::MAX,
+    };
+
+    let off =
+        CpuPipeline.prepare_preview_reconstruction(&frame, &EditRecipe::default(), options)?;
+    assert!(off.image().data().iter().any(|value| *value > 1.0));
+
+    let clipped = CpuPipeline.prepare_preview_reconstruction(&frame, &recipe, options)?;
+    assert_eq!(clipped.highlight_stats().affected_sites, 24);
+    assert_eq!(clipped.highlight_stats().changed_sites, 24);
+    assert_eq!(clipped.highlight_stats().nominal_over_white_sites, 24);
+    assert_eq!(clipped.highlight_stats().affected_by_channel, [6, 12, 6]);
+    assert!(!clipped.supports_dynamic_white_balance());
+
+    let base = CpuPipeline.prepare_preview_base_from_reconstruction(&clipped, &recipe)?;
+    let pixel = base.image().pixel(2, 2).expect("interior pixel");
+    assert!(
+        pixel.iter().all(|value| (*value - 1.0).abs() < 1.0e-5),
+        "{pixel:?}"
+    );
+    assert_eq!(base.highlight_stats(), clipped.highlight_stats());
+    Ok(())
+}
+
+#[test]
+fn clip_is_invariant_to_common_white_balance_gain_scaling() -> Result<(), Box<dyn Error>> {
+    let frame = constant_normalized_frame(1.2);
+    let mut scaled = frame.clone();
+    scaled.info.as_shot_white_balance = [Some(4.0), Some(2.0), Some(3.0), None];
+    let mut recipe = EditRecipe::default();
+    recipe.raw.highlights.method = HighlightMethod::Clip;
+    let options = PreviewOptions {
+        render: RenderOptions {
+            demosaic: rohditor_demosaic::DemosaicAlgorithm::Bilinear,
+            ..RenderOptions::default()
+        },
+        max_long_edge: usize::MAX,
+    };
+
+    let first = CpuPipeline.prepare_preview_reconstruction(&frame, &recipe, options)?;
+    let second = CpuPipeline.prepare_preview_reconstruction(&scaled, &recipe, options)?;
+    assert_eq!(first.image(), second.image());
+    assert_eq!(first.highlight_stats(), second.highlight_stats());
+    Ok(())
+}
+
+#[test]
+fn off_ignores_an_inactive_threshold_when_reusing_preview_stages() -> Result<(), Box<dyn Error>> {
+    let frame = synthetic_rggb_frame();
+    let mut recipe = EditRecipe::default();
+    recipe.raw.highlights.threshold = 1.25;
+    let options = PreviewOptions {
+        max_long_edge: 3,
+        ..PreviewOptions::default()
+    };
+
+    let reconstructed = CpuPipeline.prepare_preview_reconstruction(&frame, &recipe, options)?;
+    let base = CpuPipeline.prepare_preview_base_from_reconstruction(&reconstructed, &recipe)?;
+    assert_eq!(reconstructed.highlight_stats(), Default::default());
+    assert_eq!(base.highlight_stats(), Default::default());
+    Ok(())
+}
+
+#[test]
 fn preview_stages_return_the_typed_cancellation_error() {
     let frame = synthetic_rggb_frame();
     let cancellation = CancellationToken::new();
@@ -204,6 +277,7 @@ fn preview_stages_return_the_typed_cancellation_error() {
     let error = CpuPipeline
         .prepare_preview_reconstruction_cancellable(
             &frame,
+            &EditRecipe::default(),
             PreviewOptions::default(),
             &cancellation,
         )
@@ -389,4 +463,19 @@ fn synthetic_rggb_frame() -> RawFrame {
         row_stride: width,
         mosaic: Arc::from(samples),
     }
+}
+
+fn constant_normalized_frame(value: f32) -> RawFrame {
+    let mut frame = synthetic_rggb_frame();
+    let black = [64.0_f32, 80.0, 96.0, 112.0];
+    let white = [1064.0_f32, 1080.0, 1096.0, 1112.0];
+    let mut samples = Vec::with_capacity(frame.info.width * frame.info.height);
+    for y in 0..frame.info.height {
+        for x in 0..frame.info.width {
+            let phase = (y & 1) * 2 + (x & 1);
+            samples.push((black[phase] + value * (white[phase] - black[phase])).round() as u16);
+        }
+    }
+    frame.mosaic = Arc::from(samples);
+    frame
 }

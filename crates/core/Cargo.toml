@@ -11,6 +11,7 @@ image.workspace = true
 rayon.workspace = true
 rohditor-demosaic = { path = "../demosaic" }
 rohditor-edit = { path = "../edit" }
+rohditor-highlight = { path = "../highlight" }
 rohditor-image = { path = "../image" }
 rohditor-raw = { path = "../raw" }
 serde.workspace = true

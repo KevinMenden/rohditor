@@ -28,12 +28,21 @@ pub(crate) struct CacheModel {
 pub(crate) struct TimingModel {
     pub metadata: Duration,
     pub normalization: Duration,
+    pub highlight_clipping: Duration,
     pub demosaic: Duration,
     pub resampling: Duration,
     pub color_conversion: Duration,
     pub adjustments: Duration,
     pub output_conversion: Duration,
     pub total: Duration,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct HighlightStatsModel {
+    pub affected_sites: usize,
+    pub changed_sites: usize,
+    pub nominal_over_white_sites: usize,
+    pub affected_by_channel: [usize; 3],
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -53,6 +62,7 @@ pub(crate) struct PreviewModel {
     pub source_state: String,
     pub cache: CacheModel,
     pub timings: TimingModel,
+    pub highlight: HighlightStatsModel,
     pub cache_resident_bytes: usize,
     pub estimated_peak_bytes: usize,
     pub gpu: Option<GpuModel>,
@@ -204,6 +214,11 @@ pub(crate) fn show(
                 .show(ui, |ui| {
                     duration_row(ui, "Metadata", preview.timings.metadata);
                     duration_row(ui, "Normalization", preview.timings.normalization);
+                    duration_row(
+                        ui,
+                        "Highlight clipping",
+                        preview.timings.highlight_clipping,
+                    );
                     duration_row(ui, "Demosaic", preview.timings.demosaic);
                     duration_row(ui, "Area reduction", preview.timings.resampling);
                     duration_row(ui, "Color conversion", preview.timings.color_conversion);
@@ -211,6 +226,18 @@ pub(crate) fn show(
                     duration_row(ui, "Output conversion", preview.timings.output_conversion);
                     duration_row(ui, "Total", preview.timings.total);
                 });
+            ui.label(format!(
+                "Highlight sites: {} affected · {} changed · {} nominally over-white",
+                preview.highlight.affected_sites,
+                preview.highlight.changed_sites,
+                preview.highlight.nominal_over_white_sites,
+            ));
+            ui.label(format!(
+                "Affected CFA sites: R {} · G {} · B {}",
+                preview.highlight.affected_by_channel[0],
+                preview.highlight.affected_by_channel[1],
+                preview.highlight.affected_by_channel[2],
+            ));
             ui.label(format!(
                 "CPU cache: {} · estimated render peak: {}",
                 format_bytes(preview.cache_resident_bytes),
@@ -330,6 +357,7 @@ pub(crate) struct PreviewReport<'a> {
     pub source_state: &'a str,
     pub cache: CacheReport,
     pub timings_ms: TimingReport,
+    pub highlight: HighlightReport,
     pub cache_resident_bytes: usize,
     pub estimated_peak_bytes: usize,
     pub gpu: Option<GpuReport>,
@@ -343,6 +371,7 @@ impl<'a> From<&'a PreviewModel> for PreviewReport<'a> {
             source_state: &value.source_state,
             cache: CacheReport::from(value.cache),
             timings_ms: TimingReport::from(value.timings),
+            highlight: HighlightReport::from(value.highlight),
             cache_resident_bytes: value.cache_resident_bytes,
             estimated_peak_bytes: value.estimated_peak_bytes,
             gpu: value.gpu.map(GpuReport::from),
@@ -398,6 +427,7 @@ impl From<CacheModel> for CacheReport {
 pub(crate) struct TimingReport {
     pub metadata: f64,
     pub normalization: f64,
+    pub highlight_clipping: f64,
     pub demosaic: f64,
     pub resampling: f64,
     pub color_conversion: f64,
@@ -411,12 +441,32 @@ impl From<TimingModel> for TimingReport {
         Self {
             metadata: duration_milliseconds(value.metadata),
             normalization: duration_milliseconds(value.normalization),
+            highlight_clipping: duration_milliseconds(value.highlight_clipping),
             demosaic: duration_milliseconds(value.demosaic),
             resampling: duration_milliseconds(value.resampling),
             color_conversion: duration_milliseconds(value.color_conversion),
             adjustments: duration_milliseconds(value.adjustments),
             output_conversion: duration_milliseconds(value.output_conversion),
             total: duration_milliseconds(value.total),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct HighlightReport {
+    pub affected_sites: usize,
+    pub changed_sites: usize,
+    pub nominal_over_white_sites: usize,
+    pub affected_by_channel: [usize; 3],
+}
+
+impl From<HighlightStatsModel> for HighlightReport {
+    fn from(value: HighlightStatsModel) -> Self {
+        Self {
+            affected_sites: value.affected_sites,
+            changed_sites: value.changed_sites,
+            nominal_over_white_sites: value.nominal_over_white_sites,
+            affected_by_channel: value.affected_by_channel,
         }
     }
 }

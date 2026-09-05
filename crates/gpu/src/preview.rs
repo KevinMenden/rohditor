@@ -8,7 +8,9 @@ use rohditor_core::{
     ReconstructedPreview, XYZ_D65_TO_LINEAR_SRGB,
 };
 use rohditor_demosaic::WhiteBalanceGains;
-use rohditor_edit::{EditRecipe, LIGHT_TONE_LUT_SIZE, LightToneLut, WhiteBalance};
+use rohditor_edit::{
+    EditRecipe, HighlightAdjustments, LIGHT_TONE_LUT_SIZE, LightToneLut, WhiteBalance,
+};
 use rohditor_image::{LinearRgbSpace, Orientation};
 
 use crate::{GpuCapabilities, GpuPreviewError};
@@ -21,8 +23,9 @@ const WORKGROUP_EDGE: u32 = 16;
 const PARAMETER_WORDS: usize = 52;
 
 /// One uploaded, immutable camera-native preview source. White balance and the
-/// camera transform are applied by the downstream shader, so changing either
-/// the WB mode or its values does not require a CPU rebuild or texture upload.
+/// camera transform are applied by the downstream shader when the retained
+/// source's RAW-stage semantics allow it; clipped sources pin white balance to
+/// the selection used to derive their channel ceilings.
 pub struct GpuPreviewSource {
     // A texture view does not make the source's ownership explicit. Keep the
     // texture alongside it so the source remains valid for every later edit.
@@ -32,6 +35,7 @@ pub struct GpuPreviewSource {
     height: u32,
     source_orientation: Orientation,
     white_balance: WhiteBalance,
+    highlight_adjustments: HighlightAdjustments,
     white_balance_dynamic: bool,
     white_balance_gains: WhiteBalanceGains,
     as_shot_white_balance: [Option<f32>; 4],
@@ -56,6 +60,12 @@ impl GpuPreviewSource {
     #[must_use]
     pub const fn supports_dynamic_white_balance(&self) -> bool {
         self.white_balance_dynamic
+    }
+
+    /// RAW highlight operation that produced this immutable source.
+    #[must_use]
+    pub const fn highlight_adjustments(&self) -> HighlightAdjustments {
+        self.highlight_adjustments
     }
 
     fn resolve_white_balance(
@@ -101,6 +111,7 @@ pub struct GpuPreviewUpload {
     height: u32,
     source_orientation: Orientation,
     white_balance: WhiteBalance,
+    highlight_adjustments: HighlightAdjustments,
     white_balance_dynamic: bool,
     white_balance_gains: WhiteBalanceGains,
     as_shot_white_balance: [Option<f32>; 4],
@@ -139,6 +150,7 @@ impl GpuPreviewUpload {
             height,
             source_orientation: base.source_orientation(),
             white_balance: base.white_balance(),
+            highlight_adjustments: base.highlight_adjustments(),
             white_balance_dynamic: false,
             white_balance_gains: WhiteBalanceGains::identity(),
             as_shot_white_balance: [Some(1.0), Some(1.0), Some(1.0), None],
@@ -177,6 +189,13 @@ impl GpuPreviewUpload {
             .map_err(|error| GpuPreviewError::InvalidInput {
                 reason: error.to_string(),
             })?;
+        let white_balance_dynamic = reconstructed.supports_dynamic_white_balance();
+        if !white_balance_dynamic && white_balance != reconstructed.highlight_white_balance() {
+            return Err(GpuPreviewError::BaseMismatch {
+                reason: "this clipped camera-native source cannot change white balance without a rebuild"
+                    .to_owned(),
+            });
+        }
         let (width, height) = upload_dimensions(image.width(), image.height())?;
         let texels = pack_rgba16f(
             image.data(),
@@ -191,7 +210,8 @@ impl GpuPreviewUpload {
             height,
             source_orientation: reconstructed.source_orientation(),
             white_balance,
-            white_balance_dynamic: true,
+            highlight_adjustments: reconstructed.highlight_adjustments(),
+            white_balance_dynamic,
             white_balance_gains: gains,
             as_shot_white_balance: reconstructed.as_shot_white_balance(),
             camera_to_xyz_d65: reconstructed.camera_to_xyz_d65(),
@@ -209,6 +229,19 @@ impl GpuPreviewUpload {
     #[must_use]
     pub const fn white_balance(&self) -> WhiteBalance {
         self.white_balance
+    }
+
+    /// Whether the uploaded camera-native source can change white balance
+    /// without another RAW-stage reconstruction.
+    #[must_use]
+    pub const fn supports_dynamic_white_balance(&self) -> bool {
+        self.white_balance_dynamic
+    }
+
+    /// RAW highlight operation that produced this upload.
+    #[must_use]
+    pub const fn highlight_adjustments(&self) -> HighlightAdjustments {
+        self.highlight_adjustments
     }
 }
 
@@ -565,6 +598,7 @@ impl GpuPreviewProcessor {
             height,
             source_orientation: upload.source_orientation,
             white_balance: upload.white_balance,
+            highlight_adjustments: upload.highlight_adjustments,
             white_balance_dynamic: upload.white_balance_dynamic,
             white_balance_gains: upload.white_balance_gains,
             as_shot_white_balance: upload.as_shot_white_balance,
@@ -590,6 +624,12 @@ impl GpuPreviewProcessor {
         if !Self::supports_recipe(recipe) {
             return Err(GpuPreviewError::UnsupportedEdits {
                 reason: "HSL and three-way color grading are CPU-only".to_owned(),
+            });
+        }
+        if !highlight_adjustments_match(source.highlight_adjustments(), recipe.raw.highlights) {
+            return Err(GpuPreviewError::BaseMismatch {
+                reason: "the GPU source was prepared with different RAW highlight settings"
+                    .to_owned(),
             });
         }
         let white_balance_gains = source.resolve_white_balance(recipe.color.white_balance)?;
@@ -875,6 +915,15 @@ fn extent((width, height): (u32, u32)) -> wgpu::Extent3d {
     }
 }
 
+fn highlight_adjustments_match(
+    retained: HighlightAdjustments,
+    requested: HighlightAdjustments,
+) -> bool {
+    retained.method == requested.method
+        && (requested.method == rohditor_edit::HighlightMethod::Off
+            || retained.threshold.to_bits() == requested.threshold.to_bits())
+}
+
 fn upload_dimensions(
     source_width: usize,
     source_height: usize,
@@ -1029,7 +1078,7 @@ mod tests {
     use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
     use rohditor_core::{CpuPipeline, PreviewOptions};
-    use rohditor_edit::{NormalizedCropRect, ToneCurve};
+    use rohditor_edit::{HighlightMethod, NormalizedCropRect, ToneCurve};
     use rohditor_raw::{
         CameraColorMatrix, CaptureMetadata, CfaPattern, LevelPattern, PhotometricInterpretation,
         RawDecoder, RawFileInfo, RawFrame, RawlerDecoder,
@@ -1126,6 +1175,39 @@ mod tests {
     }
 
     #[test]
+    fn clipped_reconstruction_upload_rejects_dynamic_white_balance() {
+        let mut recipe = EditRecipe::default();
+        recipe.raw.highlights.method = HighlightMethod::Clip;
+        let frame = synthetic_frame(Orientation::Normal);
+        let reconstructed = CpuPipeline
+            .prepare_preview_reconstruction(&frame, &recipe, PreviewOptions::default())
+            .expect("synthetic clipped reconstruction should develop");
+
+        let upload = GpuPreviewUpload::from_reconstructed_preview(
+            &reconstructed,
+            recipe.color.white_balance,
+        )
+        .expect("clipped camera-native source should pack");
+        assert!(!upload.supports_dynamic_white_balance());
+        assert_eq!(upload.white_balance(), recipe.color.white_balance);
+        assert_eq!(upload.highlight_adjustments(), recipe.raw.highlights);
+
+        let mut changed = recipe;
+        changed.color.white_balance = WhiteBalance::ManualMultipliers {
+            red: 1.2,
+            green: 1.0,
+            blue: 0.8,
+        };
+        assert!(matches!(
+            GpuPreviewUpload::from_reconstructed_preview(
+                &reconstructed,
+                changed.color.white_balance
+            ),
+            Err(GpuPreviewError::BaseMismatch { .. })
+        ));
+    }
+
+    #[test]
     #[ignore = "requires a locally available Vulkan-capable GPU; run cargo test -p rohditor-gpu -- --ignored"]
     fn gpu_preview_matches_cpu_reference_for_every_exif_orientation() {
         let _gpu_test_guard = gpu_test_guard();
@@ -1143,7 +1225,7 @@ mod tests {
                 ..PreviewOptions::default()
             };
             let reconstructed = CpuPipeline
-                .prepare_preview_reconstruction(&frame, options)
+                .prepare_preview_reconstruction(&frame, &recipe, options)
                 .expect("synthetic reconstruction should develop");
             let source = processor
                 .upload_prepared(
@@ -1172,10 +1254,11 @@ mod tests {
             max_long_edge: 8,
             ..PreviewOptions::default()
         };
+        let base_recipe = EditRecipe::default();
         for orientation in all_test_orientations() {
             let frame = synthetic_frame(orientation);
             let reconstructed = CpuPipeline
-                .prepare_preview_reconstruction(&frame, options)
+                .prepare_preview_reconstruction(&frame, &base_recipe, options)
                 .expect("synthetic reconstruction should develop");
             let source = processor
                 .upload_prepared(
@@ -1228,6 +1311,7 @@ mod tests {
             max_long_edge: 16,
             ..PreviewOptions::default()
         };
+        let base_recipe = EditRecipe::default();
         let mut aggregate = vec![GpuParityStats::default(); controls.len()];
         let mut queue_samples = Vec::with_capacity(controls.len() * 8);
         let mut submission_samples = Vec::with_capacity(controls.len() * 8);
@@ -1235,7 +1319,7 @@ mod tests {
         for orientation in all_test_orientations() {
             let frame = synthetic_frame(orientation);
             let reconstructed = CpuPipeline
-                .prepare_preview_reconstruction(&frame, options)
+                .prepare_preview_reconstruction(&frame, &base_recipe, options)
                 .expect("synthetic reconstruction should develop");
             let source = processor
                 .upload_prepared(
@@ -1313,7 +1397,7 @@ mod tests {
             ..PreviewOptions::default()
         };
         let reconstructed = CpuPipeline
-            .prepare_preview_reconstruction(&frame, options)
+            .prepare_preview_reconstruction(&frame, &EditRecipe::default(), options)
             .expect("synthetic reconstruction should develop");
         let source = processor
             .upload_prepared(
@@ -1411,7 +1495,7 @@ mod tests {
         };
         let options = PreviewOptions::default();
         let reconstructed = CpuPipeline
-            .prepare_preview_reconstruction(&frame, options)
+            .prepare_preview_reconstruction(&frame, &recipe, options)
             .expect("private preview reconstruction should develop");
         let source = processor
             .upload_prepared(
@@ -1464,7 +1548,7 @@ mod tests {
         let frame = session.decode().expect("private ARW should decode");
         let options = PreviewOptions::default();
         let reconstructed = CpuPipeline
-            .prepare_preview_reconstruction(&frame, options)
+            .prepare_preview_reconstruction(&frame, &EditRecipe::default(), options)
             .expect("private preview reconstruction should develop");
         let source = processor
             .upload_prepared(
@@ -1555,7 +1639,7 @@ mod tests {
         let frame = session.decode().expect("private ARW should decode");
         let options = PreviewOptions::default();
         let reconstructed = CpuPipeline
-            .prepare_preview_reconstruction(&frame, options)
+            .prepare_preview_reconstruction(&frame, &EditRecipe::default(), options)
             .expect("private preview reconstruction should develop");
         let source = processor
             .upload_prepared(

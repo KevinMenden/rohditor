@@ -15,9 +15,9 @@ use rohditor_core::{
 };
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_edit::{
-    BLACKS_RANGE, CONTRAST_RANGE, EXPOSURE_EV_RANGE, EditRecipe, HIGHLIGHTS_RANGE,
-    SATURATION_RANGE, SHADOWS_RANGE, TEMPERATURE_RANGE, TINT_RANGE, TONE_CURVE_RANGE,
-    VIBRANCE_RANGE, WHITES_RANGE, WhiteBalance,
+    BLACKS_RANGE, CONTRAST_RANGE, EXPOSURE_EV_RANGE, EditRecipe, HIGHLIGHT_THRESHOLD_RANGE,
+    HIGHLIGHTS_RANGE, HighlightMethod, SATURATION_RANGE, SHADOWS_RANGE, TEMPERATURE_RANGE,
+    TINT_RANGE, TONE_CURVE_RANGE, VIBRANCE_RANGE, WHITES_RANGE, WhiteBalance,
 };
 use rohditor_image::{DisplayRgbImage, DisplayTransfer, Orientation};
 use rohditor_raw::{
@@ -127,6 +127,14 @@ enum Command {
         /// Increase or reduce saturation preferentially in less-saturated colors (-1 to +1).
         #[arg(long, default_value_t = VIBRANCE_RANGE.neutral, allow_hyphen_values = true)]
         vibrance: f32,
+
+        /// RAW-stage highlight handling.
+        #[arg(long, value_enum, default_value_t = CliHighlightMethod::Off)]
+        highlight_reconstruction: CliHighlightMethod,
+
+        /// Effective normalized white threshold for highlight clipping (0.5 to 1.5).
+        #[arg(long, allow_hyphen_values = true)]
+        highlight_threshold: Option<f32>,
 
         /// R,G,B multipliers relative to the as-shot white balance.
         #[arg(long, value_name = "RED,GREEN,BLUE")]
@@ -248,6 +256,22 @@ enum CliDemosaic {
     Rcd,
     #[value(name = "amaze")]
     Amaze,
+}
+
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+enum CliHighlightMethod {
+    #[default]
+    Off,
+    Clip,
+}
+
+impl From<CliHighlightMethod> for HighlightMethod {
+    fn from(value: CliHighlightMethod) -> Self {
+        match value {
+            CliHighlightMethod::Off => Self::Off,
+            CliHighlightMethod::Clip => Self::Clip,
+        }
+    }
 }
 
 impl CliDemosaic {
@@ -400,6 +424,8 @@ fn main() -> Result<()> {
             tone_highlights,
             saturation,
             vibrance,
+            highlight_reconstruction,
+            highlight_threshold,
             white_balance,
             temperature,
             tint,
@@ -427,6 +453,8 @@ fn main() -> Result<()> {
                 tone_highlights,
                 saturation,
                 vibrance,
+                highlight_reconstruction,
+                highlight_threshold,
                 white_balance,
                 temperature,
                 tint,
@@ -506,6 +534,7 @@ struct QualitySourceReport {
 struct QualityTimingReport {
     metadata: f64,
     normalization: f64,
+    highlight_clipping: f64,
     demosaic: f64,
     resampling: f64,
     color_conversion: f64,
@@ -519,6 +548,7 @@ impl From<StageTimings> for QualityTimingReport {
         Self {
             metadata: milliseconds(value.metadata),
             normalization: milliseconds(value.normalization),
+            highlight_clipping: milliseconds(value.highlight_clipping),
             demosaic: milliseconds(value.demosaic),
             resampling: milliseconds(value.resampling),
             color_conversion: milliseconds(value.color_conversion),
@@ -585,6 +615,8 @@ struct DevelopArguments {
     tone_highlights: f32,
     saturation: f32,
     vibrance: f32,
+    highlight_reconstruction: CliHighlightMethod,
+    highlight_threshold: Option<f32>,
     white_balance: Option<RgbMultipliers>,
     temperature: Option<f32>,
     tint: f32,
@@ -681,6 +713,10 @@ fn extract_preview(file: &Path, output: &Path, force: bool) -> Result<()> {
 }
 
 fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()> {
+    validate_highlight_options(
+        arguments.highlight_reconstruction,
+        arguments.highlight_threshold,
+    )?;
     let export_settings = develop_export_settings(output, arguments)?;
     if paths_refer_to_same_file(file, output).with_context(|| {
         format!(
@@ -739,6 +775,10 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
     recipe.light.tone_curve.highlights = arguments.tone_highlights;
     recipe.color.saturation = arguments.saturation;
     recipe.color.vibrance = arguments.vibrance;
+    recipe.raw.highlights.method = arguments.highlight_reconstruction.into();
+    recipe.raw.highlights.threshold = arguments
+        .highlight_threshold
+        .unwrap_or(HIGHLIGHT_THRESHOLD_RANGE.neutral);
     recipe.geometry.orientation_override = arguments.orientation.map(Into::into);
     recipe
         .validate()
@@ -771,7 +811,7 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
     let encode_time = encode_started.elapsed();
 
     write_stdout(&format!(
-        "Developed {}x{} {}-bit sRGB {}{} with {} demosaic to {} ({} bytes, {})\n{}\nEstimated CPU buffer peak: {} MiB",
+        "Developed {}x{} {}-bit sRGB {}{} with {} demosaic to {} ({} bytes, {})\n{}\nHighlight clip: {} affected, {} changed, {} nominally over-white (R {}, G {}, B {})\nEstimated CPU buffer peak: {} MiB",
         report.width,
         report.height,
         report.bit_depth.bits(),
@@ -786,8 +826,30 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
             "no EXIF"
         },
         format_stage_timings(decode_time, result.timings, encode_time),
+        result.highlight_stats.affected_sites,
+        result.highlight_stats.changed_sites,
+        result.highlight_stats.nominal_over_white_sites,
+        result.highlight_stats.affected_by_channel[0],
+        result.highlight_stats.affected_by_channel[1],
+        result.highlight_stats.affected_by_channel[2],
         bytes_to_mib(result.memory.estimated_peak_bytes),
     ))
+}
+
+fn validate_highlight_options(method: CliHighlightMethod, threshold: Option<f32>) -> Result<()> {
+    if threshold.is_some() && !matches!(method, CliHighlightMethod::Clip) {
+        bail!("--highlight-threshold requires --highlight-reconstruction clip");
+    }
+    if let Some(value) = threshold
+        && !HIGHLIGHT_THRESHOLD_RANGE.contains(value)
+    {
+        bail!(
+            "--highlight-threshold must be finite and within {}..={}",
+            HIGHLIGHT_THRESHOLD_RANGE.minimum,
+            HIGHLIGHT_THRESHOLD_RANGE.maximum
+        );
+    }
+    Ok(())
 }
 
 fn quality_crops(
@@ -1319,10 +1381,11 @@ fn format_quality(format: ExportFormat) -> String {
 
 fn format_stage_timings(decode: Duration, timings: StageTimings, encode: Duration) -> String {
     format!(
-        "CPU stages: decode {:.1} ms, metadata {:.1} ms, normalize {:.1} ms, demosaic {:.1} ms, area resize {:.1} ms, color {:.1} ms, adjustments {:.1} ms, output {:.1} ms, pipeline total {:.1} ms, export encode/commit {:.1} ms",
+        "CPU stages: decode {:.1} ms, metadata {:.1} ms, normalize {:.1} ms, highlight clip {:.1} ms, demosaic {:.1} ms, area resize {:.1} ms, color {:.1} ms, adjustments {:.1} ms, output {:.1} ms, pipeline total {:.1} ms, export encode/commit {:.1} ms",
         decode.as_secs_f64() * 1_000.0,
         timings.metadata.as_secs_f64() * 1_000.0,
         timings.normalization.as_secs_f64() * 1_000.0,
+        timings.highlight_clipping.as_secs_f64() * 1_000.0,
         timings.demosaic.as_secs_f64() * 1_000.0,
         timings.resampling.as_secs_f64() * 1_000.0,
         timings.color_conversion.as_secs_f64() * 1_000.0,
@@ -1526,10 +1589,10 @@ mod tests {
     use rohditor_raw::{CfaPattern, EncodedPreviewFormat, PhotometricInterpretation};
 
     use super::{
-        Cli, CliCropPolicy, CliDemosaic, CliMetadata, Command, DemosaicAlgorithm, DevelopArguments,
-        QualityCropSpec, RgbMultipliers, crop_display_image, develop_export_settings,
-        extract_preview, format_photometric, nearest_neighbor_2x, parse_libraw_pgm,
-        validate_preview_extension,
+        Cli, CliCropPolicy, CliDemosaic, CliHighlightMethod, CliMetadata, Command,
+        DemosaicAlgorithm, DevelopArguments, QualityCropSpec, RgbMultipliers, crop_display_image,
+        develop_export_settings, extract_preview, format_photometric, nearest_neighbor_2x,
+        parse_libraw_pgm, validate_highlight_options, validate_preview_extension,
     };
 
     #[test]
@@ -1572,6 +1635,8 @@ mod tests {
             tone_highlights: 0.0,
             saturation: 1.0,
             vibrance: 0.0,
+            highlight_reconstruction: CliHighlightMethod::Off,
+            highlight_threshold: None,
             white_balance: None,
             temperature: None,
             tint: 0.0,
@@ -1645,6 +1710,35 @@ mod tests {
             panic!("expected develop command");
         };
         assert!(matches!(demosaic, CliDemosaic::MalvarHeCutler));
+    }
+
+    #[test]
+    fn highlight_cli_options_require_clip_and_validate_the_threshold() {
+        let parsed = Cli::try_parse_from([
+            "rohditor-cli",
+            "develop",
+            "input.arw",
+            "output.jpg",
+            "--highlight-reconstruction",
+            "clip",
+            "--highlight-threshold",
+            "1.25",
+        ])
+        .expect("clip threshold options should parse");
+        let Command::Develop {
+            highlight_reconstruction,
+            highlight_threshold,
+            ..
+        } = parsed.command
+        else {
+            panic!("expected develop command");
+        };
+        assert!(matches!(highlight_reconstruction, CliHighlightMethod::Clip));
+        assert_eq!(highlight_threshold, Some(1.25));
+        assert!(validate_highlight_options(highlight_reconstruction, highlight_threshold).is_ok());
+        assert!(validate_highlight_options(CliHighlightMethod::Off, Some(1.0)).is_err());
+        assert!(validate_highlight_options(CliHighlightMethod::Clip, Some(2.0)).is_err());
+        assert!(validate_highlight_options(CliHighlightMethod::Clip, Some(f32::NAN)).is_err());
     }
 
     #[test]
