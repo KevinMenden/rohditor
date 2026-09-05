@@ -35,6 +35,7 @@ pub(crate) struct ToolbarOutput {
     pub fit: bool,
     pub actual_size: bool,
     pub crop: bool,
+    pub settings: bool,
     pub toggle_diagnostics: bool,
     pub export: bool,
     pub view_mode: Option<ViewMode>,
@@ -51,6 +52,7 @@ impl ToolbarOutput {
         self.fit |= other.fit;
         self.actual_size |= other.actual_size;
         self.crop |= other.crop;
+        self.settings |= other.settings;
         self.toggle_diagnostics |= other.toggle_diagnostics;
         self.export |= other.export;
         self.view_mode = other.view_mode.or(self.view_mode);
@@ -256,6 +258,10 @@ fn show_app_menu(ui: &mut egui::Ui, model: &ToolbarModel, output: &mut ToolbarOu
             ui.close();
         }
         ui.separator();
+        if ui.button("Settings…").clicked() {
+            output.settings = true;
+            ui.close();
+        }
         if ui
             .selectable_label(model.diagnostics_open, "Developer diagnostics")
             .clicked()
@@ -435,5 +441,15 @@ mod tests {
             metrics::NARROW_TOOLBAR_BREAKPOINT - 1.0
         ));
         assert!(!source_actions_compact(metrics::NARROW_TOOLBAR_BREAKPOINT));
+    }
+
+    #[test]
+    fn application_menu_commands_merge_settings_requests() {
+        let mut output = ToolbarOutput::default();
+        output.merge(ToolbarOutput {
+            settings: true,
+            ..ToolbarOutput::default()
+        });
+        assert!(output.settings);
     }
 }

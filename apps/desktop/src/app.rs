@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use rohditor_core::{
     DitherMode, ExportFormat, ExportMetadataPolicy, ExportSettings, Histogram,
-    JPEG_QUALITY_DEFAULT, MemoryEstimate, PngBitDepth, PreviewOptions, RenderOptions, StageTimings,
+    JPEG_QUALITY_DEFAULT, MemoryEstimate, PngBitDepth, PreviewOptions, StageTimings,
     hsl_channel_weights_from_display_rgb, paths_refer_to_same_file, srgb_to_linear_srgb,
 };
 use rohditor_demosaic::DemosaicAlgorithm;
@@ -29,6 +29,7 @@ use crate::coordinator::{
 use crate::document::{EditSession, PreviewIntent, PreviewTicket};
 use crate::preview_cache::PreviewCacheHits;
 use crate::session;
+use crate::settings::{self, AppSettings};
 use crate::ui::adjustment_panel::{
     self, AdjustmentInteraction, AdjustmentRange, AdjustmentRanges, AdjustmentTarget,
     AdjustmentValues, DocumentPanelModel, ExportKind, ExportUiSettings, PngDepth, WhiteBalanceMode,
@@ -41,6 +42,7 @@ use crate::ui::diagnostics::{
     self, CacheModel, CatalogModel, DiagnosticsMessages, DiagnosticsModel, GpuModel, PreviewModel,
     QueueModel, TimingModel,
 };
+use crate::ui::settings as settings_ui;
 use crate::ui::theme;
 use crate::ui::toolbar::{self, FilePanelModel, StatusBarModel, ToolbarModel};
 use crate::ui::viewport::{self, PreviewSource, PreviewTexture, ViewState, ViewportModel};
@@ -101,6 +103,11 @@ struct ExportActivity {
     id: u64,
     recipe_revision: u64,
     detail: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SettingsDialog {
+    draft: AppSettings,
 }
 
 struct Document {
@@ -237,7 +244,9 @@ pub(crate) struct RohditorApp {
     next_document_id: u64,
     next_export_id: u64,
     export_settings: ExportUiSettings,
-    render_options: RenderOptions,
+    settings: AppSettings,
+    settings_warning: Option<String>,
+    settings_dialog: Option<SettingsDialog>,
     ui_renderer: &'static str,
     processor_preference: ProcessorPreference,
     gpu: Option<GpuRuntime>,
@@ -338,7 +347,8 @@ impl RohditorApp {
         context: &eframe::CreationContext<'_>,
         initial_path: Option<PathBuf>,
         processor_preference: ProcessorPreference,
-        demosaic: DemosaicAlgorithm,
+        settings: AppSettings,
+        settings_warning: Option<String>,
         show_diagnostics: bool,
     ) -> std::io::Result<Self> {
         theme::apply(&context.egui_ctx);
@@ -364,18 +374,8 @@ impl RohditorApp {
             processor_preference = ?processor_preference,
             "desktop application started"
         );
-        let render_options = RenderOptions {
-            demosaic,
-            ..RenderOptions::default()
-        };
-        let coordinator = RenderCoordinator::new(
-            context.egui_ctx.clone(),
-            PreviewOptions {
-                render: render_options,
-                ..PreviewOptions::default()
-            },
-        )
-        .map_err(std::io::Error::other)?;
+        let coordinator =
+            RenderCoordinator::new(context.egui_ctx.clone()).map_err(std::io::Error::other)?;
         let catalog_coordinator =
             CatalogCoordinator::new(context.egui_ctx.clone()).map_err(std::io::Error::other)?;
         // Restore the last browsed folder when the app was not given a file.
@@ -394,7 +394,9 @@ impl RohditorApp {
             next_document_id: 1,
             next_export_id: 1,
             export_settings: ExportUiSettings::with_jpeg_quality(JPEG_QUALITY_DEFAULT),
-            render_options,
+            settings,
+            settings_warning,
+            settings_dialog: None,
             ui_renderer,
             processor_preference,
             gpu,
@@ -514,6 +516,13 @@ impl RohditorApp {
         context.send_viewport_cmd(egui::ViewportCommand::Title(title));
     }
 
+    fn preview_options(&self) -> PreviewOptions {
+        PreviewOptions {
+            render: self.settings.render_options(),
+            ..PreviewOptions::default()
+        }
+    }
+
     fn queue_preview(&mut self, context: &egui::Context, document_id: u64) {
         if self.gpu_required_but_unavailable() {
             if let Some(document) = self.document.as_mut().filter(|doc| doc.id == document_id) {
@@ -522,6 +531,7 @@ impl RohditorApp {
             }
             return;
         }
+        let options = self.preview_options();
         let request = self
             .document
             .as_mut()
@@ -568,7 +578,9 @@ impl RohditorApp {
                     "Queued full-resolution 1:1 inspection".to_owned(),
                 ));
             }
-            if let Err(error) = self.coordinator.source_scale_preview(ticket, frame, recipe)
+            if let Err(error) = self
+                .coordinator
+                .source_scale_preview(ticket, frame, recipe, options)
                 && let Some(document) = self.document.as_mut()
             {
                 document.preview_status = None;
@@ -582,8 +594,9 @@ impl RohditorApp {
                 .as_ref()
                 .and_then(|document| document.gpu_preview.as_ref())
                 .is_some_and(|preview| {
-                    preview.source.supports_dynamic_white_balance()
-                        || preview.source.white_balance() == recipe.color.white_balance
+                    gpu_base_algorithm_matches(preview.algorithm, options.render.demosaic)
+                        && (preview.source.supports_dynamic_white_balance()
+                            || preview.source.white_balance() == recipe.color.white_balance)
                 });
             if gpu_base_is_current {
                 self.coordinator.cancel_preview(document_id);
@@ -596,7 +609,9 @@ impl RohditorApp {
                     "Preparing linear base for GPU preview".to_owned(),
                 ));
             }
-            if let Err(error) = self.coordinator.prepare_gpu_base(ticket, frame, recipe)
+            if let Err(error) = self
+                .coordinator
+                .prepare_gpu_base(ticket, frame, recipe, options)
                 && let Some(document) = self.document.as_mut()
             {
                 document.preview_status = None;
@@ -615,7 +630,7 @@ impl RohditorApp {
                 "Queued CPU preview for the selected color tools".to_owned(),
             ));
         }
-        match self.coordinator.preview(ticket, frame, recipe) {
+        match self.coordinator.preview(ticket, frame, recipe, options) {
             Ok(()) => {
                 info!(
                     document_id,
@@ -628,6 +643,107 @@ impl RohditorApp {
                 if let Some(document) = self.document.as_mut() {
                     document.preview_status = None;
                     document.error = Some(error);
+                }
+            }
+        }
+    }
+
+    /// Rebuild the presentation currently requested by the viewport. A
+    /// settings change is not an edit, so this advances only the presentation
+    /// sequence and deliberately leaves the recipe history untouched.
+    fn refresh_current_presentation(&mut self, context: &egui::Context) {
+        let Some(document_id) = self.document.as_ref().map(|document| document.id) else {
+            return;
+        };
+        if self.crop_tool.is_none() {
+            self.queue_preview(context, document_id);
+            return;
+        }
+
+        let options = self.preview_options();
+        let request = self.document.as_mut().and_then(|document| {
+            let frame = document.frame.as_ref().map(Arc::clone)?;
+            let ticket = document.begin_preview_request(PreviewIntent::CropToolFullFrame);
+            let recipe = document.edits.recipe().clone();
+            document.histogram_revision = None;
+            document.preview_diagnostics = None;
+            document.preview_status = Some((
+                ticket.revision,
+                "Rebuilding full image for crop with the selected demosaic algorithm".to_owned(),
+            ));
+            Some((ticket, frame, recipe))
+        });
+        let Some((ticket, frame, recipe)) = request else {
+            return;
+        };
+        self.pending_white_balance_pick = None;
+        if let Err(error) = self
+            .coordinator
+            .crop_tool_preview(ticket, frame, recipe, options)
+            && let Some(document) = self.document.as_mut()
+        {
+            document.preview_status = None;
+            document.error = Some(error);
+        }
+    }
+
+    fn open_settings(&mut self) {
+        if self.settings_dialog.is_none() {
+            self.settings_dialog = Some(SettingsDialog {
+                draft: self.settings,
+            });
+        }
+    }
+
+    fn show_application_settings(&mut self, context: &egui::Context) {
+        let Some(dialog) = self.settings_dialog else {
+            return;
+        };
+        let model = settings_ui::SettingsWindowModel {
+            active_demosaic: self.settings.demosaic(),
+            draft_demosaic: dialog.draft.demosaic(),
+            warning: self.settings_warning.as_deref(),
+        };
+        let mut open = true;
+        let output = settings_ui::show(context, &mut open, &model);
+        if output.cancel || !open {
+            self.settings_dialog = None;
+            return;
+        }
+        if let Some(demosaic) = output.selected_demosaic
+            && let Some(dialog) = self.settings_dialog.as_mut()
+        {
+            dialog.draft.set_demosaic(demosaic);
+        }
+        if output.apply {
+            self.apply_settings(context);
+        }
+    }
+
+    fn apply_settings(&mut self, context: &egui::Context) {
+        let Some(next) = self.settings_dialog.map(|dialog| dialog.draft) else {
+            return;
+        };
+        if next == self.settings {
+            return;
+        }
+
+        self.settings = next;
+        self.pending_white_balance_pick = None;
+        self.refresh_current_presentation(context);
+        match settings::save(next) {
+            Ok(()) => {
+                self.settings_warning = None;
+                self.settings_dialog = None;
+            }
+            Err(error) => {
+                let message = format!(
+                    "The new setting is active for this run, but could not be saved and will not survive restart: {error}"
+                );
+                warn!(%error, "desktop settings could not be saved");
+                self.settings_warning = Some(message);
+                if let Some(dialog) = self.settings_dialog.as_mut() {
+                    dialog.draft = next;
                 }
             }
         }
@@ -660,7 +776,11 @@ impl RohditorApp {
         self.picker_mode = None;
         self.pending_white_balance_pick = None;
         self.crop_tool = Some(session);
-        if let Err(error) = self.coordinator.crop_tool_preview(ticket, frame, recipe) {
+        let options = self.preview_options();
+        if let Err(error) = self
+            .coordinator
+            .crop_tool_preview(ticket, frame, recipe, options)
+        {
             self.crop_tool = None;
             if let Some(document) = self
                 .document
@@ -808,6 +928,7 @@ impl RohditorApp {
                 }) {
                     document.gpu_preview = Some(GpuDocumentPreview {
                         ticket,
+                        algorithm: diagnostics.algorithm,
                         source,
                         frame,
                         texture_id,
@@ -884,7 +1005,7 @@ impl RohditorApp {
                 let mut worker = previous_worker_diagnostics.unwrap_or(WorkerPreviewDiagnostics {
                     backend: PreviewBackend::GpuBase,
                     resolution: PreviewResolution::Fit,
-                    algorithm: self.render_options.demosaic,
+                    algorithm: preview.algorithm,
                     cache_hits: PreviewCacheHits::default(),
                     timings: StageTimings::default(),
                     memory: MemoryEstimate::default(),
@@ -930,6 +1051,7 @@ impl RohditorApp {
                 }) {
                     document.gpu_preview = Some(GpuDocumentPreview {
                         ticket: current_ticket,
+                        algorithm: preview.algorithm,
                         source: preview.source,
                         frame,
                         texture_id,
@@ -1283,7 +1405,7 @@ impl RohditorApp {
             frame,
             recipe,
             settings,
-            self.render_options,
+            self.settings.render_options(),
         ) && let Some(document) = self.document.as_mut()
         {
             document.export_status = None;
@@ -1333,6 +1455,9 @@ impl RohditorApp {
         }
         if actions.toggle_diagnostics {
             self.show_diagnostics = !self.show_diagnostics;
+        }
+        if actions.settings {
+            self.open_settings();
         }
         if actions.open_file {
             self.open_file_dialog(context);
@@ -1580,10 +1705,7 @@ impl RohditorApp {
             }
             return;
         };
-        let options = PreviewOptions {
-            render: self.render_options,
-            ..PreviewOptions::default()
-        };
+        let options = self.preview_options();
         match self.coordinator.sample_white_balance(
             ticket,
             frame,
@@ -2201,6 +2323,10 @@ fn source_scale_selected(document: Option<&Document>) -> bool {
     document.is_some_and(|document| document.source_scale_requested)
 }
 
+fn gpu_base_algorithm_matches(resident: DemosaicAlgorithm, requested: DemosaicAlgorithm) -> bool {
+    resident == requested
+}
+
 /// Keyboard navigation steps in the library grid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LibraryNavigation {
@@ -2722,6 +2848,7 @@ impl eframe::App for RohditorApp {
             ViewMode::Library => self.show_library(context),
         }
         self.show_developer_diagnostics(context);
+        self.show_application_settings(context);
         // eframe normally wakes the event loop from the worker's
         // `request_repaint` callback. Keep a short polling repaint while work
         // is visible as a fallback for compositor/renderer combinations where
@@ -2782,11 +2909,22 @@ fn display_file_name(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-
     use image::{Rgb, RgbImage};
     use rohditor_image::{DisplayRgbImage, DisplayTransfer};
 
     use super::*;
+
+    #[test]
+    fn resident_gpu_bases_are_algorithm_specific() {
+        assert!(gpu_base_algorithm_matches(
+            DemosaicAlgorithm::Rcd,
+            DemosaicAlgorithm::Rcd
+        ));
+        assert!(!gpu_base_algorithm_matches(
+            DemosaicAlgorithm::Rcd,
+            DemosaicAlgorithm::Amaze
+        ));
+    }
 
     #[test]
     fn library_selection_moves_by_grid_steps_and_clamps() {

@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
+use crate::storage;
+
 #[derive(Debug, Serialize, Deserialize, Default)]
 struct SessionFile {
     last_folder: Option<PathBuf>,
@@ -16,25 +18,17 @@ struct SessionFile {
 
 /// Restore the last browsed folder, if one was recorded and still exists.
 pub(crate) fn load_last_folder() -> Option<PathBuf> {
-    let directory = config_dir()?;
+    let directory = storage::config_directory()?;
     let folder = load_folder_from(&directory)?;
     folder.is_dir().then_some(folder)
 }
 
 /// Record the last browsed folder for the next session.
 pub(crate) fn store_last_folder(folder: &Path) {
-    let Some(directory) = config_dir() else {
+    let Some(directory) = storage::config_directory() else {
         return;
     };
     store_folder_to(&directory, folder);
-}
-
-fn config_dir() -> Option<PathBuf> {
-    std::env::var_os("XDG_CONFIG_HOME")
-        .filter(|directory| !directory.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-        .map(|base| base.join("rohditor"))
 }
 
 fn load_folder_from(directory: &Path) -> Option<PathBuf> {

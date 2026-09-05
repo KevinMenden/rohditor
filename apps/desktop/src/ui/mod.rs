@@ -26,6 +26,7 @@ pub(crate) mod catalog;
 pub(crate) mod crop;
 pub(crate) mod diagnostics;
 pub(crate) mod icons;
+pub(crate) mod settings;
 pub(crate) mod theme;
 pub(crate) mod toolbar;
 pub(crate) mod viewport;
