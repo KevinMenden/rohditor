@@ -98,7 +98,7 @@ pub(crate) fn interact_and_paint(
         0.0,
         dark,
     );
-    let guide = egui::Stroke::new(1.0, egui::Color32::from_white_alpha(95));
+    let guide = egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(95));
     for fraction in [1.0 / 3.0, 2.0 / 3.0] {
         let x = egui::lerp(crop_rect.left()..=crop_rect.right(), fraction);
         let y = egui::lerp(crop_rect.top()..=crop_rect.bottom(), fraction);
@@ -120,7 +120,7 @@ pub(crate) fn interact_and_paint(
     painter.rect_stroke(
         crop_rect,
         0.0,
-        egui::Stroke::new(1.5, colors::ACCENT_HOVER),
+        egui::Stroke::new(1.5_f32, colors::ACCENT_HOVER),
         egui::StrokeKind::Inside,
     );
     for (_, point) in handles(crop_rect) {
@@ -128,7 +128,7 @@ pub(crate) fn interact_and_paint(
         painter.circle_stroke(
             point,
             HANDLE_RADIUS,
-            egui::Stroke::new(1.0, egui::Color32::BLACK),
+            egui::Stroke::new(1.0_f32, egui::Color32::BLACK),
         );
     }
     output
