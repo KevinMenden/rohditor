@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use rayon::ThreadPoolBuilder;
 use rohditor_core::{
-    CancellationToken, CpuPipeline, DitherMode, ExportImage, OutputBitDepth, PipelineError,
-    PreviewOptions, RawCropPolicy, RenderOptions, camera_color_transform,
+    CancellationToken, CpuPipeline, DitherMode, ExportImage, HighlightDiagnostics, OutputBitDepth,
+    PipelineError, PreviewOptions, RawCropPolicy, RenderOptions, camera_color_transform,
 };
 use rohditor_edit::{EditRecipe, HighlightMethod, NormalizedCropRect, WhiteBalance};
 use rohditor_image::{BayerPattern, CfaColor, LinearRgbSpace, Orientation};
@@ -252,10 +252,52 @@ fn clip_is_invariant_to_common_white_balance_gain_scaling() -> Result<(), Box<dy
 }
 
 #[test]
+fn local_ratios_is_camera_native_and_supports_dynamic_white_balance() -> Result<(), Box<dyn Error>>
+{
+    let frame = constant_normalized_frame(1.2);
+    let options = PreviewOptions {
+        render: RenderOptions {
+            demosaic: rohditor_demosaic::DemosaicAlgorithm::Bilinear,
+            ..RenderOptions::default()
+        },
+        max_long_edge: usize::MAX,
+    };
+    let mut local = EditRecipe::default();
+    local.raw.highlights.method = HighlightMethod::LocalRatios;
+    local.raw.highlights.local_ratios.detection_threshold = 0.9;
+
+    let reconstructed = CpuPipeline.prepare_preview_reconstruction(&frame, &local, options)?;
+    let HighlightDiagnostics::LocalRatios(stats) = reconstructed.highlight_diagnostics() else {
+        panic!("expected Local ratios diagnostics");
+    };
+    assert_eq!(stats.suspected_clipped_sites, 24);
+    assert_eq!(stats.reconstructed_sites, 0);
+    assert_eq!(stats.fallback_sites, 24);
+    assert!(reconstructed.supports_dynamic_white_balance());
+    assert!(reconstructed.highlight_scratch_bytes() > 0);
+
+    let mut changed_wb = local.clone();
+    changed_wb.color.white_balance = WhiteBalance::ManualMultipliers {
+        red: 1.2,
+        green: 1.0,
+        blue: 0.8,
+    };
+    let reused =
+        CpuPipeline.prepare_preview_base_from_reconstruction(&reconstructed, &changed_wb)?;
+    let fresh = CpuPipeline.prepare_preview_base(&frame, &changed_wb, options)?;
+    assert_eq!(reused.image(), fresh.image());
+    assert_eq!(
+        reused.highlight_diagnostics(),
+        fresh.highlight_diagnostics()
+    );
+    Ok(())
+}
+
+#[test]
 fn off_ignores_an_inactive_threshold_when_reusing_preview_stages() -> Result<(), Box<dyn Error>> {
     let frame = synthetic_rggb_frame();
     let mut recipe = EditRecipe::default();
-    recipe.raw.highlights.threshold = 1.25;
+    recipe.raw.highlights.clip.threshold = 1.25;
     let options = PreviewOptions {
         max_long_edge: 3,
         ..PreviewOptions::default()

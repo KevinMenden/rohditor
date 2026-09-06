@@ -2,8 +2,8 @@ use std::mem::size_of;
 use std::sync::Arc;
 
 use rohditor_core::{
-    CpuPreviewWorkspace, DemosaicedBase, MemoryEstimate, OutputPolicy, PreviewOptions,
-    RawCropPolicy, ReconstructedPreview,
+    CpuPreviewWorkspace, DemosaicedBase, LOCAL_RATIOS_ALGORITHM_VERSION, MemoryEstimate,
+    OutputPolicy, PreviewOptions, RawCropPolicy, ReconstructedPreview,
 };
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_edit::{EditRecipe, HighlightMethod, WhiteBalance};
@@ -43,7 +43,7 @@ impl PreviewCacheKeys {
             // Bump when the retained source representation changes. The GPU
             // boundary now consumes camera-native samples rather than a
             // camera-converted base.
-            reconstruction_version: 4,
+            reconstruction_version: 5,
         };
         let demosaiced = DemosaicedBaseKey {
             reconstructed: reconstructed.clone(),
@@ -131,6 +131,10 @@ enum HighlightKey {
         threshold_bits: u32,
         white_balance: WhiteBalanceKey,
     },
+    LocalRatios {
+        detection_threshold_bits: u32,
+        algorithm_version: u8,
+    },
 }
 
 impl HighlightKey {
@@ -138,8 +142,17 @@ impl HighlightKey {
         match recipe.raw.highlights.method {
             HighlightMethod::Off => Self::Off,
             HighlightMethod::Clip => Self::Clip {
-                threshold_bits: recipe.raw.highlights.threshold.to_bits(),
+                threshold_bits: recipe.raw.highlights.clip.threshold.to_bits(),
                 white_balance: WhiteBalanceKey::from(recipe.color.white_balance),
+            },
+            HighlightMethod::LocalRatios => Self::LocalRatios {
+                detection_threshold_bits: recipe
+                    .raw
+                    .highlights
+                    .local_ratios
+                    .detection_threshold
+                    .to_bits(),
+                algorithm_version: LOCAL_RATIOS_ALGORITHM_VERSION,
             },
         }
     }
@@ -487,7 +500,7 @@ mod tests {
         assert_ne!(off_keys.demosaiced, off_wb_keys.demosaiced);
 
         let mut off_threshold = off.clone();
-        off_threshold.raw.highlights.threshold = 1.25;
+        off_threshold.raw.highlights.clip.threshold = 1.25;
         assert_eq!(off_keys.reconstructed, keys(&off_threshold).reconstructed);
 
         let mut clip = off.clone();
@@ -503,7 +516,32 @@ mod tests {
         assert_ne!(clip_keys.reconstructed, keys(&clip_wb).reconstructed);
 
         let mut clip_threshold = clip.clone();
-        clip_threshold.raw.highlights.threshold = 1.25;
+        clip_threshold.raw.highlights.clip.threshold = 1.25;
         assert_ne!(clip_keys.reconstructed, keys(&clip_threshold).reconstructed);
+
+        let mut local = off.clone();
+        local.raw.highlights.method = HighlightMethod::LocalRatios;
+        let local_keys = keys(&local);
+        assert_ne!(off_keys.reconstructed, local_keys.reconstructed);
+        assert_eq!(local_keys.reconstructed, keys(&local).reconstructed);
+        assert_eq!(
+            local_keys.reconstructed,
+            keys(&{
+                let mut changed_wb = local.clone();
+                changed_wb.color.white_balance = off_wb.color.white_balance;
+                changed_wb
+            })
+            .reconstructed
+        );
+        let mut local_threshold = local;
+        local_threshold
+            .raw
+            .highlights
+            .local_ratios
+            .detection_threshold = 1.25;
+        assert_ne!(
+            local_keys.reconstructed,
+            keys(&local_threshold).reconstructed
+        );
     }
 }
