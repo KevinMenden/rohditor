@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use rohditor_core::{
-    DitherMode, ExportFormat, ExportMetadataPolicy, ExportSettings, Histogram,
-    JPEG_QUALITY_DEFAULT, MemoryEstimate, PngBitDepth, PreviewOptions, StageTimings,
+    DitherMode, ExportFormat, ExportMetadataPolicy, ExportSettings, HighlightDiagnostics,
+    Histogram, JPEG_QUALITY_DEFAULT, MemoryEstimate, PngBitDepth, PreviewOptions, StageTimings,
     hsl_channel_weights_from_display_rgb, paths_refer_to_same_file, srgb_to_linear_srgb,
 };
 use rohditor_demosaic::DemosaicAlgorithm;
@@ -1013,7 +1013,7 @@ impl RohditorApp {
                     algorithm: preview.algorithm,
                     cache_hits: PreviewCacheHits::default(),
                     timings: StageTimings::default(),
-                    highlight_stats: Default::default(),
+                    highlight_diagnostics: HighlightDiagnostics::Off,
                     memory: MemoryEstimate::default(),
                     cache_resident_bytes: 0,
                     workspace_reused: false,
@@ -2209,7 +2209,7 @@ impl RohditorApp {
                 timings: TimingModel {
                     metadata: preview.worker.timings.metadata,
                     normalization: preview.worker.timings.normalization,
-                    highlight_clipping: preview.worker.timings.highlight_clipping,
+                    highlight_processing: preview.worker.timings.highlight_processing,
                     demosaic: preview.worker.timings.demosaic,
                     resampling: preview.worker.timings.resampling,
                     color_conversion: preview.worker.timings.color_conversion,
@@ -2217,14 +2217,22 @@ impl RohditorApp {
                     output_conversion: preview.worker.timings.output_conversion,
                     total: preview.worker.timings.total,
                 },
-                highlight: HighlightStatsModel {
-                    affected_sites: preview.worker.highlight_stats.affected_sites,
-                    changed_sites: preview.worker.highlight_stats.changed_sites,
-                    nominal_over_white_sites: preview
-                        .worker
-                        .highlight_stats
-                        .nominal_over_white_sites,
-                    affected_by_channel: preview.worker.highlight_stats.affected_by_channel,
+                highlight: match preview.worker.highlight_diagnostics {
+                    HighlightDiagnostics::Off => HighlightStatsModel::Off,
+                    HighlightDiagnostics::Clip(stats) => HighlightStatsModel::Clip {
+                        affected_sites: stats.affected_sites,
+                        changed_sites: stats.changed_sites,
+                        nominal_over_white_sites: stats.nominal_over_white_sites,
+                        affected_by_channel: stats.affected_by_channel,
+                    },
+                    HighlightDiagnostics::LocalRatios(stats) => HighlightStatsModel::LocalRatios {
+                        suspected_clipped_sites: stats.suspected_clipped_sites,
+                        reconstructed_sites: stats.reconstructed_sites,
+                        changed_sites: stats.changed_sites,
+                        fallback_sites: stats.fallback_sites,
+                        fully_unsupported_sites: stats.fully_unsupported_sites,
+                        suspected_by_channel: stats.suspected_by_channel,
+                    },
                 },
                 cache_resident_bytes: preview.worker.cache_resident_bytes,
                 estimated_peak_bytes: preview.worker.memory.estimated_peak_bytes,
@@ -2498,7 +2506,19 @@ fn document_panel_model(
             whites: document.edits.recipe().light.whites,
             blacks: document.edits.recipe().light.blacks,
             highlight_method: document.edits.recipe().raw.highlights.method,
-            highlight_threshold: document.edits.recipe().raw.highlights.threshold,
+            highlight_threshold: match document.edits.recipe().raw.highlights.method {
+                HighlightMethod::Clip => document.edits.recipe().raw.highlights.clip.threshold,
+                HighlightMethod::LocalRatios => {
+                    document
+                        .edits
+                        .recipe()
+                        .raw
+                        .highlights
+                        .local_ratios
+                        .detection_threshold
+                }
+                HighlightMethod::Off => document.edits.recipe().raw.highlights.clip.threshold,
+            },
             tone_curve_shadows: document.edits.recipe().light.tone_curve.shadows,
             tone_curve_darks: document.edits.recipe().light.tone_curve.darks,
             tone_curve_lights: document.edits.recipe().light.tone_curve.lights,
@@ -2745,9 +2765,19 @@ fn gpu_base_highlights_match(
     retained: HighlightAdjustments,
     requested: HighlightAdjustments,
 ) -> bool {
-    retained.method == requested.method
-        && (requested.method == HighlightMethod::Off
-            || retained.threshold.to_bits() == requested.threshold.to_bits())
+    if retained.method != requested.method {
+        return false;
+    }
+    match requested.method {
+        HighlightMethod::Off => true,
+        HighlightMethod::Clip => {
+            retained.clip.threshold.to_bits() == requested.clip.threshold.to_bits()
+        }
+        HighlightMethod::LocalRatios => {
+            retained.local_ratios.detection_threshold.to_bits()
+                == requested.local_ratios.detection_threshold.to_bits()
+        }
+    }
 }
 
 fn gpu_upload_matches_document(document: &Document, ticket: PreviewTicket) -> bool {
@@ -2825,7 +2855,13 @@ fn apply_adjustment_interaction(
         AdjustmentTarget::Shadows => next.light.shadows = interaction.value,
         AdjustmentTarget::Whites => next.light.whites = interaction.value,
         AdjustmentTarget::Blacks => next.light.blacks = interaction.value,
-        AdjustmentTarget::HighlightThreshold => next.raw.highlights.threshold = interaction.value,
+        AdjustmentTarget::HighlightThreshold => match next.raw.highlights.method {
+            HighlightMethod::Off => {}
+            HighlightMethod::Clip => next.raw.highlights.clip.threshold = interaction.value,
+            HighlightMethod::LocalRatios => {
+                next.raw.highlights.local_ratios.detection_threshold = interaction.value
+            }
+        },
         AdjustmentTarget::ToneCurveShadows => next.light.tone_curve.shadows = interaction.value,
         AdjustmentTarget::ToneCurveDarks => next.light.tone_curve.darks = interaction.value,
         AdjustmentTarget::ToneCurveLights => next.light.tone_curve.lights = interaction.value,
@@ -3286,8 +3322,16 @@ mod tests {
         assert!(gpu_base_highlights_match(clip, clip));
 
         let mut different_threshold = clip;
-        different_threshold.threshold = 1.25;
+        different_threshold.clip.threshold = 1.25;
         assert!(!gpu_base_highlights_match(clip, different_threshold));
+
+        let mut local = off;
+        local.method = HighlightMethod::LocalRatios;
+        assert!(!gpu_base_highlights_match(off, local));
+        assert!(gpu_base_highlights_match(local, local));
+        let mut different_detection = local;
+        different_detection.local_ratios.detection_threshold = 1.25;
+        assert!(!gpu_base_highlights_match(local, different_detection));
     }
 
     #[test]

@@ -14,7 +14,7 @@ use crate::cpu::{
     render_display_srgb8_cancellable_with_geometry, white_balance_gains_with_transform,
 };
 use crate::demosaic::demosaic_cancellable;
-use crate::highlight::apply_cancellable as apply_highlight_cancellable;
+use crate::highlight::{HighlightDiagnostics, apply_cancellable as apply_highlight_cancellable};
 use crate::resample::resize_area_cancellable;
 use crate::{
     CancellationToken, DitherMode, ExportImage, OutputBitDepth, OutputGeometry, PipelineError,
@@ -72,6 +72,9 @@ impl Default for PreviewOptions {
 pub struct StageTimings {
     pub metadata: Duration,
     pub normalization: Duration,
+    pub highlight_processing: Duration,
+    /// Compatibility alias for diagnostics consumers from the Clip-only
+    /// pipeline. New code should use [`Self::highlight_processing`].
     pub highlight_clipping: Duration,
     pub demosaic: Duration,
     pub resampling: Duration,
@@ -86,6 +89,7 @@ pub struct StageTimings {
 pub struct MemoryEstimate {
     pub decoded_raw_bytes: usize,
     pub normalized_mosaic_bytes: usize,
+    pub highlight_scratch_bytes: usize,
     pub resample_intermediate_bytes: usize,
     pub linear_rgb_bytes: usize,
     pub display_rgb_bytes: usize,
@@ -102,13 +106,13 @@ pub struct ReconstructedPreview {
     image: LinearRgbImage<f32>,
     info: RawFileInfo,
     camera_transform: CameraColorTransform,
-    highlight_method: HighlightMethod,
-    highlight_threshold: f32,
+    highlight_adjustments: HighlightAdjustments,
     highlight_white_balance: WhiteBalance,
-    highlight_stats: crate::ClipStats,
+    highlight_diagnostics: HighlightDiagnostics,
     timings: StageTimings,
     decoded_raw_bytes: usize,
     normalized_mosaic_bytes: usize,
+    highlight_scratch_bytes: usize,
     resample_intermediate_bytes: usize,
     preparation_peak_bytes: usize,
 }
@@ -148,7 +152,7 @@ impl ReconstructedPreview {
     /// reconstruction without rebuilding the RAW-stage highlight result.
     #[must_use]
     pub fn supports_dynamic_white_balance(&self) -> bool {
-        self.highlight_method == HighlightMethod::Off
+        self.highlight_adjustments.method != HighlightMethod::Clip
     }
 
     /// White balance used to derive Clip's pre-WB channel ceilings.
@@ -162,24 +166,21 @@ impl ReconstructedPreview {
     /// boundary; it must not be inferred from the current downstream recipe.
     #[must_use]
     pub const fn highlight_adjustments(&self) -> HighlightAdjustments {
-        HighlightAdjustments {
-            method: self.highlight_method,
-            threshold: self.highlight_threshold,
-        }
+        self.highlight_adjustments
+    }
+
+    #[must_use]
+    pub const fn highlight_diagnostics(&self) -> HighlightDiagnostics {
+        self.highlight_diagnostics
     }
 
     #[must_use]
     pub const fn highlight_stats(&self) -> crate::ClipStats {
-        self.highlight_stats
+        self.highlight_diagnostics.legacy_clip_stats()
     }
 
     pub(crate) fn matches_highlight_recipe(&self, recipe: &EditRecipe) -> bool {
-        if self.highlight_method != recipe.raw.highlights.method {
-            return false;
-        }
-        if self.highlight_method == HighlightMethod::Clip
-            && self.highlight_threshold.to_bits() != recipe.raw.highlights.threshold.to_bits()
-        {
+        if !highlight_adjustments_match(self.highlight_adjustments, recipe.raw.highlights) {
             return false;
         }
         self.supports_dynamic_white_balance()
@@ -215,6 +216,11 @@ impl ReconstructedPreview {
     }
 
     #[must_use]
+    pub const fn highlight_scratch_bytes(&self) -> usize {
+        self.highlight_scratch_bytes
+    }
+
+    #[must_use]
     pub const fn preparation_peak_bytes(&self) -> usize {
         self.preparation_peak_bytes
     }
@@ -232,6 +238,8 @@ pub struct RenderResult {
     pub image: DisplayRgbImage<u8>,
     pub histogram: Histogram,
     pub timings: StageTimings,
+    pub highlight_diagnostics: HighlightDiagnostics,
+    /// Compatibility projection for Clip-only callers.
     pub highlight_stats: crate::ClipStats,
     pub memory: MemoryEstimate,
 }
@@ -241,6 +249,8 @@ pub struct RenderResult {
 pub struct ExportRenderResult {
     pub image: ExportImage,
     pub timings: StageTimings,
+    pub highlight_diagnostics: HighlightDiagnostics,
+    /// Compatibility projection for Clip-only callers.
     pub highlight_stats: crate::ClipStats,
     pub memory: MemoryEstimate,
 }
@@ -256,13 +266,13 @@ pub struct DemosaicedBase {
     image: LinearRgbImage<f32>,
     source_orientation: Orientation,
     white_balance: WhiteBalance,
-    highlight_method: HighlightMethod,
-    highlight_threshold: f32,
+    highlight_adjustments: HighlightAdjustments,
     highlight_white_balance: WhiteBalance,
-    highlight_stats: crate::ClipStats,
+    highlight_diagnostics: HighlightDiagnostics,
     timings: StageTimings,
     decoded_raw_bytes: usize,
     normalized_mosaic_bytes: usize,
+    highlight_scratch_bytes: usize,
     resample_intermediate_bytes: usize,
     preparation_peak_bytes: usize,
 }
@@ -286,16 +296,18 @@ impl DemosaicedBase {
 
     #[must_use]
     pub const fn highlight_stats(&self) -> crate::ClipStats {
-        self.highlight_stats
+        self.highlight_diagnostics.legacy_clip_stats()
+    }
+
+    #[must_use]
+    pub const fn highlight_diagnostics(&self) -> HighlightDiagnostics {
+        self.highlight_diagnostics
     }
 
     /// RAW highlight operation that produced this linear preview base.
     #[must_use]
     pub const fn highlight_adjustments(&self) -> HighlightAdjustments {
-        HighlightAdjustments {
-            method: self.highlight_method,
-            threshold: self.highlight_threshold,
-        }
+        self.highlight_adjustments
     }
 
     #[must_use]
@@ -311,6 +323,11 @@ impl DemosaicedBase {
     #[must_use]
     pub const fn resample_intermediate_bytes(&self) -> usize {
         self.resample_intermediate_bytes
+    }
+
+    #[must_use]
+    pub const fn highlight_scratch_bytes(&self) -> usize {
+        self.highlight_scratch_bytes
     }
 
     #[must_use]
@@ -424,6 +441,7 @@ impl CpuPipeline {
         )?;
         base.timings.metadata += reconstructed.timings.metadata;
         base.timings.normalization = reconstructed.timings.normalization;
+        base.timings.highlight_processing = reconstructed.timings.highlight_processing;
         base.timings.highlight_clipping = reconstructed.timings.highlight_clipping;
         base.timings.demosaic = reconstructed.timings.demosaic;
         base.timings.resampling = reconstructed.timings.resampling;
@@ -571,7 +589,8 @@ impl CpuPipeline {
             image,
             histogram,
             timings,
-            highlight_stats: base.highlight_stats,
+            highlight_diagnostics: base.highlight_diagnostics,
+            highlight_stats: base.highlight_stats(),
             memory,
         })
     }
@@ -626,7 +645,8 @@ impl CpuPipeline {
             image,
             histogram,
             timings: base.timings,
-            highlight_stats: base.highlight_stats,
+            highlight_diagnostics: base.highlight_diagnostics,
+            highlight_stats: base.highlight_stats(),
             memory,
         })
     }
@@ -670,7 +690,8 @@ impl CpuPipeline {
         Ok(ExportRenderResult {
             image,
             timings: base.timings,
-            highlight_stats: base.highlight_stats,
+            highlight_diagnostics: base.highlight_diagnostics,
+            highlight_stats: base.highlight_stats(),
             memory,
         })
     }
@@ -684,7 +705,7 @@ fn prepare_reconstructed_preview(
 ) -> Result<ReconstructedPreview, PipelineError> {
     let total_started = Instant::now();
     cancellation.checkpoint()?;
-    validate_preview_working_set(frame, options.max_long_edge)?;
+    validate_preview_working_set(frame, options.max_long_edge, recipe.raw.highlights.method)?;
 
     let metadata_started = Instant::now();
     let metadata_span = tracing::info_span!(
@@ -733,8 +754,14 @@ fn prepare_reconstructed_preview(
         highlight_gains.unwrap_or(WhiteBalanceGains::identity()),
         cancellation,
     )?;
-    let highlight_clipping = highlight_started.elapsed();
-    let highlight_stats = highlighted.stats;
+    let highlight_processing = highlight_started.elapsed();
+    let highlight_diagnostics = highlighted.diagnostics;
+    let highlight_scratch_bytes = estimated_highlight_scratch_bytes(
+        recipe.raw.highlights.method,
+        highlight_diagnostics,
+        source_width,
+        source_height,
+    )?;
     let mosaic = highlighted.mosaic;
 
     let demosaic_started = Instant::now();
@@ -770,6 +797,7 @@ fn prepare_reconstructed_preview(
         decoded_raw_bytes,
         normalized_mosaic_bytes,
         full_linear_bytes,
+        highlight_scratch_bytes,
         resample_intermediate_bytes,
         reduced_linear_bytes,
         unchanged_dimensions,
@@ -782,7 +810,8 @@ fn prepare_reconstructed_preview(
     let timings = StageTimings {
         metadata,
         normalization,
-        highlight_clipping,
+        highlight_processing,
+        highlight_clipping: highlight_processing,
         demosaic,
         resampling,
         total: total_started.elapsed(),
@@ -793,13 +822,13 @@ fn prepare_reconstructed_preview(
         image,
         info: frame.info.clone(),
         camera_transform,
-        highlight_method: recipe.raw.highlights.method,
-        highlight_threshold: recipe.raw.highlights.threshold,
+        highlight_adjustments: recipe.raw.highlights,
         highlight_white_balance: recipe.color.white_balance,
-        highlight_stats,
+        highlight_diagnostics,
         timings,
         decoded_raw_bytes,
         normalized_mosaic_bytes,
+        highlight_scratch_bytes,
         resample_intermediate_bytes,
         preparation_peak_bytes,
     })
@@ -856,13 +885,13 @@ fn prepare_demosaiced_preview(
         image,
         source_orientation: reconstructed.info.orientation,
         white_balance: recipe.color.white_balance,
-        highlight_method: reconstructed.highlight_method,
-        highlight_threshold: reconstructed.highlight_threshold,
+        highlight_adjustments: reconstructed.highlight_adjustments,
         highlight_white_balance: reconstructed.highlight_white_balance,
-        highlight_stats: reconstructed.highlight_stats,
+        highlight_diagnostics: reconstructed.highlight_diagnostics,
         timings,
         decoded_raw_bytes: reconstructed.decoded_raw_bytes,
         normalized_mosaic_bytes: reconstructed.normalized_mosaic_bytes,
+        highlight_scratch_bytes: reconstructed.highlight_scratch_bytes,
         resample_intermediate_bytes: reconstructed.resample_intermediate_bytes,
         preparation_peak_bytes: reconstructed.preparation_peak_bytes,
     })
@@ -884,7 +913,7 @@ fn prepare_base_cancellable(
 ) -> Result<DemosaicedBase, PipelineError> {
     let total_started = Instant::now();
     cancellation.checkpoint()?;
-    validate_base_working_set(frame)?;
+    validate_base_working_set(frame, recipe.raw.highlights.method)?;
     let metadata_started = Instant::now();
     let metadata_span = tracing::info_span!(
         "cpu.metadata",
@@ -911,12 +940,20 @@ fn prepare_base_cancellable(
         .len()
         .checked_mul(size_of::<f32>())
         .ok_or_else(|| dimension_overflow(normalized.width(), normalized.height()))?;
+    let normalized_width = normalized.width();
+    let normalized_height = normalized.height();
 
     let highlight_started = Instant::now();
     let highlighted =
         apply_highlight_cancellable(normalized, recipe.raw.highlights, gains, cancellation)?;
-    let highlight_clipping = highlight_started.elapsed();
-    let highlight_stats = highlighted.stats;
+    let highlight_processing = highlight_started.elapsed();
+    let highlight_diagnostics = highlighted.diagnostics;
+    let highlight_scratch_bytes = estimated_highlight_scratch_bytes(
+        recipe.raw.highlights.method,
+        highlight_diagnostics,
+        normalized_width,
+        normalized_height,
+    )?;
     let normalized = highlighted.mosaic;
 
     let demosaic_started = Instant::now();
@@ -938,15 +975,21 @@ fn prepare_base_cancellable(
         .len()
         .checked_mul(size_of::<f32>())
         .ok_or_else(|| dimension_overflow(linear.width(), linear.height()))?;
+    let highlight_peak_bytes = decoded_raw_bytes
+        .checked_add(normalized_mosaic_bytes)
+        .and_then(|bytes| bytes.checked_add(highlight_scratch_bytes))
+        .ok_or_else(|| dimension_overflow(linear.width(), linear.height()))?;
     let preparation_peak_bytes = decoded_raw_bytes
         .checked_add(normalized_mosaic_bytes)
         .and_then(|bytes| bytes.checked_add(linear_rgb_bytes))
-        .ok_or_else(|| dimension_overflow(linear.width(), linear.height()))?;
+        .ok_or_else(|| dimension_overflow(linear.width(), linear.height()))?
+        .max(highlight_peak_bytes);
 
     let mut timings = StageTimings {
         metadata,
         normalization,
-        highlight_clipping,
+        highlight_processing,
+        highlight_clipping: highlight_processing,
         demosaic,
         color_conversion,
         ..StageTimings::default()
@@ -957,13 +1000,13 @@ fn prepare_base_cancellable(
         image: linear,
         source_orientation: frame.info.orientation,
         white_balance: recipe.color.white_balance,
-        highlight_method: recipe.raw.highlights.method,
-        highlight_threshold: recipe.raw.highlights.threshold,
+        highlight_adjustments: recipe.raw.highlights,
         highlight_white_balance: recipe.color.white_balance,
-        highlight_stats,
+        highlight_diagnostics,
         timings,
         decoded_raw_bytes,
         normalized_mosaic_bytes,
+        highlight_scratch_bytes,
         resample_intermediate_bytes: 0,
         preparation_peak_bytes,
     })
@@ -971,17 +1014,14 @@ fn prepare_base_cancellable(
 
 fn validate_base_recipe(base: &DemosaicedBase, recipe: &EditRecipe) -> Result<(), PipelineError> {
     recipe.validate()?;
-    if base.highlight_method != recipe.raw.highlights.method
-        || (base.highlight_method == HighlightMethod::Clip
-            && base.highlight_threshold.to_bits() != recipe.raw.highlights.threshold.to_bits())
-    {
+    if !highlight_adjustments_match(base.highlight_adjustments, recipe.raw.highlights) {
         Err(PipelineError::InvalidRecipe {
             field: "raw.highlights",
             reason: "the recipe does not match the RAW highlight result used to build the demosaiced base"
                 .to_owned(),
         })
     } else if recipe.color.white_balance == base.white_balance
-        && (base.highlight_method == HighlightMethod::Off
+        && (base.highlight_adjustments.method != HighlightMethod::Clip
             || recipe.color.white_balance == base.highlight_white_balance)
     {
         Ok(())
@@ -991,6 +1031,43 @@ fn validate_base_recipe(base: &DemosaicedBase, recipe: &EditRecipe) -> Result<()
             reason: "the recipe does not match the white balance used to build the demosaiced base"
                 .to_owned(),
         })
+    }
+}
+
+fn highlight_adjustments_match(
+    retained: HighlightAdjustments,
+    requested: HighlightAdjustments,
+) -> bool {
+    if retained.method != requested.method {
+        return false;
+    }
+    match requested.method {
+        HighlightMethod::Off => true,
+        HighlightMethod::Clip => {
+            retained.clip.threshold.to_bits() == requested.clip.threshold.to_bits()
+        }
+        HighlightMethod::LocalRatios => {
+            retained.local_ratios.detection_threshold.to_bits()
+                == requested.local_ratios.detection_threshold.to_bits()
+        }
+    }
+}
+
+fn estimated_highlight_scratch_bytes(
+    method: HighlightMethod,
+    diagnostics: HighlightDiagnostics,
+    width: usize,
+    height: usize,
+) -> Result<usize, PipelineError> {
+    if method == HighlightMethod::LocalRatios
+        && diagnostics
+            .local_ratios()
+            .is_some_and(|stats| stats.suspected_clipped_sites > 0)
+    {
+        rohditor_highlight::local_ratio_scratch_bytes(width, height)
+            .ok_or_else(|| dimension_overflow(width, height))
+    } else {
+        Ok(0)
     }
 }
 
@@ -1012,7 +1089,7 @@ fn render_base(
     base.timings.output_conversion = output_started.elapsed();
     base.timings.total = base.timings.metadata
         + base.timings.normalization
-        + base.timings.highlight_clipping
+        + base.timings.highlight_processing
         + base.timings.demosaic
         + base.timings.resampling
         + base.timings.color_conversion
@@ -1023,7 +1100,8 @@ fn render_base(
         histogram: Histogram::from_display_rgb8(&image),
         image,
         timings: base.timings,
-        highlight_stats: base.highlight_stats,
+        highlight_diagnostics: base.highlight_diagnostics,
+        highlight_stats: base.highlight_stats(),
         memory,
     })
 }
@@ -1061,6 +1139,7 @@ fn memory_estimate(
     let estimate = MemoryEstimate {
         decoded_raw_bytes,
         normalized_mosaic_bytes,
+        highlight_scratch_bytes: base.highlight_scratch_bytes,
         resample_intermediate_bytes,
         linear_rgb_bytes,
         display_rgb_bytes,
@@ -1087,7 +1166,10 @@ fn output_geometry(
     )
 }
 
-fn validate_base_working_set(frame: &RawFrame) -> Result<(), PipelineError> {
+fn validate_base_working_set(
+    frame: &RawFrame,
+    highlight_method: HighlightMethod,
+) -> Result<(), PipelineError> {
     let full_pixels = frame
         .info
         .width
@@ -1098,9 +1180,26 @@ fn validate_base_working_set(frame: &RawFrame) -> Result<(), PipelineError> {
         .len()
         .checked_mul(size_of::<u16>())
         .ok_or_else(|| dimension_overflow(frame.info.width, frame.info.height))?;
-    let working_bytes = full_pixels
-        .checked_mul(size_of::<f32>() * 4)
-        .and_then(|bytes| bytes.checked_add(decoded_raw_bytes))
+    let normalized_bytes = full_pixels
+        .checked_mul(size_of::<f32>())
+        .ok_or_else(|| dimension_overflow(frame.info.width, frame.info.height))?;
+    let linear_bytes = full_pixels
+        .checked_mul(3 * size_of::<f32>())
+        .ok_or_else(|| dimension_overflow(frame.info.width, frame.info.height))?;
+    let highlight_scratch_bytes = if highlight_method == HighlightMethod::LocalRatios {
+        rohditor_highlight::local_ratio_scratch_bytes(frame.info.width, frame.info.height)
+            .ok_or_else(|| dimension_overflow(frame.info.width, frame.info.height))?
+    } else {
+        0
+    };
+    let highlight_peak = normalized_bytes
+        .checked_add(highlight_scratch_bytes)
+        .ok_or_else(|| dimension_overflow(frame.info.width, frame.info.height))?;
+    let image_peak = normalized_bytes
+        .checked_add(linear_bytes)
+        .ok_or_else(|| dimension_overflow(frame.info.width, frame.info.height))?;
+    let working_bytes = decoded_raw_bytes
+        .checked_add(image_peak.max(highlight_peak))
         .ok_or_else(|| dimension_overflow(frame.info.width, frame.info.height))?;
     validate_working_set(working_bytes)
 }
@@ -1108,6 +1207,7 @@ fn validate_base_working_set(frame: &RawFrame) -> Result<(), PipelineError> {
 fn validate_preview_working_set(
     frame: &RawFrame,
     max_long_edge: usize,
+    highlight_method: HighlightMethod,
 ) -> Result<(), PipelineError> {
     let full_width = frame.info.width;
     let full_height = frame.info.height;
@@ -1130,9 +1230,23 @@ fn validate_preview_working_set(
         .checked_mul(full_height)
         .and_then(|pixels| pixels.checked_mul(3 * size_of::<f32>()))
         .ok_or_else(|| dimension_overflow(target_width, full_height))?;
-    let conservative_peak = decoded_raw_bytes
+    let highlight_scratch_bytes = if highlight_method == HighlightMethod::LocalRatios {
+        rohditor_highlight::local_ratio_scratch_bytes(full_width, full_height)
+            .ok_or_else(|| dimension_overflow(full_width, full_height))?
+    } else {
+        0
+    };
+    let demosaic_peak = normalized_bytes
         .checked_add(full_linear_bytes)
-        .and_then(|bytes| bytes.checked_add(normalized_bytes.max(intermediate_bytes)))
+        .ok_or_else(|| dimension_overflow(full_width, full_height))?;
+    let highlight_peak = normalized_bytes
+        .checked_add(highlight_scratch_bytes)
+        .ok_or_else(|| dimension_overflow(full_width, full_height))?;
+    let horizontal_peak = full_linear_bytes
+        .checked_add(intermediate_bytes)
+        .ok_or_else(|| dimension_overflow(full_width, full_height))?;
+    let conservative_peak = decoded_raw_bytes
+        .checked_add(demosaic_peak.max(highlight_peak).max(horizontal_peak))
         .ok_or_else(|| dimension_overflow(full_width, full_height))?;
     validate_working_set(conservative_peak)
 }
@@ -1141,6 +1255,7 @@ fn preview_preparation_peak(
     decoded_raw_bytes: usize,
     normalized_mosaic_bytes: usize,
     full_linear_bytes: usize,
+    highlight_scratch_bytes: usize,
     resample_intermediate_bytes: usize,
     reduced_linear_bytes: usize,
     unchanged_dimensions: bool,
@@ -1148,13 +1263,18 @@ fn preview_preparation_peak(
     let demosaic_peak = decoded_raw_bytes
         .checked_add(normalized_mosaic_bytes)
         .and_then(|bytes| bytes.checked_add(full_linear_bytes));
+    let highlight_peak = decoded_raw_bytes
+        .checked_add(normalized_mosaic_bytes)
+        .and_then(|bytes| bytes.checked_add(highlight_scratch_bytes));
     let horizontal_peak = decoded_raw_bytes
         .checked_add(full_linear_bytes)
         .and_then(|bytes| bytes.checked_add(resample_intermediate_bytes));
     let vertical_peak = decoded_raw_bytes
         .checked_add(resample_intermediate_bytes)
         .and_then(|bytes| bytes.checked_add(reduced_linear_bytes));
-    let demosaic_peak = demosaic_peak.ok_or_else(|| dimension_overflow(0, 0))?;
+    let demosaic_peak = demosaic_peak
+        .ok_or_else(|| dimension_overflow(0, 0))?
+        .max(highlight_peak.ok_or_else(|| dimension_overflow(0, 0))?);
     let peak = if unchanged_dimensions {
         demosaic_peak
     } else {

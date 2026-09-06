@@ -127,10 +127,10 @@ impl From<HighlightError> for PipelineError {
             HighlightError::Cancelled => Self::Cancelled,
             HighlightError::InvalidLevel { channel, value } => Self::InvalidMetadata {
                 field: "raw.highlights",
-                reason: format!("invalid {channel} clipping level {value}"),
+                reason: format!("invalid {channel} highlight level {value}"),
             },
             HighlightError::NonFiniteSample { x, y } => Self::NonFiniteImageData {
-                stage: "highlight clipping",
+                stage: "highlight processing",
                 x,
                 y,
             },
