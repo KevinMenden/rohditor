@@ -39,10 +39,11 @@ pub use export::{
     PngBitDepth, export_image,
 };
 pub use geometry::{OutputGeometry, ResolvedCropRect};
+pub use highlight::HighlightDiagnostics;
 pub use output::{paths_refer_to_same_file, write_output_bytes};
 pub use pipeline::{
     CPU_WORKING_SET_LIMIT_BYTES, CpuPipeline, CpuPreviewWorkspace, DEFAULT_PREVIEW_LONG_EDGE,
     DemosaicedBase, ExportRenderResult, MemoryEstimate, OutputPolicy, PreviewOptions,
     RawCropPolicy, ReconstructedPreview, RenderOptions, RenderResult, StageTimings,
 };
-pub use rohditor_highlight::ClipStats;
+pub use rohditor_highlight::{ClipStats, LOCAL_RATIOS_ALGORITHM_VERSION, ReconstructionStats};

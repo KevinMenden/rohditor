@@ -18,10 +18,11 @@ pub struct EditError {
 }
 
 /// Schema version of the current non-destructive edit recipe.
-pub const EDIT_RECIPE_SCHEMA_VERSION: u32 = 4;
+pub const EDIT_RECIPE_SCHEMA_VERSION: u32 = 5;
 const LEGACY_EDIT_RECIPE_SCHEMA_VERSION: u32 = 1;
 const PREVIOUS_EDIT_RECIPE_SCHEMA_VERSION: u32 = 2;
 const PREVIOUS_RAW_EDIT_RECIPE_SCHEMA_VERSION: u32 = 3;
+const PREVIOUS_HIGHLIGHT_EDIT_RECIPE_SCHEMA_VERSION: u32 = 4;
 
 /// Inclusive range and neutral value for one adjustment parameter.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -151,22 +152,85 @@ pub enum HighlightMethod {
     #[default]
     Off,
     Clip,
+    LocalRatios,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ClipAdjustments {
+    #[serde(default = "default_highlight_threshold")]
+    pub threshold: f32,
+}
+
+impl Default for ClipAdjustments {
+    fn default() -> Self {
+        Self {
+            threshold: HIGHLIGHT_THRESHOLD_RANGE.neutral,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct LocalRatioAdjustments {
+    #[serde(default = "default_local_ratio_detection_threshold")]
+    pub detection_threshold: f32,
+}
+
+impl Default for LocalRatioAdjustments {
+    fn default() -> Self {
+        Self {
+            detection_threshold: HIGHLIGHT_THRESHOLD_RANGE.neutral,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct HighlightAdjustments {
     #[serde(default)]
     pub method: HighlightMethod,
-    #[serde(default = "default_highlight_threshold")]
-    pub threshold: f32,
+    #[serde(default)]
+    pub clip: ClipAdjustments,
+    #[serde(default)]
+    pub local_ratios: LocalRatioAdjustments,
 }
 
 impl Default for HighlightAdjustments {
     fn default() -> Self {
         Self {
             method: HighlightMethod::Off,
-            threshold: HIGHLIGHT_THRESHOLD_RANGE.neutral,
+            clip: ClipAdjustments::default(),
+            local_ratios: LocalRatioAdjustments::default(),
         }
+    }
+}
+
+#[derive(Deserialize)]
+struct HighlightAdjustmentsFields {
+    #[serde(default)]
+    method: HighlightMethod,
+    #[serde(default)]
+    clip: Option<ClipAdjustments>,
+    #[serde(default)]
+    local_ratios: Option<LocalRatioAdjustments>,
+    // Schema version 4 stored Clip's threshold directly on this object.
+    #[serde(default, rename = "threshold")]
+    legacy_threshold: Option<f32>,
+}
+
+impl<'de> Deserialize<'de> for HighlightAdjustments {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let fields = HighlightAdjustmentsFields::deserialize(deserializer)?;
+        let mut clip = fields.clip.unwrap_or_default();
+        if let Some(threshold) = fields.legacy_threshold {
+            clip.threshold = threshold;
+        }
+        Ok(Self {
+            method: fields.method,
+            clip,
+            local_ratios: fields.local_ratios.unwrap_or_default(),
+        })
     }
 }
 
@@ -354,8 +418,13 @@ impl EditRecipe {
             });
         }
         validate_parameter(
-            "raw.highlights.threshold",
-            self.raw.highlights.threshold,
+            "raw.highlights.clip.threshold",
+            self.raw.highlights.clip.threshold,
+            HIGHLIGHT_THRESHOLD_RANGE,
+        )?;
+        validate_parameter(
+            "raw.highlights.local_ratios.detection_threshold",
+            self.raw.highlights.local_ratios.detection_threshold,
             HIGHLIGHT_THRESHOLD_RANGE,
         )?;
         validate_parameter(
@@ -500,6 +569,14 @@ impl<'de> Deserialize<'de> for EditRecipe {
                 color: fields.color,
                 geometry: fields.geometry,
             }
+        } else if fields.schema_version == PREVIOUS_HIGHLIGHT_EDIT_RECIPE_SCHEMA_VERSION {
+            Self {
+                schema_version: EDIT_RECIPE_SCHEMA_VERSION,
+                raw: fields.raw,
+                light: fields.light,
+                color: fields.color,
+                geometry: fields.geometry,
+            }
         } else {
             Self {
                 schema_version: fields.schema_version,
@@ -519,6 +596,10 @@ const fn neutral_saturation() -> f32 {
 }
 
 const fn default_highlight_threshold() -> f32 {
+    HIGHLIGHT_THRESHOLD_RANGE.neutral
+}
+
+const fn default_local_ratio_detection_threshold() -> f32 {
     HIGHLIGHT_THRESHOLD_RANGE.neutral
 }
 
@@ -561,7 +642,11 @@ mod tests {
         assert_eq!(recipe.color.saturation, 1.0);
         assert_eq!(recipe.raw.highlights.method, HighlightMethod::Off);
         assert_eq!(
-            recipe.raw.highlights.threshold,
+            recipe.raw.highlights.clip.threshold,
+            HIGHLIGHT_THRESHOLD_RANGE.neutral
+        );
+        assert_eq!(
+            recipe.raw.highlights.local_ratios.detection_threshold,
             HIGHLIGHT_THRESHOLD_RANGE.neutral
         );
         assert!(recipe.validate().is_ok());
@@ -570,7 +655,7 @@ mod tests {
     #[test]
     fn deserialization_rejects_unknown_schema_versions() {
         let json = r#"{
-            "schema_version": 5,
+            "schema_version": 6,
             "light": {},
             "color": {},
             "geometry": {}
@@ -581,14 +666,15 @@ mod tests {
     #[test]
     fn missing_highlight_fields_receive_the_current_defaults() {
         let json = r#"{
-            "schema_version": 4,
+            "schema_version": 5,
             "light": {},
             "color": {},
             "geometry": {}
         }"#;
         let recipe = serde_json::from_str::<EditRecipe>(json).expect("current default fields");
         assert_eq!(recipe.raw.highlights.method, HighlightMethod::Off);
-        assert_eq!(recipe.raw.highlights.threshold, 1.0);
+        assert_eq!(recipe.raw.highlights.clip.threshold, 1.0);
+        assert_eq!(recipe.raw.highlights.local_ratios.detection_threshold, 1.0);
     }
 
     #[test]
@@ -643,7 +729,8 @@ mod tests {
         let recipe = serde_json::from_str::<EditRecipe>(json).expect("v3 migration");
         assert_eq!(recipe.schema_version, EDIT_RECIPE_SCHEMA_VERSION);
         assert_eq!(recipe.raw.highlights.method, HighlightMethod::Off);
-        assert_eq!(recipe.raw.highlights.threshold, 1.0);
+        assert_eq!(recipe.raw.highlights.clip.threshold, 1.0);
+        assert_eq!(recipe.raw.highlights.local_ratios.detection_threshold, 1.0);
     }
 
     #[test]
@@ -683,9 +770,53 @@ mod tests {
         assert!(recipe.validate().is_err());
 
         recipe.color.white_balance = WhiteBalance::AsShot;
-        recipe.raw.highlights.threshold = f32::INFINITY;
+        recipe.raw.highlights.clip.threshold = f32::INFINITY;
         assert!(recipe.validate().is_err());
-        recipe.raw.highlights.threshold = 2.0;
+        recipe.raw.highlights.clip.threshold = 2.0;
         assert!(recipe.validate().is_err());
+
+        recipe.raw.highlights.clip.threshold = 1.0;
+        recipe.raw.highlights.local_ratios.detection_threshold = 2.0;
+        assert!(recipe.validate().is_err());
+    }
+
+    #[test]
+    fn version_four_clip_threshold_migrates_without_loss() {
+        let json = r#"{
+            "schema_version": 4,
+            "raw": { "highlights": { "method": "clip", "threshold": 1.23 } },
+            "light": {},
+            "color": {},
+            "geometry": {}
+        }"#;
+        let recipe = serde_json::from_str::<EditRecipe>(json).expect("v4 migration");
+        assert_eq!(recipe.schema_version, EDIT_RECIPE_SCHEMA_VERSION);
+        assert_eq!(recipe.raw.highlights.method, HighlightMethod::Clip);
+        assert_eq!(recipe.raw.highlights.clip.threshold, 1.23);
+        assert_eq!(recipe.raw.highlights.local_ratios.detection_threshold, 1.0);
+    }
+
+    #[test]
+    fn local_ratios_serializes_and_round_trips_its_own_threshold() {
+        let mut recipe = EditRecipe::default();
+        recipe.raw.highlights.method = HighlightMethod::LocalRatios;
+        recipe.raw.highlights.local_ratios.detection_threshold = 0.72;
+        recipe.raw.highlights.clip.threshold = 1.31;
+        let json = serde_json::to_string(&recipe).expect("serialize recipe");
+        let round_trip = serde_json::from_str::<EditRecipe>(&json).expect("deserialize recipe");
+        assert_eq!(round_trip, recipe);
+    }
+
+    #[test]
+    fn switching_methods_does_not_copy_thresholds() {
+        let mut recipe = EditRecipe::default();
+        recipe.raw.highlights.clip.threshold = 1.3;
+        recipe.raw.highlights.local_ratios.detection_threshold = 0.7;
+        recipe.raw.highlights.method = HighlightMethod::LocalRatios;
+        assert_eq!(recipe.raw.highlights.clip.threshold, 1.3);
+        assert_eq!(recipe.raw.highlights.local_ratios.detection_threshold, 0.7);
+        recipe.raw.highlights.method = HighlightMethod::Clip;
+        assert_eq!(recipe.raw.highlights.clip.threshold, 1.3);
+        assert_eq!(recipe.raw.highlights.local_ratios.detection_threshold, 0.7);
     }
 }

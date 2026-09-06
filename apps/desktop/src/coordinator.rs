@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use image::RgbImage;
 use rohditor_core::{
-    CancellationToken, ClipStats, CpuPipeline, ExportReport, ExportSettings, Histogram,
+    CancellationToken, CpuPipeline, ExportReport, ExportSettings, HighlightDiagnostics, Histogram,
     MemoryEstimate, PipelineError, PreviewOptions, RenderOptions, StageTimings, export_image,
 };
 use rohditor_demosaic::DemosaicAlgorithm;
@@ -80,7 +80,7 @@ pub(crate) struct WorkerPreviewDiagnostics {
     pub algorithm: DemosaicAlgorithm,
     pub cache_hits: PreviewCacheHits,
     pub timings: StageTimings,
-    pub highlight_stats: ClipStats,
+    pub highlight_diagnostics: HighlightDiagnostics,
     pub memory: MemoryEstimate,
     pub cache_resident_bytes: usize,
     pub workspace_reused: bool,
@@ -854,7 +854,7 @@ fn process_source_scale_preview(
                     ..PreviewCacheHits::default()
                 },
                 timings: result.timings,
-                highlight_stats: result.highlight_stats,
+                highlight_diagnostics: result.highlight_diagnostics,
                 memory: result.memory,
                 cache_resident_bytes: 0,
                 workspace_reused: false,
@@ -1007,7 +1007,7 @@ fn process_gpu_base(
         algorithm: options.render.demosaic,
         cache_hits,
         timings,
-        highlight_stats: reconstructed.highlight_stats(),
+        highlight_diagnostics: reconstructed.highlight_diagnostics(),
         memory,
         cache_resident_bytes,
         workspace_reused: false,
@@ -1039,9 +1039,11 @@ fn develop_preview(
         let image = cached.image.clone();
         let histogram = Histogram::from_display_rgb8(&image);
         let memory = cached.memory;
-        let highlight_stats = preview_cache
+        let highlight_diagnostics = preview_cache
             .demosaiced(keys)
-            .map_or_else(ClipStats::default, |base| base.highlight_stats());
+            .map_or(HighlightDiagnostics::Off, |base| {
+                base.highlight_diagnostics()
+            });
         let timings = StageTimings {
             total: copy_started.elapsed(),
             ..StageTimings::default()
@@ -1055,7 +1057,7 @@ fn develop_preview(
                 algorithm: options.render.demosaic,
                 cache_hits,
                 timings,
-                highlight_stats,
+                highlight_diagnostics,
                 memory,
                 cache_resident_bytes: preview_cache.resident_bytes(),
                 workspace_reused: false,
@@ -1081,7 +1083,7 @@ fn develop_preview(
     add_stage_timings(&mut result.timings, base_timings);
     let memory = result.memory;
     let timings = result.timings;
-    let highlight_stats = result.highlight_stats;
+    let highlight_diagnostics = result.highlight_diagnostics;
     preview_cache.insert_adjusted(keys, result.image.clone(), memory);
     let diagnostics = WorkerPreviewDiagnostics {
         backend: PreviewBackend::Cpu,
@@ -1089,7 +1091,7 @@ fn develop_preview(
         algorithm: options.render.demosaic,
         cache_hits,
         timings,
-        highlight_stats,
+        highlight_diagnostics,
         memory,
         cache_resident_bytes: preview_cache.resident_bytes(),
         workspace_reused,
@@ -1286,6 +1288,7 @@ fn sample_camera_native_patch(
 fn add_stage_timings(target: &mut StageTimings, additional: StageTimings) {
     target.metadata += additional.metadata;
     target.normalization += additional.normalization;
+    target.highlight_processing += additional.highlight_processing;
     target.highlight_clipping += additional.highlight_clipping;
     target.demosaic += additional.demosaic;
     target.resampling += additional.resampling;
@@ -1303,6 +1306,7 @@ fn gpu_base_memory(
     MemoryEstimate {
         decoded_raw_bytes: frame.mosaic.len().saturating_mul(size_of::<u16>()),
         normalized_mosaic_bytes: reconstructed.normalized_mosaic_bytes(),
+        highlight_scratch_bytes: reconstructed.highlight_scratch_bytes(),
         resample_intermediate_bytes: reconstructed.resample_intermediate_bytes(),
         linear_rgb_bytes: reconstructed.buffer_bytes(),
         display_rgb_bytes: 0,
