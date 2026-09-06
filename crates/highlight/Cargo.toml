@@ -17,5 +17,9 @@ criterion.workspace = true
 name = "clip"
 harness = false
 
+[[bench]]
+name = "local_ratios"
+harness = false
+
 [lints]
 workspace = true

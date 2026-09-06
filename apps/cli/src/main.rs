@@ -9,9 +9,9 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use rohditor_core::{
     CpuPipeline, DitherMode, ExportFormat, ExportImage, ExportMetadataPolicy, ExportSettings,
-    JPEG_QUALITY_DEFAULT, JPEG_QUALITY_MAX, JPEG_QUALITY_MIN, OutputPolicy, PngBitDepth,
-    RawCropPolicy, RenderOptions, StageTimings, export_image, paths_refer_to_same_file,
-    write_output_bytes,
+    HighlightDiagnostics, JPEG_QUALITY_DEFAULT, JPEG_QUALITY_MAX, JPEG_QUALITY_MIN, OutputPolicy,
+    PngBitDepth, RawCropPolicy, RenderOptions, StageTimings, export_image,
+    paths_refer_to_same_file, write_output_bytes,
 };
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_edit::{
@@ -133,8 +133,16 @@ enum Command {
         highlight_reconstruction: CliHighlightMethod,
 
         /// Effective normalized white threshold for highlight clipping (0.5 to 1.5).
+        #[arg(
+            long = "highlight-clip-threshold",
+            alias = "highlight-threshold",
+            allow_hyphen_values = true
+        )]
+        highlight_clip_threshold: Option<f32>,
+
+        /// Camera-native detection threshold for Local ratios (0.5 to 1.5).
         #[arg(long, allow_hyphen_values = true)]
-        highlight_threshold: Option<f32>,
+        highlight_detection_threshold: Option<f32>,
 
         /// R,G,B multipliers relative to the as-shot white balance.
         #[arg(long, value_name = "RED,GREEN,BLUE")]
@@ -263,6 +271,8 @@ enum CliHighlightMethod {
     #[default]
     Off,
     Clip,
+    #[value(name = "local-ratios")]
+    LocalRatios,
 }
 
 impl From<CliHighlightMethod> for HighlightMethod {
@@ -270,6 +280,7 @@ impl From<CliHighlightMethod> for HighlightMethod {
         match value {
             CliHighlightMethod::Off => Self::Off,
             CliHighlightMethod::Clip => Self::Clip,
+            CliHighlightMethod::LocalRatios => Self::LocalRatios,
         }
     }
 }
@@ -425,7 +436,8 @@ fn main() -> Result<()> {
             saturation,
             vibrance,
             highlight_reconstruction,
-            highlight_threshold,
+            highlight_clip_threshold,
+            highlight_detection_threshold,
             white_balance,
             temperature,
             tint,
@@ -454,7 +466,8 @@ fn main() -> Result<()> {
                 saturation,
                 vibrance,
                 highlight_reconstruction,
-                highlight_threshold,
+                highlight_clip_threshold,
+                highlight_detection_threshold,
                 white_balance,
                 temperature,
                 tint,
@@ -534,7 +547,7 @@ struct QualitySourceReport {
 struct QualityTimingReport {
     metadata: f64,
     normalization: f64,
-    highlight_clipping: f64,
+    highlight_processing: f64,
     demosaic: f64,
     resampling: f64,
     color_conversion: f64,
@@ -548,7 +561,7 @@ impl From<StageTimings> for QualityTimingReport {
         Self {
             metadata: milliseconds(value.metadata),
             normalization: milliseconds(value.normalization),
-            highlight_clipping: milliseconds(value.highlight_clipping),
+            highlight_processing: milliseconds(value.highlight_processing),
             demosaic: milliseconds(value.demosaic),
             resampling: milliseconds(value.resampling),
             color_conversion: milliseconds(value.color_conversion),
@@ -616,7 +629,8 @@ struct DevelopArguments {
     saturation: f32,
     vibrance: f32,
     highlight_reconstruction: CliHighlightMethod,
-    highlight_threshold: Option<f32>,
+    highlight_clip_threshold: Option<f32>,
+    highlight_detection_threshold: Option<f32>,
     white_balance: Option<RgbMultipliers>,
     temperature: Option<f32>,
     tint: f32,
@@ -715,7 +729,8 @@ fn extract_preview(file: &Path, output: &Path, force: bool) -> Result<()> {
 fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()> {
     validate_highlight_options(
         arguments.highlight_reconstruction,
-        arguments.highlight_threshold,
+        arguments.highlight_clip_threshold,
+        arguments.highlight_detection_threshold,
     )?;
     let export_settings = develop_export_settings(output, arguments)?;
     if paths_refer_to_same_file(file, output).with_context(|| {
@@ -776,8 +791,11 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
     recipe.color.saturation = arguments.saturation;
     recipe.color.vibrance = arguments.vibrance;
     recipe.raw.highlights.method = arguments.highlight_reconstruction.into();
-    recipe.raw.highlights.threshold = arguments
-        .highlight_threshold
+    recipe.raw.highlights.clip.threshold = arguments
+        .highlight_clip_threshold
+        .unwrap_or(HIGHLIGHT_THRESHOLD_RANGE.neutral);
+    recipe.raw.highlights.local_ratios.detection_threshold = arguments
+        .highlight_detection_threshold
         .unwrap_or(HIGHLIGHT_THRESHOLD_RANGE.neutral);
     recipe.geometry.orientation_override = arguments.orientation.map(Into::into);
     recipe
@@ -810,8 +828,31 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
         .with_context(|| format!("could not export developed image to {}", output.display()))?;
     let encode_time = encode_started.elapsed();
 
+    let highlight_report = match result.highlight_diagnostics {
+        HighlightDiagnostics::Off => "Highlight reconstruction: off".to_owned(),
+        HighlightDiagnostics::Clip(stats) => format!(
+            "Highlight Clip: {} affected, {} changed, {} nominally over-white (R {}, G {}, B {})",
+            stats.affected_sites,
+            stats.changed_sites,
+            stats.nominal_over_white_sites,
+            stats.affected_by_channel[0],
+            stats.affected_by_channel[1],
+            stats.affected_by_channel[2],
+        ),
+        HighlightDiagnostics::LocalRatios(stats) => format!(
+            "Highlight Local ratios: {} suspected, {} reconstructed, {} changed, {} fallback, {} fully unsupported (R {}, G {}, B {})",
+            stats.suspected_clipped_sites,
+            stats.reconstructed_sites,
+            stats.changed_sites,
+            stats.fallback_sites,
+            stats.fully_unsupported_sites,
+            stats.suspected_by_channel[0],
+            stats.suspected_by_channel[1],
+            stats.suspected_by_channel[2],
+        ),
+    };
     write_stdout(&format!(
-        "Developed {}x{} {}-bit sRGB {}{} with {} demosaic to {} ({} bytes, {})\n{}\nHighlight clip: {} affected, {} changed, {} nominally over-white (R {}, G {}, B {})\nEstimated CPU buffer peak: {} MiB",
+        "Developed {}x{} {}-bit sRGB {}{} with {} demosaic to {} ({} bytes, {})\n{}\n{}\nEstimated CPU buffer peak: {} MiB",
         report.width,
         report.height,
         report.bit_depth.bits(),
@@ -826,28 +867,35 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
             "no EXIF"
         },
         format_stage_timings(decode_time, result.timings, encode_time),
-        result.highlight_stats.affected_sites,
-        result.highlight_stats.changed_sites,
-        result.highlight_stats.nominal_over_white_sites,
-        result.highlight_stats.affected_by_channel[0],
-        result.highlight_stats.affected_by_channel[1],
-        result.highlight_stats.affected_by_channel[2],
+        highlight_report,
         bytes_to_mib(result.memory.estimated_peak_bytes),
     ))
 }
 
-fn validate_highlight_options(method: CliHighlightMethod, threshold: Option<f32>) -> Result<()> {
-    if threshold.is_some() && !matches!(method, CliHighlightMethod::Clip) {
-        bail!("--highlight-threshold requires --highlight-reconstruction clip");
+fn validate_highlight_options(
+    method: CliHighlightMethod,
+    clip_threshold: Option<f32>,
+    detection_threshold: Option<f32>,
+) -> Result<()> {
+    if clip_threshold.is_some() && !matches!(method, CliHighlightMethod::Clip) {
+        bail!("--highlight-clip-threshold requires --highlight-reconstruction clip");
     }
-    if let Some(value) = threshold
-        && !HIGHLIGHT_THRESHOLD_RANGE.contains(value)
-    {
-        bail!(
-            "--highlight-threshold must be finite and within {}..={}",
-            HIGHLIGHT_THRESHOLD_RANGE.minimum,
-            HIGHLIGHT_THRESHOLD_RANGE.maximum
-        );
+    if detection_threshold.is_some() && !matches!(method, CliHighlightMethod::LocalRatios) {
+        bail!("--highlight-detection-threshold requires --highlight-reconstruction local-ratios");
+    }
+    for (name, value) in [
+        ("--highlight-clip-threshold", clip_threshold),
+        ("--highlight-detection-threshold", detection_threshold),
+    ] {
+        if let Some(value) = value
+            && !HIGHLIGHT_THRESHOLD_RANGE.contains(value)
+        {
+            bail!(
+                "{name} must be finite and within {}..={}",
+                HIGHLIGHT_THRESHOLD_RANGE.minimum,
+                HIGHLIGHT_THRESHOLD_RANGE.maximum
+            );
+        }
     }
     Ok(())
 }
@@ -1381,11 +1429,11 @@ fn format_quality(format: ExportFormat) -> String {
 
 fn format_stage_timings(decode: Duration, timings: StageTimings, encode: Duration) -> String {
     format!(
-        "CPU stages: decode {:.1} ms, metadata {:.1} ms, normalize {:.1} ms, highlight clip {:.1} ms, demosaic {:.1} ms, area resize {:.1} ms, color {:.1} ms, adjustments {:.1} ms, output {:.1} ms, pipeline total {:.1} ms, export encode/commit {:.1} ms",
+        "CPU stages: decode {:.1} ms, metadata {:.1} ms, normalize {:.1} ms, highlight processing {:.1} ms, demosaic {:.1} ms, area resize {:.1} ms, color {:.1} ms, adjustments {:.1} ms, output {:.1} ms, pipeline total {:.1} ms, export encode/commit {:.1} ms",
         decode.as_secs_f64() * 1_000.0,
         timings.metadata.as_secs_f64() * 1_000.0,
         timings.normalization.as_secs_f64() * 1_000.0,
-        timings.highlight_clipping.as_secs_f64() * 1_000.0,
+        timings.highlight_processing.as_secs_f64() * 1_000.0,
         timings.demosaic.as_secs_f64() * 1_000.0,
         timings.resampling.as_secs_f64() * 1_000.0,
         timings.color_conversion.as_secs_f64() * 1_000.0,
@@ -1636,7 +1684,8 @@ mod tests {
             saturation: 1.0,
             vibrance: 0.0,
             highlight_reconstruction: CliHighlightMethod::Off,
-            highlight_threshold: None,
+            highlight_clip_threshold: None,
+            highlight_detection_threshold: None,
             white_balance: None,
             temperature: None,
             tint: 0.0,
@@ -1721,24 +1770,66 @@ mod tests {
             "output.jpg",
             "--highlight-reconstruction",
             "clip",
-            "--highlight-threshold",
+            "--highlight-clip-threshold",
             "1.25",
         ])
         .expect("clip threshold options should parse");
         let Command::Develop {
             highlight_reconstruction,
-            highlight_threshold,
+            highlight_clip_threshold,
+            highlight_detection_threshold,
             ..
         } = parsed.command
         else {
             panic!("expected develop command");
         };
         assert!(matches!(highlight_reconstruction, CliHighlightMethod::Clip));
-        assert_eq!(highlight_threshold, Some(1.25));
-        assert!(validate_highlight_options(highlight_reconstruction, highlight_threshold).is_ok());
-        assert!(validate_highlight_options(CliHighlightMethod::Off, Some(1.0)).is_err());
-        assert!(validate_highlight_options(CliHighlightMethod::Clip, Some(2.0)).is_err());
-        assert!(validate_highlight_options(CliHighlightMethod::Clip, Some(f32::NAN)).is_err());
+        assert_eq!(highlight_clip_threshold, Some(1.25));
+        assert_eq!(highlight_detection_threshold, None);
+        assert!(
+            validate_highlight_options(highlight_reconstruction, highlight_clip_threshold, None)
+                .is_ok()
+        );
+        assert!(validate_highlight_options(CliHighlightMethod::Off, Some(1.0), None).is_err());
+        assert!(validate_highlight_options(CliHighlightMethod::Clip, Some(2.0), None).is_err());
+        assert!(
+            validate_highlight_options(CliHighlightMethod::Clip, Some(f32::NAN), None).is_err()
+        );
+
+        let local = Cli::try_parse_from([
+            "rohditor-cli",
+            "develop",
+            "input.arw",
+            "output.jpg",
+            "--highlight-reconstruction",
+            "local-ratios",
+            "--highlight-detection-threshold",
+            "0.75",
+        ])
+        .expect("local-ratios threshold options should parse");
+        let Command::Develop {
+            highlight_reconstruction,
+            highlight_clip_threshold,
+            highlight_detection_threshold,
+            ..
+        } = local.command
+        else {
+            panic!("expected develop command");
+        };
+        assert!(matches!(
+            highlight_reconstruction,
+            CliHighlightMethod::LocalRatios
+        ));
+        assert_eq!(highlight_clip_threshold, None);
+        assert_eq!(highlight_detection_threshold, Some(0.75));
+        assert!(
+            validate_highlight_options(
+                highlight_reconstruction,
+                highlight_clip_threshold,
+                highlight_detection_threshold,
+            )
+            .is_ok()
+        );
     }
 
     #[test]

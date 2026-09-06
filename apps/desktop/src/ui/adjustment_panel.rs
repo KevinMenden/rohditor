@@ -559,33 +559,53 @@ fn show_light_controls(
         match highlight_method {
             HighlightMethod::Off => "Off",
             HighlightMethod::Clip => "Clip",
+            HighlightMethod::LocalRatios => "Local ratios",
         },
         |ui| {
             ui.selectable_value(&mut highlight_method, HighlightMethod::Off, "Off");
             ui.selectable_value(&mut highlight_method, HighlightMethod::Clip, "Clip");
+            ui.selectable_value(
+                &mut highlight_method,
+                HighlightMethod::LocalRatios,
+                "Local ratios",
+            );
         },
     );
     if highlight_method != document.values.highlight_method {
         document.values.highlight_method = highlight_method;
         output.highlight_method = Some(highlight_method);
     }
-    if highlight_method == HighlightMethod::Clip {
-        record_slider(
+    if !matches!(highlight_method, HighlightMethod::Off) {
+        let (label, tooltip, suffix) = match highlight_method {
+            HighlightMethod::Clip => (
+                "Effective threshold",
+                "Clip caps channel values using a white-balance-dependent treatment ceiling.",
+                "× white",
+            ),
+            HighlightMethod::LocalRatios => (
+                "Detection threshold",
+                "Lower values classify more RAW samples as potentially clipped; too low can reconstruct legitimate over-range color.",
+                "× normalized white",
+            ),
+            HighlightMethod::Off => unreachable!("Off is excluded above"),
+        };
+        let threshold_response = record_slider(
             ui,
             &mut output.interactions,
             AdjustmentTarget::HighlightThreshold,
             &mut document.values.highlight_threshold,
             AdjustmentSpec {
-                label: "Effective threshold",
+                label,
                 minimum: document.ranges.highlight_threshold.minimum,
                 maximum: document.ranges.highlight_threshold.maximum,
                 neutral: document.ranges.highlight_threshold.neutral,
                 decimals: 2,
                 step: 0.01,
-                suffix: "× white",
+                suffix,
                 scale: ValueScale::Raw,
             },
         );
+        let _ = threshold_response.on_hover_text(tooltip);
     }
     let auto_tone_response = ui
         .add_enabled_ui(document.auto_tone_available, |ui| {
@@ -1045,7 +1065,7 @@ fn record_slider(
     target: AdjustmentTarget,
     value: &mut f32,
     spec: AdjustmentSpec<'_>,
-) {
+) -> egui::Response {
     let neutral = spec.neutral;
     let response = widgets::adjustment_slider(ui, value, spec);
     if response.reset_clicked {
@@ -1066,6 +1086,7 @@ fn record_slider(
             reset: response.reset_clicked,
         });
     }
+    response.response
 }
 
 fn show_export_settings(ui: &mut egui::Ui, settings: &mut ExportUiSettings) {
