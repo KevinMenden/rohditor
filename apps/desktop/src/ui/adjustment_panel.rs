@@ -213,33 +213,47 @@ pub(crate) fn show(
                     document_summary(ui, &document);
                     show_messages(ui, &document, &mut output);
                     histogram_panel(ui, document.histogram.as_ref());
-                    show_light_controls(ui, &mut document, &mut output);
-                    show_tone_curve_controls(ui, &mut document, &mut output);
-                    show_color_controls(ui, &mut document, &mut output);
-                    show_color_mixer_controls(ui, &mut document, &mut output);
-                    show_color_grading_controls(ui, &mut document, &mut output);
 
-                    widgets::section_header(ui, "Export");
-                    show_export_settings(ui, export_settings);
-                    let export_label = if document.export_in_progress {
-                        "Exporting…"
-                    } else {
-                        "Export image…"
-                    };
-                    output.export = widgets::primary_button(
-                        ui,
-                        export_label,
-                        document.export_ready && !document.export_in_progress,
-                    )
-                    .on_hover_text("Export the full-resolution CPU-developed image")
-                    .clicked();
-                    if !document.export_ready && !document.export_in_progress {
-                        ui.label(
-                            egui::RichText::new("Available after RAW decoding completes")
-                                .small()
-                                .color(colors::TEXT_MUTED),
-                        );
-                    }
+                    widgets::adjustment_section(ui, "Light", |ui| {
+                        show_light_controls(ui, &mut document, &mut output);
+                        show_tone_curve_controls(ui, &mut document, &mut output);
+                    });
+                    widgets::adjustment_section(ui, "Color", |ui| {
+                        show_color_controls(ui, &mut document, &mut output);
+                        ui.separator();
+                        show_color_mixer_controls(ui, &mut document, &mut output);
+                        ui.separator();
+                        show_color_grading_controls(ui, &mut document, &mut output);
+                        output.reset_all = ui
+                            .add_enabled(
+                                document.has_adjustments,
+                                egui::Button::new("Reset all adjustments").frame(false),
+                            )
+                            .on_hover_text("Restore the neutral recipe")
+                            .clicked();
+                    });
+                    widgets::adjustment_section(ui, "Export", |ui| {
+                        show_export_settings(ui, export_settings);
+                        let export_label = if document.export_in_progress {
+                            "Exporting…"
+                        } else {
+                            "Export image…"
+                        };
+                        output.export = widgets::primary_button(
+                            ui,
+                            export_label,
+                            document.export_ready && !document.export_in_progress,
+                        )
+                        .on_hover_text("Export the full-resolution CPU-developed image")
+                        .clicked();
+                        if !document.export_ready && !document.export_in_progress {
+                            ui.label(
+                                egui::RichText::new("Available after RAW decoding completes")
+                                    .small()
+                                    .color(colors::TEXT_MUTED),
+                            );
+                        }
+                    });
                 });
         });
     output
@@ -250,7 +264,7 @@ fn show_tone_curve_controls(
     document: &mut DocumentPanelModel,
     output: &mut AdjustmentPanelOutput,
 ) {
-    widgets::section_header(ui, "Tone curve");
+    widgets::subsection_header(ui, "Tone curve");
     let mut values = [
         document.values.tone_curve_shadows,
         document.values.tone_curve_darks,
@@ -550,7 +564,6 @@ fn show_light_controls(
     document: &mut DocumentPanelModel,
     output: &mut AdjustmentPanelOutput,
 ) {
-    widgets::section_header(ui, "Light");
     let mut highlight_method = document.values.highlight_method;
     widgets::dropdown(
         ui,
@@ -711,7 +724,6 @@ fn show_color_controls(
     document: &mut DocumentPanelModel,
     output: &mut AdjustmentPanelOutput,
 ) {
-    widgets::section_header(ui, "Color");
     let mut mode = document.values.white_balance_mode;
     widgets::dropdown(
         ui,
@@ -873,14 +885,6 @@ fn show_color_controls(
             scale: ValueScale::OffsetPercent,
         },
     );
-
-    output.reset_all = ui
-        .add_enabled(
-            document.has_adjustments,
-            egui::Button::new("Reset all adjustments").frame(false),
-        )
-        .on_hover_text("Restore the neutral recipe")
-        .clicked();
 }
 
 fn show_color_mixer_controls(
@@ -1078,7 +1082,11 @@ fn record_slider(
     spec: AdjustmentSpec<'_>,
 ) -> egui::Response {
     let neutral = spec.neutral;
-    let response = widgets::adjustment_slider(ui, value, spec);
+    let response = if matches!(target, AdjustmentTarget::HslHue(_)) {
+        widgets::hue_adjustment_slider(ui, value, spec)
+    } else {
+        widgets::adjustment_slider(ui, value, spec)
+    };
     if response.reset_clicked {
         *value = neutral;
     }

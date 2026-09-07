@@ -18,12 +18,13 @@ pub struct EditError {
 }
 
 /// Schema version of the current non-destructive edit recipe.
-pub const EDIT_RECIPE_SCHEMA_VERSION: u32 = 6;
+pub const EDIT_RECIPE_SCHEMA_VERSION: u32 = 7;
 const LEGACY_EDIT_RECIPE_SCHEMA_VERSION: u32 = 1;
 const PREVIOUS_EDIT_RECIPE_SCHEMA_VERSION: u32 = 2;
 const PREVIOUS_RAW_EDIT_RECIPE_SCHEMA_VERSION: u32 = 3;
 const PREVIOUS_HIGHLIGHT_EDIT_RECIPE_SCHEMA_VERSION: u32 = 4;
 const PREVIOUS_LOCAL_RATIOS_EDIT_RECIPE_SCHEMA_VERSION: u32 = 5;
+const PREVIOUS_OPPOSED_EDIT_RECIPE_SCHEMA_VERSION: u32 = 6;
 
 /// Inclusive range and neutral value for one adjustment parameter.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -129,30 +130,31 @@ pub const COLOR_GRADING_RANGE: ParameterRange = ParameterRange {
 pub const HSL_CHANNEL_COUNT: usize = 8;
 
 /// White balance relative to the decoder's as-shot channel multipliers.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum WhiteBalance {
-    #[default]
     AsShot,
-    ManualMultipliers {
-        red: f32,
-        green: f32,
-        blue: f32,
-    },
-    TemperatureTint {
-        temperature: f32,
-        tint: f32,
-    },
+    ManualMultipliers { red: f32, green: f32, blue: f32 },
+    TemperatureTint { temperature: f32, tint: f32 },
 }
 
-/// Destructive RAW-stage highlight handling. `Off` remains the default so
-/// normalized over-range samples are retained for later processing stages.
+impl Default for WhiteBalance {
+    fn default() -> Self {
+        Self::TemperatureTint {
+            temperature: TEMPERATURE_RANGE.neutral,
+            tint: TINT_RANGE.neutral,
+        }
+    }
+}
+
+/// Destructive RAW-stage highlight handling. Clip is the default so the
+/// initial developed image has a useful treatment for clipped highlights.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HighlightMethod {
     #[default]
-    Off,
     Clip,
+    Off,
     LocalRatios,
     Opposed,
 }
@@ -214,7 +216,7 @@ pub struct HighlightAdjustments {
 impl Default for HighlightAdjustments {
     fn default() -> Self {
         Self {
-            method: HighlightMethod::Off,
+            method: HighlightMethod::Clip,
             clip: ClipAdjustments::default(),
             local_ratios: LocalRatioAdjustments::default(),
             opposed: OpposedAdjustments::default(),
@@ -396,7 +398,7 @@ pub struct ColorAdjustments {
 impl Default for ColorAdjustments {
     fn default() -> Self {
         Self {
-            white_balance: WhiteBalance::AsShot,
+            white_balance: WhiteBalance::default(),
             saturation: SATURATION_RANGE.neutral,
             vibrance: VIBRANCE_RANGE.neutral,
             hsl: HslAdjustments::default(),
@@ -577,7 +579,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
             color.saturation = fields.legacy_saturation.unwrap_or(color.saturation);
             Self {
                 schema_version: EDIT_RECIPE_SCHEMA_VERSION,
-                raw: RawAdjustments::default(),
+                raw: legacy_raw_adjustments(),
                 light,
                 color,
                 geometry: GeometryAdjustments {
@@ -591,7 +593,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
         ) {
             Self {
                 schema_version: EDIT_RECIPE_SCHEMA_VERSION,
-                raw: RawAdjustments::default(),
+                raw: legacy_raw_adjustments(),
                 light: fields.light,
                 color: fields.color,
                 geometry: fields.geometry,
@@ -600,6 +602,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
             fields.schema_version,
             PREVIOUS_HIGHLIGHT_EDIT_RECIPE_SCHEMA_VERSION
                 | PREVIOUS_LOCAL_RATIOS_EDIT_RECIPE_SCHEMA_VERSION
+                | PREVIOUS_OPPOSED_EDIT_RECIPE_SCHEMA_VERSION
         ) {
             Self {
                 schema_version: EDIT_RECIPE_SCHEMA_VERSION,
@@ -638,6 +641,15 @@ const fn default_opposed_detection_threshold() -> f32 {
     HIGHLIGHT_THRESHOLD_RANGE.neutral
 }
 
+fn legacy_raw_adjustments() -> RawAdjustments {
+    RawAdjustments {
+        highlights: HighlightAdjustments {
+            method: HighlightMethod::Off,
+            ..HighlightAdjustments::default()
+        },
+    }
+}
+
 fn default_hsl_channels() -> [HslChannelAdjustments; HSL_CHANNEL_COUNT] {
     [HslChannelAdjustments::default(); HSL_CHANNEL_COUNT]
 }
@@ -671,11 +683,17 @@ mod tests {
     fn neutral_recipe_has_documented_identity_values() {
         let recipe = EditRecipe::default();
         assert_eq!(recipe.schema_version, EDIT_RECIPE_SCHEMA_VERSION);
-        assert_eq!(recipe.color.white_balance, WhiteBalance::AsShot);
+        assert_eq!(
+            recipe.color.white_balance,
+            WhiteBalance::TemperatureTint {
+                temperature: 6_500.0,
+                tint: 0.0,
+            }
+        );
         assert_eq!(recipe.light.exposure_ev, 0.0);
         assert_eq!(recipe.light.contrast, 0.0);
         assert_eq!(recipe.color.saturation, 1.0);
-        assert_eq!(recipe.raw.highlights.method, HighlightMethod::Off);
+        assert_eq!(recipe.raw.highlights.method, HighlightMethod::Clip);
         assert_eq!(
             recipe.raw.highlights.clip.threshold,
             HIGHLIGHT_THRESHOLD_RANGE.neutral
@@ -694,7 +712,7 @@ mod tests {
     #[test]
     fn deserialization_rejects_unknown_schema_versions() {
         let json = r#"{
-            "schema_version": 7,
+            "schema_version": 8,
             "light": {},
             "color": {},
             "geometry": {}
@@ -705,13 +723,20 @@ mod tests {
     #[test]
     fn missing_highlight_fields_receive_the_current_defaults() {
         let json = r#"{
-            "schema_version": 6,
+            "schema_version": 7,
             "light": {},
             "color": {},
             "geometry": {}
         }"#;
         let recipe = serde_json::from_str::<EditRecipe>(json).expect("current default fields");
-        assert_eq!(recipe.raw.highlights.method, HighlightMethod::Off);
+        assert_eq!(recipe.raw.highlights.method, HighlightMethod::Clip);
+        assert_eq!(
+            recipe.color.white_balance,
+            WhiteBalance::TemperatureTint {
+                temperature: 6_500.0,
+                tint: 0.0,
+            }
+        );
         assert_eq!(recipe.raw.highlights.clip.threshold, 1.0);
         assert_eq!(recipe.raw.highlights.local_ratios.detection_threshold, 1.0);
         assert_eq!(recipe.raw.highlights.opposed.detection_threshold, 1.0);
@@ -860,6 +885,20 @@ mod tests {
         assert_eq!(recipe.schema_version, EDIT_RECIPE_SCHEMA_VERSION);
         assert_eq!(recipe.raw.highlights.local_ratios.detection_threshold, 0.74);
         assert_eq!(recipe.raw.highlights.opposed.detection_threshold, 1.0);
+    }
+
+    #[test]
+    fn version_six_recipe_migrates_with_its_explicit_method() {
+        let json = r#"{
+            "schema_version": 6,
+            "raw": { "highlights": { "method": "opposed" } },
+            "light": {},
+            "color": {},
+            "geometry": {}
+        }"#;
+        let recipe = serde_json::from_str::<EditRecipe>(json).expect("v6 migration");
+        assert_eq!(recipe.schema_version, EDIT_RECIPE_SCHEMA_VERSION);
+        assert_eq!(recipe.raw.highlights.method, HighlightMethod::Opposed);
     }
 
     #[test]

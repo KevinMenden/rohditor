@@ -1588,7 +1588,7 @@ mod tests {
 
     use image::{Rgb, RgbImage};
     use rohditor_core::{CpuPipeline, ExportFormat, JPEG_QUALITY_DEFAULT};
-    use rohditor_edit::WhiteBalance;
+    use rohditor_edit::{HighlightMethod, WhiteBalance};
     use rohditor_raw::{
         CameraColorMatrix, CaptureMetadata, CfaPattern, LevelPattern, PhotometricInterpretation,
         RawError, RawSession,
@@ -1721,6 +1721,8 @@ mod tests {
         let frame = Arc::new(fake_frame());
         let options = PreviewOptions::default();
         let mut cache = PreviewCache::default();
+        let mut initial_recipe = EditRecipe::default();
+        initial_recipe.raw.highlights.method = HighlightMethod::Off;
         let initial = PreviewJob {
             ticket: PreviewTicket {
                 document_id: 9,
@@ -1728,7 +1730,7 @@ mod tests {
                 sequence: 0,
             },
             frame: Arc::clone(&frame),
-            recipe: EditRecipe::default(),
+            recipe: initial_recipe.clone(),
             options,
             backend: PreviewBackend::Cpu,
             resolution: PreviewResolution::Fit,
@@ -1754,7 +1756,7 @@ mod tests {
             },
             frame,
             recipe: {
-                let mut recipe = EditRecipe::default();
+                let mut recipe = initial_recipe;
                 recipe.light.exposure_ev = 1.0;
                 recipe
             },
@@ -1815,6 +1817,7 @@ mod tests {
         assert!(!invalid_schema_hits.adjusted);
 
         let mut white_balance_recipe = EditRecipe::default();
+        white_balance_recipe.raw.highlights.method = HighlightMethod::Off;
         white_balance_recipe.color.white_balance = WhiteBalance::ManualMultipliers {
             red: 1.1,
             green: 1.0,
