@@ -3336,7 +3336,10 @@ mod tests {
 
     #[test]
     fn gpu_base_reuse_requires_matching_raw_highlight_semantics() {
-        let off = HighlightAdjustments::default();
+        let off = HighlightAdjustments {
+            method: HighlightMethod::Off,
+            ..HighlightAdjustments::default()
+        };
         let mut clip = off;
         clip.method = HighlightMethod::Clip;
 

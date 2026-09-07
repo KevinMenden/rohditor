@@ -12,6 +12,12 @@ pub(crate) enum ValueScale {
     OffsetPercent,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SliderTrack {
+    Standard,
+    Hue,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct AdjustmentSpec<'a> {
     pub label: &'a str,
@@ -33,6 +39,23 @@ pub(crate) fn adjustment_slider(
     ui: &mut egui::Ui,
     value: &mut f32,
     spec: AdjustmentSpec<'_>,
+) -> AdjustmentResponse {
+    adjustment_slider_with_track(ui, value, spec, SliderTrack::Standard)
+}
+
+pub(crate) fn hue_adjustment_slider(
+    ui: &mut egui::Ui,
+    value: &mut f32,
+    spec: AdjustmentSpec<'_>,
+) -> AdjustmentResponse {
+    adjustment_slider_with_track(ui, value, spec, SliderTrack::Hue)
+}
+
+fn adjustment_slider_with_track(
+    ui: &mut egui::Ui,
+    value: &mut f32,
+    spec: AdjustmentSpec<'_>,
+    track: SliderTrack,
 ) -> AdjustmentResponse {
     let mut reset_clicked = false;
     let value_response = ui
@@ -68,13 +91,24 @@ pub(crate) fn adjustment_slider(
         .inner;
 
     let available = ui.available_width();
+    if track == SliderTrack::Hue {
+        let slider_rect = egui::Rect::from_min_size(
+            ui.cursor().min,
+            egui::vec2(available, ui.spacing().interact_size.y),
+        );
+        paint_hue_slider_track(ui, slider_rect);
+    }
     let slider_response = ui
         .scope(|ui| {
             ui.spacing_mut().slider_width = available;
+            if track == SliderTrack::Hue {
+                ui.spacing_mut().slider_rail_height = 0.0;
+                ui.visuals_mut().widgets.inactive.bg_fill = colors::PANEL_RAISED;
+            }
             ui.add(
                 egui::Slider::new(value, spec.minimum..=spec.maximum)
                     .show_value(false)
-                    .trailing_fill(true)
+                    .trailing_fill(track != SliderTrack::Hue)
                     .step_by(spec.step),
             )
         })
@@ -89,6 +123,63 @@ pub(crate) fn adjustment_slider(
         response,
         reset_clicked,
     }
+}
+
+const HUE_RAMP: [egui::Color32; 7] = [
+    egui::Color32::from_rgb(220, 55, 55),
+    egui::Color32::from_rgb(235, 205, 45),
+    egui::Color32::from_rgb(65, 185, 85),
+    egui::Color32::from_rgb(45, 185, 185),
+    egui::Color32::from_rgb(65, 105, 220),
+    egui::Color32::from_rgb(190, 65, 190),
+    egui::Color32::from_rgb(220, 55, 55),
+];
+
+fn paint_hue_slider_track(ui: &egui::Ui, rect: egui::Rect) {
+    let rail = egui::Rect::from_center_size(
+        rect.center(),
+        egui::vec2(rect.width(), ui.spacing().slider_rail_height.max(6.0)),
+    );
+    let painter = ui.painter().with_clip_rect(rail);
+    const SEGMENTS: usize = 48;
+    for index in 0..SEGMENTS {
+        let start = index as f32 / SEGMENTS as f32;
+        let end = (index + 1) as f32 / SEGMENTS as f32;
+        let x_start = egui::lerp(rail.left()..=rail.right(), start);
+        let x_end = egui::lerp(rail.left()..=rail.right(), end);
+        painter.rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(x_start, rail.top()),
+                egui::pos2(x_end + 1.0, rail.bottom()),
+            ),
+            0.0,
+            hue_ramp_color((start + end) * 0.5),
+        );
+    }
+    painter.rect_stroke(
+        rail,
+        3.0,
+        egui::Stroke::new(1.0_f32, colors::TEXT.gamma_multiply(0.35)),
+        egui::StrokeKind::Inside,
+    );
+}
+
+fn hue_ramp_color(position: f32) -> egui::Color32 {
+    let position = position.clamp(0.0, 1.0);
+    let scaled = position * (HUE_RAMP.len() - 1) as f32;
+    let index = (scaled.floor() as usize).min(HUE_RAMP.len() - 2);
+    let fraction = scaled - index as f32;
+    let start = HUE_RAMP[index];
+    let end = HUE_RAMP[index + 1];
+    egui::Color32::from_rgb(
+        interpolate_channel(start.r(), end.r(), fraction),
+        interpolate_channel(start.g(), end.g(), fraction),
+        interpolate_channel(start.b(), end.b(), fraction),
+    )
+}
+
+fn interpolate_channel(start: u8, end: u8, fraction: f32) -> u8 {
+    (f32::from(start) + (f32::from(end) - f32::from(start)) * fraction).round() as u8
 }
 
 fn paint_neutral_marker(ui: &egui::Ui, rect: egui::Rect, spec: AdjustmentSpec<'_>) {
@@ -120,6 +211,28 @@ pub(crate) fn section_header(ui: &mut egui::Ui, title: &str) {
         ui.add(egui::Separator::default().horizontal().spacing(1.0));
     });
     ui.add_space(5.0);
+}
+
+pub(crate) fn subsection_header(ui: &mut egui::Ui, title: &str) {
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(title).strong().color(colors::TEXT));
+        ui.add(egui::Separator::default().horizontal().spacing(1.0));
+    });
+    ui.add_space(5.0);
+}
+
+pub(crate) fn adjustment_section(
+    ui: &mut egui::Ui,
+    title: &str,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) {
+    theme::adjustment_section_frame().show(ui, |ui| {
+        ui.label(egui::RichText::new(title).size(14.0).strong());
+        ui.add_space(7.0);
+        add_contents(ui);
+    });
+    ui.add_space(metrics::ADJUSTMENT_SECTION_GAP);
 }
 
 pub(crate) fn icon_button(
@@ -340,5 +453,13 @@ mod tests {
         };
         assert_eq!(format_adjustment_value(0.35, spec), "+0.35");
         assert_eq!(parse_adjustment_value("+0.35 EV", spec), Some(0.35));
+    }
+
+    #[test]
+    fn hue_ramp_wraps_back_to_red() {
+        assert_eq!(hue_ramp_color(0.0), HUE_RAMP[0]);
+        assert_eq!(hue_ramp_color(1.0), HUE_RAMP[HUE_RAMP.len() - 1]);
+        assert_ne!(hue_ramp_color(0.25), HUE_RAMP[0]);
+        assert_ne!(hue_ramp_color(0.75), HUE_RAMP[0]);
     }
 }
