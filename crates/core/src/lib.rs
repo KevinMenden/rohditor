@@ -25,9 +25,9 @@ pub use color::{
     convert_rec2020_to_display_srgb, linear_srgb_to_srgb, srgb_to_linear_srgb,
 };
 pub use cpu::{
-    HSL_CHANNEL_CENTERS, apply_adjustments, evaluate_tone_curve, hsl_channel_weights,
-    hsl_channel_weights_from_display_rgb, normalize_raw, normalize_raw_preview,
-    render_display_srgb8, render_display_srgb8_dithered,
+    HSL_CHANNEL_CENTERS, HSL_HUE_SHIFT_PER_FULL_VALUE, apply_adjustments, evaluate_tone_curve,
+    hsl_channel_weights, hsl_channel_weights_from_display_rgb, normalize_raw,
+    normalize_raw_preview, render_display_srgb8, render_display_srgb8_dithered,
     render_display_srgb8_dithered_with_geometry, render_display_srgb8_with_geometry,
     render_display_srgb16, render_display_srgb16_with_geometry, white_balance_gains,
     white_balance_gains_from_calibration,
