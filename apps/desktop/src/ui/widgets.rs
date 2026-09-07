@@ -1,6 +1,7 @@
 use std::hash::Hash;
 
 use eframe::egui;
+use rohditor_core::HSL_HUE_SHIFT_PER_FULL_VALUE;
 
 use super::icons::{self, Icon};
 use super::theme::{self, colors, metrics};
@@ -12,10 +13,12 @@ pub(crate) enum ValueScale {
     OffsetPercent,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 enum SliderTrack {
     Standard,
-    Hue,
+    Hue { center: f32 },
+    Temperature,
+    Tint,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -47,8 +50,25 @@ pub(crate) fn hue_adjustment_slider(
     ui: &mut egui::Ui,
     value: &mut f32,
     spec: AdjustmentSpec<'_>,
+    center: f32,
 ) -> AdjustmentResponse {
-    adjustment_slider_with_track(ui, value, spec, SliderTrack::Hue)
+    adjustment_slider_with_track(ui, value, spec, SliderTrack::Hue { center })
+}
+
+pub(crate) fn temperature_adjustment_slider(
+    ui: &mut egui::Ui,
+    value: &mut f32,
+    spec: AdjustmentSpec<'_>,
+) -> AdjustmentResponse {
+    adjustment_slider_with_track(ui, value, spec, SliderTrack::Temperature)
+}
+
+pub(crate) fn tint_adjustment_slider(
+    ui: &mut egui::Ui,
+    value: &mut f32,
+    spec: AdjustmentSpec<'_>,
+) -> AdjustmentResponse {
+    adjustment_slider_with_track(ui, value, spec, SliderTrack::Tint)
 }
 
 fn adjustment_slider_with_track(
@@ -91,24 +111,24 @@ fn adjustment_slider_with_track(
         .inner;
 
     let available = ui.available_width();
-    if track == SliderTrack::Hue {
+    if !matches!(track, SliderTrack::Standard) {
         let slider_rect = egui::Rect::from_min_size(
             ui.cursor().min,
             egui::vec2(available, ui.spacing().interact_size.y),
         );
-        paint_hue_slider_track(ui, slider_rect);
+        paint_colored_slider_track(ui, slider_rect, track, spec);
     }
     let slider_response = ui
         .scope(|ui| {
             ui.spacing_mut().slider_width = available;
-            if track == SliderTrack::Hue {
+            if !matches!(track, SliderTrack::Standard) {
                 ui.spacing_mut().slider_rail_height = 0.0;
                 ui.visuals_mut().widgets.inactive.bg_fill = colors::PANEL_RAISED;
             }
             ui.add(
                 egui::Slider::new(value, spec.minimum..=spec.maximum)
                     .show_value(false)
-                    .trailing_fill(track != SliderTrack::Hue)
+                    .trailing_fill(matches!(track, SliderTrack::Standard))
                     .step_by(spec.step),
             )
         })
@@ -125,17 +145,31 @@ fn adjustment_slider_with_track(
     }
 }
 
-const HUE_RAMP: [egui::Color32; 7] = [
-    egui::Color32::from_rgb(220, 55, 55),
-    egui::Color32::from_rgb(235, 205, 45),
-    egui::Color32::from_rgb(65, 185, 85),
-    egui::Color32::from_rgb(45, 185, 185),
-    egui::Color32::from_rgb(65, 105, 220),
-    egui::Color32::from_rgb(190, 65, 190),
-    egui::Color32::from_rgb(220, 55, 55),
+const HUE_RAMP: [(f32, egui::Color32); 9] = [
+    (0.0, egui::Color32::from_rgb(220, 66, 67)),
+    (30.0 / 360.0, egui::Color32::from_rgb(232, 132, 48)),
+    (60.0 / 360.0, egui::Color32::from_rgb(220, 190, 50)),
+    (120.0 / 360.0, egui::Color32::from_rgb(72, 174, 91)),
+    (180.0 / 360.0, egui::Color32::from_rgb(52, 181, 178)),
+    (240.0 / 360.0, egui::Color32::from_rgb(65, 116, 220)),
+    (270.0 / 360.0, egui::Color32::from_rgb(139, 87, 213)),
+    (300.0 / 360.0, egui::Color32::from_rgb(205, 75, 164)),
+    (1.0, egui::Color32::from_rgb(220, 66, 67)),
 ];
 
-fn paint_hue_slider_track(ui: &egui::Ui, rect: egui::Rect) {
+const TEMPERATURE_COOL: egui::Color32 = egui::Color32::from_rgb(72, 143, 222);
+const TEMPERATURE_NEUTRAL: egui::Color32 = egui::Color32::from_rgb(220, 224, 214);
+const TEMPERATURE_WARM: egui::Color32 = egui::Color32::from_rgb(239, 177, 63);
+const TINT_GREEN: egui::Color32 = egui::Color32::from_rgb(72, 180, 96);
+const TINT_NEUTRAL: egui::Color32 = egui::Color32::from_rgb(220, 220, 220);
+const TINT_MAGENTA: egui::Color32 = egui::Color32::from_rgb(205, 75, 164);
+
+fn paint_colored_slider_track(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    track: SliderTrack,
+    spec: AdjustmentSpec<'_>,
+) {
     let rail = egui::Rect::from_center_size(
         rect.center(),
         egui::vec2(rect.width(), ui.spacing().slider_rail_height.max(6.0)),
@@ -153,7 +187,7 @@ fn paint_hue_slider_track(ui: &egui::Ui, rect: egui::Rect) {
                 egui::pos2(x_end + 1.0, rail.bottom()),
             ),
             0.0,
-            hue_ramp_color((start + end) * 0.5),
+            slider_track_color(track, spec, (start + end) * 0.5),
         );
     }
     painter.rect_stroke(
@@ -164,13 +198,71 @@ fn paint_hue_slider_track(ui: &egui::Ui, rect: egui::Rect) {
     );
 }
 
-fn hue_ramp_color(position: f32) -> egui::Color32 {
-    let position = position.clamp(0.0, 1.0);
-    let scaled = position * (HUE_RAMP.len() - 1) as f32;
-    let index = (scaled.floor() as usize).min(HUE_RAMP.len() - 2);
-    let fraction = scaled - index as f32;
-    let start = HUE_RAMP[index];
-    let end = HUE_RAMP[index + 1];
+fn slider_track_color(
+    track: SliderTrack,
+    spec: AdjustmentSpec<'_>,
+    position: f32,
+) -> egui::Color32 {
+    match track {
+        SliderTrack::Standard => colors::FIELD,
+        SliderTrack::Hue { center } => {
+            let value = egui::lerp(spec.minimum..=spec.maximum, position);
+            hue_ramp_color(hue_for_slider_value(value, center))
+        }
+        SliderTrack::Temperature => two_sided_ramp_color(
+            position,
+            normalized_value(spec.neutral, spec),
+            TEMPERATURE_COOL,
+            TEMPERATURE_NEUTRAL,
+            TEMPERATURE_WARM,
+        ),
+        SliderTrack::Tint => two_sided_ramp_color(
+            position,
+            normalized_value(spec.neutral, spec),
+            TINT_GREEN,
+            TINT_NEUTRAL,
+            TINT_MAGENTA,
+        ),
+    }
+}
+
+fn normalized_value(value: f32, spec: AdjustmentSpec<'_>) -> f32 {
+    ((value - spec.minimum) / (spec.maximum - spec.minimum)).clamp(0.0, 1.0)
+}
+
+fn two_sided_ramp_color(
+    position: f32,
+    neutral_position: f32,
+    low: egui::Color32,
+    neutral: egui::Color32,
+    high: egui::Color32,
+) -> egui::Color32 {
+    if position <= neutral_position {
+        let fraction = position / neutral_position.max(f32::EPSILON);
+        interpolate_color(low, neutral, fraction)
+    } else {
+        let fraction = (position - neutral_position) / (1.0 - neutral_position).max(f32::EPSILON);
+        interpolate_color(neutral, high, fraction)
+    }
+}
+
+fn hue_for_slider_value(value: f32, center: f32) -> f32 {
+    (center + value * HSL_HUE_SHIFT_PER_FULL_VALUE).rem_euclid(1.0)
+}
+
+fn hue_ramp_color(hue: f32) -> egui::Color32 {
+    let hue = hue.rem_euclid(1.0);
+    let index = HUE_RAMP
+        .windows(2)
+        .position(|window| hue >= window[0].0 && hue <= window[1].0)
+        .unwrap_or(HUE_RAMP.len() - 2);
+    let (start_hue, start) = HUE_RAMP[index];
+    let (end_hue, end) = HUE_RAMP[index + 1];
+    let fraction = ((hue - start_hue) / (end_hue - start_hue)).clamp(0.0, 1.0);
+    interpolate_color(start, end, fraction)
+}
+
+fn interpolate_color(start: egui::Color32, end: egui::Color32, fraction: f32) -> egui::Color32 {
     egui::Color32::from_rgb(
         interpolate_channel(start.r(), end.r(), fraction),
         interpolate_channel(start.g(), end.g(), fraction),
@@ -457,9 +549,25 @@ mod tests {
 
     #[test]
     fn hue_ramp_wraps_back_to_red() {
-        assert_eq!(hue_ramp_color(0.0), HUE_RAMP[0]);
-        assert_eq!(hue_ramp_color(1.0), HUE_RAMP[HUE_RAMP.len() - 1]);
-        assert_ne!(hue_ramp_color(0.25), HUE_RAMP[0]);
-        assert_ne!(hue_ramp_color(0.75), HUE_RAMP[0]);
+        assert_eq!(hue_ramp_color(0.0), HUE_RAMP[0].1);
+        assert_eq!(hue_ramp_color(1.0), HUE_RAMP[0].1);
+        assert_ne!(hue_ramp_color(0.25), HUE_RAMP[0].1);
+        assert_ne!(hue_ramp_color(0.75), HUE_RAMP[0].1);
+    }
+
+    #[test]
+    fn hue_track_matches_the_processing_shift_and_selected_center() {
+        let center = 60.0 / 360.0;
+        assert!((hue_for_slider_value(0.0, center) - center).abs() < 1.0e-6);
+        assert!(
+            (hue_for_slider_value(1.0, center) - (center + HSL_HUE_SHIFT_PER_FULL_VALUE)).abs()
+                < 1.0e-6
+        );
+        assert!(
+            (hue_for_slider_value(-1.0, center)
+                - (center - HSL_HUE_SHIFT_PER_FULL_VALUE).rem_euclid(1.0))
+            .abs()
+                < 1.0e-6
+        );
     }
 }

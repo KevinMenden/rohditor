@@ -1,5 +1,5 @@
 use eframe::egui;
-use rohditor_core::{Histogram, evaluate_tone_curve};
+use rohditor_core::{HSL_CHANNEL_CENTERS, Histogram, evaluate_tone_curve};
 use rohditor_edit::{HighlightMethod, ToneCurve};
 
 use super::PickerMode;
@@ -633,7 +633,13 @@ fn show_light_controls(
     }
     let auto_tone_response = ui
         .add_enabled_ui(document.auto_tone_available, |ui| {
-            ui.small_button("Auto tone")
+            ui.add_sized(
+                egui::vec2(ui.available_width(), 34.0),
+                egui::Button::new(egui::RichText::new("Auto tone").strong())
+                    .fill(colors::ACCENT)
+                    .stroke(egui::Stroke::new(1.0_f32, colors::ACCENT_ACTIVE))
+                    .corner_radius(metrics::RADIUS_SMALL),
+            )
         })
         .inner
         .on_hover_text(if document.auto_tone_available {
@@ -724,6 +730,7 @@ fn show_color_controls(
     document: &mut DocumentPanelModel,
     output: &mut AdjustmentPanelOutput,
 ) {
+    widgets::subsection_header(ui, "White balance");
     let mut mode = document.values.white_balance_mode;
     widgets::dropdown(
         ui,
@@ -853,6 +860,7 @@ fn show_color_controls(
         }
     }
 
+    widgets::subsection_header(ui, "Saturation & vibrance");
     record_slider(
         ui,
         &mut output.interactions,
@@ -1082,10 +1090,15 @@ fn record_slider(
     spec: AdjustmentSpec<'_>,
 ) -> egui::Response {
     let neutral = spec.neutral;
-    let response = if matches!(target, AdjustmentTarget::HslHue(_)) {
-        widgets::hue_adjustment_slider(ui, value, spec)
-    } else {
-        widgets::adjustment_slider(ui, value, spec)
+    let response = match target {
+        AdjustmentTarget::WhiteBalanceTemperature => {
+            widgets::temperature_adjustment_slider(ui, value, spec)
+        }
+        AdjustmentTarget::WhiteBalanceTint => widgets::tint_adjustment_slider(ui, value, spec),
+        AdjustmentTarget::HslHue(channel) => {
+            widgets::hue_adjustment_slider(ui, value, spec, HSL_CHANNEL_CENTERS[channel])
+        }
+        _ => widgets::adjustment_slider(ui, value, spec),
     };
     if response.reset_clicked {
         *value = neutral;
