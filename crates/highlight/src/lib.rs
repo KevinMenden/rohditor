@@ -8,19 +8,25 @@ mod cells;
 mod clip;
 mod detect;
 mod local_ratios;
+mod opposed;
 
 pub use clip::{ClipOutput, clip, clip_cancellable};
 pub use detect::{
     detect_clipping, detect_clipping_cancellable, detect_local_ratios,
-    detect_local_ratios_cancellable,
+    detect_local_ratios_cancellable, detect_opposed, detect_opposed_cancellable,
 };
 pub use local_ratios::{
     local_ratio_scratch_bytes, reconstruct_local_ratios, reconstruct_local_ratios_cancellable,
 };
+pub use opposed::{opposed_scratch_bytes, reconstruct_opposed, reconstruct_opposed_cancellable};
 
 /// Version of the deterministic Local ratios estimator used in recipe/cache
 /// identities. Numerical contract changes must increment this value.
 pub const LOCAL_RATIOS_ALGORITHM_VERSION: u8 = 1;
+
+/// Version of the deterministic Opposed estimator used in recipe/cache
+/// identities. Numerical contract changes must increment this value.
+pub const OPPOSED_ALGORITHM_VERSION: u8 = 1;
 
 use rohditor_image::ImageError;
 use thiserror::Error;
@@ -60,7 +66,7 @@ impl ChannelClipLevels {
 
 /// Camera-native thresholds used to classify samples that may have lost
 /// highlight information. These levels intentionally do not contain active
-/// white-balance gains; Local ratios runs before white balance.
+/// white-balance gains; Local ratios and Opposed run before white balance.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ChannelDetectionLevels {
     pub red: f32,
@@ -89,6 +95,15 @@ impl ChannelDetectionLevels {
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn for_channel(self, channel: usize) -> f32 {
+        match channel {
+            0 => self.red,
+            1 => self.green,
+            2 => self.blue,
+            _ => unreachable!("Bayer channel index is always in range"),
+        }
     }
 }
 
@@ -131,6 +146,47 @@ impl ReconstructionStats {
 pub struct LocalRatioOutput {
     pub mosaic: rohditor_image::MosaicImage<f32>,
     pub stats: ReconstructionStats,
+}
+
+/// Configuration for version-one Opposed / local-inpainting reconstruction.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OpposedOptions {
+    pub detection_levels: ChannelDetectionLevels,
+}
+
+/// Counts produced by Opposed / local-inpainting reconstruction.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OpposedStats {
+    pub suspected_clipped_sites: usize,
+    pub reconstructed_sites: usize,
+    pub changed_sites: usize,
+    pub fallback_sites: usize,
+    pub fully_unsupported_sites: usize,
+    pub suspected_by_channel: [usize; 3],
+}
+
+impl OpposedStats {
+    pub(crate) fn add_assign(&mut self, other: Self) {
+        self.suspected_clipped_sites += other.suspected_clipped_sites;
+        self.reconstructed_sites += other.reconstructed_sites;
+        self.changed_sites += other.changed_sites;
+        self.fallback_sites += other.fallback_sites;
+        self.fully_unsupported_sites += other.fully_unsupported_sites;
+        for (target, source) in self
+            .suspected_by_channel
+            .iter_mut()
+            .zip(other.suspected_by_channel)
+        {
+            *target += source;
+        }
+    }
+}
+
+/// Output of Opposed / local-inpainting reconstruction.
+#[derive(Debug, PartialEq)]
+pub struct OpposedOutput {
+    pub mosaic: rohditor_image::MosaicImage<f32>,
+    pub stats: OpposedStats,
 }
 
 /// Counts produced by the fused Clip pass.

@@ -294,6 +294,48 @@ fn local_ratios_is_camera_native_and_supports_dynamic_white_balance() -> Result<
 }
 
 #[test]
+fn opposed_is_camera_native_and_supports_dynamic_white_balance() -> Result<(), Box<dyn Error>> {
+    let frame = constant_normalized_frame(1.2);
+    let options = PreviewOptions {
+        render: RenderOptions {
+            demosaic: rohditor_demosaic::DemosaicAlgorithm::Bilinear,
+            ..RenderOptions::default()
+        },
+        max_long_edge: usize::MAX,
+    };
+    let mut opposed = EditRecipe::default();
+    opposed.raw.highlights.method = HighlightMethod::Opposed;
+    opposed.raw.highlights.opposed.detection_threshold = 0.9;
+
+    let reconstructed = CpuPipeline.prepare_preview_reconstruction(&frame, &opposed, options)?;
+    let HighlightDiagnostics::Opposed(stats) = reconstructed.highlight_diagnostics() else {
+        panic!("expected Opposed diagnostics");
+    };
+    assert_eq!(stats.suspected_clipped_sites, 24);
+    assert_eq!(stats.reconstructed_sites, 0);
+    assert_eq!(stats.fallback_sites, 24);
+    assert_eq!(stats.fully_unsupported_sites, 24);
+    assert!(reconstructed.supports_dynamic_white_balance());
+    assert!(reconstructed.highlight_scratch_bytes() > 0);
+
+    let mut changed_wb = opposed.clone();
+    changed_wb.color.white_balance = WhiteBalance::ManualMultipliers {
+        red: 1.2,
+        green: 1.0,
+        blue: 0.8,
+    };
+    let reused =
+        CpuPipeline.prepare_preview_base_from_reconstruction(&reconstructed, &changed_wb)?;
+    let fresh = CpuPipeline.prepare_preview_base(&frame, &changed_wb, options)?;
+    assert_eq!(reused.image(), fresh.image());
+    assert_eq!(
+        reused.highlight_diagnostics(),
+        fresh.highlight_diagnostics()
+    );
+    Ok(())
+}
+
+#[test]
 fn off_ignores_an_inactive_threshold_when_reusing_preview_stages() -> Result<(), Box<dyn Error>> {
     let frame = synthetic_rggb_frame();
     let mut recipe = EditRecipe::default();

@@ -124,3 +124,20 @@ pub fn detect_local_ratios_cancellable(
         data,
     ))
 }
+
+/// Materialize Opposed's camera-native suspected-clipping classification.
+pub fn detect_opposed(
+    mosaic: &MosaicImage<f32>,
+    levels: ChannelDetectionLevels,
+) -> Result<ClippingMask, HighlightError> {
+    detect_opposed_cancellable(mosaic, levels, &|| false)
+}
+
+/// Cancellable form of [`detect_opposed`].
+pub fn detect_opposed_cancellable(
+    mosaic: &MosaicImage<f32>,
+    levels: ChannelDetectionLevels,
+    cancellation: &dyn crate::CancellationCheck,
+) -> Result<ClippingMask, HighlightError> {
+    detect_local_ratios_cancellable(mosaic, levels, cancellation)
+}

@@ -122,6 +122,14 @@ impl CellSummaries {
     }
 }
 
+pub(crate) fn scratch_bytes(width: usize, height: usize) -> Option<usize> {
+    let cell_width = ceil_halved(width);
+    let cell_height = ceil_halved(height);
+    cell_width
+        .checked_mul(cell_height)?
+        .checked_mul(std::mem::size_of::<[f32; 3]>() + std::mem::size_of::<u8>())
+}
+
 #[must_use]
 pub(crate) const fn ceil_halved(value: usize) -> usize {
     value / 2 + value % 2

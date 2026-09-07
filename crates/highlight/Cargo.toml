@@ -21,5 +21,9 @@ harness = false
 name = "local_ratios"
 harness = false
 
+[[bench]]
+name = "opposed"
+harness = false
+
 [lints]
 workspace = true

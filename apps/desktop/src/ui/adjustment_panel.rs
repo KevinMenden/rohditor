@@ -560,6 +560,7 @@ fn show_light_controls(
             HighlightMethod::Off => "Off",
             HighlightMethod::Clip => "Clip",
             HighlightMethod::LocalRatios => "Local ratios",
+            HighlightMethod::Opposed => "Opposed / local inpainting",
         },
         |ui| {
             ui.selectable_value(&mut highlight_method, HighlightMethod::Off, "Off");
@@ -568,6 +569,11 @@ fn show_light_controls(
                 &mut highlight_method,
                 HighlightMethod::LocalRatios,
                 "Local ratios",
+            );
+            ui.selectable_value(
+                &mut highlight_method,
+                HighlightMethod::Opposed,
+                "Opposed / local inpainting",
             );
         },
     );
@@ -585,6 +591,11 @@ fn show_light_controls(
             HighlightMethod::LocalRatios => (
                 "Detection threshold",
                 "Lower values classify more RAW samples as potentially clipped; too low can reconstruct legitimate over-range color.",
+                "× normalized white",
+            ),
+            HighlightMethod::Opposed => (
+                "Detection threshold",
+                "Uses nearby opposing-channel color evidence to inpaint clipped RAW sites; unsupported sites remain unchanged.",
                 "× normalized white",
             ),
             HighlightMethod::Off => unreachable!("Off is excluded above"),
