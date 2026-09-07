@@ -2233,6 +2233,14 @@ impl RohditorApp {
                         fully_unsupported_sites: stats.fully_unsupported_sites,
                         suspected_by_channel: stats.suspected_by_channel,
                     },
+                    HighlightDiagnostics::Opposed(stats) => HighlightStatsModel::Opposed {
+                        suspected_clipped_sites: stats.suspected_clipped_sites,
+                        reconstructed_sites: stats.reconstructed_sites,
+                        changed_sites: stats.changed_sites,
+                        fallback_sites: stats.fallback_sites,
+                        fully_unsupported_sites: stats.fully_unsupported_sites,
+                        suspected_by_channel: stats.suspected_by_channel,
+                    },
                 },
                 cache_resident_bytes: preview.worker.cache_resident_bytes,
                 estimated_peak_bytes: preview.worker.memory.estimated_peak_bytes,
@@ -2517,6 +2525,15 @@ fn document_panel_model(
                         .local_ratios
                         .detection_threshold
                 }
+                HighlightMethod::Opposed => {
+                    document
+                        .edits
+                        .recipe()
+                        .raw
+                        .highlights
+                        .opposed
+                        .detection_threshold
+                }
                 HighlightMethod::Off => document.edits.recipe().raw.highlights.clip.threshold,
             },
             tone_curve_shadows: document.edits.recipe().light.tone_curve.shadows,
@@ -2777,6 +2794,10 @@ fn gpu_base_highlights_match(
             retained.local_ratios.detection_threshold.to_bits()
                 == requested.local_ratios.detection_threshold.to_bits()
         }
+        HighlightMethod::Opposed => {
+            retained.opposed.detection_threshold.to_bits()
+                == requested.opposed.detection_threshold.to_bits()
+        }
     }
 }
 
@@ -2860,6 +2881,9 @@ fn apply_adjustment_interaction(
             HighlightMethod::Clip => next.raw.highlights.clip.threshold = interaction.value,
             HighlightMethod::LocalRatios => {
                 next.raw.highlights.local_ratios.detection_threshold = interaction.value
+            }
+            HighlightMethod::Opposed => {
+                next.raw.highlights.opposed.detection_threshold = interaction.value
             }
         },
         AdjustmentTarget::ToneCurveShadows => next.light.tone_curve.shadows = interaction.value,

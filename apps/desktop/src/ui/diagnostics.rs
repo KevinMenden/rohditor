@@ -55,6 +55,14 @@ pub(crate) enum HighlightStatsModel {
         fully_unsupported_sites: usize,
         suspected_by_channel: [usize; 3],
     },
+    Opposed {
+        suspected_clipped_sites: usize,
+        reconstructed_sites: usize,
+        changed_sites: usize,
+        fallback_sites: usize,
+        fully_unsupported_sites: usize,
+        suspected_by_channel: [usize; 3],
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -267,6 +275,27 @@ pub(crate) fn show(
                 } => {
                     ui.label(format!(
                         "Highlight Local ratios: {} suspected · {} reconstructed · {} changed",
+                        suspected_clipped_sites, reconstructed_sites, changed_sites,
+                    ));
+                    ui.label(format!(
+                        "Fallback: {} · fully unsupported: {} · suspected CFA sites: R {} · G {} · B {}",
+                        fallback_sites,
+                        fully_unsupported_sites,
+                        suspected_by_channel[0],
+                        suspected_by_channel[1],
+                        suspected_by_channel[2],
+                    ));
+                }
+                HighlightStatsModel::Opposed {
+                    suspected_clipped_sites,
+                    reconstructed_sites,
+                    changed_sites,
+                    fallback_sites,
+                    fully_unsupported_sites,
+                    suspected_by_channel,
+                } => {
+                    ui.label(format!(
+                        "Highlight Opposed: {} suspected · {} reconstructed · {} changed",
                         suspected_clipped_sites, reconstructed_sites, changed_sites,
                     ));
                     ui.label(format!(
@@ -511,6 +540,14 @@ pub(crate) enum HighlightReport {
         fully_unsupported_sites: usize,
         suspected_by_channel: [usize; 3],
     },
+    Opposed {
+        suspected_clipped_sites: usize,
+        reconstructed_sites: usize,
+        changed_sites: usize,
+        fallback_sites: usize,
+        fully_unsupported_sites: usize,
+        suspected_by_channel: [usize; 3],
+    },
 }
 
 impl From<HighlightStatsModel> for HighlightReport {
@@ -536,6 +573,21 @@ impl From<HighlightStatsModel> for HighlightReport {
                 fully_unsupported_sites,
                 suspected_by_channel,
             } => Self::LocalRatios {
+                suspected_clipped_sites,
+                reconstructed_sites,
+                changed_sites,
+                fallback_sites,
+                fully_unsupported_sites,
+                suspected_by_channel,
+            },
+            HighlightStatsModel::Opposed {
+                suspected_clipped_sites,
+                reconstructed_sites,
+                changed_sites,
+                fallback_sites,
+                fully_unsupported_sites,
+                suspected_by_channel,
+            } => Self::Opposed {
                 suspected_clipped_sites,
                 reconstructed_sites,
                 changed_sites,

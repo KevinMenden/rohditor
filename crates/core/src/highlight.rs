@@ -3,7 +3,8 @@
 use rohditor_demosaic::WhiteBalanceGains;
 use rohditor_edit::{HighlightAdjustments, HighlightMethod};
 use rohditor_highlight::{
-    ChannelClipLevels, ChannelDetectionLevels, ClipOutput, ClipStats, ReconstructionStats,
+    ChannelClipLevels, ChannelDetectionLevels, ClipOutput, ClipStats, OpposedStats,
+    ReconstructionStats,
 };
 use rohditor_image::MosaicImage;
 
@@ -21,13 +22,14 @@ pub enum HighlightDiagnostics {
     Off,
     Clip(ClipStats),
     LocalRatios(ReconstructionStats),
+    Opposed(OpposedStats),
 }
 
 impl HighlightDiagnostics {
     /// Compatibility projection for callers that only understand Clip's
-    /// original counters. Local-ratio diagnostics remain available through
-    /// [`Self::local_ratios`] and are never presented as Clip statistics by
-    /// the current diagnostics path.
+    /// original counters. Reconstruction diagnostics remain available through
+    /// [`Self::local_ratios`] and [`Self::opposed`] and are never presented as
+    /// Clip statistics by the current diagnostics path.
     #[must_use]
     pub const fn legacy_clip_stats(self) -> ClipStats {
         match self {
@@ -44,6 +46,12 @@ impl HighlightDiagnostics {
                 nominal_over_white_sites: 0,
                 affected_by_channel: stats.suspected_by_channel,
             },
+            Self::Opposed(stats) => ClipStats {
+                affected_sites: stats.suspected_clipped_sites,
+                changed_sites: stats.changed_sites,
+                nominal_over_white_sites: 0,
+                affected_by_channel: stats.suspected_by_channel,
+            },
         }
     }
 
@@ -51,14 +59,22 @@ impl HighlightDiagnostics {
     pub const fn local_ratios(self) -> Option<ReconstructionStats> {
         match self {
             Self::LocalRatios(stats) => Some(stats),
-            Self::Off | Self::Clip(_) => None,
+            Self::Off | Self::Clip(_) | Self::Opposed(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn opposed(self) -> Option<OpposedStats> {
+        match self {
+            Self::Opposed(stats) => Some(stats),
+            Self::Off | Self::Clip(_) | Self::LocalRatios(_) => None,
         }
     }
 }
 
 /// Apply the selected RAW-stage highlight method. Clip uses limits that
-/// produce a common post-white-balance ceiling; Local ratios uses independent
-/// camera-native detection levels before white balance.
+/// produce a common post-white-balance ceiling; Local ratios and Opposed use
+/// independent camera-native detection levels before white balance.
 pub(crate) fn apply_cancellable(
     mosaic: MosaicImage<f32>,
     adjustments: HighlightAdjustments,
@@ -71,7 +87,8 @@ pub(crate) fn apply_cancellable(
         height = mosaic.height(),
         method = ?adjustments.method,
         clip_threshold = adjustments.clip.threshold,
-        detection_threshold = adjustments.local_ratios.detection_threshold
+        local_ratios_detection_threshold = adjustments.local_ratios.detection_threshold,
+        opposed_detection_threshold = adjustments.opposed.detection_threshold
     );
     let _guard = span.enter();
 
@@ -119,6 +136,25 @@ pub(crate) fn apply_cancellable(
             Ok(HighlightOutput {
                 mosaic: output.mosaic,
                 diagnostics: HighlightDiagnostics::LocalRatios(output.stats),
+            })
+        }
+        HighlightMethod::Opposed => {
+            let level = adjustments.opposed.detection_threshold;
+            let levels = ChannelDetectionLevels {
+                red: level,
+                green: level,
+                blue: level,
+            };
+            let output = rohditor_highlight::reconstruct_opposed_cancellable(
+                mosaic,
+                rohditor_highlight::OpposedOptions {
+                    detection_levels: levels,
+                },
+                &|| cancellation.is_cancelled(),
+            )?;
+            Ok(HighlightOutput {
+                mosaic: output.mosaic,
+                diagnostics: HighlightDiagnostics::Opposed(output.stats),
             })
         }
     }

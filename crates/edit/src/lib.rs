@@ -18,11 +18,12 @@ pub struct EditError {
 }
 
 /// Schema version of the current non-destructive edit recipe.
-pub const EDIT_RECIPE_SCHEMA_VERSION: u32 = 5;
+pub const EDIT_RECIPE_SCHEMA_VERSION: u32 = 6;
 const LEGACY_EDIT_RECIPE_SCHEMA_VERSION: u32 = 1;
 const PREVIOUS_EDIT_RECIPE_SCHEMA_VERSION: u32 = 2;
 const PREVIOUS_RAW_EDIT_RECIPE_SCHEMA_VERSION: u32 = 3;
 const PREVIOUS_HIGHLIGHT_EDIT_RECIPE_SCHEMA_VERSION: u32 = 4;
+const PREVIOUS_LOCAL_RATIOS_EDIT_RECIPE_SCHEMA_VERSION: u32 = 5;
 
 /// Inclusive range and neutral value for one adjustment parameter.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -153,6 +154,7 @@ pub enum HighlightMethod {
     Off,
     Clip,
     LocalRatios,
+    Opposed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -183,6 +185,20 @@ impl Default for LocalRatioAdjustments {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct OpposedAdjustments {
+    #[serde(default = "default_opposed_detection_threshold")]
+    pub detection_threshold: f32,
+}
+
+impl Default for OpposedAdjustments {
+    fn default() -> Self {
+        Self {
+            detection_threshold: HIGHLIGHT_THRESHOLD_RANGE.neutral,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct HighlightAdjustments {
     #[serde(default)]
@@ -191,6 +207,8 @@ pub struct HighlightAdjustments {
     pub clip: ClipAdjustments,
     #[serde(default)]
     pub local_ratios: LocalRatioAdjustments,
+    #[serde(default)]
+    pub opposed: OpposedAdjustments,
 }
 
 impl Default for HighlightAdjustments {
@@ -199,6 +217,7 @@ impl Default for HighlightAdjustments {
             method: HighlightMethod::Off,
             clip: ClipAdjustments::default(),
             local_ratios: LocalRatioAdjustments::default(),
+            opposed: OpposedAdjustments::default(),
         }
     }
 }
@@ -211,6 +230,8 @@ struct HighlightAdjustmentsFields {
     clip: Option<ClipAdjustments>,
     #[serde(default)]
     local_ratios: Option<LocalRatioAdjustments>,
+    #[serde(default)]
+    opposed: Option<OpposedAdjustments>,
     // Schema version 4 stored Clip's threshold directly on this object.
     #[serde(default, rename = "threshold")]
     legacy_threshold: Option<f32>,
@@ -230,6 +251,7 @@ impl<'de> Deserialize<'de> for HighlightAdjustments {
             method: fields.method,
             clip,
             local_ratios: fields.local_ratios.unwrap_or_default(),
+            opposed: fields.opposed.unwrap_or_default(),
         })
     }
 }
@@ -428,6 +450,11 @@ impl EditRecipe {
             HIGHLIGHT_THRESHOLD_RANGE,
         )?;
         validate_parameter(
+            "raw.highlights.opposed.detection_threshold",
+            self.raw.highlights.opposed.detection_threshold,
+            HIGHLIGHT_THRESHOLD_RANGE,
+        )?;
+        validate_parameter(
             "light.exposure_ev",
             self.light.exposure_ev,
             EXPOSURE_EV_RANGE,
@@ -569,7 +596,11 @@ impl<'de> Deserialize<'de> for EditRecipe {
                 color: fields.color,
                 geometry: fields.geometry,
             }
-        } else if fields.schema_version == PREVIOUS_HIGHLIGHT_EDIT_RECIPE_SCHEMA_VERSION {
+        } else if matches!(
+            fields.schema_version,
+            PREVIOUS_HIGHLIGHT_EDIT_RECIPE_SCHEMA_VERSION
+                | PREVIOUS_LOCAL_RATIOS_EDIT_RECIPE_SCHEMA_VERSION
+        ) {
             Self {
                 schema_version: EDIT_RECIPE_SCHEMA_VERSION,
                 raw: fields.raw,
@@ -600,6 +631,10 @@ const fn default_highlight_threshold() -> f32 {
 }
 
 const fn default_local_ratio_detection_threshold() -> f32 {
+    HIGHLIGHT_THRESHOLD_RANGE.neutral
+}
+
+const fn default_opposed_detection_threshold() -> f32 {
     HIGHLIGHT_THRESHOLD_RANGE.neutral
 }
 
@@ -649,13 +684,17 @@ mod tests {
             recipe.raw.highlights.local_ratios.detection_threshold,
             HIGHLIGHT_THRESHOLD_RANGE.neutral
         );
+        assert_eq!(
+            recipe.raw.highlights.opposed.detection_threshold,
+            HIGHLIGHT_THRESHOLD_RANGE.neutral
+        );
         assert!(recipe.validate().is_ok());
     }
 
     #[test]
     fn deserialization_rejects_unknown_schema_versions() {
         let json = r#"{
-            "schema_version": 6,
+            "schema_version": 7,
             "light": {},
             "color": {},
             "geometry": {}
@@ -666,7 +705,7 @@ mod tests {
     #[test]
     fn missing_highlight_fields_receive_the_current_defaults() {
         let json = r#"{
-            "schema_version": 5,
+            "schema_version": 6,
             "light": {},
             "color": {},
             "geometry": {}
@@ -675,6 +714,7 @@ mod tests {
         assert_eq!(recipe.raw.highlights.method, HighlightMethod::Off);
         assert_eq!(recipe.raw.highlights.clip.threshold, 1.0);
         assert_eq!(recipe.raw.highlights.local_ratios.detection_threshold, 1.0);
+        assert_eq!(recipe.raw.highlights.opposed.detection_threshold, 1.0);
     }
 
     #[test]
@@ -731,6 +771,7 @@ mod tests {
         assert_eq!(recipe.raw.highlights.method, HighlightMethod::Off);
         assert_eq!(recipe.raw.highlights.clip.threshold, 1.0);
         assert_eq!(recipe.raw.highlights.local_ratios.detection_threshold, 1.0);
+        assert_eq!(recipe.raw.highlights.opposed.detection_threshold, 1.0);
     }
 
     #[test]
@@ -778,6 +819,10 @@ mod tests {
         recipe.raw.highlights.clip.threshold = 1.0;
         recipe.raw.highlights.local_ratios.detection_threshold = 2.0;
         assert!(recipe.validate().is_err());
+
+        recipe.raw.highlights.local_ratios.detection_threshold = 1.0;
+        recipe.raw.highlights.opposed.detection_threshold = 2.0;
+        assert!(recipe.validate().is_err());
     }
 
     #[test]
@@ -794,6 +839,27 @@ mod tests {
         assert_eq!(recipe.raw.highlights.method, HighlightMethod::Clip);
         assert_eq!(recipe.raw.highlights.clip.threshold, 1.23);
         assert_eq!(recipe.raw.highlights.local_ratios.detection_threshold, 1.0);
+        assert_eq!(recipe.raw.highlights.opposed.detection_threshold, 1.0);
+    }
+
+    #[test]
+    fn version_five_recipe_migrates_with_an_opposed_default() {
+        let json = r#"{
+            "schema_version": 5,
+            "raw": {
+                "highlights": {
+                    "method": "local_ratios",
+                    "local_ratios": { "detection_threshold": 0.74 }
+                }
+            },
+            "light": {},
+            "color": {},
+            "geometry": {}
+        }"#;
+        let recipe = serde_json::from_str::<EditRecipe>(json).expect("v5 migration");
+        assert_eq!(recipe.schema_version, EDIT_RECIPE_SCHEMA_VERSION);
+        assert_eq!(recipe.raw.highlights.local_ratios.detection_threshold, 0.74);
+        assert_eq!(recipe.raw.highlights.opposed.detection_threshold, 1.0);
     }
 
     #[test]
@@ -801,6 +867,7 @@ mod tests {
         let mut recipe = EditRecipe::default();
         recipe.raw.highlights.method = HighlightMethod::LocalRatios;
         recipe.raw.highlights.local_ratios.detection_threshold = 0.72;
+        recipe.raw.highlights.opposed.detection_threshold = 0.83;
         recipe.raw.highlights.clip.threshold = 1.31;
         let json = serde_json::to_string(&recipe).expect("serialize recipe");
         let round_trip = serde_json::from_str::<EditRecipe>(&json).expect("deserialize recipe");
@@ -812,11 +879,14 @@ mod tests {
         let mut recipe = EditRecipe::default();
         recipe.raw.highlights.clip.threshold = 1.3;
         recipe.raw.highlights.local_ratios.detection_threshold = 0.7;
+        recipe.raw.highlights.opposed.detection_threshold = 0.8;
         recipe.raw.highlights.method = HighlightMethod::LocalRatios;
         assert_eq!(recipe.raw.highlights.clip.threshold, 1.3);
         assert_eq!(recipe.raw.highlights.local_ratios.detection_threshold, 0.7);
+        assert_eq!(recipe.raw.highlights.opposed.detection_threshold, 0.8);
         recipe.raw.highlights.method = HighlightMethod::Clip;
         assert_eq!(recipe.raw.highlights.clip.threshold, 1.3);
         assert_eq!(recipe.raw.highlights.local_ratios.detection_threshold, 0.7);
+        assert_eq!(recipe.raw.highlights.opposed.detection_threshold, 0.8);
     }
 }

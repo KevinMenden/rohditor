@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use rohditor_core::{
     CpuPreviewWorkspace, DemosaicedBase, LOCAL_RATIOS_ALGORITHM_VERSION, MemoryEstimate,
-    OutputPolicy, PreviewOptions, RawCropPolicy, ReconstructedPreview,
+    OPPOSED_ALGORITHM_VERSION, OutputPolicy, PreviewOptions, RawCropPolicy, ReconstructedPreview,
 };
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_edit::{EditRecipe, HighlightMethod, WhiteBalance};
@@ -43,7 +43,7 @@ impl PreviewCacheKeys {
             // Bump when the retained source representation changes. The GPU
             // boundary now consumes camera-native samples rather than a
             // camera-converted base.
-            reconstruction_version: 5,
+            reconstruction_version: 6,
         };
         let demosaiced = DemosaicedBaseKey {
             reconstructed: reconstructed.clone(),
@@ -135,6 +135,10 @@ enum HighlightKey {
         detection_threshold_bits: u32,
         algorithm_version: u8,
     },
+    Opposed {
+        detection_threshold_bits: u32,
+        algorithm_version: u8,
+    },
 }
 
 impl HighlightKey {
@@ -153,6 +157,15 @@ impl HighlightKey {
                     .detection_threshold
                     .to_bits(),
                 algorithm_version: LOCAL_RATIOS_ALGORITHM_VERSION,
+            },
+            HighlightMethod::Opposed => Self::Opposed {
+                detection_threshold_bits: recipe
+                    .raw
+                    .highlights
+                    .opposed
+                    .detection_threshold
+                    .to_bits(),
+                algorithm_version: OPPOSED_ALGORITHM_VERSION,
             },
         }
     }
@@ -542,6 +555,28 @@ mod tests {
         assert_ne!(
             local_keys.reconstructed,
             keys(&local_threshold).reconstructed
+        );
+
+        let mut opposed = off.clone();
+        opposed.raw.highlights.method = HighlightMethod::Opposed;
+        let opposed_keys = keys(&opposed);
+        assert_ne!(local_keys.reconstructed, opposed_keys.reconstructed);
+        assert_ne!(off_keys.reconstructed, opposed_keys.reconstructed);
+        assert_eq!(opposed_keys.reconstructed, keys(&opposed).reconstructed);
+        assert_eq!(
+            opposed_keys.reconstructed,
+            keys(&{
+                let mut changed_wb = opposed.clone();
+                changed_wb.color.white_balance = off_wb.color.white_balance;
+                changed_wb
+            })
+            .reconstructed
+        );
+        let mut opposed_threshold = opposed;
+        opposed_threshold.raw.highlights.opposed.detection_threshold = 1.25;
+        assert_ne!(
+            opposed_keys.reconstructed,
+            keys(&opposed_threshold).reconstructed
         );
     }
 }

@@ -140,7 +140,7 @@ enum Command {
         )]
         highlight_clip_threshold: Option<f32>,
 
-        /// Camera-native detection threshold for Local ratios (0.5 to 1.5).
+        /// Camera-native detection threshold for Local ratios or Opposed (0.5 to 1.5).
         #[arg(long, allow_hyphen_values = true)]
         highlight_detection_threshold: Option<f32>,
 
@@ -273,6 +273,8 @@ enum CliHighlightMethod {
     Clip,
     #[value(name = "local-ratios")]
     LocalRatios,
+    #[value(name = "opposed")]
+    Opposed,
 }
 
 impl From<CliHighlightMethod> for HighlightMethod {
@@ -281,6 +283,7 @@ impl From<CliHighlightMethod> for HighlightMethod {
             CliHighlightMethod::Off => Self::Off,
             CliHighlightMethod::Clip => Self::Clip,
             CliHighlightMethod::LocalRatios => Self::LocalRatios,
+            CliHighlightMethod::Opposed => Self::Opposed,
         }
     }
 }
@@ -794,9 +797,18 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
     recipe.raw.highlights.clip.threshold = arguments
         .highlight_clip_threshold
         .unwrap_or(HIGHLIGHT_THRESHOLD_RANGE.neutral);
-    recipe.raw.highlights.local_ratios.detection_threshold = arguments
+    let detection_threshold = arguments
         .highlight_detection_threshold
         .unwrap_or(HIGHLIGHT_THRESHOLD_RANGE.neutral);
+    match recipe.raw.highlights.method {
+        HighlightMethod::LocalRatios => {
+            recipe.raw.highlights.local_ratios.detection_threshold = detection_threshold;
+        }
+        HighlightMethod::Opposed => {
+            recipe.raw.highlights.opposed.detection_threshold = detection_threshold;
+        }
+        HighlightMethod::Off | HighlightMethod::Clip => {}
+    }
     recipe.geometry.orientation_override = arguments.orientation.map(Into::into);
     recipe
         .validate()
@@ -850,6 +862,17 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
             stats.suspected_by_channel[1],
             stats.suspected_by_channel[2],
         ),
+        HighlightDiagnostics::Opposed(stats) => format!(
+            "Highlight Opposed: {} suspected, {} reconstructed, {} changed, {} fallback, {} fully unsupported (R {}, G {}, B {})",
+            stats.suspected_clipped_sites,
+            stats.reconstructed_sites,
+            stats.changed_sites,
+            stats.fallback_sites,
+            stats.fully_unsupported_sites,
+            stats.suspected_by_channel[0],
+            stats.suspected_by_channel[1],
+            stats.suspected_by_channel[2],
+        ),
     };
     write_stdout(&format!(
         "Developed {}x{} {}-bit sRGB {}{} with {} demosaic to {} ({} bytes, {})\n{}\n{}\nEstimated CPU buffer peak: {} MiB",
@@ -880,8 +903,15 @@ fn validate_highlight_options(
     if clip_threshold.is_some() && !matches!(method, CliHighlightMethod::Clip) {
         bail!("--highlight-clip-threshold requires --highlight-reconstruction clip");
     }
-    if detection_threshold.is_some() && !matches!(method, CliHighlightMethod::LocalRatios) {
-        bail!("--highlight-detection-threshold requires --highlight-reconstruction local-ratios");
+    if detection_threshold.is_some()
+        && !matches!(
+            method,
+            CliHighlightMethod::LocalRatios | CliHighlightMethod::Opposed
+        )
+    {
+        bail!(
+            "--highlight-detection-threshold requires --highlight-reconstruction local-ratios or opposed"
+        );
     }
     for (name, value) in [
         ("--highlight-clip-threshold", clip_threshold),
@@ -1826,6 +1856,39 @@ mod tests {
             validate_highlight_options(
                 highlight_reconstruction,
                 highlight_clip_threshold,
+                highlight_detection_threshold,
+            )
+            .is_ok()
+        );
+
+        let opposed = Cli::try_parse_from([
+            "rohditor-cli",
+            "develop",
+            "input.arw",
+            "output.jpg",
+            "--highlight-reconstruction",
+            "opposed",
+            "--highlight-detection-threshold",
+            "0.8",
+        ])
+        .expect("Opposed threshold options should parse");
+        let Command::Develop {
+            highlight_reconstruction,
+            highlight_detection_threshold,
+            ..
+        } = opposed.command
+        else {
+            panic!("expected develop command");
+        };
+        assert!(matches!(
+            highlight_reconstruction,
+            CliHighlightMethod::Opposed
+        ));
+        assert_eq!(highlight_detection_threshold, Some(0.8));
+        assert!(
+            validate_highlight_options(
+                highlight_reconstruction,
+                None,
                 highlight_detection_threshold,
             )
             .is_ok()

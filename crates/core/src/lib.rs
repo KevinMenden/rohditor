@@ -46,4 +46,7 @@ pub use pipeline::{
     DemosaicedBase, ExportRenderResult, MemoryEstimate, OutputPolicy, PreviewOptions,
     RawCropPolicy, ReconstructedPreview, RenderOptions, RenderResult, StageTimings,
 };
-pub use rohditor_highlight::{ClipStats, LOCAL_RATIOS_ALGORITHM_VERSION, ReconstructionStats};
+pub use rohditor_highlight::{
+    ClipStats, LOCAL_RATIOS_ALGORITHM_VERSION, OPPOSED_ALGORITHM_VERSION, OpposedStats,
+    ReconstructionStats,
+};

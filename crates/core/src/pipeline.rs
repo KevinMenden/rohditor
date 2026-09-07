@@ -1050,6 +1050,10 @@ fn highlight_adjustments_match(
             retained.local_ratios.detection_threshold.to_bits()
                 == requested.local_ratios.detection_threshold.to_bits()
         }
+        HighlightMethod::Opposed => {
+            retained.opposed.detection_threshold.to_bits()
+                == requested.opposed.detection_threshold.to_bits()
+        }
     }
 }
 
@@ -1059,16 +1063,24 @@ fn estimated_highlight_scratch_bytes(
     width: usize,
     height: usize,
 ) -> Result<usize, PipelineError> {
-    if method == HighlightMethod::LocalRatios
-        && diagnostics
-            .local_ratios()
-            .is_some_and(|stats| stats.suspected_clipped_sites > 0)
-    {
-        rohditor_highlight::local_ratio_scratch_bytes(width, height)
-            .ok_or_else(|| dimension_overflow(width, height))
-    } else {
-        Ok(0)
+    let needs_scratch = match diagnostics {
+        HighlightDiagnostics::LocalRatios(stats) if method == HighlightMethod::LocalRatios => {
+            stats.suspected_clipped_sites > 0
+        }
+        HighlightDiagnostics::Opposed(stats) if method == HighlightMethod::Opposed => {
+            stats.suspected_clipped_sites > 0
+        }
+        _ => false,
+    };
+    if !needs_scratch {
+        return Ok(0);
     }
+    let scratch = match method {
+        HighlightMethod::LocalRatios => rohditor_highlight::local_ratio_scratch_bytes,
+        HighlightMethod::Opposed => rohditor_highlight::opposed_scratch_bytes,
+        HighlightMethod::Off | HighlightMethod::Clip => unreachable!("scratch is not needed"),
+    };
+    scratch(width, height).ok_or_else(|| dimension_overflow(width, height))
 }
 
 fn render_base(
@@ -1186,11 +1198,16 @@ fn validate_base_working_set(
     let linear_bytes = full_pixels
         .checked_mul(3 * size_of::<f32>())
         .ok_or_else(|| dimension_overflow(frame.info.width, frame.info.height))?;
-    let highlight_scratch_bytes = if highlight_method == HighlightMethod::LocalRatios {
-        rohditor_highlight::local_ratio_scratch_bytes(frame.info.width, frame.info.height)
-            .ok_or_else(|| dimension_overflow(frame.info.width, frame.info.height))?
-    } else {
-        0
+    let highlight_scratch_bytes = match highlight_method {
+        HighlightMethod::LocalRatios => {
+            rohditor_highlight::local_ratio_scratch_bytes(frame.info.width, frame.info.height)
+                .ok_or_else(|| dimension_overflow(frame.info.width, frame.info.height))?
+        }
+        HighlightMethod::Opposed => {
+            rohditor_highlight::opposed_scratch_bytes(frame.info.width, frame.info.height)
+                .ok_or_else(|| dimension_overflow(frame.info.width, frame.info.height))?
+        }
+        HighlightMethod::Off | HighlightMethod::Clip => 0,
     };
     let highlight_peak = normalized_bytes
         .checked_add(highlight_scratch_bytes)
@@ -1230,11 +1247,16 @@ fn validate_preview_working_set(
         .checked_mul(full_height)
         .and_then(|pixels| pixels.checked_mul(3 * size_of::<f32>()))
         .ok_or_else(|| dimension_overflow(target_width, full_height))?;
-    let highlight_scratch_bytes = if highlight_method == HighlightMethod::LocalRatios {
-        rohditor_highlight::local_ratio_scratch_bytes(full_width, full_height)
-            .ok_or_else(|| dimension_overflow(full_width, full_height))?
-    } else {
-        0
+    let highlight_scratch_bytes = match highlight_method {
+        HighlightMethod::LocalRatios => {
+            rohditor_highlight::local_ratio_scratch_bytes(full_width, full_height)
+                .ok_or_else(|| dimension_overflow(full_width, full_height))?
+        }
+        HighlightMethod::Opposed => {
+            rohditor_highlight::opposed_scratch_bytes(full_width, full_height)
+                .ok_or_else(|| dimension_overflow(full_width, full_height))?
+        }
+        HighlightMethod::Off | HighlightMethod::Clip => 0,
     };
     let demosaic_peak = normalized_bytes
         .checked_add(full_linear_bytes)

@@ -21,11 +21,7 @@ const MAXIMUM_ESTIMATE_MULTIPLIER: f32 = 4.0;
 /// deterministic working-set estimate; allocator bookkeeping is not included.
 #[must_use]
 pub fn local_ratio_scratch_bytes(width: usize, height: usize) -> Option<usize> {
-    let cell_width = crate::cells::ceil_halved(width);
-    let cell_height = crate::cells::ceil_halved(height);
-    cell_width
-        .checked_mul(cell_height)?
-        .checked_mul(std::mem::size_of::<[f32; 3]>() + std::mem::size_of::<u8>())
+    crate::cells::scratch_bytes(width, height)
 }
 
 /// Reconstruct suspected-clipped Bayer sites from bounded local channel
@@ -319,20 +315,5 @@ fn median(values: &[f32]) -> f32 {
         (values[middle - 1] + values[middle]) * 0.5
     } else {
         values[middle]
-    }
-}
-
-trait DetectionLevelsForChannel {
-    fn for_channel(self, channel: usize) -> f32;
-}
-
-impl DetectionLevelsForChannel for ChannelDetectionLevels {
-    fn for_channel(self, channel: usize) -> f32 {
-        match channel {
-            0 => self.red,
-            1 => self.green,
-            2 => self.blue,
-            _ => unreachable!("Bayer channel index is always in range"),
-        }
     }
 }
