@@ -58,6 +58,20 @@ impl RohditorApp {
                     document.info = Some(*info);
                 }
             }
+            WorkerEvent::OpticsMatchReady {
+                document_id,
+                result,
+                candidates,
+                database,
+                error,
+            } => {
+                if let Some(document) = self.document.as_mut().filter(|doc| doc.id == document_id) {
+                    document.optics_match = result;
+                    document.optics_candidates = candidates;
+                    document.optics_database = database;
+                    document.optics_error = error;
+                }
+            }
             WorkerEvent::PlaceholderReady { document_id, image } => {
                 if let Some(document) = self.document.as_mut().filter(|doc| doc.id == document_id)
                     && !matches!(

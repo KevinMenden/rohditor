@@ -13,6 +13,7 @@ mod error;
 mod export;
 mod geometry;
 mod highlight;
+mod optics;
 mod output;
 mod pipeline;
 mod resample;
@@ -44,6 +45,7 @@ pub use export::{
 };
 pub use geometry::{OutputGeometry, ResolvedCropRect};
 pub use highlight::HighlightDiagnostics;
+pub use optics::optics_query_from_info;
 pub use output::{paths_refer_to_same_file, write_output_bytes};
 pub use pipeline::{
     CPU_WORKING_SET_LIMIT_BYTES, CpuPipeline, CpuPreviewWorkspace, DEFAULT_PREVIEW_LONG_EDGE,
@@ -53,4 +55,9 @@ pub use pipeline::{
 pub use rohditor_highlight::{
     ClipStats, LOCAL_RATIOS_ALGORITHM_VERSION, OPPOSED_ALGORITHM_VERSION, OpposedStats,
     ReconstructionStats,
+};
+pub use rohditor_optics::{
+    CorrectionComponents, DatabaseProvenance, LensProfileSummary, MetadataField,
+    OPTICS_ALGORITHM_VERSION, OpticsError, OpticsProvenance, OpticsQuery, OpticsService,
+    ProfileMatch, ProfileRequest,
 };
