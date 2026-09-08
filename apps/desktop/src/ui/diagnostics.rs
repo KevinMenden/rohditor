@@ -79,6 +79,7 @@ pub(crate) struct GpuModel {
 pub(crate) struct PreviewModel {
     pub backend: String,
     pub algorithm: String,
+    pub profile: String,
     pub source_state: String,
     pub cache: CacheModel,
     pub timings: TimingModel,
@@ -197,6 +198,7 @@ pub(crate) fn show(
                 "{} source · {} demosaic",
                 preview.source_state, preview.algorithm
             ));
+            ui.weak(format!("Camera colour: {}", preview.profile));
             egui::Grid::new("preview_cache_diagnostics")
                 .num_columns(2)
                 .show(ui, |ui| {
@@ -424,6 +426,7 @@ impl From<QueueModel> for QueueReport {
 pub(crate) struct PreviewReport<'a> {
     pub backend: &'a str,
     pub algorithm: &'a str,
+    pub profile: &'a str,
     pub source_state: &'a str,
     pub cache: CacheReport,
     pub timings_ms: TimingReport,
@@ -438,6 +441,7 @@ impl<'a> From<&'a PreviewModel> for PreviewReport<'a> {
         Self {
             backend: &value.backend,
             algorithm: &value.algorithm,
+            profile: &value.profile,
             source_state: &value.source_state,
             cache: CacheReport::from(value.cache),
             timings_ms: TimingReport::from(value.timings),

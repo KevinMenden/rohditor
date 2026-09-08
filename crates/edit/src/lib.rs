@@ -1,6 +1,8 @@
+use rohditor_camera_profile::MatrixCameraProfile;
 use rohditor_image::Orientation;
 use serde::de::Error as _;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::ser::SerializeStruct;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 mod geometry;
@@ -18,12 +20,13 @@ pub struct EditError {
 }
 
 /// Schema version of the current non-destructive edit recipe.
-pub const EDIT_RECIPE_SCHEMA_VERSION: u32 = 6;
+pub const EDIT_RECIPE_SCHEMA_VERSION: u32 = 7;
 const LEGACY_EDIT_RECIPE_SCHEMA_VERSION: u32 = 1;
 const PREVIOUS_EDIT_RECIPE_SCHEMA_VERSION: u32 = 2;
 const PREVIOUS_RAW_EDIT_RECIPE_SCHEMA_VERSION: u32 = 3;
 const PREVIOUS_HIGHLIGHT_EDIT_RECIPE_SCHEMA_VERSION: u32 = 4;
 const PREVIOUS_LOCAL_RATIOS_EDIT_RECIPE_SCHEMA_VERSION: u32 = 5;
+const PREVIOUS_CAMERA_PROFILE_EDIT_RECIPE_SCHEMA_VERSION: u32 = 6;
 
 /// Inclusive range and neutral value for one adjustment parameter.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -143,6 +146,63 @@ pub enum WhiteBalance {
         temperature: f32,
         tint: f32,
     },
+}
+
+/// Camera color transform selected for a recipe. Automatic is intentionally
+/// the default and retains the decoder's existing matrix behavior.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum CameraProfileSelection {
+    #[default]
+    Automatic,
+    Matrix(MatrixCameraProfile),
+}
+
+impl Serialize for CameraProfileSelection {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut fields = serializer.serialize_struct("CameraProfileSelection", 2)?;
+        match self {
+            Self::Automatic => {
+                fields.serialize_field("mode", "automatic")?;
+                fields.serialize_field("profile", &Option::<&MatrixCameraProfile>::None)?;
+            }
+            Self::Matrix(profile) => {
+                fields.serialize_field("mode", "matrix")?;
+                fields.serialize_field("profile", profile)?;
+            }
+        }
+        fields.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for CameraProfileSelection {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Fields {
+            mode: String,
+            #[serde(default)]
+            profile: Option<MatrixCameraProfile>,
+        }
+
+        let fields = Fields::deserialize(deserializer)?;
+        match fields.mode.as_str() {
+            "automatic" if fields.profile.is_none() => Ok(Self::Automatic),
+            "matrix" => fields.profile.map(Self::Matrix).ok_or_else(|| {
+                D::Error::custom("matrix camera profile selection is missing profile")
+            }),
+            "automatic" => Err(D::Error::custom(
+                "automatic camera profile selection must not include a profile",
+            )),
+            other => Err(D::Error::custom(format!(
+                "unknown camera profile selection mode {other}"
+            ))),
+        }
+    }
 }
 
 /// Destructive RAW-stage highlight handling. `Off` remains the default so
@@ -382,6 +442,8 @@ impl Default for LightAdjustments {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ColorAdjustments {
     #[serde(default)]
+    pub camera_profile: CameraProfileSelection,
+    #[serde(default)]
     pub white_balance: WhiteBalance,
     #[serde(default = "neutral_saturation")]
     pub saturation: f32,
@@ -396,6 +458,7 @@ pub struct ColorAdjustments {
 impl Default for ColorAdjustments {
     fn default() -> Self {
         Self {
+            camera_profile: CameraProfileSelection::Automatic,
             white_balance: WhiteBalance::AsShot,
             saturation: SATURATION_RANGE.neutral,
             vibrance: VIBRANCE_RANGE.neutral,
@@ -438,6 +501,12 @@ impl EditRecipe {
                     self.schema_version, EDIT_RECIPE_SCHEMA_VERSION
                 ),
             });
+        }
+        if let CameraProfileSelection::Matrix(profile) = &self.color.camera_profile {
+            profile.validate().map_err(|error| EditError {
+                field: "color.camera_profile",
+                reason: error.to_string(),
+            })?;
         }
         validate_parameter(
             "raw.highlights.clip.threshold",
@@ -600,6 +669,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
             fields.schema_version,
             PREVIOUS_HIGHLIGHT_EDIT_RECIPE_SCHEMA_VERSION
                 | PREVIOUS_LOCAL_RATIOS_EDIT_RECIPE_SCHEMA_VERSION
+                | PREVIOUS_CAMERA_PROFILE_EDIT_RECIPE_SCHEMA_VERSION
         ) {
             Self {
                 schema_version: EDIT_RECIPE_SCHEMA_VERSION,
@@ -663,8 +733,8 @@ fn validate_parameter(
 #[cfg(test)]
 mod tests {
     use super::{
-        EDIT_RECIPE_SCHEMA_VERSION, EditRecipe, HIGHLIGHT_THRESHOLD_RANGE, HighlightMethod,
-        NormalizedCropRect, WhiteBalance,
+        CameraProfileSelection, EDIT_RECIPE_SCHEMA_VERSION, EditRecipe, HIGHLIGHT_THRESHOLD_RANGE,
+        HighlightMethod, NormalizedCropRect, WhiteBalance,
     };
 
     #[test]
@@ -694,12 +764,23 @@ mod tests {
     #[test]
     fn deserialization_rejects_unknown_schema_versions() {
         let json = r#"{
-            "schema_version": 7,
+            "schema_version": 8,
             "light": {},
             "color": {},
             "geometry": {}
         }"#;
         assert!(serde_json::from_str::<EditRecipe>(json).is_err());
+    }
+
+    #[test]
+    fn camera_profile_selection_round_trips_without_a_path() {
+        let json = serde_json::to_string(&EditRecipe::default()).expect("serialize recipe");
+        assert!(json.contains("\"camera_profile\""));
+        let recipe: EditRecipe = serde_json::from_str(&json).expect("deserialize recipe");
+        assert_eq!(
+            recipe.color.camera_profile,
+            CameraProfileSelection::Automatic
+        );
     }
 
     #[test]

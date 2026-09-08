@@ -17,12 +17,16 @@ mod output;
 mod pipeline;
 mod resample;
 
+pub use rohditor_camera_profile::CAMERA_PROFILE_EVALUATOR_VERSION;
+
 pub use analysis::Histogram;
 pub use cancel::CancellationToken;
 pub use color::{
-    CameraColorTransform, LINEAR_REC2020_TO_XYZ_D65, Matrix3, XYZ_D65_TO_LINEAR_REC2020,
-    XYZ_D65_TO_LINEAR_SRGB, adapt_xyz_to_d65, camera_color_transform, clip_linear_srgb_for_output,
-    convert_rec2020_to_display_srgb, linear_srgb_to_srgb, srgb_to_linear_srgb,
+    CameraCalibration, CameraColorTransform, CameraProfileKey, CameraProfileProvenance,
+    LINEAR_REC2020_TO_XYZ_D65, Matrix3, ResolvedCameraColour, XYZ_D65_TO_LINEAR_REC2020,
+    XYZ_D65_TO_LINEAR_SRGB, adapt_xyz_to_d65, camera_color_transform, camera_profile_key,
+    clip_linear_srgb_for_output, convert_rec2020_to_display_srgb, linear_srgb_to_srgb,
+    resolve_camera_colour, srgb_to_linear_srgb,
 };
 pub use cpu::{
     HSL_CHANNEL_CENTERS, apply_adjustments, evaluate_tone_curve, hsl_channel_weights,

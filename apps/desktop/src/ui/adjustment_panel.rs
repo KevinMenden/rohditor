@@ -1,6 +1,6 @@
 use eframe::egui;
 use rohditor_core::{Histogram, evaluate_tone_curve};
-use rohditor_edit::{HighlightMethod, ToneCurve};
+use rohditor_edit::{CameraProfileSelection, HighlightMethod, ToneCurve};
 
 use super::PickerMode;
 use super::theme::{self, colors, metrics};
@@ -100,6 +100,14 @@ pub(crate) struct AdjustmentValues {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct CameraProfileChoice {
+    pub selection: CameraProfileSelection,
+    pub label: String,
+    pub detail: String,
+    pub tooltip: String,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct DocumentPanelModel {
     pub file_name: String,
     pub camera: Option<String>,
@@ -107,6 +115,8 @@ pub(crate) struct DocumentPanelModel {
     pub revision: u64,
     pub has_adjustments: bool,
     pub values: AdjustmentValues,
+    pub camera_profile: CameraProfileSelection,
+    pub camera_profile_choices: Vec<CameraProfileChoice>,
     pub ranges: AdjustmentRanges,
     pub export_ready: bool,
     pub export_in_progress: bool,
@@ -132,6 +142,8 @@ pub(crate) struct AdjustmentInteraction {
 
 #[derive(Debug, Default)]
 pub(crate) struct AdjustmentPanelOutput {
+    pub camera_profile: Option<CameraProfileSelection>,
+    pub import_camera_profile: bool,
     pub white_balance_mode: Option<WhiteBalanceMode>,
     pub highlight_method: Option<HighlightMethod>,
     pub picker_mode: Option<Option<PickerMode>>,
@@ -712,6 +724,51 @@ fn show_color_controls(
     output: &mut AdjustmentPanelOutput,
 ) {
     widgets::section_header(ui, "Color");
+    let mut profile_index = document
+        .camera_profile_choices
+        .iter()
+        .position(|choice| choice.selection == document.camera_profile)
+        .unwrap_or(0);
+    let selected_profile = document.camera_profile_choices.get(profile_index);
+    widgets::dropdown(
+        ui,
+        "camera_profile",
+        "Camera profile",
+        selected_profile.map_or("Automatic (RAW / decoder matrix)", |choice| {
+            choice.label.as_str()
+        }),
+        |ui| {
+            for (index, choice) in document.camera_profile_choices.iter().enumerate() {
+                ui.selectable_value(&mut profile_index, index, &choice.label)
+                    .on_hover_text(&choice.tooltip);
+            }
+        },
+    );
+    if let Some(choice) = document.camera_profile_choices.get(profile_index) {
+        ui.label(
+            egui::RichText::new(&choice.detail)
+                .small()
+                .color(colors::TEXT_MUTED),
+        );
+        if profile_index
+            != document
+                .camera_profile_choices
+                .iter()
+                .position(|candidate| candidate.selection == document.camera_profile)
+                .unwrap_or(0)
+        {
+            output.camera_profile = Some(choice.selection.clone());
+            document.camera_profile = choice.selection.clone();
+        }
+    }
+    if ui
+        .small_button("Import DCP…")
+        .on_hover_text("Validate and install a compatible matrix-only DCP camera profile")
+        .clicked()
+    {
+        output.import_camera_profile = true;
+    }
+    ui.add_space(4.0);
     let mut mode = document.values.white_balance_mode;
     widgets::dropdown(
         ui,
