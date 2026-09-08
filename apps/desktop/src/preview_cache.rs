@@ -2,10 +2,10 @@ use std::mem::size_of;
 use std::sync::Arc;
 
 use rohditor_core::{
-    CorrectionComponents, CpuPipeline, CpuPreviewWorkspace, DemosaicedBase,
+    CameraProfileKey, CorrectionComponents, CpuPipeline, CpuPreviewWorkspace, DemosaicedBase,
     LOCAL_RATIOS_ALGORITHM_VERSION, MemoryEstimate, OPPOSED_ALGORITHM_VERSION,
     OPTICS_ALGORITHM_VERSION, OpticsProvenance, OutputPolicy, PreviewOptions, RawCropPolicy,
-    ReconstructedPreview,
+    ReconstructedPreview, camera_profile_key,
 };
 #[cfg(test)]
 use rohditor_core::{DatabaseProvenance, LensProfileSummary};
@@ -92,6 +92,7 @@ impl PreviewCacheKeys {
             reconstructed: reconstructed.clone(),
             recipe_schema_version: recipe.schema_version,
             white_balance: WhiteBalanceKey::from(recipe.color.white_balance),
+            camera_profile: camera_profile_key(&recipe.color.camera_profile),
         };
         let adjusted = AdjustedPreviewKey {
             demosaiced: demosaiced.clone(),
@@ -258,6 +259,7 @@ enum HighlightKey {
     Clip {
         threshold_bits: u32,
         white_balance: WhiteBalanceKey,
+        camera_profile: Option<CameraProfileKey>,
     },
     LocalRatios {
         detection_threshold_bits: u32,
@@ -276,6 +278,11 @@ impl HighlightKey {
             HighlightMethod::Clip => Self::Clip {
                 threshold_bits: recipe.raw.highlights.clip.threshold.to_bits(),
                 white_balance: WhiteBalanceKey::from(recipe.color.white_balance),
+                camera_profile: matches!(
+                    recipe.color.white_balance,
+                    WhiteBalance::TemperatureTint { .. }
+                )
+                .then(|| camera_profile_key(&recipe.color.camera_profile)),
             },
             HighlightMethod::LocalRatios => Self::LocalRatios {
                 detection_threshold_bits: recipe
@@ -304,6 +311,7 @@ struct DemosaicedBaseKey {
     reconstructed: ReconstructedCameraRgbKey,
     recipe_schema_version: u32,
     white_balance: WhiteBalanceKey,
+    camera_profile: CameraProfileKey,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -573,6 +581,7 @@ impl PreviewCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rohditor_camera_profile::{CalibrationIlluminant, MatrixCalibration, MatrixCameraProfile};
     use rohditor_image::{BayerPattern, Orientation};
     use rohditor_raw::{
         CaptureMetadata, CfaPattern, LevelPattern, PhotometricInterpretation, RawFileInfo,
@@ -628,7 +637,8 @@ mod tests {
 
     #[test]
     fn highlight_cache_key_tracks_only_the_dependencies_of_reconstruction() {
-        let off = EditRecipe::default();
+        let mut off = EditRecipe::default();
+        off.raw.highlights.method = HighlightMethod::Off;
         let mut off_wb = off.clone();
         off_wb.color.white_balance = WhiteBalance::ManualMultipliers {
             red: 1.2,
@@ -830,6 +840,99 @@ mod tests {
             used_infinity_distance_fallback: fallback,
             scale,
             content_fingerprint,
+        }
+    }
+
+    #[test]
+    fn profile_cache_dependencies_follow_the_clip_temperature_exception() {
+        let first = camera_profile(0.0, 'a');
+        let second = camera_profile(0.1, 'b');
+
+        let mut automatic = EditRecipe::default();
+        automatic.raw.highlights.method = HighlightMethod::Off;
+        let mut selected = automatic.clone();
+        selected.color.camera_profile =
+            rohditor_edit::CameraProfileSelection::Matrix(first.clone());
+        assert_eq!(
+            keys(&automatic).reconstructed,
+            keys(&selected).reconstructed,
+        );
+        assert_ne!(keys(&automatic).demosaiced, keys(&selected).demosaiced);
+
+        let mut selected_other = selected.clone();
+        selected_other.color.camera_profile =
+            rohditor_edit::CameraProfileSelection::Matrix(second.clone());
+        assert_eq!(
+            keys(&selected).reconstructed,
+            keys(&selected_other).reconstructed,
+        );
+        assert_ne!(keys(&selected).demosaiced, keys(&selected_other).demosaiced);
+
+        automatic.raw.highlights.method = HighlightMethod::Clip;
+        automatic.color.white_balance = WhiteBalance::AsShot;
+        selected = automatic.clone();
+        selected.color.camera_profile =
+            rohditor_edit::CameraProfileSelection::Matrix(first.clone());
+        selected_other = selected.clone();
+        selected_other.color.camera_profile =
+            rohditor_edit::CameraProfileSelection::Matrix(second.clone());
+        assert_eq!(
+            keys(&selected).reconstructed,
+            keys(&selected_other).reconstructed,
+        );
+
+        for method in [HighlightMethod::LocalRatios, HighlightMethod::Opposed] {
+            let mut dynamic = EditRecipe::default();
+            dynamic.raw.highlights.method = method;
+            dynamic.color.white_balance = WhiteBalance::TemperatureTint {
+                temperature: 5_500.0,
+                tint: 0.1,
+            };
+            let mut dynamic_other = dynamic.clone();
+            dynamic.color.camera_profile =
+                rohditor_edit::CameraProfileSelection::Matrix(first.clone());
+            dynamic_other.color.camera_profile =
+                rohditor_edit::CameraProfileSelection::Matrix(second.clone());
+            assert_eq!(
+                keys(&dynamic).reconstructed,
+                keys(&dynamic_other).reconstructed,
+                "{method:?} should reuse camera-native RGB"
+            );
+        }
+
+        let mut clipped_temperature = EditRecipe::default();
+        clipped_temperature.raw.highlights.method = HighlightMethod::Clip;
+        clipped_temperature.color.white_balance = WhiteBalance::TemperatureTint {
+            temperature: 5_500.0,
+            tint: 0.1,
+        };
+        clipped_temperature.color.camera_profile =
+            rohditor_edit::CameraProfileSelection::Matrix(first);
+        let mut clipped_temperature_other = clipped_temperature.clone();
+        clipped_temperature_other.color.camera_profile =
+            rohditor_edit::CameraProfileSelection::Matrix(second);
+        assert_ne!(
+            keys(&clipped_temperature).reconstructed,
+            keys(&clipped_temperature_other).reconstructed,
+        );
+    }
+
+    fn camera_profile(matrix_offset: f32, digest: char) -> MatrixCameraProfile {
+        MatrixCameraProfile {
+            format_version: 1,
+            source_sha256: digest.to_string().repeat(64),
+            name: "Cache profile".to_owned(),
+            camera_model: "Rohditor cache fixture".to_owned(),
+            copyright: None,
+            calibrations: vec![MatrixCalibration {
+                illuminant: CalibrationIlluminant::D65,
+                xyz_to_camera: [
+                    [1.0 + matrix_offset, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                ],
+                forward_camera_to_xyz_d50: None,
+            }],
         }
     }
 }

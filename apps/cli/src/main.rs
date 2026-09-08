@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
+use rohditor_camera_profile::parse_dcp_file;
 use rohditor_core::{
     CpuPipeline, DitherMode, ExportFormat, ExportImage, ExportMetadataPolicy, ExportSettings,
     HighlightDiagnostics, JPEG_QUALITY_DEFAULT, JPEG_QUALITY_MAX, JPEG_QUALITY_MIN, OpticsService,
@@ -16,10 +17,10 @@ use rohditor_core::{
 };
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_edit::{
-    BLACKS_RANGE, CONTRAST_RANGE, EXPOSURE_EV_RANGE, EditRecipe, HIGHLIGHT_THRESHOLD_RANGE,
-    HIGHLIGHTS_RANGE, HighlightMethod, LensProfileSelection, OpticsAdjustments, SATURATION_RANGE,
-    SHADOWS_RANGE, TEMPERATURE_RANGE, TINT_RANGE, TONE_CURVE_RANGE, VIBRANCE_RANGE, WHITES_RANGE,
-    WhiteBalance,
+    BLACKS_RANGE, CONTRAST_RANGE, CameraProfileSelection, EXPOSURE_EV_RANGE, EditRecipe,
+    HIGHLIGHT_THRESHOLD_RANGE, HIGHLIGHTS_RANGE, HighlightMethod, LensProfileSelection,
+    OpticsAdjustments, SATURATION_RANGE, SHADOWS_RANGE, TEMPERATURE_RANGE, TINT_RANGE,
+    TONE_CURVE_RANGE, VIBRANCE_RANGE, WHITES_RANGE, WhiteBalance,
 };
 use rohditor_image::{DisplayRgbImage, DisplayTransfer, Orientation};
 use rohditor_raw::{
@@ -131,7 +132,7 @@ enum Command {
         vibrance: f32,
 
         /// RAW-stage highlight handling.
-        #[arg(long, value_enum, default_value_t = CliHighlightMethod::Off)]
+        #[arg(long, value_enum, default_value_t = CliHighlightMethod::Clip)]
         highlight_reconstruction: CliHighlightMethod,
 
         /// Effective normalized white threshold for highlight clipping (0.5 to 1.5).
@@ -149,6 +150,10 @@ enum Command {
         /// R,G,B multipliers relative to the as-shot white balance.
         #[arg(long, value_name = "RED,GREEN,BLUE")]
         white_balance: Option<RgbMultipliers>,
+
+        /// Matrix-only DNG Camera Profile to embed in the recipe.
+        #[arg(long, value_name = "PROFILE.dcp")]
+        camera_profile: Option<PathBuf>,
 
         /// White-balance temperature in Kelvin (2000 to 12000). Use with --tint.
         #[arg(long, allow_hyphen_values = true)]
@@ -460,6 +465,7 @@ fn main() -> Result<()> {
             highlight_clip_threshold,
             highlight_detection_threshold,
             white_balance,
+            camera_profile,
             temperature,
             tint,
             crop,
@@ -494,6 +500,7 @@ fn main() -> Result<()> {
                 highlight_clip_threshold,
                 highlight_detection_threshold,
                 white_balance,
+                camera_profile,
                 temperature,
                 tint,
                 crop,
@@ -663,6 +670,7 @@ struct DevelopArguments {
     highlight_clip_threshold: Option<f32>,
     highlight_detection_threshold: Option<f32>,
     white_balance: Option<RgbMultipliers>,
+    camera_profile: Option<PathBuf>,
     temperature: Option<f32>,
     tint: f32,
     crop: CliCropPolicy,
@@ -808,13 +816,25 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
                 tint,
             }
         }
-        (None, None, 0.0) => WhiteBalance::AsShot,
+        (None, None, tint) => WhiteBalance::TemperatureTint {
+            temperature: TEMPERATURE_RANGE.neutral,
+            tint,
+        },
         _ => unreachable!("white balance conflict was rejected above"),
     };
     let mut recipe = EditRecipe {
         optics: optics_adjustments(&arguments)?,
         ..EditRecipe::default()
     };
+    let camera_profile = arguments
+        .camera_profile
+        .as_deref()
+        .map(parse_dcp_file)
+        .transpose()
+        .with_context(|| "could not parse the requested camera profile")?;
+    if let Some(profile) = camera_profile {
+        recipe.color.camera_profile = CameraProfileSelection::Matrix(profile);
+    }
     recipe.color.white_balance = white_balance;
     recipe.light.exposure_ev = arguments.exposure;
     recipe.light.contrast = arguments.contrast;
@@ -1766,7 +1786,7 @@ fn format_option<T: ToString>(value: Option<T>) -> String {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::str::FromStr;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1826,6 +1846,7 @@ mod tests {
             highlight_clip_threshold: None,
             highlight_detection_threshold: None,
             white_balance: None,
+            camera_profile: None,
             temperature: None,
             tint: 0.0,
             crop: CliCropPolicy::Recommended,
@@ -1898,10 +1919,33 @@ mod tests {
 
         let defaulted = Cli::try_parse_from(["rohditor-cli", "develop", "input.arw", "output.jpg"])
             .expect("development defaults parse");
-        let Command::Develop { demosaic, .. } = defaulted.command else {
+        let Command::Develop {
+            demosaic,
+            highlight_reconstruction,
+            ..
+        } = defaulted.command
+        else {
             panic!("expected develop command");
         };
         assert!(matches!(demosaic, CliDemosaic::MalvarHeCutler));
+        assert!(matches!(highlight_reconstruction, CliHighlightMethod::Clip));
+    }
+
+    #[test]
+    fn develop_carries_a_camera_profile_path_without_installing_it() {
+        let parsed = Cli::try_parse_from([
+            "rohditor-cli",
+            "develop",
+            "input.arw",
+            "output.jpg",
+            "--camera-profile",
+            "studio.dcp",
+        ])
+        .expect("camera profile option should parse");
+        let Command::Develop { camera_profile, .. } = parsed.command else {
+            panic!("expected develop command");
+        };
+        assert_eq!(camera_profile, Some(PathBuf::from("studio.dcp")));
     }
 
     #[test]

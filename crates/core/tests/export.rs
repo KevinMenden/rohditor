@@ -11,8 +11,8 @@ use rohditor_core::{
 };
 use rohditor_image::{DisplayRgbImage, DisplayTransfer, Orientation};
 use rohditor_raw::{
-    CameraColorMatrix, CaptureMetadata, CfaPattern, LevelPattern, PhotometricInterpretation,
-    RationalValue, RawFileInfo,
+    CameraColorMatrix, CameraMatrixOrigin, CaptureMetadata, CfaPattern, LevelPattern,
+    PhotometricInterpretation, RationalValue, RawFileInfo,
 };
 
 #[test]
@@ -344,6 +344,7 @@ fn source_info() -> RawFileInfo {
         color_matrices: vec![CameraColorMatrix {
             illuminant: "D65".to_owned(),
             values: vec![1.0; 9],
+            origin: CameraMatrixOrigin::DecoderDatabase,
         }],
         orientation: Orientation::Rotate270,
         capture: CaptureMetadata {

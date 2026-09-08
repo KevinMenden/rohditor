@@ -1,4 +1,5 @@
 mod app;
+mod camera_profiles;
 mod catalog;
 mod coordinator;
 mod document;
