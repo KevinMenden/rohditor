@@ -510,7 +510,8 @@ mod tests {
 
     #[test]
     fn highlight_cache_key_tracks_only_the_dependencies_of_reconstruction() {
-        let off = EditRecipe::default();
+        let mut off = EditRecipe::default();
+        off.raw.highlights.method = HighlightMethod::Off;
         let mut off_wb = off.clone();
         off_wb.color.white_balance = WhiteBalance::ManualMultipliers {
             red: 1.2,
