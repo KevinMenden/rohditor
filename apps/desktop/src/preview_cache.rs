@@ -597,6 +597,7 @@ mod tests {
         let second = camera_profile(0.1, 'b');
 
         let mut automatic = EditRecipe::default();
+        automatic.raw.highlights.method = HighlightMethod::Off;
         let mut selected = automatic.clone();
         selected.color.camera_profile =
             rohditor_edit::CameraProfileSelection::Matrix(first.clone());
