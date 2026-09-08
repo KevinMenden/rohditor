@@ -149,7 +149,7 @@ fn apply_vignetting(
             let y = start_y + ns * row_index as f32;
             let mut x = start_x;
             let mut radius_squared = x * x + y * y;
-            for pixel in row.chunks_exact_mut(3).take(plan.width) {
+            for pixel in row.as_chunks_mut::<3>().0.iter_mut().take(plan.width) {
                 let radius_fourth = radius_squared * radius_squared;
                 let radius_sixth = radius_fourth * radius_squared;
                 let gain = 1.0 + k1 * radius_squared + k2 * radius_fourth + k3 * radius_sixth;
