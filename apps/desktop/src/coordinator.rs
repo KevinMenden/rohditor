@@ -11,8 +11,10 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use image::RgbImage;
 use rohditor_core::{
-    CancellationToken, CpuPipeline, ExportReport, ExportSettings, HighlightDiagnostics, Histogram,
-    MemoryEstimate, PipelineError, PreviewOptions, RenderOptions, StageTimings, export_image,
+    CancellationToken, CorrectionComponents, CpuPipeline, DatabaseProvenance, ExportReport,
+    ExportSettings, HighlightDiagnostics, Histogram, MemoryEstimate, OpticsProvenance,
+    OpticsService, PipelineError, PreviewOptions, ProfileMatch, RenderOptions, StageTimings,
+    export_image, optics_query_from_info,
 };
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_edit::EditRecipe;
@@ -84,6 +86,9 @@ pub(crate) struct WorkerPreviewDiagnostics {
     pub memory: MemoryEstimate,
     pub cache_resident_bytes: usize,
     pub workspace_reused: bool,
+    pub optics_applied: Option<CorrectionComponents>,
+    pub optics_used_infinity_distance_fallback: bool,
+    pub optics_scale: Option<f32>,
 }
 
 impl fmt::Display for JobKind {
@@ -159,6 +164,13 @@ pub(crate) enum WorkerEvent {
     MetadataReady {
         document_id: u64,
         info: Box<RawFileInfo>,
+    },
+    OpticsMatchReady {
+        document_id: u64,
+        result: Option<ProfileMatch>,
+        candidates: Vec<rohditor_core::LensProfileSummary>,
+        database: Option<DatabaseProvenance>,
+        error: Option<String>,
     },
     PlaceholderReady {
         document_id: u64,
@@ -492,6 +504,13 @@ fn worker_loop(
 ) {
     let mut abandoned = HashSet::new();
     let mut preview_cache = PreviewCache::default();
+    let pipeline = match OpticsService::load_bundled() {
+        Ok(service) => CpuPipeline::new(Arc::new(service)),
+        Err(error) => {
+            tracing::warn!(%error, "Lensfun database unavailable; optics profiles are disabled");
+            CpuPipeline::default()
+        }
+    };
 
     while let Ok(request) = receiver.recv() {
         if request_belongs_to_abandoned_document(&request, &abandoned) {
@@ -501,7 +520,14 @@ fn worker_loop(
         match request {
             WorkerRequest::Open { document_id, path } => {
                 abandoned.remove(&document_id);
-                process_open(document_id, &path, &sender, &context, decoder.as_ref());
+                process_open(
+                    document_id,
+                    &path,
+                    &sender,
+                    &context,
+                    decoder.as_ref(),
+                    pipeline.optics_service().map(AsRef::as_ref),
+                );
             }
             WorkerRequest::PreviewAvailable => {
                 let Some(scheduled) = previews.take() else {
@@ -516,6 +542,7 @@ fn worker_loop(
                         &sender,
                         &context,
                         &scheduled.cancellation,
+                        &pipeline,
                         &mut preview_cache,
                     )
                 } else {
@@ -525,6 +552,7 @@ fn worker_loop(
                             &sender,
                             &context,
                             &scheduled.cancellation,
+                            &pipeline,
                             &mut preview_cache,
                         ),
                         PreviewBackend::GpuBase => process_gpu_base(
@@ -532,6 +560,7 @@ fn worker_loop(
                             &sender,
                             &context,
                             &scheduled.cancellation,
+                            &pipeline,
                             &mut preview_cache,
                         ),
                     }
@@ -540,12 +569,18 @@ fn worker_loop(
             }
             WorkerRequest::SampleWhiteBalance(job) => {
                 if !abandoned.contains(&job.ticket.document_id) {
-                    process_white_balance_sample(*job, &sender, &context, &mut preview_cache);
+                    process_white_balance_sample(
+                        *job,
+                        &sender,
+                        &context,
+                        &pipeline,
+                        &mut preview_cache,
+                    );
                 }
             }
             WorkerRequest::Export(job) => {
                 if !abandoned.contains(&job.document_id) {
-                    process_export(*job, &sender, &context);
+                    process_export(*job, &sender, &context, &pipeline);
                 }
             }
             WorkerRequest::AbandonDocument(document_id) => {
@@ -586,6 +621,7 @@ fn process_open(
     sender: &mpsc::Sender<WorkerEvent>,
     context: &egui::Context,
     decoder: &dyn RawDecoder,
+    optics: Option<&OpticsService>,
 ) {
     let file_name = display_file_name(path);
     let span = info_span!("desktop.open", document_id, file = %file_name);
@@ -635,6 +671,33 @@ fn process_open(
         WorkerEvent::MetadataReady {
             document_id,
             info: Box::new(info.clone()),
+        },
+    );
+    let (result, candidates, database, error) = if let Some(optics) = optics {
+        let query = optics_query_from_info(&info);
+        (
+            Some(optics.profile_match(&query)),
+            optics.manual_candidates(&query),
+            Some(optics.database_provenance().clone()),
+            None,
+        )
+    } else {
+        (
+            None,
+            Vec::new(),
+            None,
+            Some("The bundled Lensfun database is unavailable".to_owned()),
+        )
+    };
+    send_event(
+        sender,
+        context,
+        WorkerEvent::OpticsMatchReady {
+            document_id,
+            result,
+            candidates,
+            database,
+            error,
         },
     );
 
@@ -736,6 +799,7 @@ fn process_preview(
     sender: &mpsc::Sender<WorkerEvent>,
     context: &egui::Context,
     cancellation: &CancellationToken,
+    pipeline: &CpuPipeline,
     preview_cache: &mut PreviewCache,
 ) -> PreviewCompletion {
     let options = job.options;
@@ -745,7 +809,13 @@ fn process_preview(
         revision = job.ticket.revision
     );
     let _guard = span.enter();
-    let keys = PreviewCacheKeys::new(job.ticket.document_id, &job.frame, &job.recipe, options);
+    let keys = PreviewCacheKeys::new_for_pipeline(
+        job.ticket.document_id,
+        &job.frame,
+        &job.recipe,
+        options,
+        pipeline,
+    );
     let cache_hits = preview_cache.prepare(&keys, &job.frame);
     send_preview_progress(
         sender,
@@ -767,6 +837,7 @@ fn process_preview(
         &keys,
         cache_hits,
         cancellation,
+        pipeline,
         preview_cache,
     ) {
         Ok((display, histogram, diagnostics)) => match WorkerImage::from_display(display) {
@@ -822,6 +893,7 @@ fn process_source_scale_preview(
     sender: &mpsc::Sender<WorkerEvent>,
     context: &egui::Context,
     cancellation: &CancellationToken,
+    pipeline: &CpuPipeline,
     preview_cache: &mut PreviewCache,
 ) -> PreviewCompletion {
     let options = job.options.render;
@@ -838,13 +910,15 @@ fn process_source_scale_preview(
         job.ticket,
         "Developing full-resolution 1:1 inspection",
     );
-    match CpuPipeline.render_source_scale_preview_cancellable(
+    match pipeline.render_source_scale_preview_cancellable(
         &job.frame,
         &job.recipe,
         options,
         cancellation,
     ) {
         Ok(result) => {
+            let (optics_applied, optics_fallback, optics_scale) =
+                optics_metrics(result.optics_provenance.as_ref());
             let diagnostics = WorkerPreviewDiagnostics {
                 backend: PreviewBackend::Cpu,
                 resolution: PreviewResolution::SourceScale,
@@ -858,6 +932,9 @@ fn process_source_scale_preview(
                 memory: result.memory,
                 cache_resident_bytes: 0,
                 workspace_reused: false,
+                optics_applied,
+                optics_used_infinity_distance_fallback: optics_fallback,
+                optics_scale,
             };
             match WorkerImage::from_display(result.image) {
                 Ok(image) => {
@@ -913,6 +990,7 @@ fn process_gpu_base(
     sender: &mpsc::Sender<WorkerEvent>,
     context: &egui::Context,
     cancellation: &CancellationToken,
+    pipeline: &CpuPipeline,
     preview_cache: &mut PreviewCache,
 ) -> PreviewCompletion {
     let options = job.options;
@@ -922,7 +1000,13 @@ fn process_gpu_base(
         revision = job.ticket.revision
     );
     let _guard = span.enter();
-    let keys = PreviewCacheKeys::new(job.ticket.document_id, &job.frame, &job.recipe, options);
+    let keys = PreviewCacheKeys::new_for_pipeline(
+        job.ticket.document_id,
+        &job.frame,
+        &job.recipe,
+        options,
+        pipeline,
+    );
     let cache_hits = preview_cache.prepare(&keys, &job.frame);
     send_preview_progress(
         sender,
@@ -940,6 +1024,7 @@ fn process_gpu_base(
         &keys,
         cache_hits,
         cancellation,
+        pipeline,
         preview_cache,
     ) {
         Ok(timings) => timings,
@@ -999,6 +1084,8 @@ fn process_gpu_base(
         }
     };
     let upload_preparation = upload_started.elapsed();
+    let (optics_applied, optics_fallback, optics_scale) =
+        optics_metrics(reconstructed.optics_provenance());
     let cache_resident_bytes = preview_cache.resident_bytes();
     let memory = gpu_base_memory(&job.frame, reconstructed, cache_resident_bytes);
     let diagnostics = WorkerPreviewDiagnostics {
@@ -1011,6 +1098,9 @@ fn process_gpu_base(
         memory,
         cache_resident_bytes,
         workspace_reused: false,
+        optics_applied,
+        optics_used_infinity_distance_fallback: optics_fallback,
+        optics_scale,
     };
     log_preview_diagnostics(job.ticket, width, height, diagnostics);
     send_event(
@@ -1032,6 +1122,7 @@ fn develop_preview(
     keys: &PreviewCacheKeys,
     cache_hits: PreviewCacheHits,
     cancellation: &CancellationToken,
+    pipeline: &CpuPipeline,
     preview_cache: &mut PreviewCache,
 ) -> Result<(DisplayRgbImage<u8>, Histogram, WorkerPreviewDiagnostics), PipelineError> {
     if let Some(cached) = preview_cache.adjusted(keys) {
@@ -1044,6 +1135,10 @@ fn develop_preview(
             .map_or(HighlightDiagnostics::Off, |base| {
                 base.highlight_diagnostics()
             });
+        let (optics_applied, optics_fallback, optics_scale) = preview_cache
+            .demosaiced(keys)
+            .map(|base| optics_metrics(base.optics_provenance()))
+            .unwrap_or((None, false, None));
         let timings = StageTimings {
             total: copy_started.elapsed(),
             ..StageTimings::default()
@@ -1061,19 +1156,29 @@ fn develop_preview(
                 memory,
                 cache_resident_bytes: preview_cache.resident_bytes(),
                 workspace_reused: false,
+                optics_applied,
+                optics_used_infinity_distance_fallback: optics_fallback,
+                optics_scale,
             },
         ));
     }
 
-    let base_timings =
-        ensure_preview_base(job, options, keys, cache_hits, cancellation, preview_cache)?;
+    let base_timings = ensure_preview_base(
+        job,
+        options,
+        keys,
+        cache_hits,
+        cancellation,
+        pipeline,
+        preview_cache,
+    )?;
     let workspace_reused = preview_cache.workspace_reusable(keys);
     let Some((base, workspace)) = preview_cache.base_and_workspace(keys) else {
         return Err(cache_invariant(
             "demosaiced base was unavailable after preparation",
         ));
     };
-    let mut result = CpuPipeline.render_preview_from_base_reusing_cancellable(
+    let mut result = pipeline.render_preview_from_base_reusing_cancellable(
         base,
         &job.recipe,
         options.render.output_policy,
@@ -1084,6 +1189,8 @@ fn develop_preview(
     let memory = result.memory;
     let timings = result.timings;
     let highlight_diagnostics = result.highlight_diagnostics;
+    let (optics_applied, optics_fallback, optics_scale) =
+        optics_metrics(result.optics_provenance.as_ref());
     preview_cache.insert_adjusted(keys, result.image.clone(), memory);
     let diagnostics = WorkerPreviewDiagnostics {
         backend: PreviewBackend::Cpu,
@@ -1095,6 +1202,9 @@ fn develop_preview(
         memory,
         cache_resident_bytes: preview_cache.resident_bytes(),
         workspace_reused,
+        optics_applied,
+        optics_used_infinity_distance_fallback: optics_fallback,
+        optics_scale,
     };
     Ok((result.image, result.histogram, diagnostics))
 }
@@ -1105,15 +1215,23 @@ fn ensure_preview_base(
     keys: &PreviewCacheKeys,
     cache_hits: PreviewCacheHits,
     cancellation: &CancellationToken,
+    pipeline: &CpuPipeline,
     preview_cache: &mut PreviewCache,
 ) -> Result<StageTimings, PipelineError> {
-    let mut timings =
-        ensure_preview_reconstruction(job, options, keys, cache_hits, cancellation, preview_cache)?;
+    let mut timings = ensure_preview_reconstruction(
+        job,
+        options,
+        keys,
+        cache_hits,
+        cancellation,
+        pipeline,
+        preview_cache,
+    )?;
     if !cache_hits.demosaiced {
         let reconstructed = preview_cache.reconstructed(keys).ok_or_else(|| {
             cache_invariant("reconstructed preview was unavailable before color conversion")
         })?;
-        let base = CpuPipeline.prepare_preview_base_from_reconstruction_cancellable(
+        let base = pipeline.prepare_preview_base_from_reconstruction_cancellable(
             reconstructed,
             &job.recipe,
             cancellation,
@@ -1131,11 +1249,12 @@ fn ensure_preview_reconstruction(
     keys: &PreviewCacheKeys,
     cache_hits: PreviewCacheHits,
     cancellation: &CancellationToken,
+    pipeline: &CpuPipeline,
     preview_cache: &mut PreviewCache,
 ) -> Result<StageTimings, PipelineError> {
     let mut timings = StageTimings::default();
     if !cache_hits.reconstructed {
-        let reconstructed = CpuPipeline.prepare_preview_reconstruction_cancellable(
+        let reconstructed = pipeline.prepare_preview_reconstruction_cancellable(
             &job.frame,
             &job.recipe,
             options,
@@ -1152,9 +1271,10 @@ fn process_white_balance_sample(
     job: WhiteBalanceSampleJob,
     sender: &mpsc::Sender<WorkerEvent>,
     context: &egui::Context,
+    pipeline: &CpuPipeline,
     preview_cache: &mut PreviewCache,
 ) {
-    let result = sample_white_balance_patch(&job, preview_cache);
+    let result = sample_white_balance_patch(&job, pipeline, preview_cache);
     let event = match result {
         Ok(sample) => WorkerEvent::WhiteBalanceSampleReady {
             ticket: job.ticket,
@@ -1170,6 +1290,7 @@ fn process_white_balance_sample(
 
 fn sample_white_balance_patch(
     job: &WhiteBalanceSampleJob,
+    pipeline: &CpuPipeline,
     preview_cache: &mut PreviewCache,
 ) -> Result<[f32; 3], String> {
     if !job.coordinate.0.is_finite()
@@ -1183,7 +1304,13 @@ fn sample_white_balance_patch(
         .validate()
         .map_err(|error| format!("The current edit recipe is invalid: {error}"))?;
 
-    let keys = PreviewCacheKeys::new(job.ticket.document_id, &job.frame, &job.recipe, job.options);
+    let keys = PreviewCacheKeys::new_for_pipeline(
+        job.ticket.document_id,
+        &job.frame,
+        &job.recipe,
+        job.options,
+        pipeline,
+    );
     let cache_hits = preview_cache.prepare(&keys, &job.frame);
     let preview_job = PreviewJob {
         ticket: job.ticket,
@@ -1200,6 +1327,7 @@ fn sample_white_balance_patch(
         &keys,
         cache_hits,
         &cancellation,
+        pipeline,
         preview_cache,
     )
     .map_err(|error| format!("Could not prepare the white-balance sample: {error}"))?;
@@ -1291,11 +1419,24 @@ fn add_stage_timings(target: &mut StageTimings, additional: StageTimings) {
     target.highlight_processing += additional.highlight_processing;
     target.highlight_clipping += additional.highlight_clipping;
     target.demosaic += additional.demosaic;
+    target.optics += additional.optics;
     target.resampling += additional.resampling;
     target.color_conversion += additional.color_conversion;
     target.adjustments += additional.adjustments;
     target.output_conversion += additional.output_conversion;
     target.total += additional.total;
+}
+
+fn optics_metrics(
+    provenance: Option<&OpticsProvenance>,
+) -> (Option<CorrectionComponents>, bool, Option<f32>) {
+    provenance.map_or((None, false, None), |value| {
+        (
+            Some(value.applied),
+            value.used_infinity_distance_fallback,
+            Some(value.scale),
+        )
+    })
 }
 
 fn gpu_base_memory(
@@ -1307,6 +1448,8 @@ fn gpu_base_memory(
         decoded_raw_bytes: frame.mosaic.len().saturating_mul(size_of::<u16>()),
         normalized_mosaic_bytes: reconstructed.normalized_mosaic_bytes(),
         highlight_scratch_bytes: reconstructed.highlight_scratch_bytes(),
+        optics_output_bytes: reconstructed.optics_output_bytes(),
+        optics_scratch_bytes: reconstructed.optics_scratch_bytes(),
         resample_intermediate_bytes: reconstructed.resample_intermediate_bytes(),
         linear_rgb_bytes: reconstructed.buffer_bytes(),
         display_rgb_bytes: 0,
@@ -1335,6 +1478,7 @@ fn log_preview_diagnostics(
         metadata_us = diagnostics.timings.metadata.as_micros(),
         normalization_us = diagnostics.timings.normalization.as_micros(),
         demosaic_us = diagnostics.timings.demosaic.as_micros(),
+        optics_us = diagnostics.timings.optics.as_micros(),
         resampling_us = diagnostics.timings.resampling.as_micros(),
         color_us = diagnostics.timings.color_conversion.as_micros(),
         adjustments_us = diagnostics.timings.adjustments.as_micros(),
@@ -1353,7 +1497,12 @@ fn cache_invariant(reason: &str) -> PipelineError {
     }
 }
 
-fn process_export(job: ExportJob, sender: &mpsc::Sender<WorkerEvent>, context: &egui::Context) {
+fn process_export(
+    job: ExportJob,
+    sender: &mpsc::Sender<WorkerEvent>,
+    context: &egui::Context,
+    pipeline: &CpuPipeline,
+) {
     let file_name = display_file_name(&job.destination);
     let span = info_span!(
         "desktop.export",
@@ -1373,7 +1522,7 @@ fn process_export(job: ExportJob, sender: &mpsc::Sender<WorkerEvent>, context: &
         Some(job.export_id),
         "Developing full-resolution export on CPU",
     );
-    let rendered = match CpuPipeline.render_export(
+    let rendered = match pipeline.render_export(
         &job.frame,
         &job.recipe,
         job.render_options,
@@ -1744,6 +1893,7 @@ mod tests {
             &initial_keys,
             initial_hits,
             &CancellationToken::new(),
+            &CpuPipeline::default(),
             &mut cache,
         )
         .expect("initial preview should build its base");
@@ -1781,6 +1931,7 @@ mod tests {
             &adjusted_keys,
             adjusted_hits,
             &CancellationToken::new(),
+            &CpuPipeline::default(),
             &mut cache,
         )
         .expect("downstream edit should reuse its base");
@@ -1848,6 +1999,7 @@ mod tests {
             &white_balance_keys,
             white_balance_hits,
             &CancellationToken::new(),
+            &CpuPipeline::default(),
             &mut cache,
         )
         .expect("white balance should reuse reconstructed camera RGB");
@@ -1897,12 +2049,14 @@ mod tests {
             backend: PreviewBackend::GpuBase,
             resolution: PreviewResolution::Fit,
         };
+        let pipeline = CpuPipeline::default();
 
         let completion = process_gpu_base(
             job,
             &sender,
             &egui::Context::default(),
             &CancellationToken::new(),
+            &pipeline,
             &mut PreviewCache::default(),
         );
         assert_eq!(completion, PreviewCompletion::Completed);
@@ -1939,7 +2093,7 @@ mod tests {
     fn white_balance_picker_samples_camera_native_patch_and_rejects_clipping() {
         let frame = fake_frame();
         let recipe = EditRecipe::default();
-        let reconstructed = CpuPipeline
+        let reconstructed = CpuPipeline::default()
             .prepare_preview_reconstruction(&frame, &recipe, PreviewOptions::default())
             .expect("fixture reconstruction should succeed");
         let sample = sample_camera_native_patch(&reconstructed, None, (0.5, 0.5))
@@ -1948,7 +2102,7 @@ mod tests {
 
         let mut clipped = frame;
         clipped.mosaic = Arc::from(vec![u16::MAX; clipped.info.width * clipped.info.height]);
-        let reconstructed = CpuPipeline
+        let reconstructed = CpuPipeline::default()
             .prepare_preview_reconstruction(&clipped, &recipe, PreviewOptions::default())
             .expect("clipped fixture reconstruction should succeed");
         assert!(sample_camera_native_patch(&reconstructed, None, (0.5, 0.5)).is_err());
@@ -1976,11 +2130,13 @@ mod tests {
             backend: PreviewBackend::Cpu,
             resolution: PreviewResolution::SourceScale,
         };
+        let pipeline = CpuPipeline::default();
         let completion = process_source_scale_preview(
             job,
             &sender,
             &egui::Context::default(),
             &CancellationToken::new(),
+            &pipeline,
             &mut PreviewCache::default(),
         );
         assert_eq!(completion, PreviewCompletion::Completed);
@@ -2057,6 +2213,7 @@ mod tests {
             &sender,
             &egui::Context::default(),
             &decoder,
+            None,
         );
         let events = receiver.try_iter().collect::<Vec<_>>();
 
@@ -2334,6 +2491,7 @@ mod tests {
             &initial_keys,
             initial_hits,
             &CancellationToken::new(),
+            &CpuPipeline::default(),
             &mut cache,
         )?;
         let first_wall = initial_started.elapsed();
@@ -2367,6 +2525,7 @@ mod tests {
                 &keys,
                 hits,
                 &CancellationToken::new(),
+                &CpuPipeline::default(),
                 &mut cache,
             )?;
             cached_wall.push(started.elapsed());

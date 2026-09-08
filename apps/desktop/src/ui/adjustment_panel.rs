@@ -3,6 +3,7 @@ use rohditor_core::{HSL_CHANNEL_CENTERS, Histogram, evaluate_tone_curve};
 use rohditor_edit::{CameraProfileSelection, HighlightMethod, ToneCurve};
 
 use super::PickerMode;
+use super::optics::{self, OpticsAction, OpticsPanelModel};
 use super::theme::{self, colors, metrics};
 use super::widgets::{self, AdjustmentSpec, ValueScale};
 
@@ -127,6 +128,7 @@ pub(crate) struct DocumentPanelModel {
     pub auto_tone_available: bool,
     pub picker_mode: Option<PickerMode>,
     pub color_mixer_channel: usize,
+    pub optics: OpticsPanelModel,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -148,6 +150,8 @@ pub(crate) struct AdjustmentPanelOutput {
     pub highlight_method: Option<HighlightMethod>,
     pub picker_mode: Option<Option<PickerMode>>,
     pub color_mixer_channel: Option<usize>,
+    pub optics_action: Option<OpticsAction>,
+    pub optics_filter: Option<String>,
     pub interactions: Vec<AdjustmentInteraction>,
     pub auto_tone: bool,
     pub reset_all: bool,
@@ -244,6 +248,8 @@ pub(crate) fn show(
                             .on_hover_text("Restore the neutral recipe")
                             .clicked();
                     });
+                    output.optics_filter =
+                        optics::show(ui, &mut document.optics, &mut output.optics_action);
                     widgets::adjustment_section(ui, "Export", |ui| {
                         show_export_settings(ui, export_settings);
                         let export_label = if document.export_in_progress {

@@ -30,6 +30,7 @@ pub(crate) struct TimingModel {
     pub normalization: Duration,
     pub highlight_processing: Duration,
     pub demosaic: Duration,
+    pub optics: Duration,
     pub resampling: Duration,
     pub color_conversion: Duration,
     pub adjustments: Duration,
@@ -242,6 +243,7 @@ pub(crate) fn show(
                         preview.timings.highlight_processing,
                     );
                     duration_row(ui, "Demosaic", preview.timings.demosaic);
+                    duration_row(ui, "Optics", preview.timings.optics);
                     duration_row(ui, "Area reduction", preview.timings.resampling);
                     duration_row(ui, "Color conversion", preview.timings.color_conversion);
                     duration_row(ui, "Adjustments", preview.timings.adjustments);
@@ -357,7 +359,7 @@ pub(crate) fn show(
 /// the JSON is portable and readable without Rust-specific encodings.
 pub(crate) fn report(model: &DiagnosticsModel) -> DiagnosticsReport<'_> {
     DiagnosticsReport {
-        format_version: 4,
+        format_version: 5,
         application: ApplicationReport {
             name: "Rohditor",
             version: env!("CARGO_PKG_VERSION"),
@@ -503,6 +505,7 @@ pub(crate) struct TimingReport {
     pub normalization: f64,
     pub highlight_processing: f64,
     pub demosaic: f64,
+    pub optics: f64,
     pub resampling: f64,
     pub color_conversion: f64,
     pub adjustments: f64,
@@ -517,6 +520,7 @@ impl From<TimingModel> for TimingReport {
             normalization: duration_milliseconds(value.normalization),
             highlight_processing: duration_milliseconds(value.highlight_processing),
             demosaic: duration_milliseconds(value.demosaic),
+            optics: duration_milliseconds(value.optics),
             resampling: duration_milliseconds(value.resampling),
             color_conversion: duration_milliseconds(value.color_conversion),
             adjustments: duration_milliseconds(value.adjustments),

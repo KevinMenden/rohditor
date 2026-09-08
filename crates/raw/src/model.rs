@@ -91,6 +91,9 @@ pub struct CaptureMetadata {
     pub exposure_time: Option<RationalValue>,
     pub aperture: Option<RationalValue>,
     pub focal_length: Option<RationalValue>,
+    /// Subject distance in metres when EXIF provides a finite positive value.
+    #[serde(default)]
+    pub focus_distance: Option<RationalValue>,
     pub captured_at: Option<String>,
     pub lens_make: Option<String>,
     pub lens_model: Option<String>,
@@ -220,6 +223,13 @@ mod tests {
 
         assert_eq!(value.as_f64(), None);
         assert_eq!(value.to_string(), "1/0");
+    }
+
+    #[test]
+    fn older_capture_metadata_without_focus_distance_still_deserializes() {
+        let metadata = serde_json::from_str::<super::CaptureMetadata>(r#"{}"#)
+            .expect("optional capture metadata should retain its defaults");
+        assert_eq!(metadata.focus_distance, None);
     }
 
     #[test]

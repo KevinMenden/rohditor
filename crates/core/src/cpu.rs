@@ -1101,6 +1101,14 @@ fn development_geometry(
     Ok((pattern, crop))
 }
 
+pub(crate) fn raw_crop_dimensions(
+    info: &RawFileInfo,
+    policy: RawCropPolicy,
+) -> Result<(usize, usize), PipelineError> {
+    let (_, crop) = development_geometry(info, policy)?;
+    Ok((crop.width, crop.height))
+}
+
 fn validate_levels(info: &RawFileInfo, pattern: BayerPattern) -> Result<(), PipelineError> {
     let levels = &info.black_levels;
     if levels.repeat_width == 0 || levels.repeat_height == 0 || levels.components_per_pixel != 1 {

@@ -1757,6 +1757,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
+name = "lensfun"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe52f943cdba39214e90c8ff14c10cebc0f597dcbbbcdab15a68902fc8392bd8"
+dependencies = [
+ "flate2",
+ "regex",
+ "roxmltree",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2859,6 +2871,7 @@ dependencies = [
  "rohditor-edit",
  "rohditor-highlight",
  "rohditor-image",
+ "rohditor-optics",
  "rohditor-raw",
  "serde",
  "serde_json",
@@ -2946,6 +2959,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rohditor-optics"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "lensfun",
+ "rayon",
+ "rohditor-image",
+ "serde",
+ "thiserror 2.0.20",
+ "tracing",
+]
+
+[[package]]
 name = "rohditor-raw"
 version = "0.1.0"
 dependencies = [
@@ -2957,6 +2983,12 @@ dependencies = [
  "thiserror 2.0.20",
  "tracing",
 ]
+
+[[package]]
+name = "roxmltree"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
 
 [[package]]
 name = "rustc-demangle"

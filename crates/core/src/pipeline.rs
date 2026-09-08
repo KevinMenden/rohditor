@@ -1,4 +1,5 @@
 use std::mem::size_of;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rohditor_demosaic::{DemosaicAlgorithm, WhiteBalanceGains};
@@ -6,6 +7,7 @@ use rohditor_edit::{
     CameraProfileSelection, EditRecipe, HighlightAdjustments, HighlightMethod, WhiteBalance,
 };
 use rohditor_image::{DisplayRgbImage, LinearRgbImage, Orientation};
+use rohditor_optics::{OpticsProvenance, OpticsService};
 use rohditor_raw::RawFrame;
 
 use crate::analysis::Histogram;
@@ -81,6 +83,7 @@ pub struct StageTimings {
     /// pipeline. New code should use [`Self::highlight_processing`].
     pub highlight_clipping: Duration,
     pub demosaic: Duration,
+    pub optics: Duration,
     pub resampling: Duration,
     pub color_conversion: Duration,
     pub adjustments: Duration,
@@ -94,6 +97,8 @@ pub struct MemoryEstimate {
     pub decoded_raw_bytes: usize,
     pub normalized_mosaic_bytes: usize,
     pub highlight_scratch_bytes: usize,
+    pub optics_output_bytes: usize,
+    pub optics_scratch_bytes: usize,
     pub resample_intermediate_bytes: usize,
     pub linear_rgb_bytes: usize,
     pub display_rgb_bytes: usize,
@@ -115,6 +120,9 @@ pub struct ReconstructedPreview {
     highlight_adjustments: HighlightAdjustments,
     highlight_white_balance: WhiteBalance,
     highlight_diagnostics: HighlightDiagnostics,
+    optics_provenance: Option<OpticsProvenance>,
+    optics_output_bytes: usize,
+    optics_scratch_bytes: usize,
     timings: StageTimings,
     decoded_raw_bytes: usize,
     normalized_mosaic_bytes: usize,
@@ -186,6 +194,12 @@ impl ReconstructedPreview {
         self.highlight_diagnostics
     }
 
+    /// Profile identity and database snapshot that produced this source, when enabled.
+    #[must_use]
+    pub fn optics_provenance(&self) -> Option<&OpticsProvenance> {
+        self.optics_provenance.as_ref()
+    }
+
     #[must_use]
     pub const fn highlight_stats(&self) -> crate::ClipStats {
         self.highlight_diagnostics.legacy_clip_stats()
@@ -238,6 +252,16 @@ impl ReconstructedPreview {
     }
 
     #[must_use]
+    pub const fn optics_output_bytes(&self) -> usize {
+        self.optics_output_bytes
+    }
+
+    #[must_use]
+    pub const fn optics_scratch_bytes(&self) -> usize {
+        self.optics_scratch_bytes
+    }
+
+    #[must_use]
     pub const fn preparation_peak_bytes(&self) -> usize {
         self.preparation_peak_bytes
     }
@@ -258,6 +282,7 @@ pub struct RenderResult {
     pub highlight_diagnostics: HighlightDiagnostics,
     /// Compatibility projection for Clip-only callers.
     pub highlight_stats: crate::ClipStats,
+    pub optics_provenance: Option<OpticsProvenance>,
     pub memory: MemoryEstimate,
 }
 
@@ -269,6 +294,7 @@ pub struct ExportRenderResult {
     pub highlight_diagnostics: HighlightDiagnostics,
     /// Compatibility projection for Clip-only callers.
     pub highlight_stats: crate::ClipStats,
+    pub optics_provenance: Option<OpticsProvenance>,
     pub memory: MemoryEstimate,
 }
 
@@ -287,6 +313,9 @@ pub struct DemosaicedBase {
     highlight_adjustments: HighlightAdjustments,
     highlight_white_balance: WhiteBalance,
     highlight_diagnostics: HighlightDiagnostics,
+    optics_provenance: Option<OpticsProvenance>,
+    optics_output_bytes: usize,
+    optics_scratch_bytes: usize,
     timings: StageTimings,
     decoded_raw_bytes: usize,
     normalized_mosaic_bytes: usize,
@@ -327,6 +356,12 @@ impl DemosaicedBase {
         self.highlight_diagnostics
     }
 
+    /// Profile identity and database snapshot that produced this base, when enabled.
+    #[must_use]
+    pub fn optics_provenance(&self) -> Option<&OpticsProvenance> {
+        self.optics_provenance.as_ref()
+    }
+
     /// RAW highlight operation that produced this linear preview base.
     #[must_use]
     pub const fn highlight_adjustments(&self) -> HighlightAdjustments {
@@ -351,6 +386,16 @@ impl DemosaicedBase {
     #[must_use]
     pub const fn highlight_scratch_bytes(&self) -> usize {
         self.highlight_scratch_bytes
+    }
+
+    #[must_use]
+    pub const fn optics_output_bytes(&self) -> usize {
+        self.optics_output_bytes
+    }
+
+    #[must_use]
+    pub const fn optics_scratch_bytes(&self) -> usize {
+        self.optics_scratch_bytes
     }
 
     #[must_use]
@@ -411,10 +456,50 @@ impl CpuPreviewWorkspace {
 }
 
 /// Deterministic, headless CPU implementation of the Phase 2 reference pipeline.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct CpuPipeline;
+#[derive(Debug, Clone)]
+pub struct CpuPipeline {
+    optics: Option<Arc<OpticsService>>,
+}
+
+impl Default for CpuPipeline {
+    fn default() -> Self {
+        Self::without_optics()
+    }
+}
 
 impl CpuPipeline {
+    /// Construct a pipeline with one immutable optics database snapshot.
+    #[must_use]
+    pub fn new(optics: Arc<OpticsService>) -> Self {
+        Self {
+            optics: Some(optics),
+        }
+    }
+
+    /// Construct a pipeline for recipes whose optics profile is off.
+    #[must_use]
+    pub const fn without_optics() -> Self {
+        Self { optics: None }
+    }
+
+    /// The shared optics service, when this processor has one.
+    #[must_use]
+    pub fn optics_service(&self) -> Option<&Arc<OpticsService>> {
+        self.optics.as_ref()
+    }
+
+    /// Resolve the plan identity used by a reconstructed camera-native cache
+    /// entry without allocating or processing image pixels.
+    #[must_use]
+    pub fn optics_cache_provenance(
+        &self,
+        frame: &RawFrame,
+        recipe: &EditRecipe,
+        options: RenderOptions,
+    ) -> Option<OpticsProvenance> {
+        crate::optics::cache_provenance(self.optics.as_deref(), frame, recipe, options)
+    }
+
     pub fn render(
         &self,
         frame: &RawFrame,
@@ -422,7 +507,7 @@ impl CpuPipeline {
         options: RenderOptions,
     ) -> Result<RenderResult, PipelineError> {
         let total_started = Instant::now();
-        let base = prepare_base(frame, recipe, options)?;
+        let base = prepare_base(self.optics.as_deref(), frame, recipe, options)?;
         let mut result = render_base(base, recipe, options.output_policy)?;
         result.timings.total = total_started.elapsed();
         Ok(result)
@@ -467,6 +552,7 @@ impl CpuPipeline {
         base.timings.highlight_processing = reconstructed.timings.highlight_processing;
         base.timings.highlight_clipping = reconstructed.timings.highlight_clipping;
         base.timings.demosaic = reconstructed.timings.demosaic;
+        base.timings.optics = reconstructed.timings.optics;
         base.timings.resampling = reconstructed.timings.resampling;
         base.timings.total += reconstructed.timings.total;
         Ok(base)
@@ -496,7 +582,7 @@ impl CpuPipeline {
         options: PreviewOptions,
         cancellation: &CancellationToken,
     ) -> Result<ReconstructedPreview, PipelineError> {
-        prepare_reconstructed_preview(frame, recipe, options, cancellation)
+        prepare_reconstructed_preview(self.optics.as_deref(), frame, recipe, options, cancellation)
     }
 
     /// Apply white balance and camera color conversion to a retained
@@ -614,6 +700,7 @@ impl CpuPipeline {
             timings,
             highlight_diagnostics: base.highlight_diagnostics,
             highlight_stats: base.highlight_stats(),
+            optics_provenance: base.optics_provenance.clone(),
             memory,
         })
     }
@@ -648,7 +735,8 @@ impl CpuPipeline {
         cancellation: &CancellationToken,
     ) -> Result<RenderResult, PipelineError> {
         let total_started = Instant::now();
-        let mut base = prepare_base_cancellable(frame, recipe, options, cancellation)?;
+        let mut base =
+            prepare_base_cancellable(self.optics.as_deref(), frame, recipe, options, cancellation)?;
         let geometry = output_geometry(&base.image, base.source_orientation, recipe)?;
         let memory = memory_estimate(&base, size_of::<u8>(), geometry)?;
         let adjustments_started = Instant::now();
@@ -670,6 +758,7 @@ impl CpuPipeline {
             timings: base.timings,
             highlight_diagnostics: base.highlight_diagnostics,
             highlight_stats: base.highlight_stats(),
+            optics_provenance: base.optics_provenance.clone(),
             memory,
         })
     }
@@ -684,7 +773,7 @@ impl CpuPipeline {
         dithering: DitherMode,
     ) -> Result<ExportRenderResult, PipelineError> {
         let total_started = Instant::now();
-        let mut base = prepare_base(frame, recipe, options)?;
+        let mut base = prepare_base(self.optics.as_deref(), frame, recipe, options)?;
         let geometry = output_geometry(&base.image, base.source_orientation, recipe)?;
         let memory = memory_estimate(&base, bit_depth.bytes_per_sample(), geometry)?;
         let adjustments_started = Instant::now();
@@ -715,12 +804,14 @@ impl CpuPipeline {
             timings: base.timings,
             highlight_diagnostics: base.highlight_diagnostics,
             highlight_stats: base.highlight_stats(),
+            optics_provenance: base.optics_provenance,
             memory,
         })
     }
 }
 
 fn prepare_reconstructed_preview(
+    optics: Option<&OpticsService>,
     frame: &RawFrame,
     recipe: &EditRecipe,
     options: PreviewOptions,
@@ -728,7 +819,12 @@ fn prepare_reconstructed_preview(
 ) -> Result<ReconstructedPreview, PipelineError> {
     let total_started = Instant::now();
     cancellation.checkpoint()?;
-    validate_preview_working_set(frame, options.max_long_edge, recipe.raw.highlights.method)?;
+    validate_preview_working_set(
+        frame,
+        options.max_long_edge,
+        recipe.raw.highlights.method,
+        crate::optics::optics_enabled(&recipe.optics),
+    )?;
 
     let metadata_started = Instant::now();
     let metadata_span = tracing::info_span!(
@@ -739,6 +835,7 @@ fn prepare_reconstructed_preview(
     );
     let metadata_guard = metadata_span.enter();
     recipe.validate()?;
+    validate_optics_crop(options.render.raw_crop_policy, recipe)?;
     let calibration = CameraCalibration::from_raw_info(&frame.info);
     let resolved = resolve_camera_colour(
         &calibration,
@@ -793,6 +890,20 @@ fn prepare_reconstructed_preview(
     let demosaic = demosaic_started.elapsed();
     drop(mosaic);
 
+    let optics_started = Instant::now();
+    let optics_result = crate::optics::apply_cancellable(
+        optics,
+        &frame.info,
+        &recipe.optics,
+        full_linear,
+        cancellation,
+    )?;
+    let optics = optics_result.image;
+    let optics_provenance = optics_result.provenance;
+    let optics_output_bytes = optics_result.output_bytes;
+    let optics_scratch_bytes = optics_result.scratch_bytes;
+    let optics_timing = optics_started.elapsed();
+
     let (target_width, target_height) =
         preview_dimensions(source_width, source_height, options.max_long_edge)?;
     let unchanged_dimensions = source_width == target_width && source_height == target_height;
@@ -812,19 +923,21 @@ fn prepare_reconstructed_preview(
         .checked_mul(source_height)
         .and_then(|pixels| pixels.checked_mul(3 * size_of::<f32>()))
         .ok_or_else(|| dimension_overflow(source_width, source_height))?;
-    let preparation_peak_bytes = preview_preparation_peak(
+    let preparation_peak_bytes = preview_preparation_peak(PreviewPreparationInputs {
         decoded_raw_bytes,
         normalized_mosaic_bytes,
         full_linear_bytes,
         highlight_scratch_bytes,
+        optics_output_bytes,
+        optics_scratch_bytes,
         resample_intermediate_bytes,
         reduced_linear_bytes,
         unchanged_dimensions,
-    )?;
+    })?;
     validate_working_set(preparation_peak_bytes)?;
 
     let resampling_started = Instant::now();
-    let image = resize_area_cancellable(full_linear, target_width, target_height, cancellation)?;
+    let image = resize_area_cancellable(optics, target_width, target_height, cancellation)?;
     let resampling = resampling_started.elapsed();
     let timings = StageTimings {
         metadata,
@@ -832,6 +945,7 @@ fn prepare_reconstructed_preview(
         highlight_processing,
         highlight_clipping: highlight_processing,
         demosaic,
+        optics: optics_timing,
         resampling,
         total: total_started.elapsed(),
         ..StageTimings::default()
@@ -846,6 +960,9 @@ fn prepare_reconstructed_preview(
         highlight_adjustments: recipe.raw.highlights,
         highlight_white_balance: recipe.color.white_balance,
         highlight_diagnostics,
+        optics_provenance,
+        optics_output_bytes,
+        optics_scratch_bytes,
         timings,
         decoded_raw_bytes,
         normalized_mosaic_bytes,
@@ -878,6 +995,13 @@ fn prepare_demosaiced_preview(
                 .to_owned(),
         });
     }
+    if !crate::optics::matches_recipe(reconstructed.optics_provenance(), &recipe.optics) {
+        return Err(PipelineError::InvalidRecipe {
+            field: "optics",
+            reason: "the recipe does not match the optics result used to build the reconstruction"
+                .to_owned(),
+        });
+    }
     let resolved = resolve_camera_colour(
         &reconstructed.calibration,
         &recipe.color.camera_profile,
@@ -897,6 +1021,7 @@ fn prepare_demosaiced_preview(
     let color_conversion = color_started.elapsed();
     let timings = StageTimings {
         metadata,
+        optics: reconstructed.timings.optics,
         color_conversion,
         total: total_started.elapsed(),
         ..StageTimings::default()
@@ -910,6 +1035,9 @@ fn prepare_demosaiced_preview(
         highlight_adjustments: reconstructed.highlight_adjustments,
         highlight_white_balance: reconstructed.highlight_white_balance,
         highlight_diagnostics: reconstructed.highlight_diagnostics,
+        optics_provenance: reconstructed.optics_provenance.clone(),
+        optics_output_bytes: reconstructed.optics_output_bytes,
+        optics_scratch_bytes: reconstructed.optics_scratch_bytes,
         timings,
         decoded_raw_bytes: reconstructed.decoded_raw_bytes,
         normalized_mosaic_bytes: reconstructed.normalized_mosaic_bytes,
@@ -920,14 +1048,16 @@ fn prepare_demosaiced_preview(
 }
 
 fn prepare_base(
+    optics: Option<&OpticsService>,
     frame: &RawFrame,
     recipe: &EditRecipe,
     options: RenderOptions,
 ) -> Result<DemosaicedBase, PipelineError> {
-    prepare_base_cancellable(frame, recipe, options, &CancellationToken::new())
+    prepare_base_cancellable(optics, frame, recipe, options, &CancellationToken::new())
 }
 
 fn prepare_base_cancellable(
+    optics: Option<&OpticsService>,
     frame: &RawFrame,
     recipe: &EditRecipe,
     options: RenderOptions,
@@ -935,7 +1065,11 @@ fn prepare_base_cancellable(
 ) -> Result<DemosaicedBase, PipelineError> {
     let total_started = Instant::now();
     cancellation.checkpoint()?;
-    validate_base_working_set(frame, recipe.raw.highlights.method)?;
+    validate_base_working_set(
+        frame,
+        recipe.raw.highlights.method,
+        crate::optics::optics_enabled(&recipe.optics),
+    )?;
     let metadata_started = Instant::now();
     let metadata_span = tracing::info_span!(
         "cpu.metadata",
@@ -945,6 +1079,7 @@ fn prepare_base_cancellable(
     );
     let metadata_guard = metadata_span.enter();
     recipe.validate()?;
+    validate_optics_crop(options.raw_crop_policy, recipe)?;
     let calibration = CameraCalibration::from_raw_info(&frame.info);
     let resolved = resolve_camera_colour(
         &calibration,
@@ -978,13 +1113,40 @@ fn prepare_base_cancellable(
         normalized_height,
     )?;
     let normalized = highlighted.mosaic;
+    let optics_enabled = crate::optics::optics_enabled(&recipe.optics);
 
     let demosaic_started = Instant::now();
-    let mut linear = demosaic_cancellable(&normalized, gains, options.demosaic, cancellation)?;
+    let mut linear = demosaic_cancellable(
+        &normalized,
+        if optics_enabled {
+            WhiteBalanceGains::identity()
+        } else {
+            gains
+        },
+        options.demosaic,
+        cancellation,
+    )?;
     let demosaic = demosaic_started.elapsed();
     drop(normalized);
 
+    let optics_started = Instant::now();
+    let optics_result = crate::optics::apply_cancellable(
+        optics,
+        &frame.info,
+        &recipe.optics,
+        linear,
+        cancellation,
+    )?;
+    linear = optics_result.image;
+    let optics_provenance = optics_result.provenance;
+    let optics_output_bytes = optics_result.output_bytes;
+    let optics_scratch_bytes = optics_result.scratch_bytes;
+    let optics_timing = optics_started.elapsed();
+
     let color_started = Instant::now();
+    if optics_enabled {
+        apply_white_balance_cancellable(&mut linear, gains, cancellation)?;
+    }
     apply_camera_color_transform_cancellable(
         &mut linear,
         &resolved.camera_color_transform(),
@@ -1009,6 +1171,8 @@ fn prepare_base_cancellable(
     let preparation_peak_bytes = decoded_raw_bytes
         .checked_add(normalized_mosaic_bytes)
         .and_then(|bytes| bytes.checked_add(linear_rgb_bytes))
+        .and_then(|bytes| bytes.checked_add(optics_output_bytes))
+        .and_then(|bytes| bytes.checked_add(optics_scratch_bytes))
         .ok_or_else(|| dimension_overflow(linear.width(), linear.height()))?
         .max(highlight_peak_bytes);
 
@@ -1018,6 +1182,7 @@ fn prepare_base_cancellable(
         highlight_processing,
         highlight_clipping: highlight_processing,
         demosaic,
+        optics: optics_timing,
         color_conversion,
         ..StageTimings::default()
     };
@@ -1031,6 +1196,9 @@ fn prepare_base_cancellable(
         highlight_adjustments: recipe.raw.highlights,
         highlight_white_balance: recipe.color.white_balance,
         highlight_diagnostics,
+        optics_provenance,
+        optics_output_bytes,
+        optics_scratch_bytes,
         timings,
         decoded_raw_bytes,
         normalized_mosaic_bytes,
@@ -1047,6 +1215,11 @@ fn validate_base_recipe(base: &DemosaicedBase, recipe: &EditRecipe) -> Result<()
             field: "raw.highlights",
             reason: "the recipe does not match the RAW highlight result used to build the demosaiced base"
                 .to_owned(),
+        })
+    } else if !crate::optics::matches_recipe(base.optics_provenance(), &recipe.optics) {
+        Err(PipelineError::InvalidRecipe {
+            field: "optics",
+            reason: "the recipe does not match the optics result used to build the base".to_owned(),
         })
     } else if base.camera_profile != camera_profile_key(&recipe.color.camera_profile) {
         Err(PipelineError::InvalidRecipe {
@@ -1138,6 +1311,7 @@ fn render_base(
         + base.timings.normalization
         + base.timings.highlight_processing
         + base.timings.demosaic
+        + base.timings.optics
         + base.timings.resampling
         + base.timings.color_conversion
         + base.timings.adjustments
@@ -1149,6 +1323,7 @@ fn render_base(
         timings: base.timings,
         highlight_diagnostics: base.highlight_diagnostics,
         highlight_stats: base.highlight_stats(),
+        optics_provenance: base.optics_provenance.clone(),
         memory,
     })
 }
@@ -1187,6 +1362,8 @@ fn memory_estimate(
         decoded_raw_bytes,
         normalized_mosaic_bytes,
         highlight_scratch_bytes: base.highlight_scratch_bytes,
+        optics_output_bytes: base.optics_output_bytes,
+        optics_scratch_bytes: base.optics_scratch_bytes,
         resample_intermediate_bytes,
         linear_rgb_bytes,
         display_rgb_bytes,
@@ -1216,6 +1393,7 @@ fn output_geometry(
 fn validate_base_working_set(
     frame: &RawFrame,
     highlight_method: HighlightMethod,
+    optics_enabled: bool,
 ) -> Result<(), PipelineError> {
     let full_pixels = frame
         .info
@@ -1250,8 +1428,22 @@ fn validate_base_working_set(
     let image_peak = normalized_bytes
         .checked_add(linear_bytes)
         .ok_or_else(|| dimension_overflow(frame.info.width, frame.info.height))?;
+    let optics_scratch_bytes = if optics_enabled {
+        frame
+            .info
+            .width
+            .checked_mul(6)
+            .and_then(|elements| elements.checked_mul(size_of::<f32>()))
+            .ok_or_else(|| dimension_overflow(frame.info.width, frame.info.height))?
+    } else {
+        0
+    };
+    let optics_peak = linear_bytes
+        .checked_add(linear_bytes)
+        .and_then(|bytes| bytes.checked_add(optics_scratch_bytes))
+        .ok_or_else(|| dimension_overflow(frame.info.width, frame.info.height))?;
     let working_bytes = decoded_raw_bytes
-        .checked_add(image_peak.max(highlight_peak))
+        .checked_add(image_peak.max(highlight_peak).max(optics_peak))
         .ok_or_else(|| dimension_overflow(frame.info.width, frame.info.height))?;
     validate_working_set(working_bytes)
 }
@@ -1260,6 +1452,7 @@ fn validate_preview_working_set(
     frame: &RawFrame,
     max_long_edge: usize,
     highlight_method: HighlightMethod,
+    optics_enabled: bool,
 ) -> Result<(), PipelineError> {
     let full_width = frame.info.width;
     let full_height = frame.info.height;
@@ -1299,24 +1492,56 @@ fn validate_preview_working_set(
     let highlight_peak = normalized_bytes
         .checked_add(highlight_scratch_bytes)
         .ok_or_else(|| dimension_overflow(full_width, full_height))?;
+    let optics_scratch_bytes = if optics_enabled {
+        full_width
+            .checked_mul(6)
+            .and_then(|elements| elements.checked_mul(size_of::<f32>()))
+            .ok_or_else(|| dimension_overflow(full_width, full_height))?
+    } else {
+        0
+    };
+    let optics_peak = full_linear_bytes
+        .checked_add(full_linear_bytes)
+        .and_then(|bytes| bytes.checked_add(optics_scratch_bytes))
+        .ok_or_else(|| dimension_overflow(full_width, full_height))?;
     let horizontal_peak = full_linear_bytes
         .checked_add(intermediate_bytes)
         .ok_or_else(|| dimension_overflow(full_width, full_height))?;
     let conservative_peak = decoded_raw_bytes
-        .checked_add(demosaic_peak.max(highlight_peak).max(horizontal_peak))
+        .checked_add(
+            demosaic_peak
+                .max(highlight_peak)
+                .max(optics_peak)
+                .max(horizontal_peak),
+        )
         .ok_or_else(|| dimension_overflow(full_width, full_height))?;
     validate_working_set(conservative_peak)
 }
 
-fn preview_preparation_peak(
+struct PreviewPreparationInputs {
     decoded_raw_bytes: usize,
     normalized_mosaic_bytes: usize,
     full_linear_bytes: usize,
     highlight_scratch_bytes: usize,
+    optics_output_bytes: usize,
+    optics_scratch_bytes: usize,
     resample_intermediate_bytes: usize,
     reduced_linear_bytes: usize,
     unchanged_dimensions: bool,
-) -> Result<usize, PipelineError> {
+}
+
+fn preview_preparation_peak(inputs: PreviewPreparationInputs) -> Result<usize, PipelineError> {
+    let PreviewPreparationInputs {
+        decoded_raw_bytes,
+        normalized_mosaic_bytes,
+        full_linear_bytes,
+        highlight_scratch_bytes,
+        optics_output_bytes,
+        optics_scratch_bytes,
+        resample_intermediate_bytes,
+        reduced_linear_bytes,
+        unchanged_dimensions,
+    } = inputs;
     let demosaic_peak = decoded_raw_bytes
         .checked_add(normalized_mosaic_bytes)
         .and_then(|bytes| bytes.checked_add(full_linear_bytes));
@@ -1325,13 +1550,20 @@ fn preview_preparation_peak(
         .and_then(|bytes| bytes.checked_add(highlight_scratch_bytes));
     let horizontal_peak = decoded_raw_bytes
         .checked_add(full_linear_bytes)
+        .and_then(|bytes| bytes.checked_add(optics_output_bytes))
+        .and_then(|bytes| bytes.checked_add(optics_scratch_bytes))
         .and_then(|bytes| bytes.checked_add(resample_intermediate_bytes));
+    let optics_peak = decoded_raw_bytes
+        .checked_add(full_linear_bytes)
+        .and_then(|bytes| bytes.checked_add(optics_output_bytes))
+        .and_then(|bytes| bytes.checked_add(optics_scratch_bytes));
     let vertical_peak = decoded_raw_bytes
         .checked_add(resample_intermediate_bytes)
         .and_then(|bytes| bytes.checked_add(reduced_linear_bytes));
     let demosaic_peak = demosaic_peak
         .ok_or_else(|| dimension_overflow(0, 0))?
-        .max(highlight_peak.ok_or_else(|| dimension_overflow(0, 0))?);
+        .max(highlight_peak.ok_or_else(|| dimension_overflow(0, 0))?)
+        .max(optics_peak.ok_or_else(|| dimension_overflow(0, 0))?);
     let peak = if unchanged_dimensions {
         demosaic_peak
     } else {
@@ -1350,6 +1582,20 @@ fn validate_working_set(estimated_bytes: usize) -> Result<(), PipelineError> {
             estimated_bytes,
             max_bytes: CPU_WORKING_SET_LIMIT_BYTES,
         })
+    }
+}
+
+fn validate_optics_crop(
+    crop_policy: RawCropPolicy,
+    recipe: &EditRecipe,
+) -> Result<(), PipelineError> {
+    if crop_policy == RawCropPolicy::ActiveArea && crate::optics::optics_enabled(&recipe.optics) {
+        Err(PipelineError::Optics {
+            reason: "lens-profile correction requires the recommended RAW crop, not ActiveArea"
+                .to_owned(),
+        })
+    } else {
+        Ok(())
     }
 }
 
