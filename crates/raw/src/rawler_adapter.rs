@@ -646,6 +646,7 @@ fn map_capture_metadata(metadata: &RawMetadata) -> CaptureMetadata {
         exposure_time: exif.exposure_time.map(map_rational),
         aperture: exif.fnumber.map(map_rational),
         focal_length: exif.focal_length.map(map_rational),
+        focus_distance: exif.subject_distance.and_then(map_positive_rational),
         captured_at: exif
             .date_time_original
             .clone()
@@ -660,6 +661,12 @@ fn map_rational(value: rawler::formats::tiff::Rational) -> RationalValue {
         numerator: value.n,
         denominator: value.d,
     }
+}
+
+fn map_positive_rational(value: rawler::formats::tiff::Rational) -> Option<RationalValue> {
+    let mapped = map_rational(value);
+    let numeric = mapped.as_f64()?;
+    (numeric.is_finite() && numeric > 0.0).then_some(mapped)
 }
 
 fn finite_value(value: f32) -> Option<f32> {
@@ -696,4 +703,34 @@ fn file_name(path: &Path) -> String {
         || "<unknown>".to_owned(),
         |name| name.to_string_lossy().into_owned(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::map_positive_rational;
+    use crate::RationalValue;
+
+    #[test]
+    fn subject_distance_keeps_positive_exif_rationals() {
+        let mapped = map_positive_rational(rawler::formats::tiff::Rational { n: 35, d: 2 });
+        assert_eq!(
+            mapped,
+            Some(RationalValue {
+                numerator: 35,
+                denominator: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn subject_distance_discards_zero_and_invalid_rationals() {
+        assert_eq!(
+            map_positive_rational(rawler::formats::tiff::Rational { n: 0, d: 1 }),
+            None
+        );
+        assert_eq!(
+            map_positive_rational(rawler::formats::tiff::Rational { n: 1, d: 0 }),
+            None
+        );
+    }
 }

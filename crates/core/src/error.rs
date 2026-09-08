@@ -43,6 +43,9 @@ pub enum PipelineError {
     #[error("invalid edit recipe field {field}: {reason}")]
     InvalidRecipe { field: &'static str, reason: String },
 
+    #[error("lens-profile correction failed: {reason}")]
+    Optics { reason: String },
+
     #[error("{stage} received a non-finite sample at ({x}, {y})")]
     NonFiniteImageData {
         stage: &'static str,

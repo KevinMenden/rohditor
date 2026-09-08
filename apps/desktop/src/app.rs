@@ -7,9 +7,10 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use rohditor_core::{
-    DitherMode, ExportFormat, ExportMetadataPolicy, ExportSettings, HighlightDiagnostics,
-    Histogram, JPEG_QUALITY_DEFAULT, MemoryEstimate, PngBitDepth, PreviewOptions, StageTimings,
-    hsl_channel_weights_from_display_rgb, paths_refer_to_same_file, srgb_to_linear_srgb,
+    DatabaseProvenance, DitherMode, ExportFormat, ExportMetadataPolicy, ExportSettings,
+    HighlightDiagnostics, Histogram, JPEG_QUALITY_DEFAULT, MemoryEstimate, PngBitDepth,
+    PreviewOptions, ProfileMatch, StageTimings, hsl_channel_weights_from_display_rgb,
+    paths_refer_to_same_file, srgb_to_linear_srgb,
 };
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_edit::{
@@ -43,6 +44,7 @@ use crate::ui::diagnostics::{
     self, CacheModel, CatalogModel, DiagnosticsMessages, DiagnosticsModel, GpuModel,
     HighlightStatsModel, PreviewModel, QueueModel, TimingModel,
 };
+use crate::ui::optics::{OpticsAction, OpticsPanelModel};
 use crate::ui::settings as settings_ui;
 use crate::ui::theme;
 use crate::ui::toolbar::{self, FilePanelModel, StatusBarModel, ToolbarModel};
@@ -134,6 +136,11 @@ struct Document {
     export_status: Option<ExportActivity>,
     last_preview_time: Option<Duration>,
     preview_diagnostics: Option<DocumentPreviewDiagnostics>,
+    optics_match: Option<ProfileMatch>,
+    optics_candidates: Vec<rohditor_core::LensProfileSummary>,
+    optics_profile_filter: String,
+    optics_database: Option<DatabaseProvenance>,
+    optics_error: Option<String>,
     warning: Option<String>,
     error: Option<String>,
     notice: Option<String>,
@@ -171,6 +178,11 @@ impl Document {
             export_status: None,
             last_preview_time: None,
             preview_diagnostics: None,
+            optics_match: None,
+            optics_candidates: Vec::new(),
+            optics_profile_filter: String::new(),
+            optics_database: None,
+            optics_error: None,
             warning: None,
             error: None,
             notice: None,
@@ -602,6 +614,7 @@ impl RohditorApp {
                         )
                         && (preview.source.supports_dynamic_white_balance()
                             || preview.source.white_balance() == recipe.color.white_balance)
+                        && preview.source.optics_matches_recipe(&recipe.optics)
                 });
             if gpu_base_is_current {
                 self.coordinator.cancel_preview(document_id);
@@ -1017,6 +1030,9 @@ impl RohditorApp {
                     memory: MemoryEstimate::default(),
                     cache_resident_bytes: 0,
                     workspace_reused: false,
+                    optics_applied: None,
+                    optics_used_infinity_distance_fallback: false,
+                    optics_scale: None,
                 });
                 worker.backend = PreviewBackend::GpuBase;
                 worker.cache_hits = PreviewCacheHits {
@@ -1575,6 +1591,12 @@ impl RohditorApp {
             if let Some(mode) = output.white_balance_mode {
                 changed |=
                     set_white_balance_mode(&mut document.edits, mode, &mut white_balance_memory);
+            }
+            if let Some(action) = output.optics_action {
+                changed |= apply_optics_action(&mut document.edits, action);
+            }
+            if let Some(filter) = output.optics_filter {
+                document.optics_profile_filter = filter;
             }
             if output.auto_tone
                 && document.histogram_revision == Some(document.edits.revision())
@@ -2211,6 +2233,7 @@ impl RohditorApp {
                     normalization: preview.worker.timings.normalization,
                     highlight_processing: preview.worker.timings.highlight_processing,
                     demosaic: preview.worker.timings.demosaic,
+                    optics: preview.worker.timings.optics,
                     resampling: preview.worker.timings.resampling,
                     color_conversion: preview.worker.timings.color_conversion,
                     adjustments: preview.worker.timings.adjustments,
@@ -2651,6 +2674,66 @@ fn document_panel_model(
         auto_tone_available: document.histogram_revision == Some(document.edits.revision()),
         picker_mode,
         color_mixer_channel,
+        optics: optics_panel_model(document),
+    }
+}
+
+fn optics_panel_model(document: &Document) -> OpticsPanelModel {
+    let (camera, lens, focal_length_mm, aperture_f_number, focus_distance_m) = document
+        .info
+        .as_ref()
+        .map_or((None, None, None, None, None), |info| {
+            let lens = info.capture.lens_model.as_ref().map(|model| {
+                info.capture
+                    .lens_make
+                    .as_deref()
+                    .map_or_else(|| model.clone(), |make| format!("{make} {model}"))
+            });
+            (
+                Some(format!("{} {}", info.clean_make, info.clean_model)),
+                lens,
+                info.capture
+                    .focal_length
+                    .and_then(|value| value.as_f64())
+                    .map(|value| value as f32),
+                info.capture
+                    .aperture
+                    .and_then(|value| value.as_f64())
+                    .map(|value| value as f32),
+                info.capture
+                    .focus_distance
+                    .and_then(|value| value.as_f64())
+                    .map(|value| value as f32),
+            )
+        });
+    let (applied, used_infinity_distance_fallback, scale) =
+        document
+            .preview_diagnostics
+            .map_or((None, false, None), |diagnostics| {
+                (
+                    diagnostics.worker.optics_applied,
+                    diagnostics.worker.optics_used_infinity_distance_fallback,
+                    diagnostics.worker.optics_scale,
+                )
+            });
+    OpticsPanelModel {
+        profile: document.edits.recipe().optics.profile.clone(),
+        distortion: document.edits.recipe().optics.distortion,
+        vignetting: document.edits.recipe().optics.vignetting,
+        chromatic_aberration: document.edits.recipe().optics.chromatic_aberration,
+        camera,
+        lens,
+        focal_length_mm,
+        aperture_f_number,
+        focus_distance_m,
+        match_result: document.optics_match.clone(),
+        candidates: document.optics_candidates.clone(),
+        profile_filter: document.optics_profile_filter.clone(),
+        database: document.optics_database.clone(),
+        error: document.optics_error.clone(),
+        applied,
+        used_infinity_distance_fallback,
+        scale,
     }
 }
 
@@ -2929,6 +3012,20 @@ fn apply_adjustment_interaction(
         edits.finish_gesture();
     }
     changed
+}
+
+fn apply_optics_action(edits: &mut EditSession, action: OpticsAction) -> bool {
+    let mut next = edits.recipe().clone();
+    match action {
+        OpticsAction::SelectProfile(profile) => next.optics.profile = profile,
+        OpticsAction::SetDistortion(value) => next.optics.distortion = value,
+        OpticsAction::SetVignetting(value) => next.optics.vignetting = value,
+        OpticsAction::SetChromaticAberration(value) => next.optics.chromatic_aberration = value,
+        OpticsAction::Reset => next.optics = rohditor_edit::OpticsAdjustments::default(),
+    }
+    // Keep this branch explicit: a profile selection is recipe state and must
+    // participate in the same undo/revision path as every other adjustment.
+    edits.set_discrete(next)
 }
 
 impl eframe::App for RohditorApp {

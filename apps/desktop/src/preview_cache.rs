@@ -2,11 +2,15 @@ use std::mem::size_of;
 use std::sync::Arc;
 
 use rohditor_core::{
-    CpuPreviewWorkspace, DemosaicedBase, LOCAL_RATIOS_ALGORITHM_VERSION, MemoryEstimate,
-    OPPOSED_ALGORITHM_VERSION, OutputPolicy, PreviewOptions, RawCropPolicy, ReconstructedPreview,
+    CorrectionComponents, CpuPipeline, CpuPreviewWorkspace, DemosaicedBase,
+    LOCAL_RATIOS_ALGORITHM_VERSION, MemoryEstimate, OPPOSED_ALGORITHM_VERSION,
+    OPTICS_ALGORITHM_VERSION, OpticsProvenance, OutputPolicy, PreviewOptions, RawCropPolicy,
+    ReconstructedPreview,
 };
+#[cfg(test)]
+use rohditor_core::{DatabaseProvenance, LensProfileSummary};
 use rohditor_demosaic::DemosaicAlgorithm;
-use rohditor_edit::{EditRecipe, HighlightMethod, WhiteBalance};
+use rohditor_edit::{EditRecipe, HighlightMethod, LensProfileSelection, WhiteBalance};
 use rohditor_image::{DisplayRgbImage, Orientation};
 use rohditor_raw::{RawFrame, SourceIdentity};
 
@@ -20,11 +24,49 @@ pub(crate) struct PreviewCacheKeys {
 }
 
 impl PreviewCacheKeys {
+    #[cfg(test)]
     pub(crate) fn new(
         document_id: u64,
         frame: &RawFrame,
         recipe: &EditRecipe,
         options: PreviewOptions,
+    ) -> Self {
+        Self::new_with_optics(document_id, frame, recipe, options, None, None)
+    }
+
+    pub(crate) fn new_for_pipeline(
+        document_id: u64,
+        frame: &RawFrame,
+        recipe: &EditRecipe,
+        options: PreviewOptions,
+        pipeline: &CpuPipeline,
+    ) -> Self {
+        let optics_enabled = !matches!(recipe.optics.profile, LensProfileSelection::Off);
+        let database_fingerprint = optics_enabled
+            .then(|| {
+                pipeline
+                    .optics_service()
+                    .map(|service| service.database_provenance().fingerprint)
+            })
+            .flatten();
+        let provenance = pipeline.optics_cache_provenance(frame, recipe, options.render);
+        Self::new_with_optics(
+            document_id,
+            frame,
+            recipe,
+            options,
+            database_fingerprint,
+            provenance.as_ref(),
+        )
+    }
+
+    fn new_with_optics(
+        document_id: u64,
+        frame: &RawFrame,
+        recipe: &EditRecipe,
+        options: PreviewOptions,
+        database_fingerprint: Option<u64>,
+        provenance: Option<&OpticsProvenance>,
     ) -> Self {
         let decoded = DecodedRawKey {
             document_id,
@@ -40,10 +82,11 @@ impl PreviewCacheKeys {
             max_long_edge: options.max_long_edge,
             algorithm: options.render.demosaic,
             highlight: HighlightKey::from_recipe(recipe),
+            optics: OpticsKey::from_frame_recipe(frame, recipe, database_fingerprint, provenance),
             // Bump when the retained source representation changes. The GPU
             // boundary now consumes camera-native samples rather than a
             // camera-converted base.
-            reconstruction_version: 6,
+            reconstruction_version: 7,
         };
         let demosaiced = DemosaicedBaseKey {
             reconstructed: reconstructed.clone(),
@@ -121,7 +164,92 @@ struct ReconstructedCameraRgbKey {
     max_long_edge: usize,
     algorithm: DemosaicAlgorithm,
     highlight: HighlightKey,
+    optics: OpticsKey,
     reconstruction_version: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OpticsKey {
+    algorithm_version: u32,
+    database_fingerprint: Option<u64>,
+    plan_content_fingerprint: Option<u64>,
+    profile: OpticsProfileKey,
+    distortion: bool,
+    vignetting: bool,
+    chromatic_aberration: bool,
+    applied: CorrectionComponents,
+    automatic_scale_bits: Option<u32>,
+    used_infinity_distance_fallback: bool,
+    camera_make: String,
+    camera_model: String,
+    camera_clean_make: String,
+    camera_clean_model: String,
+    lens_make: Option<String>,
+    lens_model: Option<String>,
+    focal_length_bits: Option<u32>,
+    aperture_bits: Option<u32>,
+    focus_distance_bits: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OpticsProfileKey {
+    Off,
+    Automatic,
+    Lensfun(String),
+}
+
+impl OpticsKey {
+    fn from_frame_recipe(
+        frame: &RawFrame,
+        recipe: &EditRecipe,
+        database_fingerprint: Option<u64>,
+        provenance: Option<&OpticsProvenance>,
+    ) -> Self {
+        let profile = match &recipe.optics.profile {
+            LensProfileSelection::Off => OpticsProfileKey::Off,
+            LensProfileSelection::Automatic => OpticsProfileKey::Automatic,
+            LensProfileSelection::Lensfun { profile_id } => {
+                OpticsProfileKey::Lensfun(profile_id.clone())
+            }
+        };
+        Self {
+            algorithm_version: OPTICS_ALGORITHM_VERSION,
+            database_fingerprint,
+            plan_content_fingerprint: provenance.map(|value| value.content_fingerprint),
+            profile,
+            distortion: recipe.optics.distortion,
+            vignetting: recipe.optics.vignetting,
+            chromatic_aberration: recipe.optics.chromatic_aberration,
+            applied: provenance.map_or(CorrectionComponents::none(), |value| value.applied),
+            automatic_scale_bits: provenance.map(|value| value.scale.to_bits()),
+            used_infinity_distance_fallback: provenance
+                .is_some_and(|value| value.used_infinity_distance_fallback),
+            camera_make: frame.info.make.clone(),
+            camera_model: frame.info.model.clone(),
+            camera_clean_make: frame.info.clean_make.clone(),
+            camera_clean_model: frame.info.clean_model.clone(),
+            lens_make: frame.info.capture.lens_make.clone(),
+            lens_model: frame.info.capture.lens_model.clone(),
+            focal_length_bits: frame
+                .info
+                .capture
+                .focal_length
+                .and_then(|value| value.as_f64())
+                .map(|value| (value as f32).to_bits()),
+            aperture_bits: frame
+                .info
+                .capture
+                .aperture
+                .and_then(|value| value.as_f64())
+                .map(|value| (value as f32).to_bits()),
+            focus_distance_bits: frame
+                .info
+                .capture
+                .focus_distance
+                .and_then(|value| value.as_f64())
+                .map(|value| (value as f32).to_bits()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -578,5 +706,130 @@ mod tests {
             opposed_keys.reconstructed,
             keys(&opposed_threshold).reconstructed
         );
+    }
+
+    #[test]
+    fn optics_cache_key_tracks_profile_plan_database_and_capture_inputs() {
+        let mut recipe = EditRecipe::default();
+        recipe.optics.profile = LensProfileSelection::Automatic;
+        let provenance = optics_provenance(11, 22, 1.25, true);
+        let base = OpticsKey::from_frame_recipe(&frame(), &recipe, Some(11), Some(&provenance));
+
+        let mut changed_database = provenance.clone();
+        changed_database.database.fingerprint = 12;
+        assert_ne!(
+            base,
+            OpticsKey::from_frame_recipe(&frame(), &recipe, Some(12), Some(&changed_database),)
+        );
+
+        let mut changed_plan = provenance.clone();
+        changed_plan.content_fingerprint = 23;
+        assert_ne!(
+            base,
+            OpticsKey::from_frame_recipe(&frame(), &recipe, Some(11), Some(&changed_plan),)
+        );
+
+        let mut changed_flags = recipe.clone();
+        changed_flags.optics.vignetting = false;
+        assert_ne!(
+            base,
+            OpticsKey::from_frame_recipe(&frame(), &changed_flags, Some(11), Some(&provenance),)
+        );
+
+        let mut changed_capture = frame();
+        changed_capture.info.capture.focal_length = Some(rohditor_raw::RationalValue {
+            numerator: 35,
+            denominator: 1,
+        });
+        assert_ne!(
+            base,
+            OpticsKey::from_frame_recipe(&changed_capture, &recipe, Some(11), Some(&provenance),)
+        );
+
+        let mut changed_aperture = frame();
+        changed_aperture.info.capture.aperture = Some(rohditor_raw::RationalValue {
+            numerator: 28,
+            denominator: 10,
+        });
+        assert_ne!(
+            base,
+            OpticsKey::from_frame_recipe(&changed_aperture, &recipe, Some(11), Some(&provenance),)
+        );
+
+        let mut changed_focus = frame();
+        changed_focus.info.capture.focus_distance = Some(rohditor_raw::RationalValue {
+            numerator: 10,
+            denominator: 1,
+        });
+        assert_ne!(
+            base,
+            OpticsKey::from_frame_recipe(&changed_focus, &recipe, Some(11), Some(&provenance),)
+        );
+
+        let mut changed_scale = provenance.clone();
+        changed_scale.scale = 1.5;
+        assert_ne!(
+            base,
+            OpticsKey::from_frame_recipe(&frame(), &recipe, Some(11), Some(&changed_scale),)
+        );
+
+        let mut changed_fallback = provenance.clone();
+        changed_fallback.used_infinity_distance_fallback = false;
+        assert_ne!(
+            base,
+            OpticsKey::from_frame_recipe(&frame(), &recipe, Some(11), Some(&changed_fallback),)
+        );
+
+        let mut changed_algorithm = base.clone();
+        changed_algorithm.algorithm_version += 1;
+        assert_ne!(base, changed_algorithm);
+
+        let mut explicit = recipe;
+        explicit.optics.profile = LensProfileSelection::Lensfun {
+            profile_id: "lensfun:fixture:explicit".to_owned(),
+        };
+        assert_ne!(
+            base,
+            OpticsKey::from_frame_recipe(&frame(), &explicit, Some(11), Some(&provenance),)
+        );
+    }
+
+    fn optics_provenance(
+        database_fingerprint: u64,
+        content_fingerprint: u64,
+        scale: f32,
+        fallback: bool,
+    ) -> OpticsProvenance {
+        OpticsProvenance {
+            profile: LensProfileSummary {
+                id: "lensfun:fixture".to_owned(),
+                camera: "Camera".to_owned(),
+                lens: "Lens".to_owned(),
+                mount: "Mount".to_owned(),
+                available: CorrectionComponents {
+                    distortion: true,
+                    vignetting: true,
+                    chromatic_aberration: true,
+                },
+            },
+            database: DatabaseProvenance {
+                source: "fixture".to_owned(),
+                snapshot: "test".to_owned(),
+                fingerprint: database_fingerprint,
+            },
+            requested: CorrectionComponents {
+                distortion: true,
+                vignetting: true,
+                chromatic_aberration: true,
+            },
+            applied: CorrectionComponents {
+                distortion: true,
+                vignetting: true,
+                chromatic_aberration: true,
+            },
+            used_infinity_distance_fallback: fallback,
+            scale,
+            content_fingerprint,
+        }
     }
 }

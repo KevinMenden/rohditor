@@ -9,6 +9,7 @@ members = [
     "crates/gpu",
     "crates/highlight",
     "crates/image",
+    "crates/optics",
     "crates/raw",
 ]
 resolver = "3"
@@ -28,6 +29,7 @@ criterion = "=0.5.1"
 eframe = { version = "=0.33.3", default-features = false, features = ["default_fonts", "glow", "wayland", "wgpu", "x11"] }
 half = "=2.7.1"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+lensfun = "=0.7.0"
 pollster = "=0.4.0"
 rayon = "1.11"
 rawler = "=0.7.2"
