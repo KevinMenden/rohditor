@@ -130,7 +130,7 @@ enum Command {
         vibrance: f32,
 
         /// RAW-stage highlight handling.
-        #[arg(long, value_enum, default_value_t = CliHighlightMethod::Off)]
+        #[arg(long, value_enum, default_value_t = CliHighlightMethod::Clip)]
         highlight_reconstruction: CliHighlightMethod,
 
         /// Effective normalized white threshold for highlight clipping (0.5 to 1.5).
@@ -784,7 +784,10 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
                 tint,
             }
         }
-        (None, None, 0.0) => WhiteBalance::AsShot,
+        (None, None, tint) => WhiteBalance::TemperatureTint {
+            temperature: TEMPERATURE_RANGE.neutral,
+            tint,
+        },
         _ => unreachable!("white balance conflict was rejected above"),
     };
     let camera_profile = arguments
@@ -1803,10 +1806,16 @@ mod tests {
 
         let defaulted = Cli::try_parse_from(["rohditor-cli", "develop", "input.arw", "output.jpg"])
             .expect("development defaults parse");
-        let Command::Develop { demosaic, .. } = defaulted.command else {
+        let Command::Develop {
+            demosaic,
+            highlight_reconstruction,
+            ..
+        } = defaulted.command
+        else {
             panic!("expected develop command");
         };
         assert!(matches!(demosaic, CliDemosaic::MalvarHeCutler));
+        assert!(matches!(highlight_reconstruction, CliHighlightMethod::Clip));
     }
 
     #[test]

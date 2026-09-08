@@ -304,7 +304,7 @@ identity by itself. Deserialised recipes can be edited independently of the
 original DCP, so cache keys must include the actual selected matrix bits,
 illuminants, and evaluator version.
 
-Bump `EDIT_RECIPE_SCHEMA_VERSION` to 7. The known v1-v6 recipe migrations should
+Bump `EDIT_RECIPE_SCHEMA_VERSION` to 8. The known v1-v6 recipe migrations should
 receive `CameraProfileSelection::Automatic`; this is a small continuation of
 the existing migration code, not a promise of general pre-release backwards
 compatibility. Validate bounded strings, hash syntax, calibration count,
@@ -696,4 +696,3 @@ directly to ICC, bundled databases, and camera looks at the same time.
 - Current Rohditor boundaries: `crates/raw/src/rawler_adapter.rs`,
   `crates/core/src/color.rs`, `crates/core/src/pipeline.rs`,
   `apps/desktop/src/preview_cache.rs`, and `crates/gpu/src/preview.rs`
-

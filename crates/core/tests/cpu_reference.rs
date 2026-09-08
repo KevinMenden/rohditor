@@ -263,8 +263,9 @@ fn clip_uses_active_wb_limits_and_reaches_a_common_post_wb_ceiling() -> Result<(
         max_long_edge: usize::MAX,
     };
 
-    let off =
-        CpuPipeline.prepare_preview_reconstruction(&frame, &EditRecipe::default(), options)?;
+    let mut off_recipe = EditRecipe::default();
+    off_recipe.raw.highlights.method = HighlightMethod::Off;
+    let off = CpuPipeline.prepare_preview_reconstruction(&frame, &off_recipe, options)?;
     assert!(off.image().data().iter().any(|value| *value > 1.0));
 
     let clipped = CpuPipeline.prepare_preview_reconstruction(&frame, &recipe, options)?;
@@ -394,6 +395,7 @@ fn opposed_is_camera_native_and_supports_dynamic_white_balance() -> Result<(), B
 fn off_ignores_an_inactive_threshold_when_reusing_preview_stages() -> Result<(), Box<dyn Error>> {
     let frame = synthetic_rggb_frame();
     let mut recipe = EditRecipe::default();
+    recipe.raw.highlights.method = HighlightMethod::Off;
     recipe.raw.highlights.clip.threshold = 1.25;
     let options = PreviewOptions {
         max_long_edge: 3,
