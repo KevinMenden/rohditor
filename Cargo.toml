@@ -3,6 +3,7 @@ members = [
     "apps/cli",
     "apps/desktop",
     "crates/catalog",
+    "crates/camera-profile",
     "crates/core",
     "crates/demosaic",
     "crates/edit",

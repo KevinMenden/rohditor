@@ -33,6 +33,8 @@ pub const HSL_CHANNEL_CENTERS: [f32; HSL_CHANNEL_COUNT] = [
     270.0 / 360.0,
     300.0 / 360.0,
 ];
+/// A full HSL hue control value shifts a fully selected color band by 45°.
+pub const HSL_HUE_SHIFT_PER_FULL_VALUE: f32 = 0.125;
 // Blend into additive luminance changes near black instead of allowing a
 // ratio to magnify tiny numerical differences. The continuous transition also
 // keeps half-float source quantization from changing the visible result.
@@ -276,18 +278,6 @@ fn validate_white_balance_selection(selection: WhiteBalance) -> Result<(), Pipel
             reason: "white-balance values are outside their declared finite ranges".to_owned(),
         })
     }
-}
-
-pub(crate) fn white_balance_gains_with_transform(
-    info: &RawFileInfo,
-    transform: &CameraColorTransform,
-    selection: WhiteBalance,
-) -> Result<WhiteBalanceGains, PipelineError> {
-    white_balance_gains_from_calibration(
-        info.as_shot_white_balance,
-        transform.camera_to_xyz_d65,
-        selection,
-    )
 }
 
 fn temperature_tint_gains(
@@ -645,7 +635,7 @@ fn apply_hsl_adjustments(pixel: &mut [f32], adjustments: &HslAdjustments) {
     let mut lightness_shift = 0.0;
     for (channel, weight) in adjustments.channels.iter().zip(channel_weights) {
         let weight = weight * chroma_weight;
-        hue_shift += channel.hue * 0.125 * weight;
+        hue_shift += channel.hue * HSL_HUE_SHIFT_PER_FULL_VALUE * weight;
         saturation_shift += channel.saturation * 0.5 * weight;
         lightness_shift += channel.luminance * 0.25 * weight;
     }
@@ -1300,6 +1290,7 @@ mod tests {
             color_matrices: vec![CameraColorMatrix {
                 illuminant: "D65".to_owned(),
                 values: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                origin: rohditor_raw::CameraMatrixOrigin::DecoderDatabase,
             }],
             orientation: Orientation::Normal,
             capture: CaptureMetadata::default(),

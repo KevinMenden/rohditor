@@ -1060,9 +1060,9 @@ fn process_gpu_base(
     let width = reconstructed.image().width();
     let height = reconstructed.image().height();
     let upload_started = Instant::now();
-    let upload = match GpuPreviewUpload::from_reconstructed_preview_cancellable(
+    let upload = match GpuPreviewUpload::from_reconstructed_preview_for_recipe(
         reconstructed,
-        job.recipe.color.white_balance,
+        &job.recipe,
         cancellation,
     ) {
         Ok(upload) => upload,
@@ -1737,7 +1737,7 @@ mod tests {
 
     use image::{Rgb, RgbImage};
     use rohditor_core::{CpuPipeline, ExportFormat, JPEG_QUALITY_DEFAULT};
-    use rohditor_edit::WhiteBalance;
+    use rohditor_edit::{HighlightMethod, WhiteBalance};
     use rohditor_raw::{
         CameraColorMatrix, CaptureMetadata, CfaPattern, LevelPattern, PhotometricInterpretation,
         RawError, RawSession,
@@ -1870,6 +1870,8 @@ mod tests {
         let frame = Arc::new(fake_frame());
         let options = PreviewOptions::default();
         let mut cache = PreviewCache::default();
+        let mut initial_recipe = EditRecipe::default();
+        initial_recipe.raw.highlights.method = HighlightMethod::Off;
         let initial = PreviewJob {
             ticket: PreviewTicket {
                 document_id: 9,
@@ -1877,7 +1879,7 @@ mod tests {
                 sequence: 0,
             },
             frame: Arc::clone(&frame),
-            recipe: EditRecipe::default(),
+            recipe: initial_recipe.clone(),
             options,
             backend: PreviewBackend::Cpu,
             resolution: PreviewResolution::Fit,
@@ -1904,7 +1906,7 @@ mod tests {
             },
             frame,
             recipe: {
-                let mut recipe = EditRecipe::default();
+                let mut recipe = initial_recipe;
                 recipe.light.exposure_ev = 1.0;
                 recipe
             },
@@ -1966,6 +1968,7 @@ mod tests {
         assert!(!invalid_schema_hits.adjusted);
 
         let mut white_balance_recipe = EditRecipe::default();
+        white_balance_recipe.raw.highlights.method = HighlightMethod::Off;
         white_balance_recipe.color.white_balance = WhiteBalance::ManualMultipliers {
             red: 1.1,
             green: 1.0,
@@ -2328,6 +2331,7 @@ mod tests {
                 color_matrices: vec![CameraColorMatrix {
                     illuminant: "D65".to_owned(),
                     values: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                    origin: rohditor_raw::CameraMatrixOrigin::DecoderDatabase,
                 }],
                 orientation: Orientation::Normal,
                 capture: CaptureMetadata::default(),

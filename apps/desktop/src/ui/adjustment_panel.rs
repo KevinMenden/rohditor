@@ -1,6 +1,6 @@
 use eframe::egui;
-use rohditor_core::{Histogram, evaluate_tone_curve};
-use rohditor_edit::{HighlightMethod, ToneCurve};
+use rohditor_core::{HSL_CHANNEL_CENTERS, Histogram, evaluate_tone_curve};
+use rohditor_edit::{CameraProfileSelection, HighlightMethod, ToneCurve};
 
 use super::PickerMode;
 use super::optics::{self, OpticsAction, OpticsPanelModel};
@@ -101,6 +101,14 @@ pub(crate) struct AdjustmentValues {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct CameraProfileChoice {
+    pub selection: CameraProfileSelection,
+    pub label: String,
+    pub detail: String,
+    pub tooltip: String,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct DocumentPanelModel {
     pub file_name: String,
     pub camera: Option<String>,
@@ -108,6 +116,8 @@ pub(crate) struct DocumentPanelModel {
     pub revision: u64,
     pub has_adjustments: bool,
     pub values: AdjustmentValues,
+    pub camera_profile: CameraProfileSelection,
+    pub camera_profile_choices: Vec<CameraProfileChoice>,
     pub ranges: AdjustmentRanges,
     pub export_ready: bool,
     pub export_in_progress: bool,
@@ -134,6 +144,8 @@ pub(crate) struct AdjustmentInteraction {
 
 #[derive(Debug, Default)]
 pub(crate) struct AdjustmentPanelOutput {
+    pub camera_profile: Option<CameraProfileSelection>,
+    pub import_camera_profile: bool,
     pub white_balance_mode: Option<WhiteBalanceMode>,
     pub highlight_method: Option<HighlightMethod>,
     pub picker_mode: Option<Option<PickerMode>>,
@@ -217,35 +229,49 @@ pub(crate) fn show(
                     document_summary(ui, &document);
                     show_messages(ui, &document, &mut output);
                     histogram_panel(ui, document.histogram.as_ref());
-                    show_light_controls(ui, &mut document, &mut output);
-                    show_tone_curve_controls(ui, &mut document, &mut output);
-                    show_color_controls(ui, &mut document, &mut output);
-                    show_color_mixer_controls(ui, &mut document, &mut output);
-                    show_color_grading_controls(ui, &mut document, &mut output);
+
+                    widgets::adjustment_section(ui, "Light", |ui| {
+                        show_light_controls(ui, &mut document, &mut output);
+                        show_tone_curve_controls(ui, &mut document, &mut output);
+                    });
+                    widgets::adjustment_section(ui, "Color", |ui| {
+                        show_color_controls(ui, &mut document, &mut output);
+                        ui.separator();
+                        show_color_mixer_controls(ui, &mut document, &mut output);
+                        ui.separator();
+                        show_color_grading_controls(ui, &mut document, &mut output);
+                        output.reset_all = ui
+                            .add_enabled(
+                                document.has_adjustments,
+                                egui::Button::new("Reset all adjustments").frame(false),
+                            )
+                            .on_hover_text("Restore the neutral recipe")
+                            .clicked();
+                    });
                     output.optics_filter =
                         optics::show(ui, &mut document.optics, &mut output.optics_action);
-
-                    widgets::section_header(ui, "Export");
-                    show_export_settings(ui, export_settings);
-                    let export_label = if document.export_in_progress {
-                        "Exporting…"
-                    } else {
-                        "Export image…"
-                    };
-                    output.export = widgets::primary_button(
-                        ui,
-                        export_label,
-                        document.export_ready && !document.export_in_progress,
-                    )
-                    .on_hover_text("Export the full-resolution CPU-developed image")
-                    .clicked();
-                    if !document.export_ready && !document.export_in_progress {
-                        ui.label(
-                            egui::RichText::new("Available after RAW decoding completes")
-                                .small()
-                                .color(colors::TEXT_MUTED),
-                        );
-                    }
+                    widgets::adjustment_section(ui, "Export", |ui| {
+                        show_export_settings(ui, export_settings);
+                        let export_label = if document.export_in_progress {
+                            "Exporting…"
+                        } else {
+                            "Export image…"
+                        };
+                        output.export = widgets::primary_button(
+                            ui,
+                            export_label,
+                            document.export_ready && !document.export_in_progress,
+                        )
+                        .on_hover_text("Export the full-resolution CPU-developed image")
+                        .clicked();
+                        if !document.export_ready && !document.export_in_progress {
+                            ui.label(
+                                egui::RichText::new("Available after RAW decoding completes")
+                                    .small()
+                                    .color(colors::TEXT_MUTED),
+                            );
+                        }
+                    });
                 });
         });
     output
@@ -256,7 +282,7 @@ fn show_tone_curve_controls(
     document: &mut DocumentPanelModel,
     output: &mut AdjustmentPanelOutput,
 ) {
-    widgets::section_header(ui, "Tone curve");
+    widgets::subsection_header(ui, "Tone curve");
     let mut values = [
         document.values.tone_curve_shadows,
         document.values.tone_curve_darks,
@@ -556,7 +582,6 @@ fn show_light_controls(
     document: &mut DocumentPanelModel,
     output: &mut AdjustmentPanelOutput,
 ) {
-    widgets::section_header(ui, "Light");
     let mut highlight_method = document.values.highlight_method;
     widgets::dropdown(
         ui,
@@ -626,7 +651,13 @@ fn show_light_controls(
     }
     let auto_tone_response = ui
         .add_enabled_ui(document.auto_tone_available, |ui| {
-            ui.small_button("Auto tone")
+            ui.add_sized(
+                egui::vec2(ui.available_width(), 34.0),
+                egui::Button::new(egui::RichText::new("Auto tone").strong())
+                    .fill(colors::ACCENT)
+                    .stroke(egui::Stroke::new(1.0_f32, colors::ACCENT_ACTIVE))
+                    .corner_radius(metrics::RADIUS_SMALL),
+            )
         })
         .inner
         .on_hover_text(if document.auto_tone_available {
@@ -717,7 +748,52 @@ fn show_color_controls(
     document: &mut DocumentPanelModel,
     output: &mut AdjustmentPanelOutput,
 ) {
-    widgets::section_header(ui, "Color");
+    let mut profile_index = document
+        .camera_profile_choices
+        .iter()
+        .position(|choice| choice.selection == document.camera_profile)
+        .unwrap_or(0);
+    let selected_profile = document.camera_profile_choices.get(profile_index);
+    widgets::dropdown(
+        ui,
+        "camera_profile",
+        "Camera profile",
+        selected_profile.map_or("Automatic (RAW / decoder matrix)", |choice| {
+            choice.label.as_str()
+        }),
+        |ui| {
+            for (index, choice) in document.camera_profile_choices.iter().enumerate() {
+                ui.selectable_value(&mut profile_index, index, &choice.label)
+                    .on_hover_text(&choice.tooltip);
+            }
+        },
+    );
+    if let Some(choice) = document.camera_profile_choices.get(profile_index) {
+        ui.label(
+            egui::RichText::new(&choice.detail)
+                .small()
+                .color(colors::TEXT_MUTED),
+        );
+        if profile_index
+            != document
+                .camera_profile_choices
+                .iter()
+                .position(|candidate| candidate.selection == document.camera_profile)
+                .unwrap_or(0)
+        {
+            output.camera_profile = Some(choice.selection.clone());
+            document.camera_profile = choice.selection.clone();
+        }
+    }
+    if ui
+        .small_button("Import DCP…")
+        .on_hover_text("Validate and install a compatible matrix-only DCP camera profile")
+        .clicked()
+    {
+        output.import_camera_profile = true;
+    }
+    ui.add_space(4.0);
+    widgets::subsection_header(ui, "White balance");
     let mut mode = document.values.white_balance_mode;
     widgets::dropdown(
         ui,
@@ -847,6 +923,7 @@ fn show_color_controls(
         }
     }
 
+    widgets::subsection_header(ui, "Saturation & vibrance");
     record_slider(
         ui,
         &mut output.interactions,
@@ -879,14 +956,6 @@ fn show_color_controls(
             scale: ValueScale::OffsetPercent,
         },
     );
-
-    output.reset_all = ui
-        .add_enabled(
-            document.has_adjustments,
-            egui::Button::new("Reset all adjustments").frame(false),
-        )
-        .on_hover_text("Restore the neutral recipe")
-        .clicked();
 }
 
 fn show_color_mixer_controls(
@@ -1084,7 +1153,16 @@ fn record_slider(
     spec: AdjustmentSpec<'_>,
 ) -> egui::Response {
     let neutral = spec.neutral;
-    let response = widgets::adjustment_slider(ui, value, spec);
+    let response = match target {
+        AdjustmentTarget::WhiteBalanceTemperature => {
+            widgets::temperature_adjustment_slider(ui, value, spec)
+        }
+        AdjustmentTarget::WhiteBalanceTint => widgets::tint_adjustment_slider(ui, value, spec),
+        AdjustmentTarget::HslHue(channel) => {
+            widgets::hue_adjustment_slider(ui, value, spec, HSL_CHANNEL_CENTERS[channel])
+        }
+        _ => widgets::adjustment_slider(ui, value, spec),
+    };
     if response.reset_clicked {
         *value = neutral;
     }

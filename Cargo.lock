@@ -2819,6 +2819,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3582f63211428f83597b51b2ddb88e2a91a9d52d12831f9d08f5e624e8977422"
 
 [[package]]
+name = "rohditor-camera-profile"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "rohditor-catalog"
 version = "0.1.0"
 dependencies = [
@@ -2837,6 +2846,7 @@ dependencies = [
  "anyhow",
  "clap",
  "image",
+ "rohditor-camera-profile",
  "rohditor-core",
  "rohditor-demosaic",
  "rohditor-edit",
@@ -2856,6 +2866,7 @@ dependencies = [
  "criterion",
  "image",
  "rayon",
+ "rohditor-camera-profile",
  "rohditor-demosaic",
  "rohditor-edit",
  "rohditor-highlight",
@@ -2886,6 +2897,7 @@ dependencies = [
  "eframe",
  "image",
  "rfd",
+ "rohditor-camera-profile",
  "rohditor-catalog",
  "rohditor-core",
  "rohditor-demosaic",
@@ -2905,6 +2917,7 @@ dependencies = [
 name = "rohditor-edit"
 version = "0.1.0"
 dependencies = [
+ "rohditor-camera-profile",
  "rohditor-image",
  "serde",
  "serde_json",

@@ -1,6 +1,8 @@
+use rohditor_camera_profile::MatrixCameraProfile;
 use rohditor_image::Orientation;
 use serde::de::Error as _;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::ser::SerializeStruct;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 mod geometry;
@@ -20,13 +22,14 @@ pub struct EditError {
 }
 
 /// Schema version of the current non-destructive edit recipe.
-pub const EDIT_RECIPE_SCHEMA_VERSION: u32 = 7;
+pub const EDIT_RECIPE_SCHEMA_VERSION: u32 = 8;
 const LEGACY_EDIT_RECIPE_SCHEMA_VERSION: u32 = 1;
 const PREVIOUS_EDIT_RECIPE_SCHEMA_VERSION: u32 = 2;
 const PREVIOUS_RAW_EDIT_RECIPE_SCHEMA_VERSION: u32 = 3;
 const PREVIOUS_HIGHLIGHT_EDIT_RECIPE_SCHEMA_VERSION: u32 = 4;
 const PREVIOUS_LOCAL_RATIOS_EDIT_RECIPE_SCHEMA_VERSION: u32 = 5;
-const PREVIOUS_NO_OPTICS_EDIT_RECIPE_SCHEMA_VERSION: u32 = 6;
+const PREVIOUS_OPPOSED_EDIT_RECIPE_SCHEMA_VERSION: u32 = 6;
+const PREVIOUS_CAMERA_PROFILE_EDIT_RECIPE_SCHEMA_VERSION: u32 = 7;
 
 /// Inclusive range and neutral value for one adjustment parameter.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -132,30 +135,88 @@ pub const COLOR_GRADING_RANGE: ParameterRange = ParameterRange {
 pub const HSL_CHANNEL_COUNT: usize = 8;
 
 /// White balance relative to the decoder's as-shot channel multipliers.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum WhiteBalance {
-    #[default]
     AsShot,
-    ManualMultipliers {
-        red: f32,
-        green: f32,
-        blue: f32,
-    },
-    TemperatureTint {
-        temperature: f32,
-        tint: f32,
-    },
+    ManualMultipliers { red: f32, green: f32, blue: f32 },
+    TemperatureTint { temperature: f32, tint: f32 },
 }
 
-/// Destructive RAW-stage highlight handling. `Off` remains the default so
-/// normalized over-range samples are retained for later processing stages.
+impl Default for WhiteBalance {
+    fn default() -> Self {
+        Self::TemperatureTint {
+            temperature: TEMPERATURE_RANGE.neutral,
+            tint: TINT_RANGE.neutral,
+        }
+    }
+}
+
+/// Camera color transform selected for a recipe. Automatic is intentionally
+/// the default and retains the decoder's existing matrix behavior.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum CameraProfileSelection {
+    #[default]
+    Automatic,
+    Matrix(MatrixCameraProfile),
+}
+
+impl Serialize for CameraProfileSelection {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut fields = serializer.serialize_struct("CameraProfileSelection", 2)?;
+        match self {
+            Self::Automatic => {
+                fields.serialize_field("mode", "automatic")?;
+                fields.serialize_field("profile", &Option::<&MatrixCameraProfile>::None)?;
+            }
+            Self::Matrix(profile) => {
+                fields.serialize_field("mode", "matrix")?;
+                fields.serialize_field("profile", profile)?;
+            }
+        }
+        fields.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for CameraProfileSelection {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Fields {
+            mode: String,
+            #[serde(default)]
+            profile: Option<MatrixCameraProfile>,
+        }
+
+        let fields = Fields::deserialize(deserializer)?;
+        match fields.mode.as_str() {
+            "automatic" if fields.profile.is_none() => Ok(Self::Automatic),
+            "matrix" => fields.profile.map(Self::Matrix).ok_or_else(|| {
+                D::Error::custom("matrix camera profile selection is missing profile")
+            }),
+            "automatic" => Err(D::Error::custom(
+                "automatic camera profile selection must not include a profile",
+            )),
+            other => Err(D::Error::custom(format!(
+                "unknown camera profile selection mode {other}"
+            ))),
+        }
+    }
+}
+
+/// Destructive RAW-stage highlight handling. Clip is the default so the
+/// initial developed image has a useful treatment for clipped highlights.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HighlightMethod {
     #[default]
-    Off,
     Clip,
+    Off,
     LocalRatios,
     Opposed,
 }
@@ -217,7 +278,7 @@ pub struct HighlightAdjustments {
 impl Default for HighlightAdjustments {
     fn default() -> Self {
         Self {
-            method: HighlightMethod::Off,
+            method: HighlightMethod::Clip,
             clip: ClipAdjustments::default(),
             local_ratios: LocalRatioAdjustments::default(),
             opposed: OpposedAdjustments::default(),
@@ -385,6 +446,8 @@ impl Default for LightAdjustments {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ColorAdjustments {
     #[serde(default)]
+    pub camera_profile: CameraProfileSelection,
+    #[serde(default)]
     pub white_balance: WhiteBalance,
     #[serde(default = "neutral_saturation")]
     pub saturation: f32,
@@ -399,7 +462,8 @@ pub struct ColorAdjustments {
 impl Default for ColorAdjustments {
     fn default() -> Self {
         Self {
-            white_balance: WhiteBalance::AsShot,
+            camera_profile: CameraProfileSelection::Automatic,
+            white_balance: WhiteBalance::default(),
             saturation: SATURATION_RANGE.neutral,
             vibrance: VIBRANCE_RANGE.neutral,
             hsl: HslAdjustments::default(),
@@ -458,6 +522,12 @@ impl EditRecipe {
                     reason: "profile ID is limited to 256 bytes".to_owned(),
                 });
             }
+        }
+        if let CameraProfileSelection::Matrix(profile) = &self.color.camera_profile {
+            profile.validate().map_err(|error| EditError {
+                field: "color.camera_profile",
+                reason: error.to_string(),
+            })?;
         }
         validate_parameter(
             "raw.highlights.clip.threshold",
@@ -599,7 +669,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
             color.saturation = fields.legacy_saturation.unwrap_or(color.saturation);
             Self {
                 schema_version: EDIT_RECIPE_SCHEMA_VERSION,
-                raw: RawAdjustments::default(),
+                raw: legacy_raw_adjustments(),
                 optics: OpticsAdjustments::default(),
                 light,
                 color,
@@ -614,7 +684,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
         ) {
             Self {
                 schema_version: EDIT_RECIPE_SCHEMA_VERSION,
-                raw: RawAdjustments::default(),
+                raw: legacy_raw_adjustments(),
                 optics: OpticsAdjustments::default(),
                 light: fields.light,
                 color: fields.color,
@@ -624,12 +694,21 @@ impl<'de> Deserialize<'de> for EditRecipe {
             fields.schema_version,
             PREVIOUS_HIGHLIGHT_EDIT_RECIPE_SCHEMA_VERSION
                 | PREVIOUS_LOCAL_RATIOS_EDIT_RECIPE_SCHEMA_VERSION
-                | PREVIOUS_NO_OPTICS_EDIT_RECIPE_SCHEMA_VERSION
+                | PREVIOUS_OPPOSED_EDIT_RECIPE_SCHEMA_VERSION
         ) {
             Self {
                 schema_version: EDIT_RECIPE_SCHEMA_VERSION,
                 raw: fields.raw,
                 optics: OpticsAdjustments::default(),
+                light: fields.light,
+                color: fields.color,
+                geometry: fields.geometry,
+            }
+        } else if fields.schema_version == PREVIOUS_CAMERA_PROFILE_EDIT_RECIPE_SCHEMA_VERSION {
+            Self {
+                schema_version: EDIT_RECIPE_SCHEMA_VERSION,
+                raw: fields.raw,
+                optics: fields.optics,
                 light: fields.light,
                 color: fields.color,
                 geometry: fields.geometry,
@@ -665,6 +744,15 @@ const fn default_opposed_detection_threshold() -> f32 {
     HIGHLIGHT_THRESHOLD_RANGE.neutral
 }
 
+fn legacy_raw_adjustments() -> RawAdjustments {
+    RawAdjustments {
+        highlights: HighlightAdjustments {
+            method: HighlightMethod::Off,
+            ..HighlightAdjustments::default()
+        },
+    }
+}
+
 fn default_hsl_channels() -> [HslChannelAdjustments; HSL_CHANNEL_COUNT] {
     [HslChannelAdjustments::default(); HSL_CHANNEL_COUNT]
 }
@@ -690,19 +778,25 @@ fn validate_parameter(
 #[cfg(test)]
 mod tests {
     use super::{
-        EDIT_RECIPE_SCHEMA_VERSION, EditRecipe, HIGHLIGHT_THRESHOLD_RANGE, HighlightMethod,
-        LensProfileSelection, NormalizedCropRect, WhiteBalance,
+        CameraProfileSelection, EDIT_RECIPE_SCHEMA_VERSION, EditRecipe, HIGHLIGHT_THRESHOLD_RANGE,
+        HighlightMethod, LensProfileSelection, NormalizedCropRect, WhiteBalance,
     };
 
     #[test]
     fn neutral_recipe_has_documented_identity_values() {
         let recipe = EditRecipe::default();
         assert_eq!(recipe.schema_version, EDIT_RECIPE_SCHEMA_VERSION);
-        assert_eq!(recipe.color.white_balance, WhiteBalance::AsShot);
+        assert_eq!(
+            recipe.color.white_balance,
+            WhiteBalance::TemperatureTint {
+                temperature: 6_500.0,
+                tint: 0.0,
+            }
+        );
         assert_eq!(recipe.light.exposure_ev, 0.0);
         assert_eq!(recipe.light.contrast, 0.0);
         assert_eq!(recipe.color.saturation, 1.0);
-        assert_eq!(recipe.raw.highlights.method, HighlightMethod::Off);
+        assert_eq!(recipe.raw.highlights.method, HighlightMethod::Clip);
         assert_eq!(
             recipe.raw.highlights.clip.threshold,
             HIGHLIGHT_THRESHOLD_RANGE.neutral
@@ -721,7 +815,7 @@ mod tests {
     #[test]
     fn deserialization_rejects_unknown_schema_versions() {
         let json = r#"{
-            "schema_version": 8,
+            "schema_version": 9,
             "light": {},
             "color": {},
             "geometry": {}
@@ -730,18 +824,52 @@ mod tests {
     }
 
     #[test]
+    fn camera_profile_selection_round_trips_without_a_path() {
+        let json = serde_json::to_string(&EditRecipe::default()).expect("serialize recipe");
+        assert!(json.contains("\"camera_profile\""));
+        let recipe: EditRecipe = serde_json::from_str(&json).expect("deserialize recipe");
+        assert_eq!(
+            recipe.color.camera_profile,
+            CameraProfileSelection::Automatic
+        );
+    }
+
+    #[test]
     fn missing_highlight_fields_receive_the_current_defaults() {
+        let json = r#"{
+            "schema_version": 8,
+            "light": {},
+            "color": {},
+            "geometry": {}
+        }"#;
+        let recipe = serde_json::from_str::<EditRecipe>(json).expect("current default fields");
+        assert_eq!(recipe.raw.highlights.method, HighlightMethod::Clip);
+        assert_eq!(
+            recipe.color.white_balance,
+            WhiteBalance::TemperatureTint {
+                temperature: 6_500.0,
+                tint: 0.0,
+            }
+        );
+        assert_eq!(recipe.raw.highlights.clip.threshold, 1.0);
+        assert_eq!(recipe.raw.highlights.local_ratios.detection_threshold, 1.0);
+        assert_eq!(recipe.raw.highlights.opposed.detection_threshold, 1.0);
+    }
+
+    #[test]
+    fn version_seven_recipe_migrates_with_an_automatic_camera_profile() {
         let json = r#"{
             "schema_version": 7,
             "light": {},
             "color": {},
             "geometry": {}
         }"#;
-        let recipe = serde_json::from_str::<EditRecipe>(json).expect("current default fields");
-        assert_eq!(recipe.raw.highlights.method, HighlightMethod::Off);
-        assert_eq!(recipe.raw.highlights.clip.threshold, 1.0);
-        assert_eq!(recipe.raw.highlights.local_ratios.detection_threshold, 1.0);
-        assert_eq!(recipe.raw.highlights.opposed.detection_threshold, 1.0);
+        let recipe = serde_json::from_str::<EditRecipe>(json).expect("v7 migration");
+        assert_eq!(recipe.schema_version, EDIT_RECIPE_SCHEMA_VERSION);
+        assert_eq!(
+            recipe.color.camera_profile,
+            CameraProfileSelection::Automatic
+        );
     }
 
     #[test]
@@ -890,9 +1018,10 @@ mod tests {
     }
 
     #[test]
-    fn version_six_recipe_migrates_with_optics_off() {
+    fn version_six_recipe_migrates_highlights_and_optics_off() {
         let json = r#"{
             "schema_version": 6,
+            "raw": { "highlights": { "method": "opposed" } },
             "optics": {
                 "profile": { "mode": "automatic" },
                 "distortion": false,
@@ -909,6 +1038,7 @@ mod tests {
         assert!(recipe.optics.distortion);
         assert!(recipe.optics.vignetting);
         assert!(recipe.optics.chromatic_aberration);
+        assert_eq!(recipe.raw.highlights.method, HighlightMethod::Opposed);
     }
 
     #[test]

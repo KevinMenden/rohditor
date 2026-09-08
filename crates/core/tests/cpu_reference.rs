@@ -3,15 +3,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rayon::ThreadPoolBuilder;
+use rohditor_camera_profile::{CalibrationIlluminant, MatrixCalibration, MatrixCameraProfile};
 use rohditor_core::{
     CancellationToken, CpuPipeline, DitherMode, ExportImage, HighlightDiagnostics, OpticsService,
     OutputBitDepth, PipelineError, PreviewOptions, RawCropPolicy, RenderOptions,
     camera_color_transform,
 };
-use rohditor_edit::{EditRecipe, HighlightMethod, NormalizedCropRect, WhiteBalance};
+use rohditor_edit::{
+    CameraProfileSelection, EditRecipe, HighlightMethod, NormalizedCropRect, WhiteBalance,
+};
 use rohditor_image::{BayerPattern, CfaColor, LinearRgbSpace, Orientation};
 use rohditor_raw::{
-    CameraColorMatrix, CaptureMetadata, CfaPattern, ImageRect, LevelPattern,
+    CameraColorMatrix, CameraMatrixOrigin, CaptureMetadata, CfaPattern, ImageRect, LevelPattern,
     PhotometricInterpretation, RationalValue, RawFileInfo, RawFrame,
 };
 
@@ -204,6 +207,58 @@ fn split_reconstruction_and_color_stages_match_the_combined_preview_base()
 }
 
 #[test]
+fn selected_matrix_profile_is_used_by_preview_split_and_export() -> Result<(), Box<dyn Error>> {
+    let frame = synthetic_rggb_frame();
+    let mut recipe = EditRecipe::default();
+    recipe.color.camera_profile = CameraProfileSelection::Matrix(MatrixCameraProfile {
+        format_version: 1,
+        source_sha256: "a".repeat(64),
+        name: "Synthetic matrix".to_owned(),
+        camera_model: "Rohditor RGGB fixture".to_owned(),
+        copyright: None,
+        calibrations: vec![MatrixCalibration {
+            illuminant: CalibrationIlluminant::D65,
+            xyz_to_camera: [[1.0, 0.05, 0.0], [0.0, 1.0, 0.1], [0.02, 0.0, 1.0]],
+            forward_camera_to_xyz_d50: None,
+        }],
+    });
+    let options = PreviewOptions {
+        max_long_edge: 3,
+        ..PreviewOptions::default()
+    };
+
+    let pipeline = CpuPipeline::default();
+    let direct = pipeline.render_preview(&frame, &recipe, options)?;
+    let reconstructed = pipeline.prepare_preview_reconstruction(&frame, &recipe, options)?;
+    let split_base = pipeline.prepare_preview_base_from_reconstruction(&reconstructed, &recipe)?;
+    let split =
+        pipeline.render_preview_from_base(&split_base, &recipe, options.render.output_policy)?;
+    assert_eq!(direct.image, split.image);
+
+    let selected_export = pipeline.render_export(
+        &frame,
+        &recipe,
+        options.render,
+        OutputBitDepth::Sixteen,
+        DitherMode::None,
+    )?;
+    let automatic_export = pipeline.render_export(
+        &frame,
+        &EditRecipe::default(),
+        options.render,
+        OutputBitDepth::Sixteen,
+        DitherMode::None,
+    )?;
+    let (ExportImage::Rgb16(selected), ExportImage::Rgb16(automatic)) =
+        (selected_export.image, automatic_export.image)
+    else {
+        panic!("requested 16-bit exports");
+    };
+    assert_ne!(selected.data(), automatic.data());
+    Ok(())
+}
+
+#[test]
 fn clip_uses_active_wb_limits_and_reaches_a_common_post_wb_ceiling() -> Result<(), Box<dyn Error>> {
     let frame = constant_normalized_frame(1.2);
     let mut recipe = EditRecipe::default();
@@ -216,11 +271,10 @@ fn clip_uses_active_wb_limits_and_reaches_a_common_post_wb_ceiling() -> Result<(
         max_long_edge: usize::MAX,
     };
 
-    let off = CpuPipeline::default().prepare_preview_reconstruction(
-        &frame,
-        &EditRecipe::default(),
-        options,
-    )?;
+    let mut off_recipe = EditRecipe::default();
+    off_recipe.raw.highlights.method = HighlightMethod::Off;
+    let off =
+        CpuPipeline::default().prepare_preview_reconstruction(&frame, &off_recipe, options)?;
     assert!(off.image().data().iter().any(|value| *value > 1.0));
 
     let clipped =
@@ -355,6 +409,7 @@ fn opposed_is_camera_native_and_supports_dynamic_white_balance() -> Result<(), B
 fn off_ignores_an_inactive_threshold_when_reusing_preview_stages() -> Result<(), Box<dyn Error>> {
     let frame = synthetic_rggb_frame();
     let mut recipe = EditRecipe::default();
+    recipe.raw.highlights.method = HighlightMethod::Off;
     recipe.raw.highlights.clip.threshold = 1.25;
     let options = PreviewOptions {
         max_long_edge: 3,
@@ -622,6 +677,7 @@ fn synthetic_rggb_frame() -> RawFrame {
             color_matrices: vec![CameraColorMatrix {
                 illuminant: "D65".to_owned(),
                 values: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                origin: CameraMatrixOrigin::DecoderDatabase,
             }],
             orientation: Orientation::Rotate270,
             capture: CaptureMetadata::default(),

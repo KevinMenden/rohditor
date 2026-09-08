@@ -17,9 +17,10 @@ use rohditor_image::Orientation;
 use tracing::{info_span, warn};
 
 use crate::{
-    CameraColorMatrix, CaptureMetadata, CfaPattern, DecoderLimits, EmbeddedPreviewInfo,
-    EncodedPreview, EncodedPreviewFormat, ImageRect, LevelPattern, PhotometricInterpretation,
-    RationalValue, RawDecoder, RawError, RawFileInfo, RawFrame, RawSession, SourceIdentity,
+    CameraColorMatrix, CameraMatrixOrigin, CaptureMetadata, CfaPattern, DecoderLimits,
+    EmbeddedPreviewInfo, EncodedPreview, EncodedPreviewFormat, ImageRect, LevelPattern,
+    PhotometricInterpretation, RationalValue, RawDecoder, RawError, RawFileInfo, RawFrame,
+    RawSession, SourceIdentity,
 };
 
 /// `rawler` implementation of Rohditor's private decoder boundary.
@@ -558,6 +559,11 @@ fn map_file_info(
         .map(|(illuminant, values)| CameraColorMatrix {
             illuminant: format!("{illuminant:?}"),
             values: values.clone(),
+            origin: if format_hint == FormatHint::DNG {
+                CameraMatrixOrigin::EmbeddedDng
+            } else {
+                CameraMatrixOrigin::DecoderDatabase
+            },
         })
         .collect::<Vec<_>>();
     color_matrices.sort_by(|left, right| left.illuminant.cmp(&right.illuminant));
