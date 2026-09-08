@@ -1,8 +1,11 @@
 use rayon::prelude::*;
+use rohditor_camera_profile::{CAMERA_PROFILE_EVALUATOR_VERSION, CalibrationIlluminant};
+use rohditor_demosaic::WhiteBalanceGains;
+use rohditor_edit::{CameraProfileSelection, WhiteBalance};
 use rohditor_image::{
     DisplayRgbImage, DisplayTransfer, LinearRgbImage, LinearRgbSpace, allocate_zeroed_f32,
 };
-use rohditor_raw::{CameraColorMatrix, RawFileInfo};
+use rohditor_raw::{CameraColorMatrix, CameraMatrixOrigin, RawFileInfo};
 
 use crate::PipelineError;
 
@@ -112,25 +115,290 @@ pub struct CameraColorTransform {
     pub camera_to_linear_rec2020: Matrix3,
 }
 
+/// Compact camera facts retained after RAW metadata probing. It contains no
+/// decoded pixels and is sufficient to resolve any supported recipe profile.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CameraCalibration {
+    pub make: String,
+    pub model: String,
+    pub clean_make: String,
+    pub clean_model: String,
+    pub as_shot_white_balance: [Option<f32>; 4],
+    pub xyz_to_camera: [[f32; 3]; 4],
+    pub color_matrices: Vec<CameraColorMatrix>,
+}
+
+impl CameraCalibration {
+    #[must_use]
+    pub fn from_raw_info(info: &RawFileInfo) -> Self {
+        Self {
+            make: info.make.clone(),
+            model: info.model.clone(),
+            clean_make: info.clean_make.clone(),
+            clean_model: info.clean_model.clone(),
+            as_shot_white_balance: info.as_shot_white_balance,
+            xyz_to_camera: info.xyz_to_camera,
+            color_matrices: info.color_matrices.clone(),
+        }
+    }
+}
+
+/// Provenance recorded alongside the resolved camera transform for diagnostics
+/// and for distinguishing user-installed profiles from decoder defaults.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CameraProfileProvenance {
+    Automatic {
+        origin: CameraMatrixOrigin,
+        illuminant: String,
+        camera_make: String,
+        camera_model: String,
+        evaluator_version: u8,
+    },
+    Matrix {
+        name: String,
+        source_sha256: String,
+        camera_model: String,
+        illuminant: CalibrationIlluminant,
+        forward_matrix_used: bool,
+        evaluator_version: u8,
+    },
+}
+
+impl std::fmt::Display for CameraProfileProvenance {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Automatic {
+                origin,
+                illuminant,
+                camera_make,
+                camera_model,
+                evaluator_version,
+            } => {
+                write!(
+                    formatter,
+                    "automatic/v{evaluator_version}/{origin:?}/{illuminant}/{camera_make} {camera_model}"
+                )
+            }
+            Self::Matrix {
+                name,
+                source_sha256,
+                camera_model,
+                illuminant,
+                forward_matrix_used,
+                evaluator_version,
+            } => write!(
+                formatter,
+                "matrix/v{evaluator_version}/{name}/{source_sha256}/{illuminant}/model={camera_model}/forward={forward_matrix_used}"
+            ),
+        }
+    }
+}
+
+/// The transform and white-balance gains resolved for one recipe.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedCameraColour {
+    pub source_illuminant: String,
+    pub camera_to_xyz_d65: Matrix3,
+    pub camera_to_linear_rec2020: Matrix3,
+    pub white_balance_gains: WhiteBalanceGains,
+    pub provenance: CameraProfileProvenance,
+}
+
+impl ResolvedCameraColour {
+    #[must_use]
+    pub fn camera_color_transform(&self) -> CameraColorTransform {
+        CameraColorTransform {
+            source_illuminant: self.source_illuminant.clone(),
+            camera_to_xyz_d65: self.camera_to_xyz_d65,
+            camera_to_linear_rec2020: self.camera_to_linear_rec2020,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CameraProfileKeyMode {
+    Automatic,
+    Matrix {
+        calibrations: Vec<ProfileCalibrationKey>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProfileCalibrationKey {
+    illuminant: CalibrationIlluminant,
+    xyz_to_camera: [u32; 9],
+    forward_camera_to_xyz_d50: Option<[u32; 9]>,
+}
+
+/// Exact cache identity for the selected camera-profile evaluator input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CameraProfileKey {
+    evaluator_version: u8,
+    mode: CameraProfileKeyMode,
+}
+
+/// Build a cache identity from pixel-producing profile payload, excluding
+/// labels and paths that do not affect evaluation.
+#[must_use]
+pub fn camera_profile_key(selection: &CameraProfileSelection) -> CameraProfileKey {
+    let mode = match selection {
+        CameraProfileSelection::Automatic => CameraProfileKeyMode::Automatic,
+        CameraProfileSelection::Matrix(profile) => {
+            let mut calibrations = profile
+                .calibrations
+                .iter()
+                .map(|calibration| ProfileCalibrationKey {
+                    illuminant: calibration.illuminant,
+                    xyz_to_camera: calibration
+                        .xyz_to_camera
+                        .into_iter()
+                        .flatten()
+                        .map(f32::to_bits)
+                        .collect::<Vec<_>>()
+                        .try_into()
+                        .expect("a 3x3 matrix always has nine values"),
+                    forward_camera_to_xyz_d50: calibration.forward_camera_to_xyz_d50.map(
+                        |matrix| {
+                            matrix
+                                .into_iter()
+                                .flatten()
+                                .map(f32::to_bits)
+                                .collect::<Vec<_>>()
+                                .try_into()
+                                .expect("a 3x3 matrix always has nine values")
+                        },
+                    ),
+                })
+                .collect::<Vec<_>>();
+            calibrations.sort_by_key(|calibration| calibration.illuminant.priority());
+            CameraProfileKeyMode::Matrix { calibrations }
+        }
+    };
+    CameraProfileKey {
+        evaluator_version: CAMERA_PROFILE_EVALUATOR_VERSION,
+        mode,
+    }
+}
+
 /// Parse the camera calibration matrices and construct a D65 working transform.
 ///
 /// A D65 matrix is preferred for the Phase 2 baseline. D50 and Standard Light A
 /// matrices are supported with Bradford adaptation when no D65 matrix exists.
 pub fn camera_color_transform(info: &RawFileInfo) -> Result<CameraColorTransform, PipelineError> {
-    let parsed = info
+    let calibration = CameraCalibration::from_raw_info(info);
+    Ok(automatic_camera_color(&calibration)?.0)
+}
+
+/// Resolve the selected camera profile and recipe white balance without
+/// changing the retained camera-native image.
+pub fn resolve_camera_colour(
+    calibration: &CameraCalibration,
+    selection: &CameraProfileSelection,
+    white_balance: WhiteBalance,
+) -> Result<ResolvedCameraColour, PipelineError> {
+    let (transform, provenance) = match selection {
+        CameraProfileSelection::Automatic => {
+            let (transform, origin, illuminant) = automatic_camera_color(calibration)?;
+            let (camera_make, camera_model) = camera_identity(calibration);
+            (
+                transform,
+                CameraProfileProvenance::Automatic {
+                    origin,
+                    illuminant,
+                    camera_make,
+                    camera_model,
+                    evaluator_version: CAMERA_PROFILE_EVALUATOR_VERSION,
+                },
+            )
+        }
+        CameraProfileSelection::Matrix(profile) => {
+            profile
+                .validate()
+                .map_err(|error| PipelineError::InvalidRecipe {
+                    field: "color.camera_profile",
+                    reason: error.to_string(),
+                })?;
+            if !profile.matches_camera(
+                &calibration.make,
+                &calibration.model,
+                &calibration.clean_make,
+                &calibration.clean_model,
+            ) {
+                return Err(PipelineError::InvalidRecipe {
+                    field: "color.camera_profile",
+                    reason: format!(
+                        "profile camera model {:?} does not match {:?}",
+                        profile.camera_model,
+                        camera_model_description(calibration)
+                    ),
+                });
+            }
+            let selected =
+                profile
+                    .preferred_calibration()
+                    .ok_or_else(|| PipelineError::InvalidRecipe {
+                        field: "color.camera_profile",
+                        reason: "profile has no supported calibration".to_owned(),
+                    })?;
+            let forward_matrix_used = selected.forward_camera_to_xyz_d50.is_some();
+            let transform = profile_camera_color(selected, &profile.name)?;
+            (
+                transform,
+                CameraProfileProvenance::Matrix {
+                    name: profile.name.clone(),
+                    source_sha256: profile.source_sha256.clone(),
+                    camera_model: profile.camera_model.clone(),
+                    illuminant: selected.illuminant,
+                    forward_matrix_used,
+                    evaluator_version: CAMERA_PROFILE_EVALUATOR_VERSION,
+                },
+            )
+        }
+    };
+    let white_balance_gains = crate::cpu::white_balance_gains_from_calibration(
+        calibration.as_shot_white_balance,
+        transform.camera_to_xyz_d65,
+        white_balance,
+    )?;
+    let resolved = ResolvedCameraColour {
+        source_illuminant: transform.source_illuminant.clone(),
+        camera_to_xyz_d65: transform.camera_to_xyz_d65,
+        camera_to_linear_rec2020: transform.camera_to_linear_rec2020,
+        white_balance_gains,
+        provenance,
+    };
+    tracing::debug!(
+        profile = %resolved.provenance,
+        white_balance = ?white_balance,
+        "resolved camera colour"
+    );
+    Ok(resolved)
+}
+
+fn automatic_camera_color(
+    calibration: &CameraCalibration,
+) -> Result<(CameraColorTransform, CameraMatrixOrigin, String), PipelineError> {
+    let parsed = calibration
         .color_matrices
         .iter()
         .map(parse_camera_matrix)
         .collect::<Result<Vec<_>, _>>()?;
     let selected = parsed
         .iter()
-        .filter_map(|(matrix, name)| illuminant(name).map(|value| (matrix, name, value)))
-        .min_by_key(|(_, _, (_, priority))| *priority);
+        .filter_map(|(matrix, name, origin)| {
+            illuminant(name).map(|value| (matrix, name, origin, value))
+        })
+        .min_by_key(|(_, _, _, (_, priority))| *priority);
 
-    let (xyz_to_camera, source_name, (source_white, _)) = if let Some(selected) = selected {
-        (*selected.0, selected.1.clone(), selected.2)
-    } else if let Some(matrix) = fallback_xyz_to_camera(info)? {
-        (matrix, "D65 fallback".to_owned(), (D65_WHITE, 0))
+    let (transform, origin, source_name) = if let Some(selected) = selected {
+        let transform = matrix_camera_color(*selected.0, selected.1.clone(), selected.3.0)?;
+        (transform, *selected.2, selected.1.clone())
+    } else if let Some(matrix) = fallback_xyz_to_camera(calibration)? {
+        (
+            matrix_camera_color(matrix, "D65 fallback".to_owned(), D65_WHITE)?,
+            CameraMatrixOrigin::LegacyDecoderFallback,
+            "D65 fallback".to_owned(),
+        )
     } else {
         return Err(PipelineError::InvalidMetadata {
             field: "color_matrices",
@@ -138,32 +406,7 @@ pub fn camera_color_transform(info: &RawFileInfo) -> Result<CameraColorTransform
         });
     };
 
-    // The as-shot gains make a neutral sensor value [1, 1, 1]. Normalize each
-    // calibration row so that this neutral maps back to the matrix illuminant's
-    // reference white before inversion.
-    let camera_white = xyz_to_camera.transform(source_white);
-    let mut normalized = xyz_to_camera.values();
-    for row in 0..3 {
-        if !camera_white[row].is_finite() || camera_white[row].abs() < 1.0e-8 {
-            return Err(PipelineError::InvalidMetadata {
-                field: "color_matrices",
-                reason: format!("matrix row {row} does not describe a usable reference white"),
-            });
-        }
-        for value in &mut normalized[row] {
-            *value /= camera_white[row];
-        }
-    }
-    let camera_to_source_xyz = Matrix3::new(normalized).inverse()?;
-    let adaptation = chromatic_adaptation_to_d65(source_white)?;
-    let camera_to_xyz_d65 = camera_to_source_xyz.then(adaptation);
-    let camera_to_linear_rec2020 = camera_to_xyz_d65.then(XYZ_D65_TO_LINEAR_REC2020);
-
-    Ok(CameraColorTransform {
-        source_illuminant: source_name,
-        camera_to_xyz_d65,
-        camera_to_linear_rec2020,
-    })
+    Ok((transform, origin, source_name))
 }
 
 /// Bradford-adapt one XYZ triplet from `source_white` to D65.
@@ -268,7 +511,9 @@ pub fn srgb_to_linear_srgb(value: f32) -> f32 {
     }
 }
 
-fn parse_camera_matrix(matrix: &CameraColorMatrix) -> Result<(Matrix3, String), PipelineError> {
+fn parse_camera_matrix(
+    matrix: &CameraColorMatrix,
+) -> Result<(Matrix3, String, CameraMatrixOrigin), PipelineError> {
     if matrix.values.len() != 9 {
         return Err(PipelineError::InvalidMetadata {
             field: "color_matrices",
@@ -292,14 +537,17 @@ fn parse_camera_matrix(matrix: &CameraColorMatrix) -> Result<(Matrix3, String), 
             [matrix.values[6], matrix.values[7], matrix.values[8]],
         ]),
         matrix.illuminant.clone(),
+        matrix.origin,
     ))
 }
 
-fn fallback_xyz_to_camera(info: &RawFileInfo) -> Result<Option<Matrix3>, PipelineError> {
+fn fallback_xyz_to_camera(
+    calibration: &CameraCalibration,
+) -> Result<Option<Matrix3>, PipelineError> {
     let rows = [
-        info.xyz_to_camera[0],
-        info.xyz_to_camera[1],
-        info.xyz_to_camera[2],
+        calibration.xyz_to_camera[0],
+        calibration.xyz_to_camera[1],
+        calibration.xyz_to_camera[2],
     ];
     if rows.iter().flatten().any(|value| !value.is_finite()) {
         return Err(PipelineError::InvalidMetadata {
@@ -312,6 +560,97 @@ fn fallback_xyz_to_camera(info: &RawFileInfo) -> Result<Option<Matrix3>, Pipelin
         .flatten()
         .any(|value| value.abs() > f32::EPSILON)
         .then(|| Matrix3::new(rows)))
+}
+
+fn profile_camera_color(
+    calibration: &rohditor_camera_profile::MatrixCalibration,
+    source_name: &str,
+) -> Result<CameraColorTransform, PipelineError> {
+    let camera_to_xyz_d65 = if let Some(forward) = calibration.forward_camera_to_xyz_d50 {
+        Matrix3::new(forward).then(chromatic_adaptation_to_d65(D50_WHITE)?)
+    } else {
+        matrix_camera_to_xyz_d65(
+            Matrix3::new(calibration.xyz_to_camera),
+            profile_white(calibration.illuminant),
+        )?
+    };
+    Ok(CameraColorTransform {
+        source_illuminant: format!("{source_name} ({})", calibration.illuminant),
+        camera_to_linear_rec2020: camera_to_xyz_d65.then(XYZ_D65_TO_LINEAR_REC2020),
+        camera_to_xyz_d65,
+    })
+}
+
+fn matrix_camera_color(
+    xyz_to_camera: Matrix3,
+    source_name: String,
+    source_white: [f32; 3],
+) -> Result<CameraColorTransform, PipelineError> {
+    let camera_to_xyz_d65 = matrix_camera_to_xyz_d65(xyz_to_camera, source_white)?;
+    Ok(CameraColorTransform {
+        source_illuminant: source_name,
+        camera_to_linear_rec2020: camera_to_xyz_d65.then(XYZ_D65_TO_LINEAR_REC2020),
+        camera_to_xyz_d65,
+    })
+}
+
+fn matrix_camera_to_xyz_d65(
+    xyz_to_camera: Matrix3,
+    source_white: [f32; 3],
+) -> Result<Matrix3, PipelineError> {
+    // Normalize each calibration row so a neutral camera value maps to the
+    // matrix illuminant's reference white before inversion. This is the
+    // existing Automatic evaluator and is also the fallback for profiles that
+    // do not provide a ForwardMatrix.
+    let camera_white = xyz_to_camera.transform(source_white);
+    let mut normalized = xyz_to_camera.values();
+    for row in 0..3 {
+        if !camera_white[row].is_finite() || camera_white[row].abs() < 1.0e-8 {
+            return Err(PipelineError::InvalidMetadata {
+                field: "color_matrices",
+                reason: format!("matrix row {row} does not describe a usable reference white"),
+            });
+        }
+        for value in &mut normalized[row] {
+            *value /= camera_white[row];
+        }
+    }
+    let camera_to_source_xyz = Matrix3::new(normalized).inverse()?;
+    Ok(camera_to_source_xyz.then(chromatic_adaptation_to_d65(source_white)?))
+}
+
+fn profile_white(illuminant: CalibrationIlluminant) -> [f32; 3] {
+    match illuminant {
+        CalibrationIlluminant::D65 => D65_WHITE,
+        CalibrationIlluminant::D50 => D50_WHITE,
+        CalibrationIlluminant::StandardLightA => A_WHITE,
+    }
+}
+
+fn camera_model_description(calibration: &CameraCalibration) -> String {
+    [
+        calibration.clean_make.as_str(),
+        calibration.clean_model.as_str(),
+    ]
+    .into_iter()
+    .filter(|value| !value.trim().is_empty())
+    .collect::<Vec<_>>()
+    .join(" ")
+}
+
+fn camera_identity(calibration: &CameraCalibration) -> (String, String) {
+    (
+        if calibration.clean_make.trim().is_empty() {
+            calibration.make.clone()
+        } else {
+            calibration.clean_make.clone()
+        },
+        if calibration.clean_model.trim().is_empty() {
+            calibration.model.clone()
+        } else {
+            calibration.clean_model.clone()
+        },
+    )
 }
 
 fn illuminant(name: &str) -> Option<([f32; 3], u8)> {
@@ -363,9 +702,14 @@ fn dot(left: [f32; 3], right: [f32; 3]) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    use rohditor_camera_profile::{CalibrationIlluminant, MatrixCalibration, MatrixCameraProfile};
+    use rohditor_edit::{CameraProfileSelection, WhiteBalance};
+    use rohditor_raw::{CameraColorMatrix, CameraMatrixOrigin};
+
     use super::{
-        D50_WHITE, D65_WHITE, Matrix3, XYZ_D65_TO_LINEAR_REC2020, adapt_xyz_to_d65,
-        clip_linear_srgb_for_output, convert_rec2020_to_display_srgb, linear_srgb_to_srgb,
+        CameraCalibration, D50_WHITE, D65_WHITE, Matrix3, XYZ_D65_TO_LINEAR_REC2020,
+        adapt_xyz_to_d65, camera_profile_key, clip_linear_srgb_for_output,
+        convert_rec2020_to_display_srgb, linear_srgb_to_srgb, resolve_camera_colour,
         srgb_to_linear_srgb,
     };
     use rohditor_image::{DisplayTransfer, LinearRgbImage, LinearRgbSpace};
@@ -435,5 +779,118 @@ mod tests {
         let wrong_space = LinearRgbImage::new(1, 1, 3, LinearRgbSpace::CameraNative, vec![1.0; 3])
             .expect("valid typed image");
         assert!(convert_rec2020_to_display_srgb(&wrong_space).is_err());
+    }
+
+    #[test]
+    fn automatic_resolution_records_decoder_matrix_provenance() {
+        let calibration = calibration();
+        let resolved = resolve_camera_colour(
+            &calibration,
+            &CameraProfileSelection::Automatic,
+            WhiteBalance::AsShot,
+        )
+        .expect("automatic matrix should resolve");
+        assert_eq!(
+            resolved.provenance,
+            super::CameraProfileProvenance::Automatic {
+                origin: CameraMatrixOrigin::DecoderDatabase,
+                illuminant: "D65".to_owned(),
+                camera_make: "Sony".to_owned(),
+                camera_model: "ILCE-6400".to_owned(),
+                evaluator_version: super::CAMERA_PROFILE_EVALUATOR_VERSION,
+            }
+        );
+    }
+
+    #[test]
+    fn forward_matrix_profile_uses_d50_to_d65_adaptation() {
+        let profile = profile(Some([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]));
+        let resolved = resolve_camera_colour(
+            &calibration(),
+            &CameraProfileSelection::Matrix(profile),
+            WhiteBalance::AsShot,
+        )
+        .expect("matching forward matrix profile should resolve");
+        let expected = adapt_xyz_to_d65([1.0, 1.0, 1.0], D50_WHITE).expect("D50 adaptation");
+        let actual = resolved.camera_to_xyz_d65.transform([1.0, 1.0, 1.0]);
+        for (actual, expected) in actual.into_iter().zip(expected) {
+            assert_close(actual, expected, 1.0e-5);
+        }
+    }
+
+    #[test]
+    fn as_shot_and_manual_gains_do_not_depend_on_profile_choice() {
+        let first = CameraProfileSelection::Matrix(profile(None));
+        let second = CameraProfileSelection::Matrix(profile(Some([
+            [1.0, 0.1, 0.0],
+            [0.0, 1.0, 0.1],
+            [0.1, 0.0, 1.0],
+        ])));
+        let calibration = calibration();
+        let as_shot = resolve_camera_colour(&calibration, &first, WhiteBalance::AsShot)
+            .expect("first as-shot profile");
+        let as_shot_other = resolve_camera_colour(&calibration, &second, WhiteBalance::AsShot)
+            .expect("second as-shot profile");
+        assert_eq!(
+            as_shot.white_balance_gains,
+            as_shot_other.white_balance_gains
+        );
+        let manual = WhiteBalance::ManualMultipliers {
+            red: 1.2,
+            green: 0.9,
+            blue: 0.8,
+        };
+        let manual_first =
+            resolve_camera_colour(&calibration, &first, manual).expect("first manual profile");
+        let manual_second =
+            resolve_camera_colour(&calibration, &second, manual).expect("second manual profile");
+        assert_eq!(
+            manual_first.white_balance_gains,
+            manual_second.white_balance_gains
+        );
+    }
+
+    #[test]
+    fn profile_key_includes_matrix_bits_and_forward_presence() {
+        let first = CameraProfileSelection::Matrix(profile(None));
+        let second = CameraProfileSelection::Matrix(profile(Some([
+            [1.0, 0.1, 0.0],
+            [0.0, 1.0, 0.1],
+            [0.1, 0.0, 1.0],
+        ])));
+        assert_ne!(camera_profile_key(&first), camera_profile_key(&second));
+    }
+
+    fn calibration() -> CameraCalibration {
+        CameraCalibration {
+            make: "Sony".to_owned(),
+            model: "ILCE-6400".to_owned(),
+            clean_make: "Sony".to_owned(),
+            clean_model: "ILCE-6400".to_owned(),
+            as_shot_white_balance: [Some(2.0), Some(1.0), Some(1.5), None],
+            xyz_to_camera: [[0.0; 3]; 4],
+            color_matrices: vec![CameraColorMatrix {
+                illuminant: "D65".to_owned(),
+                values: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                origin: CameraMatrixOrigin::DecoderDatabase,
+            }],
+        }
+    }
+
+    fn profile(forward: Option<[[f32; 3]; 3]>) -> MatrixCameraProfile {
+        let profile = MatrixCameraProfile {
+            format_version: 1,
+            source_sha256: "a".repeat(64),
+            name: "Test profile".to_owned(),
+            camera_model: "Sony ILCE-6400".to_owned(),
+            copyright: None,
+            calibrations: vec![MatrixCalibration {
+                illuminant: CalibrationIlluminant::D50,
+                xyz_to_camera: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                forward_camera_to_xyz_d50: forward,
+            }],
+        };
+        profile.validate().expect("test profile is valid");
+        profile
     }
 }

@@ -975,9 +975,9 @@ fn process_gpu_base(
     let width = reconstructed.image().width();
     let height = reconstructed.image().height();
     let upload_started = Instant::now();
-    let upload = match GpuPreviewUpload::from_reconstructed_preview_cancellable(
+    let upload = match GpuPreviewUpload::from_reconstructed_preview_for_recipe(
         reconstructed,
-        job.recipe.color.white_balance,
+        &job.recipe,
         cancellation,
     ) {
         Ok(upload) => upload,
@@ -2174,6 +2174,7 @@ mod tests {
                 color_matrices: vec![CameraColorMatrix {
                     illuminant: "D65".to_owned(),
                     values: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                    origin: rohditor_raw::CameraMatrixOrigin::DecoderDatabase,
                 }],
                 orientation: Orientation::Normal,
                 capture: CaptureMetadata::default(),

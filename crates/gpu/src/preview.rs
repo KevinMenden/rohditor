@@ -4,8 +4,9 @@ use std::time::{Duration, Instant};
 
 use half::f16;
 use rohditor_core::{
-    CancellationToken, DemosaicedBase, LINEAR_REC2020_TO_XYZ_D65, Matrix3, OutputGeometry,
-    ReconstructedPreview, XYZ_D65_TO_LINEAR_SRGB,
+    CameraCalibration, CameraProfileKey, CancellationToken, DemosaicedBase,
+    LINEAR_REC2020_TO_XYZ_D65, Matrix3, OutputGeometry, ReconstructedPreview,
+    XYZ_D65_TO_LINEAR_SRGB, camera_profile_key, resolve_camera_colour,
 };
 use rohditor_demosaic::WhiteBalanceGains;
 use rohditor_edit::{
@@ -38,9 +39,9 @@ pub struct GpuPreviewSource {
     highlight_adjustments: HighlightAdjustments,
     white_balance_dynamic: bool,
     white_balance_gains: WhiteBalanceGains,
-    as_shot_white_balance: [Option<f32>; 4],
-    camera_to_xyz_d65: Matrix3,
     camera_to_linear_rec2020: Matrix3,
+    calibration: Option<CameraCalibration>,
+    highlight_camera_profile: CameraProfileKey,
 }
 
 impl GpuPreviewSource {
@@ -68,27 +69,58 @@ impl GpuPreviewSource {
         self.highlight_adjustments
     }
 
-    fn resolve_white_balance(
-        &self,
-        selection: WhiteBalance,
-    ) -> Result<WhiteBalanceGains, GpuPreviewError> {
-        if !self.white_balance_dynamic {
-            if selection != self.white_balance {
-                return Err(GpuPreviewError::BaseMismatch {
-                    reason: "this converted source cannot change white balance without a rebuild"
-                        .to_owned(),
-                });
-            }
-            return Ok(self.white_balance_gains);
+    /// Whether the source provenance permits evaluating the complete recipe
+    /// without uploading a new camera-native texture.
+    #[must_use]
+    pub fn matches_recipe(&self, recipe: &EditRecipe) -> bool {
+        if !highlight_adjustments_match(self.highlight_adjustments, recipe.raw.highlights) {
+            return false;
         }
-        rohditor_core::white_balance_gains_from_calibration(
-            self.as_shot_white_balance,
-            self.camera_to_xyz_d65,
-            selection,
-        )
-        .map_err(|error| GpuPreviewError::InvalidInput {
-            reason: error.to_string(),
-        })
+        if self.calibration.is_none()
+            && self.highlight_camera_profile != camera_profile_key(&recipe.color.camera_profile)
+        {
+            return false;
+        }
+        if !self.white_balance_dynamic && recipe.color.white_balance != self.white_balance {
+            return false;
+        }
+        if self.highlight_adjustments.method == rohditor_edit::HighlightMethod::Clip
+            && matches!(
+                recipe.color.white_balance,
+                WhiteBalance::TemperatureTint { .. }
+            )
+        {
+            return self.highlight_camera_profile
+                == camera_profile_key(&recipe.color.camera_profile);
+        }
+        true
+    }
+
+    fn resolve_recipe_colour(
+        &self,
+        recipe: &EditRecipe,
+    ) -> Result<(WhiteBalanceGains, Matrix3), GpuPreviewError> {
+        if !self.matches_recipe(recipe) {
+            return Err(GpuPreviewError::BaseMismatch {
+                reason: "the GPU source provenance does not match the requested recipe".to_owned(),
+            });
+        }
+        if let Some(calibration) = &self.calibration {
+            let resolved = resolve_camera_colour(
+                calibration,
+                &recipe.color.camera_profile,
+                recipe.color.white_balance,
+            )
+            .map_err(|error| GpuPreviewError::InvalidInput {
+                reason: error.to_string(),
+            })?;
+            Ok((
+                resolved.white_balance_gains,
+                resolved.camera_to_linear_rec2020,
+            ))
+        } else {
+            Ok((self.white_balance_gains, self.camera_to_linear_rec2020))
+        }
     }
 
     /// Estimated bytes occupied by the retained RGBA16Float source texture.
@@ -114,9 +146,9 @@ pub struct GpuPreviewUpload {
     highlight_adjustments: HighlightAdjustments,
     white_balance_dynamic: bool,
     white_balance_gains: WhiteBalanceGains,
-    as_shot_white_balance: [Option<f32>; 4],
-    camera_to_xyz_d65: Matrix3,
     camera_to_linear_rec2020: Matrix3,
+    calibration: Option<CameraCalibration>,
+    highlight_camera_profile: CameraProfileKey,
 }
 
 impl GpuPreviewUpload {
@@ -153,9 +185,9 @@ impl GpuPreviewUpload {
             highlight_adjustments: base.highlight_adjustments(),
             white_balance_dynamic: false,
             white_balance_gains: WhiteBalanceGains::identity(),
-            as_shot_white_balance: [Some(1.0), Some(1.0), Some(1.0), None],
-            camera_to_xyz_d65: Matrix3::identity(),
             camera_to_linear_rec2020: Matrix3::identity(),
+            calibration: None,
+            highlight_camera_profile: base.camera_profile_key().clone(),
         })
     }
 
@@ -165,9 +197,13 @@ impl GpuPreviewUpload {
         reconstructed: &ReconstructedPreview,
         white_balance: WhiteBalance,
     ) -> Result<Self, GpuPreviewError> {
-        Self::from_reconstructed_preview_cancellable(
+        let mut recipe = EditRecipe::default();
+        recipe.raw.highlights = reconstructed.highlight_adjustments();
+        recipe.color.camera_profile = reconstructed.profile_selection().clone();
+        recipe.color.white_balance = white_balance;
+        Self::from_reconstructed_preview_for_recipe(
             reconstructed,
-            white_balance,
+            &recipe,
             &CancellationToken::new(),
         )
     }
@@ -178,17 +214,44 @@ impl GpuPreviewUpload {
         white_balance: WhiteBalance,
         cancellation: &CancellationToken,
     ) -> Result<Self, GpuPreviewError> {
+        let mut recipe = EditRecipe::default();
+        recipe.raw.highlights = reconstructed.highlight_adjustments();
+        recipe.color.camera_profile = reconstructed.profile_selection().clone();
+        recipe.color.white_balance = white_balance;
+        Self::from_reconstructed_preview_for_recipe(reconstructed, &recipe, cancellation)
+    }
+
+    /// Pack a camera-native reconstruction for the exact current recipe. The
+    /// reconstruction may reuse its camera-native pixels when the selected
+    /// profile changes, so profile evaluation remains a downstream operation.
+    pub fn from_reconstructed_preview_for_recipe(
+        reconstructed: &ReconstructedPreview,
+        recipe: &EditRecipe,
+        cancellation: &CancellationToken,
+    ) -> Result<Self, GpuPreviewError> {
         let image = reconstructed.image();
         if image.space() != LinearRgbSpace::CameraNative {
             return Err(GpuPreviewError::InvalidInput {
                 reason: "the GPU camera source requires camera-native linear RGB".to_owned(),
             });
         }
-        let gains = reconstructed
-            .white_balance_gains(white_balance)
-            .map_err(|error| GpuPreviewError::InvalidInput {
-                reason: error.to_string(),
-            })?;
+        if !reconstructed.matches_highlight_recipe(recipe) {
+            return Err(GpuPreviewError::BaseMismatch {
+                reason:
+                    "the GPU source was prepared with different RAW highlight or profile provenance"
+                        .to_owned(),
+            });
+        }
+        let resolved = resolve_camera_colour(
+            reconstructed.calibration(),
+            &recipe.color.camera_profile,
+            recipe.color.white_balance,
+        )
+        .map_err(|error| GpuPreviewError::InvalidInput {
+            reason: error.to_string(),
+        })?;
+        let gains = resolved.white_balance_gains;
+        let white_balance = recipe.color.white_balance;
         let white_balance_dynamic = reconstructed.supports_dynamic_white_balance();
         if !white_balance_dynamic && white_balance != reconstructed.highlight_white_balance() {
             return Err(GpuPreviewError::BaseMismatch {
@@ -213,9 +276,9 @@ impl GpuPreviewUpload {
             highlight_adjustments: reconstructed.highlight_adjustments(),
             white_balance_dynamic,
             white_balance_gains: gains,
-            as_shot_white_balance: reconstructed.as_shot_white_balance(),
-            camera_to_xyz_d65: reconstructed.camera_to_xyz_d65(),
-            camera_to_linear_rec2020: reconstructed.camera_to_linear_rec2020(),
+            camera_to_linear_rec2020: resolved.camera_to_linear_rec2020,
+            calibration: Some(reconstructed.calibration().clone()),
+            highlight_camera_profile: reconstructed.camera_profile_key().clone(),
         })
     }
 
@@ -601,9 +664,9 @@ impl GpuPreviewProcessor {
             highlight_adjustments: upload.highlight_adjustments,
             white_balance_dynamic: upload.white_balance_dynamic,
             white_balance_gains: upload.white_balance_gains,
-            as_shot_white_balance: upload.as_shot_white_balance,
-            camera_to_xyz_d65: upload.camera_to_xyz_d65,
             camera_to_linear_rec2020: upload.camera_to_linear_rec2020,
+            calibration: upload.calibration,
+            highlight_camera_profile: upload.highlight_camera_profile,
         })
     }
 
@@ -632,7 +695,8 @@ impl GpuPreviewProcessor {
                     .to_owned(),
             });
         }
-        let white_balance_gains = source.resolve_white_balance(recipe.color.white_balance)?;
+        let (white_balance_gains, camera_to_linear_rec2020) =
+            source.resolve_recipe_colour(recipe)?;
         let orientation = recipe
             .geometry
             .orientation_override
@@ -690,7 +754,7 @@ impl GpuPreviewProcessor {
             output_geometry,
             recipe,
             white_balance_gains,
-            source.camera_to_linear_rec2020,
+            camera_to_linear_rec2020,
         );
         self.queue
             .write_buffer(&self.parameters, 0, bytemuck::cast_slice(&parameters));
@@ -2093,6 +2157,7 @@ mod tests {
                 color_matrices: vec![CameraColorMatrix {
                     illuminant: "D65".to_owned(),
                     values: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                    origin: rohditor_raw::CameraMatrixOrigin::DecoderDatabase,
                 }],
                 orientation,
                 capture: CaptureMetadata::default(),
