@@ -7,22 +7,27 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use rohditor_core::{
-    DitherMode, ExportFormat, ExportMetadataPolicy, ExportSettings, HighlightDiagnostics,
-    Histogram, JPEG_QUALITY_DEFAULT, MemoryEstimate, PngBitDepth, PreviewOptions, StageTimings,
-    hsl_channel_weights_from_display_rgb, paths_refer_to_same_file, srgb_to_linear_srgb,
+    CameraCalibration, DitherMode, ExportFormat, ExportMetadataPolicy, ExportSettings,
+    HighlightDiagnostics, Histogram, JPEG_QUALITY_DEFAULT, MemoryEstimate, PngBitDepth,
+    PreviewOptions, StageTimings, camera_color_transform, hsl_channel_weights_from_display_rgb,
+    paths_refer_to_same_file, resolve_camera_colour, srgb_to_linear_srgb,
 };
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_edit::{
     BLACKS_RANGE, COLOR_GRADING_RANGE, CONTRAST_RANGE, EXPOSURE_EV_RANGE, EditRecipe,
     HIGHLIGHT_THRESHOLD_RANGE, HIGHLIGHTS_RANGE, HSL_CHANNEL_COUNT, HSL_HUE_RANGE,
-    HSL_LUMINANCE_RANGE, HSL_SATURATION_RANGE, HighlightAdjustments, HighlightMethod,
-    SATURATION_RANGE, SHADOWS_RANGE, TEMPERATURE_RANGE, TINT_RANGE, TONE_CURVE_RANGE,
-    VIBRANCE_RANGE, WHITE_BALANCE_MULTIPLIER_RANGE, WHITES_RANGE, WhiteBalance,
+    HSL_LUMINANCE_RANGE, HSL_SATURATION_RANGE, HighlightMethod, SATURATION_RANGE, SHADOWS_RANGE,
+    TEMPERATURE_RANGE, TINT_RANGE, TONE_CURVE_RANGE, VIBRANCE_RANGE,
+    WHITE_BALANCE_MULTIPLIER_RANGE, WHITES_RANGE, WhiteBalance,
 };
 use rohditor_raw::{RawFileInfo, RawFrame};
 use tracing::{info, warn};
 
+#[cfg(test)]
+use rohditor_edit::HighlightAdjustments;
+
 use crate::ProcessorPreference;
+use crate::camera_profiles::CameraProfileRegistry;
 use crate::catalog::{CatalogCoordinator, CatalogState, ThumbnailSlot};
 use crate::coordinator::{
     PreviewBackend, PreviewResolution, RenderCoordinator, WorkerImage, WorkerPreviewDiagnostics,
@@ -33,7 +38,8 @@ use crate::session;
 use crate::settings::{self, AppSettings};
 use crate::ui::adjustment_panel::{
     self, AdjustmentInteraction, AdjustmentRange, AdjustmentRanges, AdjustmentTarget,
-    AdjustmentValues, DocumentPanelModel, ExportKind, ExportUiSettings, PngDepth, WhiteBalanceMode,
+    AdjustmentValues, CameraProfileChoice, DocumentPanelModel, ExportKind, ExportUiSettings,
+    PngDepth, WhiteBalanceMode,
 };
 use crate::ui::catalog::{
     self, FilmstripModel, LibraryEntryModel, LibraryEntryState, LibraryModel, LibrarySort,
@@ -247,6 +253,7 @@ pub(crate) struct RohditorApp {
     export_settings: ExportUiSettings,
     settings: AppSettings,
     settings_warning: Option<String>,
+    camera_profiles: CameraProfileRegistry,
     settings_dialog: Option<SettingsDialog>,
     ui_renderer: &'static str,
     processor_preference: ProcessorPreference,
@@ -397,6 +404,7 @@ impl RohditorApp {
             export_settings: ExportUiSettings::with_jpeg_quality(JPEG_QUALITY_DEFAULT),
             settings,
             settings_warning,
+            camera_profiles: CameraProfileRegistry::load(),
             settings_dialog: None,
             ui_renderer,
             processor_preference,
@@ -438,6 +446,47 @@ impl RohditorApp {
         if let Some(path) = selected {
             self.view_mode = ViewMode::Develop;
             self.open_path(context, path);
+        }
+    }
+
+    fn import_camera_profile(&mut self, context: &egui::Context) {
+        let Some(info) = self
+            .document
+            .as_ref()
+            .and_then(|document| document.info.clone())
+        else {
+            return;
+        };
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Import matrix camera profile")
+            .add_filter("DNG Camera Profiles", &["dcp"])
+            .pick_file()
+        else {
+            return;
+        };
+        let result = self.camera_profiles.import(&path, &info);
+        match result {
+            Ok(profile) => {
+                let changed_document = self.document.as_mut().and_then(|document| {
+                    let mut next = document.edits.recipe().clone();
+                    next.color.camera_profile =
+                        rohditor_edit::CameraProfileSelection::Matrix(profile);
+                    let changed = document.edits.set_discrete(next);
+                    document.error = None;
+                    if self.camera_profiles.warning().is_some() {
+                        document.warning = self.camera_profiles.warning().map(str::to_owned);
+                    }
+                    changed.then_some(document.id)
+                });
+                if let Some(document_id) = changed_document {
+                    self.queue_preview(context, document_id);
+                }
+            }
+            Err(error) => {
+                if let Some(document) = self.document.as_mut() {
+                    document.error = Some(error);
+                }
+            }
         }
     }
 
@@ -596,12 +645,7 @@ impl RohditorApp {
                 .and_then(|document| document.gpu_preview.as_ref())
                 .is_some_and(|preview| {
                     gpu_base_algorithm_matches(preview.algorithm, options.render.demosaic)
-                        && gpu_base_highlights_match(
-                            preview.source.highlight_adjustments(),
-                            recipe.raw.highlights,
-                        )
-                        && (preview.source.supports_dynamic_white_balance()
-                            || preview.source.white_balance() == recipe.color.white_balance)
+                        && preview.source.matches_recipe(&recipe)
                 });
             if gpu_base_is_current {
                 self.coordinator.cancel_preview(document_id);
@@ -1553,7 +1597,12 @@ impl RohditorApp {
 
     fn show_adjustment_panel(&mut self, context: &egui::Context) {
         let model = self.document.as_ref().map(|document| {
-            document_panel_model(document, self.picker_mode, self.color_mixer_channel)
+            document_panel_model(
+                document,
+                self.picker_mode,
+                self.color_mixer_channel,
+                &self.camera_profiles,
+            )
         });
         let output = adjustment_panel::show(context, model, &mut self.export_settings);
         let picker_mode = output.picker_mode;
@@ -1569,6 +1618,11 @@ impl RohditorApp {
 
             let mut changed = false;
             let mut auto_tone_applied = false;
+            if let Some(selection) = output.camera_profile {
+                let mut next = document.edits.recipe().clone();
+                next.color.camera_profile = selection;
+                changed |= document.edits.set_discrete(next);
+            }
             if let Some(method) = output.highlight_method {
                 changed |= set_highlight_method(&mut document.edits, method);
             }
@@ -1608,6 +1662,9 @@ impl RohditorApp {
         self.white_balance_memory = white_balance_memory;
         if let Some(document_id) = changed_document {
             self.queue_preview(context, document_id);
+        }
+        if output.import_camera_profile {
+            self.import_camera_profile(context);
         }
         if let Some(mode) = picker_mode {
             self.picker_mode = mode;
@@ -2185,73 +2242,79 @@ impl RohditorApp {
             .document
             .as_ref()
             .and_then(|document| document.preview_diagnostics)
-            .map(|preview| PreviewModel {
-                backend: preview.worker.backend.label().to_owned(),
-                algorithm: preview.worker.algorithm.stable_name().to_owned(),
-                source_state: match preview.worker.resolution {
-                    PreviewResolution::SourceScale => "1:1",
-                    PreviewResolution::CropToolFullFrame => "crop authoring",
-                    PreviewResolution::Fit => match preview.worker.algorithm {
-                        DemosaicAlgorithm::Bilinear => "fast",
-                        DemosaicAlgorithm::MalvarHeCutler => "high-quality",
-                        DemosaicAlgorithm::Rcd => "high-quality",
-                        DemosaicAlgorithm::Amaze => "high-quality",
+            .and_then(|preview| {
+                let document = self.document.as_ref()?;
+                Some(PreviewModel {
+                    backend: preview.worker.backend.label().to_owned(),
+                    algorithm: preview.worker.algorithm.stable_name().to_owned(),
+                    profile: camera_profile_diagnostic(document),
+                    source_state: match preview.worker.resolution {
+                        PreviewResolution::SourceScale => "1:1",
+                        PreviewResolution::CropToolFullFrame => "crop authoring",
+                        PreviewResolution::Fit => match preview.worker.algorithm {
+                            DemosaicAlgorithm::Bilinear => "fast",
+                            DemosaicAlgorithm::MalvarHeCutler => "high-quality",
+                            DemosaicAlgorithm::Rcd => "high-quality",
+                            DemosaicAlgorithm::Amaze => "high-quality",
+                        },
+                    }
+                    .to_owned(),
+                    cache: CacheModel {
+                        decoded: preview.worker.cache_hits.decoded,
+                        reconstructed: preview.worker.cache_hits.reconstructed,
+                        demosaiced: preview.worker.cache_hits.demosaiced,
+                        adjusted: preview.worker.cache_hits.adjusted,
+                        workspace_reused: preview.worker.workspace_reused,
                     },
-                }
-                .to_owned(),
-                cache: CacheModel {
-                    decoded: preview.worker.cache_hits.decoded,
-                    reconstructed: preview.worker.cache_hits.reconstructed,
-                    demosaiced: preview.worker.cache_hits.demosaiced,
-                    adjusted: preview.worker.cache_hits.adjusted,
-                    workspace_reused: preview.worker.workspace_reused,
-                },
-                timings: TimingModel {
-                    metadata: preview.worker.timings.metadata,
-                    normalization: preview.worker.timings.normalization,
-                    highlight_processing: preview.worker.timings.highlight_processing,
-                    demosaic: preview.worker.timings.demosaic,
-                    resampling: preview.worker.timings.resampling,
-                    color_conversion: preview.worker.timings.color_conversion,
-                    adjustments: preview.worker.timings.adjustments,
-                    output_conversion: preview.worker.timings.output_conversion,
-                    total: preview.worker.timings.total,
-                },
-                highlight: match preview.worker.highlight_diagnostics {
-                    HighlightDiagnostics::Off => HighlightStatsModel::Off,
-                    HighlightDiagnostics::Clip(stats) => HighlightStatsModel::Clip {
-                        affected_sites: stats.affected_sites,
-                        changed_sites: stats.changed_sites,
-                        nominal_over_white_sites: stats.nominal_over_white_sites,
-                        affected_by_channel: stats.affected_by_channel,
+                    timings: TimingModel {
+                        metadata: preview.worker.timings.metadata,
+                        normalization: preview.worker.timings.normalization,
+                        highlight_processing: preview.worker.timings.highlight_processing,
+                        demosaic: preview.worker.timings.demosaic,
+                        resampling: preview.worker.timings.resampling,
+                        color_conversion: preview.worker.timings.color_conversion,
+                        adjustments: preview.worker.timings.adjustments,
+                        output_conversion: preview.worker.timings.output_conversion,
+                        total: preview.worker.timings.total,
                     },
-                    HighlightDiagnostics::LocalRatios(stats) => HighlightStatsModel::LocalRatios {
-                        suspected_clipped_sites: stats.suspected_clipped_sites,
-                        reconstructed_sites: stats.reconstructed_sites,
-                        changed_sites: stats.changed_sites,
-                        fallback_sites: stats.fallback_sites,
-                        fully_unsupported_sites: stats.fully_unsupported_sites,
-                        suspected_by_channel: stats.suspected_by_channel,
+                    highlight: match preview.worker.highlight_diagnostics {
+                        HighlightDiagnostics::Off => HighlightStatsModel::Off,
+                        HighlightDiagnostics::Clip(stats) => HighlightStatsModel::Clip {
+                            affected_sites: stats.affected_sites,
+                            changed_sites: stats.changed_sites,
+                            nominal_over_white_sites: stats.nominal_over_white_sites,
+                            affected_by_channel: stats.affected_by_channel,
+                        },
+                        HighlightDiagnostics::LocalRatios(stats) => {
+                            HighlightStatsModel::LocalRatios {
+                                suspected_clipped_sites: stats.suspected_clipped_sites,
+                                reconstructed_sites: stats.reconstructed_sites,
+                                changed_sites: stats.changed_sites,
+                                fallback_sites: stats.fallback_sites,
+                                fully_unsupported_sites: stats.fully_unsupported_sites,
+                                suspected_by_channel: stats.suspected_by_channel,
+                            }
+                        }
+                        HighlightDiagnostics::Opposed(stats) => HighlightStatsModel::Opposed {
+                            suspected_clipped_sites: stats.suspected_clipped_sites,
+                            reconstructed_sites: stats.reconstructed_sites,
+                            changed_sites: stats.changed_sites,
+                            fallback_sites: stats.fallback_sites,
+                            fully_unsupported_sites: stats.fully_unsupported_sites,
+                            suspected_by_channel: stats.suspected_by_channel,
+                        },
                     },
-                    HighlightDiagnostics::Opposed(stats) => HighlightStatsModel::Opposed {
-                        suspected_clipped_sites: stats.suspected_clipped_sites,
-                        reconstructed_sites: stats.reconstructed_sites,
-                        changed_sites: stats.changed_sites,
-                        fallback_sites: stats.fallback_sites,
-                        fully_unsupported_sites: stats.fully_unsupported_sites,
-                        suspected_by_channel: stats.suspected_by_channel,
-                    },
-                },
-                cache_resident_bytes: preview.worker.cache_resident_bytes,
-                estimated_peak_bytes: preview.worker.memory.estimated_peak_bytes,
-                gpu: preview.gpu_submission.map(|submission| GpuModel {
-                    upload_preparation: preview.gpu_upload_preparation,
-                    submission: Some(submission),
-                    queue_completion: preview.gpu_queue_completion,
-                    histogram_readback: preview.gpu_histogram_readback,
-                    textures_reused: preview.gpu_textures_reused,
-                    resident_bytes: preview.gpu_resident_bytes,
-                }),
+                    cache_resident_bytes: preview.worker.cache_resident_bytes,
+                    estimated_peak_bytes: preview.worker.memory.estimated_peak_bytes,
+                    gpu: preview.gpu_submission.map(|submission| GpuModel {
+                        upload_preparation: preview.gpu_upload_preparation,
+                        submission: Some(submission),
+                        queue_completion: preview.gpu_queue_completion,
+                        histogram_readback: preview.gpu_histogram_readback,
+                        textures_reused: preview.gpu_textures_reused,
+                        resident_bytes: preview.gpu_resident_bytes,
+                    }),
+                })
             });
         let catalog =
             (self.catalog.entry_count() > 0 || self.catalog.failure().is_some()).then(|| {
@@ -2352,6 +2415,20 @@ impl RohditorApp {
             }
         }
     }
+}
+
+fn camera_profile_diagnostic(document: &Document) -> String {
+    let Some(info) = document.info.as_ref() else {
+        return "unavailable (RAW metadata pending)".to_owned();
+    };
+    let calibration = CameraCalibration::from_raw_info(info);
+    resolve_camera_colour(
+        &calibration,
+        &document.edits.recipe().color.camera_profile,
+        document.edits.recipe().color.white_balance,
+    )
+    .map(|resolved| resolved.provenance.to_string())
+    .unwrap_or_else(|error| format!("unavailable ({error})"))
 }
 
 fn source_scale_selected(document: Option<&Document>) -> bool {
@@ -2457,7 +2534,30 @@ fn document_panel_model(
     document: &Document,
     picker_mode: Option<PickerMode>,
     color_mixer_channel: usize,
+    camera_profiles: &CameraProfileRegistry,
 ) -> DocumentPanelModel {
+    let camera_profile = document.edits.recipe().color.camera_profile.clone();
+    let mut camera_profile_choices = vec![CameraProfileChoice {
+        selection: rohditor_edit::CameraProfileSelection::Automatic,
+        label: "Automatic (RAW / decoder matrix)".to_owned(),
+        detail: document.info.as_ref().map_or_else(
+            || "Decoder matrix selected when RAW metadata is available".to_owned(),
+            automatic_profile_detail,
+        ),
+        tooltip: "Use the existing decoder-derived camera calibration".to_owned(),
+    }];
+    if let Some(info) = &document.info {
+        for profile in camera_profiles.compatible_profiles(info) {
+            camera_profile_choices.push(camera_profile_choice(profile));
+        }
+    }
+    if let rohditor_edit::CameraProfileSelection::Matrix(profile) = &camera_profile
+        && !camera_profile_choices
+            .iter()
+            .any(|choice| choice.selection == camera_profile)
+    {
+        camera_profile_choices.push(camera_profile_choice(profile.clone()));
+    }
     let (
         white_balance_mode,
         white_balance_red,
@@ -2500,6 +2600,8 @@ fn document_panel_model(
         sensor_dimensions: document.info.as_ref().map(|info| (info.width, info.height)),
         revision: document.edits.revision(),
         has_adjustments: document.edits.recipe() != &EditRecipe::default(),
+        camera_profile,
+        camera_profile_choices,
         values: AdjustmentValues {
             white_balance_mode,
             white_balance_red,
@@ -2645,12 +2747,63 @@ fn document_panel_model(
         export_ready: document.frame.is_some(),
         export_in_progress: document.export_status.is_some(),
         error: document.error.clone(),
-        warning: document.warning.clone(),
+        warning: document
+            .warning
+            .clone()
+            .or_else(|| camera_profiles.warning().map(str::to_owned)),
         notice: document.notice.clone(),
         histogram: document.histogram,
         auto_tone_available: document.histogram_revision == Some(document.edits.revision()),
         picker_mode,
         color_mixer_channel,
+    }
+}
+
+fn automatic_profile_detail(info: &RawFileInfo) -> String {
+    let transform = camera_color_transform(info);
+    let origin = info
+        .color_matrices
+        .iter()
+        .filter_map(|matrix| {
+            let normalized = matrix
+                .illuminant
+                .to_ascii_uppercase()
+                .replace([' ', '_', '-'], "");
+            let priority = match normalized.as_str() {
+                "D65" => 0,
+                "D50" => 1,
+                "A" | "STANDARDLIGHTA" => 2,
+                _ => return None,
+            };
+            Some((priority, matrix.origin))
+        })
+        .min_by_key(|(priority, _)| *priority)
+        .map_or(
+            rohditor_raw::CameraMatrixOrigin::LegacyDecoderFallback,
+            |(_, origin)| origin,
+        );
+    match transform {
+        Ok(transform) => format!("{origin:?} · {}", transform.source_illuminant),
+        Err(error) => format!("{origin:?} · unavailable ({error})"),
+    }
+}
+
+fn camera_profile_choice(
+    profile: rohditor_camera_profile::MatrixCameraProfile,
+) -> CameraProfileChoice {
+    let illuminant = profile.preferred_calibration().map_or_else(
+        || "unknown illuminant".to_owned(),
+        |value| value.illuminant.to_string(),
+    );
+    let digest = profile.source_sha256.chars().take(8).collect::<String>();
+    CameraProfileChoice {
+        label: profile.name.clone(),
+        detail: format!("Matrix DCP · {illuminant}"),
+        tooltip: format!(
+            "Camera model: {} · {illuminant} · SHA-256 {digest}",
+            profile.camera_model
+        ),
+        selection: rohditor_edit::CameraProfileSelection::Matrix(profile),
     }
 }
 
@@ -2778,6 +2931,7 @@ fn gpu_supports_recipe(recipe: &EditRecipe) -> bool {
     rohditor_gpu::GpuPreviewProcessor::supports_recipe(recipe)
 }
 
+#[cfg(test)]
 fn gpu_base_highlights_match(
     retained: HighlightAdjustments,
     requested: HighlightAdjustments,

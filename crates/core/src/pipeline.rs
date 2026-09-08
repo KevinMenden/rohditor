@@ -2,16 +2,20 @@ use std::mem::size_of;
 use std::time::{Duration, Instant};
 
 use rohditor_demosaic::{DemosaicAlgorithm, WhiteBalanceGains};
-use rohditor_edit::{EditRecipe, HighlightAdjustments, HighlightMethod, WhiteBalance};
+use rohditor_edit::{
+    CameraProfileSelection, EditRecipe, HighlightAdjustments, HighlightMethod, WhiteBalance,
+};
 use rohditor_image::{DisplayRgbImage, LinearRgbImage, Orientation};
-use rohditor_raw::{RawFileInfo, RawFrame};
+use rohditor_raw::RawFrame;
 
 use crate::analysis::Histogram;
-use crate::color::{CameraColorTransform, camera_color_transform};
+use crate::color::{
+    CameraCalibration, CameraProfileKey, camera_profile_key, resolve_camera_colour,
+};
 use crate::cpu::{
     apply_adjustments_cancellable, apply_camera_color_transform_cancellable,
     apply_white_balance_cancellable, normalize_raw_cancellable, preview_dimensions,
-    render_display_srgb8_cancellable_with_geometry, white_balance_gains_with_transform,
+    render_display_srgb8_cancellable_with_geometry,
 };
 use crate::demosaic::demosaic_cancellable;
 use crate::highlight::{HighlightDiagnostics, apply_cancellable as apply_highlight_cancellable};
@@ -104,8 +108,10 @@ pub struct MemoryEstimate {
 #[derive(Debug, Clone)]
 pub struct ReconstructedPreview {
     image: LinearRgbImage<f32>,
-    info: RawFileInfo,
-    camera_transform: CameraColorTransform,
+    calibration: CameraCalibration,
+    source_orientation: Orientation,
+    profile_selection: CameraProfileSelection,
+    camera_profile: CameraProfileKey,
     highlight_adjustments: HighlightAdjustments,
     highlight_white_balance: WhiteBalance,
     highlight_diagnostics: HighlightDiagnostics,
@@ -127,25 +133,31 @@ impl ReconstructedPreview {
     /// Source EXIF orientation for the reconstructed camera-native image.
     #[must_use]
     pub const fn source_orientation(&self) -> Orientation {
-        self.info.orientation
+        self.source_orientation
     }
 
-    /// Camera-native to linear Rec.2020/D65 transform for GPU parameterization.
+    /// Camera calibration retained for shared CPU/GPU color resolution.
     #[must_use]
-    pub const fn camera_to_linear_rec2020(&self) -> crate::Matrix3 {
-        self.camera_transform.camera_to_linear_rec2020
+    pub const fn calibration(&self) -> &CameraCalibration {
+        &self.calibration
     }
 
-    /// Camera-native to D65 XYZ transform used to resolve temperature/tint.
+    /// Exact profile identity used while building the RAW-stage result.
     #[must_use]
-    pub const fn camera_to_xyz_d65(&self) -> crate::Matrix3 {
-        self.camera_transform.camera_to_xyz_d65
+    pub fn camera_profile_key(&self) -> &CameraProfileKey {
+        &self.camera_profile
+    }
+
+    /// Profile selection used when this reconstruction was produced.
+    #[must_use]
+    pub const fn profile_selection(&self) -> &CameraProfileSelection {
+        &self.profile_selection
     }
 
     /// Decoder as-shot multipliers used as the relative WB baseline.
     #[must_use]
     pub const fn as_shot_white_balance(&self) -> [Option<f32>; 4] {
-        self.info.as_shot_white_balance
+        self.calibration.as_shot_white_balance
     }
 
     /// Whether changing recipe white balance can reuse this camera-native
@@ -179,12 +191,20 @@ impl ReconstructedPreview {
         self.highlight_diagnostics.legacy_clip_stats()
     }
 
-    pub(crate) fn matches_highlight_recipe(&self, recipe: &EditRecipe) -> bool {
+    pub fn matches_highlight_recipe(&self, recipe: &EditRecipe) -> bool {
         if !highlight_adjustments_match(self.highlight_adjustments, recipe.raw.highlights) {
             return false;
         }
-        self.supports_dynamic_white_balance()
-            || self.highlight_white_balance == recipe.color.white_balance
+        if self.supports_dynamic_white_balance() {
+            return true;
+        }
+        if self.highlight_white_balance != recipe.color.white_balance {
+            return false;
+        }
+        !matches!(
+            recipe.color.white_balance,
+            WhiteBalance::TemperatureTint { .. }
+        ) || self.camera_profile == camera_profile_key(&recipe.color.camera_profile)
     }
 
     /// Resolve a recipe white balance against this reconstruction's camera
@@ -193,11 +213,8 @@ impl ReconstructedPreview {
         &self,
         selection: WhiteBalance,
     ) -> Result<WhiteBalanceGains, PipelineError> {
-        crate::cpu::white_balance_gains_with_transform(
-            &self.info,
-            &self.camera_transform,
-            selection,
-        )
+        resolve_camera_colour(&self.calibration, &self.profile_selection, selection)
+            .map(|resolved| resolved.white_balance_gains)
     }
 
     #[must_use]
@@ -266,6 +283,7 @@ pub struct DemosaicedBase {
     image: LinearRgbImage<f32>,
     source_orientation: Orientation,
     white_balance: WhiteBalance,
+    camera_profile: CameraProfileKey,
     highlight_adjustments: HighlightAdjustments,
     highlight_white_balance: WhiteBalance,
     highlight_diagnostics: HighlightDiagnostics,
@@ -292,6 +310,11 @@ impl DemosaicedBase {
     #[must_use]
     pub const fn white_balance(&self) -> WhiteBalance {
         self.white_balance
+    }
+
+    #[must_use]
+    pub fn camera_profile_key(&self) -> &CameraProfileKey {
+        &self.camera_profile
     }
 
     #[must_use]
@@ -716,18 +739,14 @@ fn prepare_reconstructed_preview(
     );
     let metadata_guard = metadata_span.enter();
     recipe.validate()?;
-    let camera_transform = camera_color_transform(&frame.info)?;
-    let highlight_gains = (recipe.raw.highlights.method == HighlightMethod::Clip).then(|| {
-        white_balance_gains_with_transform(
-            &frame.info,
-            &camera_transform,
-            recipe.color.white_balance,
-        )
-    });
-    let highlight_gains = match highlight_gains {
-        Some(result) => Some(result?),
-        None => None,
-    };
+    let calibration = CameraCalibration::from_raw_info(&frame.info);
+    let resolved = resolve_camera_colour(
+        &calibration,
+        &recipe.color.camera_profile,
+        recipe.color.white_balance,
+    )?;
+    let highlight_gains = (recipe.raw.highlights.method == HighlightMethod::Clip)
+        .then_some(resolved.white_balance_gains);
     let metadata = metadata_started.elapsed();
     drop(metadata_guard);
 
@@ -820,8 +839,10 @@ fn prepare_reconstructed_preview(
 
     Ok(ReconstructedPreview {
         image,
-        info: frame.info.clone(),
-        camera_transform,
+        calibration,
+        source_orientation: frame.info.orientation,
+        profile_selection: recipe.color.camera_profile.clone(),
+        camera_profile: camera_profile_key(&recipe.color.camera_profile),
         highlight_adjustments: recipe.raw.highlights,
         highlight_white_balance: recipe.color.white_balance,
         highlight_diagnostics,
@@ -857,9 +878,9 @@ fn prepare_demosaiced_preview(
                 .to_owned(),
         });
     }
-    let gains = white_balance_gains_with_transform(
-        &reconstructed.info,
-        &reconstructed.camera_transform,
+    let resolved = resolve_camera_colour(
+        &reconstructed.calibration,
+        &recipe.color.camera_profile,
         recipe.color.white_balance,
     )?;
     let metadata = metadata_started.elapsed();
@@ -867,10 +888,10 @@ fn prepare_demosaiced_preview(
 
     let color_started = Instant::now();
     let mut image = reconstructed.image.clone();
-    apply_white_balance_cancellable(&mut image, gains, cancellation)?;
+    apply_white_balance_cancellable(&mut image, resolved.white_balance_gains, cancellation)?;
     apply_camera_color_transform_cancellable(
         &mut image,
-        &reconstructed.camera_transform,
+        &resolved.camera_color_transform(),
         cancellation,
     )?;
     let color_conversion = color_started.elapsed();
@@ -883,8 +904,9 @@ fn prepare_demosaiced_preview(
 
     Ok(DemosaicedBase {
         image,
-        source_orientation: reconstructed.info.orientation,
+        source_orientation: reconstructed.source_orientation,
         white_balance: recipe.color.white_balance,
+        camera_profile: camera_profile_key(&recipe.color.camera_profile),
         highlight_adjustments: reconstructed.highlight_adjustments,
         highlight_white_balance: reconstructed.highlight_white_balance,
         highlight_diagnostics: reconstructed.highlight_diagnostics,
@@ -923,12 +945,13 @@ fn prepare_base_cancellable(
     );
     let metadata_guard = metadata_span.enter();
     recipe.validate()?;
-    let camera_transform = camera_color_transform(&frame.info)?;
-    let gains = white_balance_gains_with_transform(
-        &frame.info,
-        &camera_transform,
+    let calibration = CameraCalibration::from_raw_info(&frame.info);
+    let resolved = resolve_camera_colour(
+        &calibration,
+        &recipe.color.camera_profile,
         recipe.color.white_balance,
     )?;
+    let gains = resolved.white_balance_gains;
     let metadata = metadata_started.elapsed();
     drop(metadata_guard);
 
@@ -962,7 +985,11 @@ fn prepare_base_cancellable(
     drop(normalized);
 
     let color_started = Instant::now();
-    apply_camera_color_transform_cancellable(&mut linear, &camera_transform, cancellation)?;
+    apply_camera_color_transform_cancellable(
+        &mut linear,
+        &resolved.camera_color_transform(),
+        cancellation,
+    )?;
     let color_conversion = color_started.elapsed();
 
     let decoded_raw_bytes = frame
@@ -1000,6 +1027,7 @@ fn prepare_base_cancellable(
         image: linear,
         source_orientation: frame.info.orientation,
         white_balance: recipe.color.white_balance,
+        camera_profile: camera_profile_key(&recipe.color.camera_profile),
         highlight_adjustments: recipe.raw.highlights,
         highlight_white_balance: recipe.color.white_balance,
         highlight_diagnostics,
@@ -1019,6 +1047,13 @@ fn validate_base_recipe(base: &DemosaicedBase, recipe: &EditRecipe) -> Result<()
             field: "raw.highlights",
             reason: "the recipe does not match the RAW highlight result used to build the demosaiced base"
                 .to_owned(),
+        })
+    } else if base.camera_profile != camera_profile_key(&recipe.color.camera_profile) {
+        Err(PipelineError::InvalidRecipe {
+            field: "color.camera_profile",
+            reason:
+                "the recipe does not match the camera profile used to build the demosaiced base"
+                    .to_owned(),
         })
     } else if recipe.color.white_balance == base.white_balance
         && (base.highlight_adjustments.method != HighlightMethod::Clip

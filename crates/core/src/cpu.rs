@@ -280,18 +280,6 @@ fn validate_white_balance_selection(selection: WhiteBalance) -> Result<(), Pipel
     }
 }
 
-pub(crate) fn white_balance_gains_with_transform(
-    info: &RawFileInfo,
-    transform: &CameraColorTransform,
-    selection: WhiteBalance,
-) -> Result<WhiteBalanceGains, PipelineError> {
-    white_balance_gains_from_calibration(
-        info.as_shot_white_balance,
-        transform.camera_to_xyz_d65,
-        selection,
-    )
-}
-
 fn temperature_tint_gains(
     camera_to_xyz_d65: crate::Matrix3,
     temperature: f32,
@@ -1294,6 +1282,7 @@ mod tests {
             color_matrices: vec![CameraColorMatrix {
                 illuminant: "D65".to_owned(),
                 values: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                origin: rohditor_raw::CameraMatrixOrigin::DecoderDatabase,
             }],
             orientation: Orientation::Normal,
             capture: CaptureMetadata::default(),
