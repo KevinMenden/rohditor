@@ -44,6 +44,24 @@ pub struct LevelPattern {
 pub struct CameraColorMatrix {
     pub illuminant: String,
     pub values: Vec<f32>,
+    /// Where the decoder obtained this matrix. This is part of color-source
+    /// provenance, not a cosmetic description of the camera.
+    #[serde(default)]
+    pub origin: CameraMatrixOrigin,
+}
+
+/// Provenance of a matrix exposed by the RAW decoder.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CameraMatrixOrigin {
+    /// The matrix was read from DNG camera metadata.
+    EmbeddedDng,
+    /// The decoder supplied a camera-database calibration.
+    #[default]
+    DecoderDatabase,
+    /// The matrix is the decoder's legacy XYZ-to-camera fallback rather than
+    /// an entry in [`RawFileInfo::color_matrices`].
+    LegacyDecoderFallback,
 }
 
 /// A rational value retained exactly as stored in EXIF.

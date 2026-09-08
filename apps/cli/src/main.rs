@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
+use rohditor_camera_profile::parse_dcp_file;
 use rohditor_core::{
     CpuPipeline, DitherMode, ExportFormat, ExportImage, ExportMetadataPolicy, ExportSettings,
     HighlightDiagnostics, JPEG_QUALITY_DEFAULT, JPEG_QUALITY_MAX, JPEG_QUALITY_MIN, OutputPolicy,
@@ -15,9 +16,9 @@ use rohditor_core::{
 };
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_edit::{
-    BLACKS_RANGE, CONTRAST_RANGE, EXPOSURE_EV_RANGE, EditRecipe, HIGHLIGHT_THRESHOLD_RANGE,
-    HIGHLIGHTS_RANGE, HighlightMethod, SATURATION_RANGE, SHADOWS_RANGE, TEMPERATURE_RANGE,
-    TINT_RANGE, TONE_CURVE_RANGE, VIBRANCE_RANGE, WHITES_RANGE, WhiteBalance,
+    BLACKS_RANGE, CONTRAST_RANGE, CameraProfileSelection, EXPOSURE_EV_RANGE, EditRecipe,
+    HIGHLIGHT_THRESHOLD_RANGE, HIGHLIGHTS_RANGE, HighlightMethod, SATURATION_RANGE, SHADOWS_RANGE,
+    TEMPERATURE_RANGE, TINT_RANGE, TONE_CURVE_RANGE, VIBRANCE_RANGE, WHITES_RANGE, WhiteBalance,
 };
 use rohditor_image::{DisplayRgbImage, DisplayTransfer, Orientation};
 use rohditor_raw::{
@@ -147,6 +148,10 @@ enum Command {
         /// R,G,B multipliers relative to the as-shot white balance.
         #[arg(long, value_name = "RED,GREEN,BLUE")]
         white_balance: Option<RgbMultipliers>,
+
+        /// Matrix-only DNG Camera Profile to embed in the recipe.
+        #[arg(long, value_name = "PROFILE.dcp")]
+        camera_profile: Option<PathBuf>,
 
         /// White-balance temperature in Kelvin (2000 to 12000). Use with --tint.
         #[arg(long, allow_hyphen_values = true)]
@@ -442,6 +447,7 @@ fn main() -> Result<()> {
             highlight_clip_threshold,
             highlight_detection_threshold,
             white_balance,
+            camera_profile,
             temperature,
             tint,
             crop,
@@ -472,6 +478,7 @@ fn main() -> Result<()> {
                 highlight_clip_threshold,
                 highlight_detection_threshold,
                 white_balance,
+                camera_profile,
                 temperature,
                 tint,
                 crop,
@@ -617,7 +624,7 @@ struct LibRawMismatch {
     libraw: u16,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct DevelopArguments {
     exposure: f32,
     contrast: f32,
@@ -635,6 +642,7 @@ struct DevelopArguments {
     highlight_clip_threshold: Option<f32>,
     highlight_detection_threshold: Option<f32>,
     white_balance: Option<RgbMultipliers>,
+    camera_profile: Option<PathBuf>,
     temperature: Option<f32>,
     tint: f32,
     crop: CliCropPolicy,
@@ -735,7 +743,7 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
         arguments.highlight_clip_threshold,
         arguments.highlight_detection_threshold,
     )?;
-    let export_settings = develop_export_settings(output, arguments)?;
+    let export_settings = develop_export_settings(output, &arguments)?;
     if paths_refer_to_same_file(file, output).with_context(|| {
         format!(
             "could not compare RAW source {} with output {}",
@@ -779,7 +787,16 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
         (None, None, 0.0) => WhiteBalance::AsShot,
         _ => unreachable!("white balance conflict was rejected above"),
     };
+    let camera_profile = arguments
+        .camera_profile
+        .as_deref()
+        .map(parse_dcp_file)
+        .transpose()
+        .with_context(|| "could not parse the requested camera profile")?;
     let mut recipe = EditRecipe::default();
+    if let Some(profile) = camera_profile {
+        recipe.color.camera_profile = CameraProfileSelection::Matrix(profile);
+    }
     recipe.color.white_balance = white_balance;
     recipe.light.exposure_ev = arguments.exposure;
     recipe.light.contrast = arguments.contrast;
@@ -1405,7 +1422,7 @@ fn milliseconds(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1_000.0
 }
 
-fn develop_export_settings(output: &Path, arguments: DevelopArguments) -> Result<ExportSettings> {
+fn develop_export_settings(output: &Path, arguments: &DevelopArguments) -> Result<ExportSettings> {
     let extension = output
         .extension()
         .and_then(|value| value.to_str())
@@ -1658,7 +1675,7 @@ fn format_option<T: ToString>(value: Option<T>) -> String {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::str::FromStr;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1717,6 +1734,7 @@ mod tests {
             highlight_clip_threshold: None,
             highlight_detection_threshold: None,
             white_balance: None,
+            camera_profile: None,
             temperature: None,
             tint: 0.0,
             crop: CliCropPolicy::Recommended,
@@ -1728,9 +1746,9 @@ mod tests {
             metadata: CliMetadata::Safe,
             force: false,
         };
-        assert!(develop_export_settings(Path::new("developed.PNG"), base).is_ok());
-        assert!(develop_export_settings(Path::new("developed.jpg"), base).is_ok());
-        assert!(develop_export_settings(Path::new("developed.tiff"), base).is_err());
+        assert!(develop_export_settings(Path::new("developed.PNG"), &base).is_ok());
+        assert!(develop_export_settings(Path::new("developed.jpg"), &base).is_ok());
+        assert!(develop_export_settings(Path::new("developed.tiff"), &base).is_err());
 
         let values = RgbMultipliers::from_str("1.2,1.0,0.8").expect("valid multipliers");
         assert_eq!((values.red, values.green, values.blue), (1.2, 1.0, 0.8));
@@ -1789,6 +1807,23 @@ mod tests {
             panic!("expected develop command");
         };
         assert!(matches!(demosaic, CliDemosaic::MalvarHeCutler));
+    }
+
+    #[test]
+    fn develop_carries_a_camera_profile_path_without_installing_it() {
+        let parsed = Cli::try_parse_from([
+            "rohditor-cli",
+            "develop",
+            "input.arw",
+            "output.jpg",
+            "--camera-profile",
+            "studio.dcp",
+        ])
+        .expect("camera profile option should parse");
+        let Command::Develop { camera_profile, .. } = parsed.command else {
+            panic!("expected develop command");
+        };
+        assert_eq!(camera_profile, Some(PathBuf::from("studio.dcp")));
     }
 
     #[test]
