@@ -5,9 +5,11 @@ use thiserror::Error;
 
 mod geometry;
 mod light;
+mod optics;
 
 pub use geometry::{GeometryAdjustments, NormalizedCropRect};
 pub use light::{LIGHT_TONE_LUT_SIZE, LightToneLut};
+pub use optics::{LensProfileSelection, OpticsAdjustments};
 
 /// Validation errors for serialized, non-destructive edit recipes.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -18,12 +20,13 @@ pub struct EditError {
 }
 
 /// Schema version of the current non-destructive edit recipe.
-pub const EDIT_RECIPE_SCHEMA_VERSION: u32 = 6;
+pub const EDIT_RECIPE_SCHEMA_VERSION: u32 = 7;
 const LEGACY_EDIT_RECIPE_SCHEMA_VERSION: u32 = 1;
 const PREVIOUS_EDIT_RECIPE_SCHEMA_VERSION: u32 = 2;
 const PREVIOUS_RAW_EDIT_RECIPE_SCHEMA_VERSION: u32 = 3;
 const PREVIOUS_HIGHLIGHT_EDIT_RECIPE_SCHEMA_VERSION: u32 = 4;
 const PREVIOUS_LOCAL_RATIOS_EDIT_RECIPE_SCHEMA_VERSION: u32 = 5;
+const PREVIOUS_NO_OPTICS_EDIT_RECIPE_SCHEMA_VERSION: u32 = 6;
 
 /// Inclusive range and neutral value for one adjustment parameter.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -411,6 +414,8 @@ pub struct EditRecipe {
     pub schema_version: u32,
     #[serde(default)]
     pub raw: RawAdjustments,
+    #[serde(default)]
+    pub optics: OpticsAdjustments,
     pub light: LightAdjustments,
     pub color: ColorAdjustments,
     pub geometry: GeometryAdjustments,
@@ -421,6 +426,7 @@ impl Default for EditRecipe {
         Self {
             schema_version: EDIT_RECIPE_SCHEMA_VERSION,
             raw: RawAdjustments::default(),
+            optics: OpticsAdjustments::default(),
             light: LightAdjustments::default(),
             color: ColorAdjustments::default(),
             geometry: GeometryAdjustments::default(),
@@ -438,6 +444,20 @@ impl EditRecipe {
                     self.schema_version, EDIT_RECIPE_SCHEMA_VERSION
                 ),
             });
+        }
+        if let LensProfileSelection::Lensfun { profile_id } = &self.optics.profile {
+            if profile_id.trim().is_empty() {
+                return Err(EditError {
+                    field: "optics.profile.profile_id",
+                    reason: "profile ID must not be empty".to_owned(),
+                });
+            }
+            if profile_id.len() > 256 {
+                return Err(EditError {
+                    field: "optics.profile.profile_id",
+                    reason: "profile ID is limited to 256 bytes".to_owned(),
+                });
+            }
         }
         validate_parameter(
             "raw.highlights.clip.threshold",
@@ -544,6 +564,8 @@ struct RecipeFields {
     #[serde(default)]
     raw: RawAdjustments,
     #[serde(default)]
+    optics: OpticsAdjustments,
+    #[serde(default)]
     light: LightAdjustments,
     #[serde(default)]
     color: ColorAdjustments,
@@ -578,6 +600,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
             Self {
                 schema_version: EDIT_RECIPE_SCHEMA_VERSION,
                 raw: RawAdjustments::default(),
+                optics: OpticsAdjustments::default(),
                 light,
                 color,
                 geometry: GeometryAdjustments {
@@ -592,6 +615,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
             Self {
                 schema_version: EDIT_RECIPE_SCHEMA_VERSION,
                 raw: RawAdjustments::default(),
+                optics: OpticsAdjustments::default(),
                 light: fields.light,
                 color: fields.color,
                 geometry: fields.geometry,
@@ -600,10 +624,12 @@ impl<'de> Deserialize<'de> for EditRecipe {
             fields.schema_version,
             PREVIOUS_HIGHLIGHT_EDIT_RECIPE_SCHEMA_VERSION
                 | PREVIOUS_LOCAL_RATIOS_EDIT_RECIPE_SCHEMA_VERSION
+                | PREVIOUS_NO_OPTICS_EDIT_RECIPE_SCHEMA_VERSION
         ) {
             Self {
                 schema_version: EDIT_RECIPE_SCHEMA_VERSION,
                 raw: fields.raw,
+                optics: OpticsAdjustments::default(),
                 light: fields.light,
                 color: fields.color,
                 geometry: fields.geometry,
@@ -612,6 +638,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
             Self {
                 schema_version: fields.schema_version,
                 raw: fields.raw,
+                optics: fields.optics,
                 light: fields.light,
                 color: fields.color,
                 geometry: fields.geometry,
@@ -664,7 +691,7 @@ fn validate_parameter(
 mod tests {
     use super::{
         EDIT_RECIPE_SCHEMA_VERSION, EditRecipe, HIGHLIGHT_THRESHOLD_RANGE, HighlightMethod,
-        NormalizedCropRect, WhiteBalance,
+        LensProfileSelection, NormalizedCropRect, WhiteBalance,
     };
 
     #[test]
@@ -694,7 +721,7 @@ mod tests {
     #[test]
     fn deserialization_rejects_unknown_schema_versions() {
         let json = r#"{
-            "schema_version": 7,
+            "schema_version": 8,
             "light": {},
             "color": {},
             "geometry": {}
@@ -705,7 +732,7 @@ mod tests {
     #[test]
     fn missing_highlight_fields_receive_the_current_defaults() {
         let json = r#"{
-            "schema_version": 6,
+            "schema_version": 7,
             "light": {},
             "color": {},
             "geometry": {}
@@ -863,6 +890,28 @@ mod tests {
     }
 
     #[test]
+    fn version_six_recipe_migrates_with_optics_off() {
+        let json = r#"{
+            "schema_version": 6,
+            "optics": {
+                "profile": { "mode": "automatic" },
+                "distortion": false,
+                "vignetting": false,
+                "chromatic_aberration": false
+            },
+            "light": {},
+            "color": {},
+            "geometry": {}
+        }"#;
+        let recipe = serde_json::from_str::<EditRecipe>(json).expect("v6 migration");
+        assert_eq!(recipe.schema_version, EDIT_RECIPE_SCHEMA_VERSION);
+        assert_eq!(recipe.optics.profile, LensProfileSelection::Off);
+        assert!(recipe.optics.distortion);
+        assert!(recipe.optics.vignetting);
+        assert!(recipe.optics.chromatic_aberration);
+    }
+
+    #[test]
     fn local_ratios_serializes_and_round_trips_its_own_threshold() {
         let mut recipe = EditRecipe::default();
         recipe.raw.highlights.method = HighlightMethod::LocalRatios;
@@ -872,6 +921,32 @@ mod tests {
         let json = serde_json::to_string(&recipe).expect("serialize recipe");
         let round_trip = serde_json::from_str::<EditRecipe>(&json).expect("deserialize recipe");
         assert_eq!(round_trip, recipe);
+    }
+
+    #[test]
+    fn optics_defaults_are_off_but_component_choices_are_enabled() {
+        let recipe = EditRecipe::default();
+        assert_eq!(recipe.optics.profile, super::LensProfileSelection::Off);
+        assert!(recipe.optics.distortion);
+        assert!(recipe.optics.vignetting);
+        assert!(recipe.optics.chromatic_aberration);
+    }
+
+    #[test]
+    fn optics_profile_id_is_bounded_and_opaque() {
+        let mut recipe = EditRecipe::default();
+        recipe.optics.profile = super::LensProfileSelection::Lensfun {
+            profile_id: "  ".to_owned(),
+        };
+        assert!(recipe.validate().is_err());
+        recipe.optics.profile = super::LensProfileSelection::Lensfun {
+            profile_id: "camera|lens|mount/with punctuation".to_owned(),
+        };
+        assert!(recipe.validate().is_ok());
+        recipe.optics.profile = super::LensProfileSelection::Lensfun {
+            profile_id: "x".repeat(257),
+        };
+        assert!(recipe.validate().is_err());
     }
 
     #[test]

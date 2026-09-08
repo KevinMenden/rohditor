@@ -360,6 +360,7 @@ fn source_info() -> RawFileInfo {
                 numerator: 35,
                 denominator: 1,
             }),
+            focus_distance: None,
             captured_at: Some("2026-08-29 12:34:56+02:00".to_owned()),
             lens_make: Some("Sony".to_owned()),
             lens_model: Some("E 35mm F2.8".to_owned()),

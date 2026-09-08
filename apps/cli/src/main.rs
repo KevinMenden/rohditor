@@ -3,21 +3,23 @@ use std::fs;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use rohditor_core::{
     CpuPipeline, DitherMode, ExportFormat, ExportImage, ExportMetadataPolicy, ExportSettings,
-    HighlightDiagnostics, JPEG_QUALITY_DEFAULT, JPEG_QUALITY_MAX, JPEG_QUALITY_MIN, OutputPolicy,
-    PngBitDepth, RawCropPolicy, RenderOptions, StageTimings, export_image,
+    HighlightDiagnostics, JPEG_QUALITY_DEFAULT, JPEG_QUALITY_MAX, JPEG_QUALITY_MIN, OpticsService,
+    OutputPolicy, PngBitDepth, RawCropPolicy, RenderOptions, StageTimings, export_image,
     paths_refer_to_same_file, write_output_bytes,
 };
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_edit::{
     BLACKS_RANGE, CONTRAST_RANGE, EXPOSURE_EV_RANGE, EditRecipe, HIGHLIGHT_THRESHOLD_RANGE,
-    HIGHLIGHTS_RANGE, HighlightMethod, SATURATION_RANGE, SHADOWS_RANGE, TEMPERATURE_RANGE,
-    TINT_RANGE, TONE_CURVE_RANGE, VIBRANCE_RANGE, WHITES_RANGE, WhiteBalance,
+    HIGHLIGHTS_RANGE, HighlightMethod, LensProfileSelection, OpticsAdjustments, SATURATION_RANGE,
+    SHADOWS_RANGE, TEMPERATURE_RANGE, TINT_RANGE, TONE_CURVE_RANGE, VIBRANCE_RANGE, WHITES_RANGE,
+    WhiteBalance,
 };
 use rohditor_image::{DisplayRgbImage, DisplayTransfer, Orientation};
 use rohditor_raw::{
@@ -163,6 +165,22 @@ enum Command {
         /// CPU demosaic algorithm.
         #[arg(long, value_enum, default_value_t = CliDemosaic::MalvarHeCutler)]
         demosaic: CliDemosaic,
+
+        /// Lensfun profile selection: off, auto, or a stable profile ID.
+        #[arg(long, default_value = "off")]
+        lens_profile: String,
+
+        /// Do not apply the selected profile's distortion correction.
+        #[arg(long)]
+        no_lens_distortion: bool,
+
+        /// Do not apply the selected profile's vignetting correction.
+        #[arg(long)]
+        no_lens_vignetting: bool,
+
+        /// Do not apply the selected profile's chromatic-aberration correction.
+        #[arg(long)]
+        no_lens_tca: bool,
 
         /// Replace the RAW orientation metadata with an explicit transform.
         #[arg(long, value_enum)]
@@ -446,6 +464,10 @@ fn main() -> Result<()> {
             tint,
             crop,
             demosaic,
+            lens_profile,
+            no_lens_distortion,
+            no_lens_vignetting,
+            no_lens_tca,
             orientation,
             jpeg_quality,
             png_bit_depth,
@@ -476,6 +498,10 @@ fn main() -> Result<()> {
                 tint,
                 crop,
                 demosaic,
+                lens_profile,
+                no_lens_distortion,
+                no_lens_vignetting,
+                no_lens_tca,
                 orientation,
                 jpeg_quality,
                 png_bit_depth,
@@ -552,6 +578,7 @@ struct QualityTimingReport {
     normalization: f64,
     highlight_processing: f64,
     demosaic: f64,
+    optics: f64,
     resampling: f64,
     color_conversion: f64,
     adjustments: f64,
@@ -566,6 +593,7 @@ impl From<StageTimings> for QualityTimingReport {
             normalization: milliseconds(value.normalization),
             highlight_processing: milliseconds(value.highlight_processing),
             demosaic: milliseconds(value.demosaic),
+            optics: milliseconds(value.optics),
             resampling: milliseconds(value.resampling),
             color_conversion: milliseconds(value.color_conversion),
             adjustments: milliseconds(value.adjustments),
@@ -617,7 +645,7 @@ struct LibRawMismatch {
     libraw: u16,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct DevelopArguments {
     exposure: f32,
     contrast: f32,
@@ -639,6 +667,10 @@ struct DevelopArguments {
     tint: f32,
     crop: CliCropPolicy,
     demosaic: CliDemosaic,
+    lens_profile: String,
+    no_lens_distortion: bool,
+    no_lens_vignetting: bool,
+    no_lens_tca: bool,
     orientation: Option<CliOrientation>,
     jpeg_quality: Option<u8>,
     png_bit_depth: Option<CliPngBitDepth>,
@@ -735,7 +767,7 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
         arguments.highlight_clip_threshold,
         arguments.highlight_detection_threshold,
     )?;
-    let export_settings = develop_export_settings(output, arguments)?;
+    let export_settings = develop_export_settings(output, &arguments)?;
     if paths_refer_to_same_file(file, output).with_context(|| {
         format!(
             "could not compare RAW source {} with output {}",
@@ -779,7 +811,10 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
         (None, None, 0.0) => WhiteBalance::AsShot,
         _ => unreachable!("white balance conflict was rejected above"),
     };
-    let mut recipe = EditRecipe::default();
+    let mut recipe = EditRecipe {
+        optics: optics_adjustments(&arguments)?,
+        ..EditRecipe::default()
+    };
     recipe.color.white_balance = white_balance;
     recipe.light.exposure_ev = arguments.exposure;
     recipe.light.contrast = arguments.contrast;
@@ -815,12 +850,20 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
         .context("could not validate the development recipe")?;
 
     let decoder = RawlerDecoder::default();
+    let pipeline = match recipe.optics.profile {
+        LensProfileSelection::Off => CpuPipeline::default(),
+        LensProfileSelection::Automatic | LensProfileSelection::Lensfun { .. } => {
+            let service = OpticsService::load_bundled()
+                .context("could not load the bundled Lensfun profile database")?;
+            CpuPipeline::new(Arc::new(service))
+        }
+    };
     let decode_started = Instant::now();
     let frame = decoder
         .decode(file)
         .with_context(|| format!("could not decode {} for development", file.display()))?;
     let decode_time = decode_started.elapsed();
-    let result = CpuPipeline
+    let result = pipeline
         .render_export(
             &frame,
             &recipe,
@@ -874,8 +917,9 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
             stats.suspected_by_channel[2],
         ),
     };
+    let optics_report = format_optics_report(&recipe.optics, result.optics_provenance.as_ref());
     write_stdout(&format!(
-        "Developed {}x{} {}-bit sRGB {}{} with {} demosaic to {} ({} bytes, {})\n{}\n{}\nEstimated CPU buffer peak: {} MiB",
+        "Developed {}x{} {}-bit sRGB {}{} with {} demosaic to {} ({} bytes, {})\n{}\n{}\n{}\nEstimated CPU buffer peak: {} MiB",
         report.width,
         report.height,
         report.bit_depth.bits(),
@@ -891,8 +935,71 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
         },
         format_stage_timings(decode_time, result.timings, encode_time),
         highlight_report,
+        optics_report,
         bytes_to_mib(result.memory.estimated_peak_bytes),
     ))
+}
+
+fn optics_adjustments(arguments: &DevelopArguments) -> Result<OpticsAdjustments> {
+    Ok(OpticsAdjustments {
+        profile: parse_lens_profile(&arguments.lens_profile)?,
+        distortion: !arguments.no_lens_distortion,
+        vignetting: !arguments.no_lens_vignetting,
+        chromatic_aberration: !arguments.no_lens_tca,
+    })
+}
+
+fn parse_lens_profile(value: &str) -> Result<LensProfileSelection> {
+    let value = value.trim();
+    if value.is_empty() {
+        bail!("--lens-profile cannot be empty");
+    }
+    if value.eq_ignore_ascii_case("off") {
+        return Ok(LensProfileSelection::Off);
+    }
+    if value.eq_ignore_ascii_case("auto") || value.eq_ignore_ascii_case("automatic") {
+        return Ok(LensProfileSelection::Automatic);
+    }
+    Ok(LensProfileSelection::Lensfun {
+        profile_id: value.to_owned(),
+    })
+}
+
+fn format_optics_report(
+    adjustments: &OpticsAdjustments,
+    provenance: Option<&rohditor_core::OpticsProvenance>,
+) -> String {
+    let Some(provenance) = provenance else {
+        return "Lens correction: off".to_owned();
+    };
+    format!(
+        "Lens profile: {} [{}] ({})\nOptics components: requested {} applied {}\nOptics database: {} {} (fingerprint {:016x})\nOptics fallback distance: {}\nOptics correction scale: {:.6}",
+        provenance.profile.lens,
+        provenance.profile.id,
+        match adjustments.profile {
+            LensProfileSelection::Automatic => "automatic",
+            LensProfileSelection::Lensfun { .. } => "explicit",
+            LensProfileSelection::Off => "off",
+        },
+        format_components(provenance.requested),
+        format_components(provenance.applied),
+        provenance.database.source,
+        provenance.database.snapshot,
+        provenance.database.fingerprint,
+        if provenance.used_infinity_distance_fallback {
+            "1000 m (infinity fallback)"
+        } else {
+            "capture distance"
+        },
+        provenance.scale,
+    )
+}
+
+fn format_components(components: rohditor_core::CorrectionComponents) -> String {
+    format!(
+        "distortion={}, vignetting={}, tca={}",
+        components.distortion, components.vignetting, components.chromatic_aberration
+    )
 }
 
 fn validate_highlight_options(
@@ -1002,7 +1109,7 @@ fn quality_crops(
             )
         })?;
         let decode_time = decode_started.elapsed();
-        let rendered = CpuPipeline
+        let rendered = CpuPipeline::default()
             .render_export(
                 &frame,
                 &recipe,
@@ -1405,7 +1512,7 @@ fn milliseconds(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1_000.0
 }
 
-fn develop_export_settings(output: &Path, arguments: DevelopArguments) -> Result<ExportSettings> {
+fn develop_export_settings(output: &Path, arguments: &DevelopArguments) -> Result<ExportSettings> {
     let extension = output
         .extension()
         .and_then(|value| value.to_str())
@@ -1459,12 +1566,13 @@ fn format_quality(format: ExportFormat) -> String {
 
 fn format_stage_timings(decode: Duration, timings: StageTimings, encode: Duration) -> String {
     format!(
-        "CPU stages: decode {:.1} ms, metadata {:.1} ms, normalize {:.1} ms, highlight processing {:.1} ms, demosaic {:.1} ms, area resize {:.1} ms, color {:.1} ms, adjustments {:.1} ms, output {:.1} ms, pipeline total {:.1} ms, export encode/commit {:.1} ms",
+        "CPU stages: decode {:.1} ms, metadata {:.1} ms, normalize {:.1} ms, highlight processing {:.1} ms, demosaic {:.1} ms, optics {:.1} ms, area resize {:.1} ms, color {:.1} ms, adjustments {:.1} ms, output {:.1} ms, pipeline total {:.1} ms, export encode/commit {:.1} ms",
         decode.as_secs_f64() * 1_000.0,
         timings.metadata.as_secs_f64() * 1_000.0,
         timings.normalization.as_secs_f64() * 1_000.0,
         timings.highlight_processing.as_secs_f64() * 1_000.0,
         timings.demosaic.as_secs_f64() * 1_000.0,
+        timings.optics.as_secs_f64() * 1_000.0,
         timings.resampling.as_secs_f64() * 1_000.0,
         timings.color_conversion.as_secs_f64() * 1_000.0,
         timings.adjustments.as_secs_f64() * 1_000.0,
@@ -1670,7 +1778,8 @@ mod tests {
         Cli, CliCropPolicy, CliDemosaic, CliHighlightMethod, CliMetadata, Command,
         DemosaicAlgorithm, DevelopArguments, QualityCropSpec, RgbMultipliers, crop_display_image,
         develop_export_settings, extract_preview, format_photometric, nearest_neighbor_2x,
-        parse_libraw_pgm, validate_highlight_options, validate_preview_extension,
+        parse_lens_profile, parse_libraw_pgm, validate_highlight_options,
+        validate_preview_extension,
     };
 
     #[test]
@@ -1721,6 +1830,10 @@ mod tests {
             tint: 0.0,
             crop: CliCropPolicy::Recommended,
             demosaic: CliDemosaic::Bilinear,
+            lens_profile: "off".to_owned(),
+            no_lens_distortion: false,
+            no_lens_vignetting: false,
+            no_lens_tca: false,
             orientation: None,
             jpeg_quality: None,
             png_bit_depth: None,
@@ -1728,9 +1841,9 @@ mod tests {
             metadata: CliMetadata::Safe,
             force: false,
         };
-        assert!(develop_export_settings(Path::new("developed.PNG"), base).is_ok());
-        assert!(develop_export_settings(Path::new("developed.jpg"), base).is_ok());
-        assert!(develop_export_settings(Path::new("developed.tiff"), base).is_err());
+        assert!(develop_export_settings(Path::new("developed.PNG"), &base).is_ok());
+        assert!(develop_export_settings(Path::new("developed.jpg"), &base).is_ok());
+        assert!(develop_export_settings(Path::new("developed.tiff"), &base).is_err());
 
         let values = RgbMultipliers::from_str("1.2,1.0,0.8").expect("valid multipliers");
         assert_eq!((values.red, values.green, values.blue), (1.2, 1.0, 0.8));
@@ -1789,6 +1902,52 @@ mod tests {
             panic!("expected develop command");
         };
         assert!(matches!(demosaic, CliDemosaic::MalvarHeCutler));
+    }
+
+    #[test]
+    fn lens_profile_values_and_component_flags_parse() {
+        assert!(matches!(
+            parse_lens_profile("off").expect("off should parse"),
+            rohditor_edit::LensProfileSelection::Off
+        ));
+        assert!(matches!(
+            parse_lens_profile("AUTO").expect("auto should parse"),
+            rohditor_edit::LensProfileSelection::Automatic
+        ));
+        let explicit =
+            parse_lens_profile("lensfun:sony:profile").expect("opaque profile IDs should parse");
+        assert!(matches!(
+            explicit,
+            rohditor_edit::LensProfileSelection::Lensfun { profile_id }
+                if profile_id == "lensfun:sony:profile"
+        ));
+        assert!(parse_lens_profile(" ").is_err());
+
+        let parsed = Cli::try_parse_from([
+            "rohditor-cli",
+            "develop",
+            "input.arw",
+            "output.jpg",
+            "--lens-profile",
+            "auto",
+            "--no-lens-distortion",
+            "--no-lens-tca",
+        ])
+        .expect("lens profile flags should parse");
+        let Command::Develop {
+            lens_profile,
+            no_lens_distortion,
+            no_lens_vignetting,
+            no_lens_tca,
+            ..
+        } = parsed.command
+        else {
+            panic!("expected develop command");
+        };
+        assert_eq!(lens_profile, "auto");
+        assert!(no_lens_distortion);
+        assert!(!no_lens_vignetting);
+        assert!(no_lens_tca);
     }
 
     #[test]

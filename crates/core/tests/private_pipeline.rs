@@ -21,7 +21,7 @@ const PHASE_9_PREVIEW_PEAK_LIMIT_BYTES: usize = 600 * 1_024 * 1_024;
 #[ignore = "requires the ignored Sony ARW corpus in testdata/private"]
 fn neutral_recipe_develops_every_private_sample_deterministically() -> Result<(), Box<dyn Error>> {
     let decoder = RawlerDecoder::default();
-    let pipeline = CpuPipeline;
+    let pipeline = CpuPipeline::default();
     let recipe = EditRecipe::default();
     let algorithms = [
         ("bilinear", DemosaicAlgorithm::Bilinear),
@@ -116,7 +116,7 @@ fn neutral_recipe_develops_every_private_sample_deterministically() -> Result<()
 fn source_scale_inspection_meets_phase_9_latency_and_memory_budgets() -> Result<(), Box<dyn Error>>
 {
     let frame = RawlerDecoder::default().decode(&private_corpus_directory().join(SAMPLES[0]))?;
-    let result = CpuPipeline.render_source_scale_preview_cancellable(
+    let result = CpuPipeline::default().render_source_scale_preview_cancellable(
         &frame,
         &EditRecipe::default(),
         RenderOptions::default(),

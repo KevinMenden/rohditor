@@ -4,12 +4,13 @@ use std::time::{Duration, Instant};
 
 use half::f16;
 use rohditor_core::{
-    CancellationToken, DemosaicedBase, LINEAR_REC2020_TO_XYZ_D65, Matrix3, OutputGeometry,
-    ReconstructedPreview, XYZ_D65_TO_LINEAR_SRGB,
+    CancellationToken, CorrectionComponents, DemosaicedBase, LINEAR_REC2020_TO_XYZ_D65, Matrix3,
+    OpticsProvenance, OutputGeometry, ReconstructedPreview, XYZ_D65_TO_LINEAR_SRGB,
 };
 use rohditor_demosaic::WhiteBalanceGains;
 use rohditor_edit::{
-    EditRecipe, HighlightAdjustments, LIGHT_TONE_LUT_SIZE, LightToneLut, WhiteBalance,
+    EditRecipe, HighlightAdjustments, LIGHT_TONE_LUT_SIZE, LensProfileSelection, LightToneLut,
+    WhiteBalance,
 };
 use rohditor_image::{LinearRgbSpace, Orientation};
 
@@ -36,6 +37,7 @@ pub struct GpuPreviewSource {
     source_orientation: Orientation,
     white_balance: WhiteBalance,
     highlight_adjustments: HighlightAdjustments,
+    optics_provenance: Option<OpticsProvenance>,
     white_balance_dynamic: bool,
     white_balance_gains: WhiteBalanceGains,
     as_shot_white_balance: [Option<f32>; 4],
@@ -66,6 +68,20 @@ impl GpuPreviewSource {
     #[must_use]
     pub const fn highlight_adjustments(&self) -> HighlightAdjustments {
         self.highlight_adjustments
+    }
+
+    /// Lens correction provenance for the retained source, when enabled.
+    #[must_use]
+    pub fn optics_provenance(&self) -> Option<&OpticsProvenance> {
+        self.optics_provenance.as_ref()
+    }
+
+    /// Whether the retained camera-native source was produced for the given
+    /// optics recipe. This is used by the desktop before attempting a cheap
+    /// downstream-only GPU rerender.
+    #[must_use]
+    pub fn optics_matches_recipe(&self, adjustments: &rohditor_edit::OpticsAdjustments) -> bool {
+        optics_provenance_matches(self.optics_provenance(), adjustments)
     }
 
     fn resolve_white_balance(
@@ -112,6 +128,7 @@ pub struct GpuPreviewUpload {
     source_orientation: Orientation,
     white_balance: WhiteBalance,
     highlight_adjustments: HighlightAdjustments,
+    optics_provenance: Option<OpticsProvenance>,
     white_balance_dynamic: bool,
     white_balance_gains: WhiteBalanceGains,
     as_shot_white_balance: [Option<f32>; 4],
@@ -151,6 +168,7 @@ impl GpuPreviewUpload {
             source_orientation: base.source_orientation(),
             white_balance: base.white_balance(),
             highlight_adjustments: base.highlight_adjustments(),
+            optics_provenance: base.optics_provenance().cloned(),
             white_balance_dynamic: false,
             white_balance_gains: WhiteBalanceGains::identity(),
             as_shot_white_balance: [Some(1.0), Some(1.0), Some(1.0), None],
@@ -211,6 +229,7 @@ impl GpuPreviewUpload {
             source_orientation: reconstructed.source_orientation(),
             white_balance,
             highlight_adjustments: reconstructed.highlight_adjustments(),
+            optics_provenance: reconstructed.optics_provenance().cloned(),
             white_balance_dynamic,
             white_balance_gains: gains,
             as_shot_white_balance: reconstructed.as_shot_white_balance(),
@@ -599,6 +618,7 @@ impl GpuPreviewProcessor {
             source_orientation: upload.source_orientation,
             white_balance: upload.white_balance,
             highlight_adjustments: upload.highlight_adjustments,
+            optics_provenance: upload.optics_provenance,
             white_balance_dynamic: upload.white_balance_dynamic,
             white_balance_gains: upload.white_balance_gains,
             as_shot_white_balance: upload.as_shot_white_balance,
@@ -629,6 +649,12 @@ impl GpuPreviewProcessor {
         if !highlight_adjustments_match(source.highlight_adjustments(), recipe.raw.highlights) {
             return Err(GpuPreviewError::BaseMismatch {
                 reason: "the GPU source was prepared with different RAW highlight settings"
+                    .to_owned(),
+            });
+        }
+        if !optics_provenance_matches(source.optics_provenance(), &recipe.optics) {
+            return Err(GpuPreviewError::BaseMismatch {
+                reason: "the GPU source was prepared with different lens-profile settings"
                     .to_owned(),
             });
         }
@@ -938,6 +964,31 @@ fn highlight_adjustments_match(
     }
 }
 
+fn optics_provenance_matches(
+    provenance: Option<&OpticsProvenance>,
+    adjustments: &rohditor_edit::OpticsAdjustments,
+) -> bool {
+    let Some(provenance) = provenance else {
+        return matches!(adjustments.profile, LensProfileSelection::Off);
+    };
+    if matches!(adjustments.profile, LensProfileSelection::Off) {
+        return false;
+    }
+    let requested = CorrectionComponents {
+        distortion: adjustments.distortion,
+        vignetting: adjustments.vignetting,
+        chromatic_aberration: adjustments.chromatic_aberration,
+    };
+    if provenance.requested != requested {
+        return false;
+    }
+    match &adjustments.profile {
+        LensProfileSelection::Automatic => true,
+        LensProfileSelection::Lensfun { profile_id } => provenance.profile.id == *profile_id,
+        LensProfileSelection::Off => false,
+    }
+}
+
 fn upload_dimensions(
     source_width: usize,
     source_height: usize,
@@ -1091,7 +1142,7 @@ fn orientation_code(orientation: Orientation) -> u32 {
 mod tests {
     use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
-    use rohditor_core::{CpuPipeline, PreviewOptions};
+    use rohditor_core::{CpuPipeline, DatabaseProvenance, LensProfileSummary, PreviewOptions};
     use rohditor_edit::{HighlightMethod, NormalizedCropRect, ToneCurve};
     use rohditor_raw::{
         CameraColorMatrix, CaptureMetadata, CfaPattern, LevelPattern, PhotometricInterpretation,
@@ -1193,7 +1244,7 @@ mod tests {
         let mut recipe = EditRecipe::default();
         recipe.raw.highlights.method = HighlightMethod::Clip;
         let frame = synthetic_frame(Orientation::Normal);
-        let reconstructed = CpuPipeline
+        let reconstructed = CpuPipeline::default()
             .prepare_preview_reconstruction(&frame, &recipe, PreviewOptions::default())
             .expect("synthetic clipped reconstruction should develop");
 
@@ -1226,7 +1277,7 @@ mod tests {
         let mut recipe = EditRecipe::default();
         recipe.raw.highlights.method = HighlightMethod::LocalRatios;
         let frame = synthetic_frame(Orientation::Normal);
-        let reconstructed = CpuPipeline
+        let reconstructed = CpuPipeline::default()
             .prepare_preview_reconstruction(&frame, &recipe, PreviewOptions::default())
             .expect("synthetic Local-ratio reconstruction should develop");
 
@@ -1255,7 +1306,7 @@ mod tests {
         let mut recipe = EditRecipe::default();
         recipe.raw.highlights.method = HighlightMethod::Opposed;
         let frame = synthetic_frame(Orientation::Normal);
-        let reconstructed = CpuPipeline
+        let reconstructed = CpuPipeline::default()
             .prepare_preview_reconstruction(&frame, &recipe, PreviewOptions::default())
             .expect("synthetic Opposed reconstruction should develop");
 
@@ -1296,7 +1347,7 @@ mod tests {
                 max_long_edge: 8,
                 ..PreviewOptions::default()
             };
-            let reconstructed = CpuPipeline
+            let reconstructed = CpuPipeline::default()
                 .prepare_preview_reconstruction(&frame, &recipe, options)
                 .expect("synthetic reconstruction should develop");
             let source = processor
@@ -1329,7 +1380,7 @@ mod tests {
         let base_recipe = EditRecipe::default();
         for orientation in all_test_orientations() {
             let frame = synthetic_frame(orientation);
-            let reconstructed = CpuPipeline
+            let reconstructed = CpuPipeline::default()
                 .prepare_preview_reconstruction(&frame, &base_recipe, options)
                 .expect("synthetic reconstruction should develop");
             let source = processor
@@ -1390,7 +1441,7 @@ mod tests {
 
         for orientation in all_test_orientations() {
             let frame = synthetic_frame(orientation);
-            let reconstructed = CpuPipeline
+            let reconstructed = CpuPipeline::default()
                 .prepare_preview_reconstruction(&frame, &base_recipe, options)
                 .expect("synthetic reconstruction should develop");
             let source = processor
@@ -1468,7 +1519,7 @@ mod tests {
             max_long_edge: 8,
             ..PreviewOptions::default()
         };
-        let reconstructed = CpuPipeline
+        let reconstructed = CpuPipeline::default()
             .prepare_preview_reconstruction(&frame, &EditRecipe::default(), options)
             .expect("synthetic reconstruction should develop");
         let source = processor
@@ -1509,7 +1560,7 @@ mod tests {
         };
         let frame = synthetic_frame(Orientation::Normal);
         let initial_recipe = EditRecipe::default();
-        let base = CpuPipeline
+        let base = CpuPipeline::default()
             .prepare_preview_base(
                 &frame,
                 &initial_recipe,
@@ -1566,7 +1617,7 @@ mod tests {
             blue: 1.15,
         };
         let options = PreviewOptions::default();
-        let reconstructed = CpuPipeline
+        let reconstructed = CpuPipeline::default()
             .prepare_preview_reconstruction(&frame, &recipe, options)
             .expect("private preview reconstruction should develop");
         let source = processor
@@ -1619,7 +1670,7 @@ mod tests {
         let mut session = decoder.open(&path).expect("private ARW should open");
         let frame = session.decode().expect("private ARW should decode");
         let options = PreviewOptions::default();
-        let reconstructed = CpuPipeline
+        let reconstructed = CpuPipeline::default()
             .prepare_preview_reconstruction(&frame, &EditRecipe::default(), options)
             .expect("private preview reconstruction should develop");
         let source = processor
@@ -1710,7 +1761,7 @@ mod tests {
         let mut session = decoder.open(&path).expect("private ARW should open");
         let frame = session.decode().expect("private ARW should decode");
         let options = PreviewOptions::default();
-        let reconstructed = CpuPipeline
+        let reconstructed = CpuPipeline::default()
             .prepare_preview_reconstruction(&frame, &EditRecipe::default(), options)
             .expect("private preview reconstruction should develop");
         let source = processor
@@ -1818,7 +1869,7 @@ mod tests {
         recipe: &EditRecipe,
         gpu: &GpuPreviewFrame,
     ) {
-        let cpu = CpuPipeline
+        let cpu = CpuPipeline::default()
             .render_preview_from_base(base, recipe, PreviewOptions::default().render.output_policy)
             .expect("CPU reference should render")
             .image;
@@ -1857,7 +1908,7 @@ mod tests {
         recipe: &EditRecipe,
         gpu: &GpuPreviewFrame,
     ) -> GpuParityStats {
-        let cpu = CpuPipeline
+        let cpu = CpuPipeline::default()
             .render_preview(frame, recipe, options)
             .expect("CPU reference should render")
             .image;
@@ -2045,6 +2096,80 @@ mod tests {
             Orientation::Transverse,
             Orientation::Rotate270,
         ]
+    }
+
+    #[test]
+    fn optics_source_provenance_must_match_the_requested_recipe() {
+        let off = EditRecipe::default();
+        assert!(optics_provenance_matches(None, &off.optics));
+
+        let mut automatic = off.clone();
+        automatic.optics.profile = LensProfileSelection::Automatic;
+        assert!(!optics_provenance_matches(None, &automatic.optics));
+
+        let provenance = test_optics_provenance();
+        assert!(optics_provenance_matches(
+            Some(&provenance),
+            &automatic.optics
+        ));
+
+        let mut explicit = automatic.clone();
+        explicit.optics.profile = LensProfileSelection::Lensfun {
+            profile_id: provenance.profile.id.clone(),
+        };
+        assert!(optics_provenance_matches(
+            Some(&provenance),
+            &explicit.optics
+        ));
+
+        explicit.optics.profile = LensProfileSelection::Lensfun {
+            profile_id: "lensfun:other".to_owned(),
+        };
+        assert!(!optics_provenance_matches(
+            Some(&provenance),
+            &explicit.optics
+        ));
+
+        explicit.optics.profile = LensProfileSelection::Automatic;
+        explicit.optics.vignetting = false;
+        assert!(!optics_provenance_matches(
+            Some(&provenance),
+            &explicit.optics
+        ));
+    }
+
+    fn test_optics_provenance() -> OpticsProvenance {
+        OpticsProvenance {
+            profile: LensProfileSummary {
+                id: "lensfun:fixture".to_owned(),
+                camera: "Fixture camera".to_owned(),
+                lens: "Fixture lens".to_owned(),
+                mount: "Fixture mount".to_owned(),
+                available: CorrectionComponents {
+                    distortion: true,
+                    vignetting: true,
+                    chromatic_aberration: true,
+                },
+            },
+            database: DatabaseProvenance {
+                source: "fixture".to_owned(),
+                snapshot: "test".to_owned(),
+                fingerprint: 1,
+            },
+            requested: CorrectionComponents {
+                distortion: true,
+                vignetting: true,
+                chromatic_aberration: true,
+            },
+            applied: CorrectionComponents {
+                distortion: true,
+                vignetting: true,
+                chromatic_aberration: true,
+            },
+            used_infinity_distance_fallback: false,
+            scale: 1.0,
+            content_fingerprint: 2,
+        }
     }
 
     fn synthetic_frame(orientation: Orientation) -> RawFrame {

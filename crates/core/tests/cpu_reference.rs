@@ -4,14 +4,15 @@ use std::time::Duration;
 
 use rayon::ThreadPoolBuilder;
 use rohditor_core::{
-    CancellationToken, CpuPipeline, DitherMode, ExportImage, HighlightDiagnostics, OutputBitDepth,
-    PipelineError, PreviewOptions, RawCropPolicy, RenderOptions, camera_color_transform,
+    CancellationToken, CpuPipeline, DitherMode, ExportImage, HighlightDiagnostics, OpticsService,
+    OutputBitDepth, PipelineError, PreviewOptions, RawCropPolicy, RenderOptions,
+    camera_color_transform,
 };
 use rohditor_edit::{EditRecipe, HighlightMethod, NormalizedCropRect, WhiteBalance};
 use rohditor_image::{BayerPattern, CfaColor, LinearRgbSpace, Orientation};
 use rohditor_raw::{
     CameraColorMatrix, CaptureMetadata, CfaPattern, ImageRect, LevelPattern,
-    PhotometricInterpretation, RawFileInfo, RawFrame,
+    PhotometricInterpretation, RationalValue, RawFileInfo, RawFrame,
 };
 
 #[test]
@@ -33,8 +34,9 @@ fn synthetic_pipeline_is_identical_with_one_and_multiple_rayon_threads()
     };
     let single_pool = ThreadPoolBuilder::new().num_threads(1).build()?;
     let multi_pool = ThreadPoolBuilder::new().num_threads(4).build()?;
-    let single = single_pool.install(|| CpuPipeline.render(&frame, &recipe, options))?;
-    let multiple = multi_pool.install(|| CpuPipeline.render(&frame, &recipe, options))?;
+    let single = single_pool.install(|| CpuPipeline::default().render(&frame, &recipe, options))?;
+    let multiple =
+        multi_pool.install(|| CpuPipeline::default().render(&frame, &recipe, options))?;
 
     assert_eq!((single.image.width(), single.image.height()), (4, 6));
     assert_eq!(single.image.data(), multiple.image.data());
@@ -52,7 +54,8 @@ fn synthetic_pipeline_is_identical_with_one_and_multiple_rayon_threads()
 fn user_crop_is_late_and_consistent_for_render_source_scale_and_export()
 -> Result<(), Box<dyn Error>> {
     let frame = synthetic_rggb_frame();
-    let full = CpuPipeline.render(&frame, &EditRecipe::default(), RenderOptions::default())?;
+    let full =
+        CpuPipeline::default().render(&frame, &EditRecipe::default(), RenderOptions::default())?;
     let mut recipe = EditRecipe::default();
     recipe.geometry.crop = Some(NormalizedCropRect {
         left: 0.25,
@@ -60,7 +63,7 @@ fn user_crop_is_late_and_consistent_for_render_source_scale_and_export()
         right: 0.75,
         bottom: 0.75,
     });
-    let cropped = CpuPipeline.render(&frame, &recipe, RenderOptions::default())?;
+    let cropped = CpuPipeline::default().render(&frame, &recipe, RenderOptions::default())?;
     assert_eq!((full.image.width(), full.image.height()), (4, 6));
     assert_eq!((cropped.image.width(), cropped.image.height()), (2, 3));
     for y in 0..cropped.image.height() {
@@ -70,7 +73,7 @@ fn user_crop_is_late_and_consistent_for_render_source_scale_and_export()
     }
     assert_eq!(cropped.memory.display_rgb_bytes, 18);
 
-    let source_scale = CpuPipeline.render_source_scale_preview_cancellable(
+    let source_scale = CpuPipeline::default().render_source_scale_preview_cancellable(
         &frame,
         &recipe,
         RenderOptions::default(),
@@ -80,7 +83,7 @@ fn user_crop_is_late_and_consistent_for_render_source_scale_and_export()
         (source_scale.image.width(), source_scale.image.height()),
         (cropped.image.width(), cropped.image.height())
     );
-    let export = CpuPipeline.render_export(
+    let export = CpuPipeline::default().render_export(
         &frame,
         &recipe,
         RenderOptions::default(),
@@ -97,7 +100,7 @@ fn user_crop_is_late_and_consistent_for_render_source_scale_and_export()
 #[test]
 fn preview_pipeline_reconstructs_full_crop_before_area_reduction() -> Result<(), Box<dyn Error>> {
     let frame = synthetic_rggb_frame();
-    let result = CpuPipeline.render_preview(
+    let result = CpuPipeline::default().render_preview(
         &frame,
         &EditRecipe::default(),
         PreviewOptions {
@@ -121,7 +124,7 @@ fn preview_pipeline_reconstructs_full_crop_before_area_reduction() -> Result<(),
 fn unbounded_preview_target_falls_back_to_the_full_crop_without_size_overflow()
 -> Result<(), Box<dyn Error>> {
     let frame = synthetic_rggb_frame();
-    let result = CpuPipeline.render_preview(
+    let result = CpuPipeline::default().render_preview(
         &frame,
         &EditRecipe::default(),
         PreviewOptions {
@@ -142,7 +145,7 @@ fn reusable_preview_base_matches_direct_render_and_rejects_stale_white_balance()
         max_long_edge: 3,
     };
     let base_recipe = EditRecipe::default();
-    let base = CpuPipeline.prepare_preview_base(&frame, &base_recipe, options)?;
+    let base = CpuPipeline::default().prepare_preview_base(&frame, &base_recipe, options)?;
     assert_eq!(base.image().space(), LinearRgbSpace::Rec2020D65);
     assert_eq!((base.image().width(), base.image().height()), (3, 2));
 
@@ -150,9 +153,12 @@ fn reusable_preview_base_matches_direct_render_and_rejects_stale_white_balance()
     adjusted.light.exposure_ev = 0.75;
     adjusted.light.contrast = 0.2;
     adjusted.color.saturation = 1.3;
-    let reused =
-        CpuPipeline.render_preview_from_base(&base, &adjusted, options.render.output_policy)?;
-    let direct = CpuPipeline.render_preview(&frame, &adjusted, options)?;
+    let reused = CpuPipeline::default().render_preview_from_base(
+        &base,
+        &adjusted,
+        options.render.output_policy,
+    )?;
+    let direct = CpuPipeline::default().render_preview(&frame, &adjusted, options)?;
     assert_eq!(reused.image, direct.image);
     assert_eq!(
         reused.memory.estimated_peak_bytes,
@@ -166,7 +172,7 @@ fn reusable_preview_base_matches_direct_render_and_rejects_stale_white_balance()
         blue: 0.9,
     };
     assert!(
-        CpuPipeline
+        CpuPipeline::default()
             .render_preview_from_base(&base, &stale, options.render.output_policy)
             .is_err()
     );
@@ -182,9 +188,11 @@ fn split_reconstruction_and_color_stages_match_the_combined_preview_base()
         ..PreviewOptions::default()
     };
     let recipe = EditRecipe::default();
-    let reconstructed = CpuPipeline.prepare_preview_reconstruction(&frame, &recipe, options)?;
-    let split = CpuPipeline.prepare_preview_base_from_reconstruction(&reconstructed, &recipe)?;
-    let combined = CpuPipeline.prepare_preview_base(&frame, &recipe, options)?;
+    let reconstructed =
+        CpuPipeline::default().prepare_preview_reconstruction(&frame, &recipe, options)?;
+    let split =
+        CpuPipeline::default().prepare_preview_base_from_reconstruction(&reconstructed, &recipe)?;
+    let combined = CpuPipeline::default().prepare_preview_base(&frame, &recipe, options)?;
 
     assert_eq!(split.image(), combined.image());
     assert_eq!(split.timings().normalization, Duration::ZERO);
@@ -208,18 +216,23 @@ fn clip_uses_active_wb_limits_and_reaches_a_common_post_wb_ceiling() -> Result<(
         max_long_edge: usize::MAX,
     };
 
-    let off =
-        CpuPipeline.prepare_preview_reconstruction(&frame, &EditRecipe::default(), options)?;
+    let off = CpuPipeline::default().prepare_preview_reconstruction(
+        &frame,
+        &EditRecipe::default(),
+        options,
+    )?;
     assert!(off.image().data().iter().any(|value| *value > 1.0));
 
-    let clipped = CpuPipeline.prepare_preview_reconstruction(&frame, &recipe, options)?;
+    let clipped =
+        CpuPipeline::default().prepare_preview_reconstruction(&frame, &recipe, options)?;
     assert_eq!(clipped.highlight_stats().affected_sites, 24);
     assert_eq!(clipped.highlight_stats().changed_sites, 24);
     assert_eq!(clipped.highlight_stats().nominal_over_white_sites, 24);
     assert_eq!(clipped.highlight_stats().affected_by_channel, [6, 12, 6]);
     assert!(!clipped.supports_dynamic_white_balance());
 
-    let base = CpuPipeline.prepare_preview_base_from_reconstruction(&clipped, &recipe)?;
+    let base =
+        CpuPipeline::default().prepare_preview_base_from_reconstruction(&clipped, &recipe)?;
     let pixel = base.image().pixel(2, 2).expect("interior pixel");
     assert!(
         pixel.iter().all(|value| (*value - 1.0).abs() < 1.0e-5),
@@ -244,8 +257,9 @@ fn clip_is_invariant_to_common_white_balance_gain_scaling() -> Result<(), Box<dy
         max_long_edge: usize::MAX,
     };
 
-    let first = CpuPipeline.prepare_preview_reconstruction(&frame, &recipe, options)?;
-    let second = CpuPipeline.prepare_preview_reconstruction(&scaled, &recipe, options)?;
+    let first = CpuPipeline::default().prepare_preview_reconstruction(&frame, &recipe, options)?;
+    let second =
+        CpuPipeline::default().prepare_preview_reconstruction(&scaled, &recipe, options)?;
     assert_eq!(first.image(), second.image());
     assert_eq!(first.highlight_stats(), second.highlight_stats());
     Ok(())
@@ -266,7 +280,8 @@ fn local_ratios_is_camera_native_and_supports_dynamic_white_balance() -> Result<
     local.raw.highlights.method = HighlightMethod::LocalRatios;
     local.raw.highlights.local_ratios.detection_threshold = 0.9;
 
-    let reconstructed = CpuPipeline.prepare_preview_reconstruction(&frame, &local, options)?;
+    let reconstructed =
+        CpuPipeline::default().prepare_preview_reconstruction(&frame, &local, options)?;
     let HighlightDiagnostics::LocalRatios(stats) = reconstructed.highlight_diagnostics() else {
         panic!("expected Local ratios diagnostics");
     };
@@ -282,9 +297,9 @@ fn local_ratios_is_camera_native_and_supports_dynamic_white_balance() -> Result<
         green: 1.0,
         blue: 0.8,
     };
-    let reused =
-        CpuPipeline.prepare_preview_base_from_reconstruction(&reconstructed, &changed_wb)?;
-    let fresh = CpuPipeline.prepare_preview_base(&frame, &changed_wb, options)?;
+    let reused = CpuPipeline::default()
+        .prepare_preview_base_from_reconstruction(&reconstructed, &changed_wb)?;
+    let fresh = CpuPipeline::default().prepare_preview_base(&frame, &changed_wb, options)?;
     assert_eq!(reused.image(), fresh.image());
     assert_eq!(
         reused.highlight_diagnostics(),
@@ -307,7 +322,8 @@ fn opposed_is_camera_native_and_supports_dynamic_white_balance() -> Result<(), B
     opposed.raw.highlights.method = HighlightMethod::Opposed;
     opposed.raw.highlights.opposed.detection_threshold = 0.9;
 
-    let reconstructed = CpuPipeline.prepare_preview_reconstruction(&frame, &opposed, options)?;
+    let reconstructed =
+        CpuPipeline::default().prepare_preview_reconstruction(&frame, &opposed, options)?;
     let HighlightDiagnostics::Opposed(stats) = reconstructed.highlight_diagnostics() else {
         panic!("expected Opposed diagnostics");
     };
@@ -324,9 +340,9 @@ fn opposed_is_camera_native_and_supports_dynamic_white_balance() -> Result<(), B
         green: 1.0,
         blue: 0.8,
     };
-    let reused =
-        CpuPipeline.prepare_preview_base_from_reconstruction(&reconstructed, &changed_wb)?;
-    let fresh = CpuPipeline.prepare_preview_base(&frame, &changed_wb, options)?;
+    let reused = CpuPipeline::default()
+        .prepare_preview_base_from_reconstruction(&reconstructed, &changed_wb)?;
+    let fresh = CpuPipeline::default().prepare_preview_base(&frame, &changed_wb, options)?;
     assert_eq!(reused.image(), fresh.image());
     assert_eq!(
         reused.highlight_diagnostics(),
@@ -345,8 +361,10 @@ fn off_ignores_an_inactive_threshold_when_reusing_preview_stages() -> Result<(),
         ..PreviewOptions::default()
     };
 
-    let reconstructed = CpuPipeline.prepare_preview_reconstruction(&frame, &recipe, options)?;
-    let base = CpuPipeline.prepare_preview_base_from_reconstruction(&reconstructed, &recipe)?;
+    let reconstructed =
+        CpuPipeline::default().prepare_preview_reconstruction(&frame, &recipe, options)?;
+    let base =
+        CpuPipeline::default().prepare_preview_base_from_reconstruction(&reconstructed, &recipe)?;
     assert_eq!(reconstructed.highlight_stats(), Default::default());
     assert_eq!(base.highlight_stats(), Default::default());
     Ok(())
@@ -358,7 +376,7 @@ fn preview_stages_return_the_typed_cancellation_error() {
     let cancellation = CancellationToken::new();
     cancellation.cancel();
 
-    let error = CpuPipeline
+    let error = CpuPipeline::default()
         .prepare_preview_reconstruction_cancellable(
             &frame,
             &EditRecipe::default(),
@@ -375,7 +393,7 @@ fn source_scale_preview_matches_full_output_dimensions_and_is_cancellable()
 -> Result<(), Box<dyn Error>> {
     let frame = synthetic_rggb_frame();
     let recipe = EditRecipe::default();
-    let rendered = CpuPipeline.render_source_scale_preview_cancellable(
+    let rendered = CpuPipeline::default().render_source_scale_preview_cancellable(
         &frame,
         &recipe,
         RenderOptions::default(),
@@ -386,7 +404,7 @@ fn source_scale_preview_matches_full_output_dimensions_and_is_cancellable()
 
     let cancellation = CancellationToken::new();
     cancellation.cancel();
-    let error = CpuPipeline
+    let error = CpuPipeline::default()
         .render_source_scale_preview_cancellable(
             &frame,
             &recipe,
@@ -399,6 +417,71 @@ fn source_scale_preview_matches_full_output_dimensions_and_is_cancellable()
 }
 
 #[test]
+fn enabled_optics_rejects_active_area_crop_policy() {
+    let frame = synthetic_rggb_frame();
+    let mut recipe = EditRecipe::default();
+    recipe.optics.profile = rohditor_edit::LensProfileSelection::Automatic;
+    let error = CpuPipeline::default()
+        .render(
+            &frame,
+            &recipe,
+            RenderOptions {
+                raw_crop_policy: RawCropPolicy::ActiveArea,
+                ..RenderOptions::default()
+            },
+        )
+        .expect_err("ActiveArea must be rejected for enabled optics");
+    assert!(matches!(error, PipelineError::Optics { .. }));
+    assert!(error.to_string().contains("recommended RAW crop"));
+}
+
+#[test]
+fn bundled_optics_plan_is_shared_by_preview_and_export() -> Result<(), Box<dyn Error>> {
+    let mut frame = synthetic_rggb_frame();
+    frame.info.make = "Sony".to_owned();
+    frame.info.model = "ILCE-6400".to_owned();
+    frame.info.clean_make = "Sony".to_owned();
+    frame.info.clean_model = "Alpha 6400".to_owned();
+    frame.info.capture = CaptureMetadata {
+        focal_length: Some(RationalValue {
+            numerator: 35,
+            denominator: 1,
+        }),
+        aperture: Some(RationalValue {
+            numerator: 28,
+            denominator: 10,
+        }),
+        lens_make: Some("Tamron".to_owned()),
+        lens_model: Some("Tamron 17-70mm F/2.8 Di III-A VC RXD".to_owned()),
+        ..CaptureMetadata::default()
+    };
+    let mut recipe = EditRecipe::default();
+    recipe.optics.profile = rohditor_edit::LensProfileSelection::Automatic;
+    let pipeline = CpuPipeline::new(Arc::new(OpticsService::load_bundled()?));
+
+    let preview = pipeline.render(&frame, &recipe, RenderOptions::default())?;
+    let provenance = preview
+        .optics_provenance
+        .as_ref()
+        .expect("enabled optics should attach provenance");
+    assert!(provenance.applied.any());
+    assert!(preview.memory.optics_output_bytes > 0);
+    assert!(preview.timings.optics > Duration::ZERO);
+
+    let export = pipeline.render_export(
+        &frame,
+        &recipe,
+        RenderOptions::default(),
+        OutputBitDepth::Eight,
+        DitherMode::None,
+    )?;
+    assert_eq!(export.optics_provenance, preview.optics_provenance);
+    assert_eq!((preview.image.width(), preview.image.height()), (4, 6));
+    assert_eq!((export.image.width(), export.image.height()), (4, 6));
+    Ok(())
+}
+
+#[test]
 fn sixteen_bit_dithered_export_is_identical_across_rayon_thread_counts()
 -> Result<(), Box<dyn Error>> {
     let frame = synthetic_rggb_frame();
@@ -407,7 +490,7 @@ fn sixteen_bit_dithered_export_is_identical_across_rayon_thread_counts()
     let single_pool = ThreadPoolBuilder::new().num_threads(1).build()?;
     let multi_pool = ThreadPoolBuilder::new().num_threads(4).build()?;
     let single = single_pool.install(|| {
-        CpuPipeline.render_export(
+        CpuPipeline::default().render_export(
             &frame,
             &recipe,
             options,
@@ -416,7 +499,7 @@ fn sixteen_bit_dithered_export_is_identical_across_rayon_thread_counts()
         )
     })?;
     let multiple = multi_pool.install(|| {
-        CpuPipeline.render_export(
+        CpuPipeline::default().render_export(
             &frame,
             &recipe,
             options,
@@ -440,7 +523,7 @@ fn sixteen_bit_dithered_export_is_identical_across_rayon_thread_counts()
 fn missing_camera_calibration_is_an_actionable_error() {
     let mut frame = synthetic_rggb_frame();
     frame.info.color_matrices.clear();
-    let error = CpuPipeline
+    let error = CpuPipeline::default()
         .render(&frame, &EditRecipe::default(), RenderOptions::default())
         .expect_err("missing calibration must fail");
     assert!(error.to_string().contains("color_matrices"));
@@ -451,7 +534,7 @@ fn unreasonable_cpu_working_set_is_rejected_before_image_allocation() {
     let mut frame = synthetic_rggb_frame();
     frame.info.width = 200_000;
     frame.info.height = 200_000;
-    let error = CpuPipeline
+    let error = CpuPipeline::default()
         .render(&frame, &EditRecipe::default(), RenderOptions::default())
         .expect_err("unreasonable working set must fail");
     assert!(matches!(
