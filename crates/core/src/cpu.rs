@@ -16,6 +16,7 @@ use crate::color::{
     CameraColorTransform, LINEAR_REC2020_TO_XYZ_D65, XYZ_D65_TO_LINEAR_SRGB,
     camera_color_transform, encode_rec2020_for_srgb_output,
 };
+use crate::white_balance::camera_gains_from_coordinates;
 use crate::{
     CancellationToken, DitherMode, OutputGeometry, OutputPolicy, PipelineError, RawCropPolicy,
     standard_base_rendering_lut,
@@ -252,10 +253,10 @@ pub fn white_balance_gains_from_calibration(
             gains.blue *= blue;
         }
         WhiteBalance::TemperatureTint { temperature, tint } => {
-            let [red, green, blue] = temperature_tint_gains(camera_to_xyz_d65, temperature, tint)?;
-            gains.red *= red;
-            gains.green *= green;
-            gains.blue *= blue;
+            gains = camera_gains_from_coordinates(
+                camera_to_xyz_d65,
+                crate::WhiteBalanceCoordinates { temperature, tint },
+            )?;
         }
     }
     gains.validate()?;
@@ -280,66 +281,6 @@ fn validate_white_balance_selection(selection: WhiteBalance) -> Result<(), Pipel
             reason: "white-balance values are outside their declared finite ranges".to_owned(),
         })
     }
-}
-
-fn temperature_tint_gains(
-    camera_to_xyz_d65: crate::Matrix3,
-    temperature: f32,
-    tint: f32,
-) -> Result<[f32; 3], PipelineError> {
-    // Estimate the requested white point in XYZ, then solve the correction in
-    // the actual camera-native basis. This avoids treating sensor channels as
-    // if they were display RGB (the former implementation did exactly that).
-    let tint_gain = 1.0 + tint * 0.15;
-    if (temperature - 6_500.0).abs() <= 0.5 {
-        // 6500 K is the neutral point of this control. Keeping it exact avoids
-        // introducing a small color change merely by switching modes from
-        // AsShot to Temperature/Tint.
-        return Ok([1.0, 1.0 / tint_gain, 1.0]);
-    }
-    let daylight_xyz = approximate_daylight_xyz(temperature);
-    let camera_white = camera_to_xyz_d65.inverse()?.transform(daylight_xyz);
-    if camera_white
-        .iter()
-        .any(|value| !value.is_finite() || *value <= 1.0e-8)
-    {
-        return Err(PipelineError::InvalidMetadata {
-            field: "temperature_tint",
-            reason: "the requested white point is outside the calibrated camera gamut".to_owned(),
-        });
-    }
-    let green = camera_white[1];
-    Ok([
-        green / camera_white[0],
-        1.0 / tint_gain,
-        green / camera_white[2],
-    ])
-}
-
-/// Approximate a daylight white point for the editor's temperature control.
-///
-/// This is a daylight-locus approximation expressed directly as a normalized
-/// XYZ white point (Y = 1). The published locus is most reliable above 4000 K;
-/// the same smooth polynomial is deliberately extended to the control's
-/// 2000 K lower bound. It is still only an illuminant model: camera
-/// calibration and as-shot gains remain the source of sensor-specific
-/// behavior. Keeping the intermediate in XYZ also avoids applying a
-/// display-transfer RGB approximation as though it were linear light.
-fn approximate_daylight_xyz(temperature: f32) -> [f32; 3] {
-    let temperature = temperature.clamp(2_000.0, 12_000.0);
-    let x = if temperature <= 7_000.0 {
-        -4_607_000_000.0 / temperature.powi(3)
-            + 2_967_800.0 / temperature.powi(2)
-            + 99.11 / temperature
-            + 0.244_063
-    } else {
-        -2_006_400_000.0 / temperature.powi(3)
-            + 1_901_800.0 / temperature.powi(2)
-            + 247.48 / temperature
-            + 0.237_040
-    };
-    let y = -3.0 * x.powi(2) + 2.87 * x - 0.275;
-    [x / y, 1.0, (1.0 - x - y) / y]
 }
 
 pub(crate) fn apply_camera_color_transform_cancellable(
@@ -1516,15 +1457,20 @@ mod tests {
     fn neutral_temperature_tint_preserves_as_shot_gains() {
         let info = test_info(2, 2, "RGGB");
         let as_shot = white_balance_gains(&info, WhiteBalance::AsShot).expect("as-shot balance");
-        let neutral = white_balance_gains(
+        let at_d65 = white_balance_gains(
             &info,
             WhiteBalance::TemperatureTint {
                 temperature: 6_500.0,
                 tint: 0.0,
             },
         )
-        .expect("neutral temperature balance");
-        assert_eq!(as_shot, neutral);
+        .expect("D65 temperature balance");
+        assert!(
+            [at_d65.red, at_d65.green, at_d65.blue]
+                .into_iter()
+                .all(|value| value.is_finite() && value > 0.0)
+        );
+        assert_eq!(as_shot, WhiteBalanceGains::identity());
     }
 
     #[test]
@@ -1560,13 +1506,13 @@ mod tests {
 
     #[test]
     fn daylight_temperature_model_is_a_positive_xyz_white_point() {
-        let d65 = approximate_daylight_xyz(6_500.0);
+        let d65 = crate::white_balance::xyz_from_temperature(6_500.0);
         assert!((d65[0] - 0.9505).abs() < 0.01);
         assert_eq!(d65[1], 1.0);
         assert!((d65[2] - 1.089).abs() < 0.01);
         for temperature in [2_000.0, 3_200.0, 6_500.0, 12_000.0] {
             assert!(
-                approximate_daylight_xyz(temperature)
+                crate::white_balance::xyz_from_temperature(temperature)
                     .into_iter()
                     .all(|value| value.is_finite() && value > 0.0)
             );

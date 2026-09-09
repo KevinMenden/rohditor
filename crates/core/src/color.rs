@@ -8,6 +8,7 @@ use rohditor_image::{
 use rohditor_raw::{CameraColorMatrix, CameraMatrixOrigin, RawFileInfo};
 
 use crate::PipelineError;
+use crate::white_balance::{WhiteBalanceCoordinates, coordinates_from_camera_gains};
 
 const D65_WHITE: [f32; 3] = [0.950_455_9, 1.0, 1.089_057_8];
 const D50_WHITE: [f32; 3] = [0.964_22, 1.0, 0.825_21];
@@ -201,6 +202,10 @@ pub struct ResolvedCameraColour {
     pub camera_to_xyz_d65: Matrix3,
     pub camera_to_linear_rec2020: Matrix3,
     pub white_balance_gains: WhiteBalanceGains,
+    /// Best-effort Temperature/Tint projection of the camera's As Shot gains.
+    /// The source gains remain authoritative when the projection is outside the
+    /// user-facing coordinate range.
+    pub as_shot_coordinates: Option<WhiteBalanceCoordinates>,
     pub provenance: CameraProfileProvenance,
 }
 
@@ -360,11 +365,19 @@ pub fn resolve_camera_colour(
         transform.camera_to_xyz_d65,
         white_balance,
     )?;
+    let as_shot_coordinates = crate::cpu::white_balance_gains_from_calibration(
+        calibration.as_shot_white_balance,
+        transform.camera_to_xyz_d65,
+        WhiteBalance::AsShot,
+    )
+    .ok()
+    .and_then(|gains| coordinates_from_camera_gains(transform.camera_to_xyz_d65, gains).ok());
     let resolved = ResolvedCameraColour {
         source_illuminant: transform.source_illuminant.clone(),
         camera_to_xyz_d65: transform.camera_to_xyz_d65,
         camera_to_linear_rec2020: transform.camera_to_linear_rec2020,
         white_balance_gains,
+        as_shot_coordinates,
         provenance,
     };
     tracing::debug!(

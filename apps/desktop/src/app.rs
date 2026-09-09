@@ -9,11 +9,12 @@ use eframe::egui;
 use rohditor_core::{
     CameraCalibration, DatabaseProvenance, DitherMode, ExportFormat, ExportMetadataPolicy,
     ExportSettings, HighlightDiagnostics, Histogram, JPEG_QUALITY_DEFAULT, MemoryEstimate,
-    OutputPolicy, PngBitDepth, PreviewOptions, ProfileMatch, StageTimings, camera_color_transform,
+    OutputPolicy, PngBitDepth, PreviewOptions, ProfileMatch, StageTimings, WhiteBalanceCoordinates,
+    camera_color_transform, camera_gains_from_coordinates, coordinates_from_camera_gains,
     hsl_channel_weights_from_display_rgb, paths_refer_to_same_file, resolve_camera_colour,
     srgb_to_linear_srgb,
 };
-use rohditor_demosaic::DemosaicAlgorithm;
+use rohditor_demosaic::{DemosaicAlgorithm, WhiteBalanceGains};
 use rohditor_edit::{
     BLACKS_RANGE, COLOR_GRADING_RANGE, CONTRAST_RANGE, EXPOSURE_EV_RANGE, EditRecipe,
     HIGHLIGHT_THRESHOLD_RANGE, HIGHLIGHTS_RANGE, HSL_CHANNEL_COUNT, HSL_HUE_RANGE,
@@ -306,16 +307,16 @@ pub(crate) struct RohditorApp {
 /// silently resetting a carefully chosen temperature or manual balance.
 #[derive(Debug, Clone, Copy)]
 struct WhiteBalanceModeMemory {
-    temperature: f32,
-    tint: f32,
+    temperature: Option<f32>,
+    tint: Option<f32>,
     manual: [f32; 3],
 }
 
 impl Default for WhiteBalanceModeMemory {
     fn default() -> Self {
         Self {
-            temperature: TEMPERATURE_RANGE.neutral,
-            tint: TINT_RANGE.neutral,
+            temperature: None,
+            tint: None,
             manual: [WHITE_BALANCE_MULTIPLIER_RANGE.neutral; 3],
         }
     }
@@ -325,8 +326,8 @@ impl WhiteBalanceModeMemory {
     fn remember(&mut self, balance: WhiteBalance) {
         match balance {
             WhiteBalance::TemperatureTint { temperature, tint } => {
-                self.temperature = temperature;
-                self.tint = tint;
+                self.temperature = Some(temperature);
+                self.tint = Some(tint);
             }
             WhiteBalance::ManualMultipliers { red, green, blue } => {
                 self.manual = [red, green, blue];
@@ -335,8 +336,17 @@ impl WhiteBalanceModeMemory {
         }
     }
 
-    fn select(&mut self, current: WhiteBalance, mode: WhiteBalanceMode) -> WhiteBalance {
+    fn select(
+        &mut self,
+        current: WhiteBalance,
+        mode: WhiteBalanceMode,
+        as_shot: Option<WhiteBalanceCoordinates>,
+    ) -> WhiteBalance {
         self.remember(current);
+        let as_shot = as_shot.unwrap_or(WhiteBalanceCoordinates {
+            temperature: TEMPERATURE_RANGE.neutral,
+            tint: TINT_RANGE.neutral,
+        });
         match mode {
             WhiteBalanceMode::AsShot => WhiteBalance::AsShot,
             WhiteBalanceMode::TemperatureTint => match current {
@@ -344,8 +354,8 @@ impl WhiteBalanceModeMemory {
                     WhiteBalance::TemperatureTint { temperature, tint }
                 }
                 _ => WhiteBalance::TemperatureTint {
-                    temperature: self.temperature,
-                    tint: self.tint,
+                    temperature: self.temperature.unwrap_or(as_shot.temperature),
+                    tint: self.tint.unwrap_or(as_shot.tint),
                 },
             },
             WhiteBalanceMode::ManualMultipliers => match current {
@@ -1647,9 +1657,18 @@ impl RohditorApp {
             if let Some(method) = output.highlight_method {
                 changed |= set_highlight_method(&mut document.edits, method);
             }
+            // Temperature/Tint controls are absolute camera-calibrated
+            // coordinates. Resolve the current profile after applying a
+            // profile selection so mode switches and slider edits start from
+            // this document's actual As Shot white point.
+            let as_shot_coordinates = document_as_shot_coordinates(document);
             if let Some(mode) = output.white_balance_mode {
-                changed |=
-                    set_white_balance_mode(&mut document.edits, mode, &mut white_balance_memory);
+                changed |= set_white_balance_mode(
+                    &mut document.edits,
+                    mode,
+                    &mut white_balance_memory,
+                    as_shot_coordinates,
+                );
             }
             if let Some(action) = output.optics_action {
                 changed |= apply_optics_action(&mut document.edits, action);
@@ -1666,7 +1685,11 @@ impl RohditorApp {
                 auto_tone_applied = auto_changed;
             }
             for interaction in output.interactions {
-                changed |= apply_adjustment_interaction(&mut document.edits, interaction);
+                changed |= apply_adjustment_interaction(
+                    &mut document.edits,
+                    interaction,
+                    as_shot_coordinates,
+                );
             }
             if output.reset_all {
                 changed |= document.edits.reset();
@@ -2552,6 +2575,31 @@ fn decode_library_texture(bytes: &[u8]) -> Result<egui::ColorImage, String> {
     ))
 }
 
+/// Resolve the camera-specific coordinates represented by the source's
+/// decoder-provided As Shot gains. Coordinates are a display convenience;
+/// rendering continues to use the original gains when projection is not
+/// possible for a particular calibration.
+fn document_as_shot_coordinates(document: &Document) -> Option<WhiteBalanceCoordinates> {
+    document_as_shot_colour(document).and_then(|resolved| resolved.as_shot_coordinates)
+}
+
+/// Resolve the camera transform currently selected for a document while
+/// asking the core for its authoritative As Shot white-balance gains.
+fn document_as_shot_colour(document: &Document) -> Option<rohditor_core::ResolvedCameraColour> {
+    let info = document
+        .frame
+        .as_ref()
+        .map(|frame| &frame.info)
+        .or(document.info.as_ref())?;
+    let calibration = CameraCalibration::from_raw_info(info);
+    resolve_camera_colour(
+        &calibration,
+        &document.edits.recipe().color.camera_profile,
+        WhiteBalance::AsShot,
+    )
+    .ok()
+}
+
 /// Evict least-recently-used textures until the map fits within `cap`.
 fn evict_least_recently_used(
     textures: &mut HashMap<PathBuf, (egui::TextureHandle, u64)>,
@@ -2599,6 +2647,11 @@ fn document_panel_model(
     {
         camera_profile_choices.push(camera_profile_choice(profile.clone()));
     }
+    let as_shot_coordinates =
+        document_as_shot_coordinates(document).unwrap_or(WhiteBalanceCoordinates {
+            temperature: TEMPERATURE_RANGE.neutral,
+            tint: TINT_RANGE.neutral,
+        });
     let (
         white_balance_mode,
         white_balance_red,
@@ -2612,16 +2665,16 @@ fn document_panel_model(
             WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
             WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
             WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
-            TEMPERATURE_RANGE.neutral,
-            TINT_RANGE.neutral,
+            as_shot_coordinates.temperature,
+            as_shot_coordinates.tint,
         ),
         WhiteBalance::ManualMultipliers { red, green, blue } => (
             WhiteBalanceMode::ManualMultipliers,
             red,
             green,
             blue,
-            TEMPERATURE_RANGE.neutral,
-            TINT_RANGE.neutral,
+            as_shot_coordinates.temperature,
+            as_shot_coordinates.tint,
         ),
         WhiteBalance::TemperatureTint { temperature, tint } => (
             WhiteBalanceMode::TemperatureTint,
@@ -2944,7 +2997,8 @@ fn sample_rgb_patch(
 
 fn white_balance_from_camera_sample(
     sample: [f32; 3],
-    as_shot_white_balance: [Option<f32>; 4],
+    camera_to_xyz_d65: rohditor_core::Matrix3,
+    as_shot_white_balance: Option<[Option<f32>; 4]>,
 ) -> Option<WhiteBalance> {
     if sample
         .iter()
@@ -2952,39 +3006,53 @@ fn white_balance_from_camera_sample(
     {
         return None;
     }
-    let [red, green, blue, _] = as_shot_white_balance;
+    let desired_total = [sample[1] / sample[0], 1.0, sample[1] / sample[2]];
+    let gains = WhiteBalanceGains {
+        red: desired_total[0],
+        green: desired_total[1],
+        blue: desired_total[2],
+    };
+    if let Ok(coordinates) = coordinates_from_camera_gains(camera_to_xyz_d65, gains) {
+        return Some(WhiteBalance::TemperatureTint {
+            temperature: coordinates.temperature,
+            tint: coordinates.tint,
+        });
+    }
+
+    // If the sampled neutral lies outside the calibrated locus, preserve the
+    // exact camera-native result with the existing relative multiplier mode.
+    // This is a bounded fallback for unusual sensors or strongly coloured
+    // patches; normal samples use the same absolute coordinates as the UI.
+    let [red, green, blue, _] = as_shot_white_balance?;
     let [Some(red), Some(green), Some(blue)] = [red, green, blue]
         .map(|value| value.filter(|number| number.is_finite() && *number > 1.0e-5))
     else {
         return None;
     };
     let as_shot_relative = [red / green, 1.0, blue / green];
-    let desired_total = [sample[1] / sample[0], 1.0, sample[1] / sample[2]];
     let manual = [
         desired_total[0] / as_shot_relative[0],
         WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
         desired_total[2] / as_shot_relative[2],
     ];
-    if manual
+    manual
         .iter()
-        .any(|value| !WHITE_BALANCE_MULTIPLIER_RANGE.contains(*value))
-    {
-        return None;
-    }
-    Some(WhiteBalance::ManualMultipliers {
-        red: manual[0],
-        green: manual[1],
-        blue: manual[2],
-    })
+        .all(|value| WHITE_BALANCE_MULTIPLIER_RANGE.contains(*value))
+        .then_some(WhiteBalance::ManualMultipliers {
+            red: manual[0],
+            green: manual[1],
+            blue: manual[2],
+        })
 }
 
 fn set_white_balance_mode(
     edits: &mut EditSession,
     mode: WhiteBalanceMode,
     memory: &mut WhiteBalanceModeMemory,
+    as_shot: Option<WhiteBalanceCoordinates>,
 ) -> bool {
     let mut next = edits.recipe().clone();
-    next.color.white_balance = memory.select(next.color.white_balance, mode);
+    next.color.white_balance = memory.select(next.color.white_balance, mode, as_shot);
     edits.set_discrete(next)
 }
 
@@ -3068,6 +3136,7 @@ fn gpu_upload_matches_document(document: &Document, ticket: PreviewTicket) -> bo
 fn apply_adjustment_interaction(
     edits: &mut EditSession,
     interaction: AdjustmentInteraction,
+    as_shot: Option<WhiteBalanceCoordinates>,
 ) -> bool {
     if interaction.drag_started {
         edits.begin_gesture();
@@ -3115,9 +3184,13 @@ fn apply_adjustment_interaction(
             next.color.white_balance = WhiteBalance::ManualMultipliers { red, green, blue };
         }
         AdjustmentTarget::WhiteBalanceTemperature | AdjustmentTarget::WhiteBalanceTint => {
+            let as_shot = as_shot.unwrap_or(WhiteBalanceCoordinates {
+                temperature: TEMPERATURE_RANGE.neutral,
+                tint: TINT_RANGE.neutral,
+            });
             let (mut temperature, mut tint) = match next.color.white_balance {
                 WhiteBalance::TemperatureTint { temperature, tint } => (temperature, tint),
-                _ => (TEMPERATURE_RANGE.neutral, TINT_RANGE.neutral),
+                _ => (as_shot.temperature, as_shot.tint),
             };
             match interaction.target {
                 AdjustmentTarget::WhiteBalanceTemperature => temperature = interaction.value,
@@ -3430,7 +3503,7 @@ mod tests {
                 reset: false,
             },
         ] {
-            let _ = apply_adjustment_interaction(&mut edits, interaction);
+            let _ = apply_adjustment_interaction(&mut edits, interaction, None);
         }
 
         assert_eq!(edits.revision(), 2);
@@ -3442,32 +3515,51 @@ mod tests {
 
     #[test]
     fn white_balance_picker_uses_camera_native_channel_ratios() {
-        let WhiteBalance::ManualMultipliers { red, green, blue } =
-            white_balance_from_camera_sample(
-                [0.5, 0.5, 0.5],
-                [Some(1.0), Some(1.0), Some(1.0), None],
-            )
-            .expect("neutral sample")
-        else {
-            panic!("picker should produce manual multipliers");
-        };
-        assert!((red - 1.0).abs() < 1.0e-6);
-        assert!((green - 1.0).abs() < 1.0e-6);
-        assert!((blue - 1.0).abs() < 1.0e-6);
-
-        let WhiteBalance::ManualMultipliers { red, blue, .. } = white_balance_from_camera_sample(
-            [0.8, 0.5, 0.2],
-            [Some(1.0), Some(1.0), Some(1.0), None],
+        let neutral = white_balance_from_camera_sample(
+            [0.5, 0.5, 0.5],
+            rohditor_core::Matrix3::identity(),
+            Some([Some(1.0), Some(1.0), Some(1.0), None]),
         )
-        .expect("colored sample") else {
-            panic!("picker should produce manual multipliers");
+        .expect("neutral sample");
+        let neutral_gains = match neutral {
+            WhiteBalance::ManualMultipliers { red, green, blue } => {
+                WhiteBalanceGains { red, green, blue }
+            }
+            WhiteBalance::TemperatureTint { temperature, tint } => camera_gains_from_coordinates(
+                rohditor_core::Matrix3::identity(),
+                WhiteBalanceCoordinates { temperature, tint },
+            )
+            .expect("temperature/tint gains"),
+            WhiteBalance::AsShot => panic!("picker should not leave the balance as shot"),
         };
-        assert!(red < 1.0);
-        assert!(blue > 1.0);
+        assert!((neutral_gains.red - 1.0).abs() < 0.01);
+        assert!((neutral_gains.green - 1.0).abs() < 0.01);
+        assert!((neutral_gains.blue - 1.0).abs() < 0.01);
+
+        let colored = white_balance_from_camera_sample(
+            [0.8, 0.5, 0.2],
+            rohditor_core::Matrix3::identity(),
+            Some([Some(1.0), Some(1.0), Some(1.0), None]),
+        )
+        .expect("colored sample");
+        let gains = match colored {
+            WhiteBalance::TemperatureTint { temperature, tint } => camera_gains_from_coordinates(
+                rohditor_core::Matrix3::identity(),
+                WhiteBalanceCoordinates { temperature, tint },
+            )
+            .expect("temperature/tint gains"),
+            WhiteBalance::ManualMultipliers { red, green, blue } => {
+                WhiteBalanceGains { red, green, blue }
+            }
+            WhiteBalance::AsShot => panic!("picker should not leave the balance as shot"),
+        };
+        assert!((gains.red - 0.625).abs() < 0.01);
+        assert!((gains.blue - 2.5).abs() < 0.01);
         assert!(
             white_balance_from_camera_sample(
                 [0.0, 0.5, 0.5],
-                [Some(1.0), Some(1.0), Some(1.0), None]
+                rohditor_core::Matrix3::identity(),
+                Some([Some(1.0), Some(1.0), Some(1.0), None])
             )
             .is_none()
         );
@@ -3475,18 +3567,27 @@ mod tests {
 
     #[test]
     fn white_balance_picker_accounts_for_as_shot_baseline() {
-        let WhiteBalance::ManualMultipliers { red, green, blue } =
-            white_balance_from_camera_sample(
-                [0.4, 0.5, 0.6],
-                [Some(2.0), Some(1.0), Some(1.5), None],
+        let gains = match white_balance_from_camera_sample(
+            [0.4, 0.5, 0.6],
+            rohditor_core::Matrix3::identity(),
+            Some([Some(2.0), Some(1.0), Some(1.5), None]),
+        )
+        .expect("sample should fit the balance range")
+        {
+            WhiteBalance::TemperatureTint { temperature, tint } => camera_gains_from_coordinates(
+                rohditor_core::Matrix3::identity(),
+                WhiteBalanceCoordinates { temperature, tint },
             )
-            .expect("sample should fit the manual range")
-        else {
-            panic!("picker should produce manual multipliers");
+            .expect("temperature/tint gains"),
+            WhiteBalance::ManualMultipliers { red, green, blue } => WhiteBalanceGains {
+                red: 2.0 * red,
+                green,
+                blue: 1.5 * blue,
+            },
+            WhiteBalance::AsShot => panic!("picker should not leave the balance as shot"),
         };
-        assert!((red - 0.625).abs() < 1.0e-6);
-        assert!((green - 1.0).abs() < 1.0e-6);
-        assert!((blue - (5.0 / 9.0)).abs() < 1.0e-6);
+        assert!((gains.red - 1.25).abs() < 0.01);
+        assert!((gains.blue - (5.0 / 6.0)).abs() < 0.01);
     }
 
     #[test]
@@ -3504,6 +3605,7 @@ mod tests {
             &mut edits,
             WhiteBalanceMode::ManualMultipliers,
             &mut memory,
+            None,
         ));
         let mut recipe = edits.recipe().clone();
         recipe.color.white_balance = WhiteBalance::ManualMultipliers {
@@ -3516,12 +3618,14 @@ mod tests {
             &mut edits,
             WhiteBalanceMode::AsShot,
             &mut memory,
+            None,
         ));
 
         assert!(set_white_balance_mode(
             &mut edits,
             WhiteBalanceMode::TemperatureTint,
             &mut memory,
+            None,
         ));
         assert_eq!(
             edits.recipe().color.white_balance,
@@ -3534,6 +3638,7 @@ mod tests {
             &mut edits,
             WhiteBalanceMode::ManualMultipliers,
             &mut memory,
+            None,
         ));
         assert_eq!(
             edits.recipe().color.white_balance,
@@ -3560,12 +3665,16 @@ mod tests {
                 drag_stopped: false,
                 reset: false,
             },
+            Some(WhiteBalanceCoordinates {
+                temperature: 5_200.0,
+                tint: -0.2,
+            }),
         ));
         assert_eq!(
             edits.recipe().color.white_balance,
             WhiteBalance::TemperatureTint {
                 temperature: 7_200.0,
-                tint: TINT_RANGE.neutral,
+                tint: -0.2,
             }
         );
     }
@@ -3585,11 +3694,15 @@ mod tests {
                 drag_stopped: false,
                 reset: false,
             },
+            Some(WhiteBalanceCoordinates {
+                temperature: 5_200.0,
+                tint: -0.2,
+            }),
         ));
         assert_eq!(
             edits.recipe().color.white_balance,
             WhiteBalance::TemperatureTint {
-                temperature: TEMPERATURE_RANGE.neutral,
+                temperature: 5_200.0,
                 tint: 0.25,
             }
         );

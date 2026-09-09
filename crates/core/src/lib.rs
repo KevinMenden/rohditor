@@ -18,6 +18,7 @@ mod output;
 mod pipeline;
 mod rendering;
 mod resample;
+mod white_balance;
 
 pub use rohditor_camera_profile::CAMERA_PROFILE_EVALUATOR_VERSION;
 
@@ -65,4 +66,8 @@ pub use rohditor_optics::{
     CorrectionComponents, DatabaseProvenance, LensProfileSummary, MetadataField,
     OPTICS_ALGORITHM_VERSION, OpticsError, OpticsProvenance, OpticsQuery, OpticsService,
     ProfileMatch, ProfileRequest,
+};
+pub use white_balance::{
+    WHITE_BALANCE_ALGORITHM_VERSION, WhiteBalanceCoordinates, camera_gains_from_coordinates,
+    coordinates_from_camera_gains,
 };

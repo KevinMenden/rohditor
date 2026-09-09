@@ -10,10 +10,11 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use rohditor_camera_profile::parse_dcp_file;
 use rohditor_core::{
-    CpuPipeline, DitherMode, ExportFormat, ExportImage, ExportMetadataPolicy, ExportSettings,
-    HighlightDiagnostics, JPEG_QUALITY_DEFAULT, JPEG_QUALITY_MAX, JPEG_QUALITY_MIN, OpticsService,
-    OutputPolicy, PngBitDepth, RawCropPolicy, RenderOptions, StageTimings, export_image,
-    paths_refer_to_same_file, write_output_bytes,
+    CameraCalibration, CpuPipeline, DitherMode, ExportFormat, ExportImage, ExportMetadataPolicy,
+    ExportSettings, HighlightDiagnostics, JPEG_QUALITY_DEFAULT, JPEG_QUALITY_MAX, JPEG_QUALITY_MIN,
+    OpticsService, OutputPolicy, PngBitDepth, RawCropPolicy, RenderOptions, StageTimings,
+    WhiteBalanceCoordinates, export_image, paths_refer_to_same_file, resolve_camera_colour,
+    write_output_bytes,
 };
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_edit::{
@@ -159,11 +160,13 @@ enum Command {
         #[arg(long, value_enum, default_value_t = CliRenderingProfile::Standard)]
         rendering_profile: CliRenderingProfile,
 
-        /// White-balance temperature in Kelvin (2000 to 12000). Use with --tint.
+        /// Absolute camera-calibrated white-balance temperature in Kelvin
+        /// (2000 to 25000). If omitted, the source's As Shot estimate is used.
         #[arg(long, allow_hyphen_values = true)]
         temperature: Option<f32>,
 
-        /// Green/magenta tint (-1 to +1); implies temperature white balance.
+        /// Absolute camera-calibrated green/magenta tint (-1 to +1); implies
+        /// Temperature/Tint white balance.
         #[arg(long, default_value_t = TINT_RANGE.neutral, allow_hyphen_values = true)]
         tint: f32,
 
@@ -792,6 +795,39 @@ fn extract_preview(file: &Path, output: &Path, force: bool) -> Result<()> {
     ))
 }
 
+fn white_balance_from_arguments(
+    arguments: &DevelopArguments,
+    as_shot: Option<WhiteBalanceCoordinates>,
+) -> WhiteBalance {
+    match (
+        arguments.white_balance,
+        arguments.temperature,
+        arguments.tint,
+    ) {
+        (Some(value), None, 0.0) => WhiteBalance::ManualMultipliers {
+            red: value.red,
+            green: value.green,
+            blue: value.blue,
+        },
+        (None, temperature, tint) if temperature.is_some() || tint != 0.0 => {
+            let as_shot = as_shot.unwrap_or(WhiteBalanceCoordinates {
+                temperature: TEMPERATURE_RANGE.neutral,
+                tint: TINT_RANGE.neutral,
+            });
+            WhiteBalance::TemperatureTint {
+                temperature: temperature.unwrap_or(as_shot.temperature),
+                tint: if tint == TINT_RANGE.neutral {
+                    as_shot.tint
+                } else {
+                    tint
+                },
+            }
+        }
+        (None, None, 0.0) => WhiteBalance::AsShot,
+        _ => unreachable!("white balance conflict was rejected above"),
+    }
+}
+
 fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()> {
     validate_highlight_options(
         arguments.highlight_reconstruction,
@@ -823,29 +859,6 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
     {
         bail!("--white-balance cannot be combined with --temperature or --tint");
     }
-    let white_balance = match (
-        arguments.white_balance,
-        arguments.temperature,
-        arguments.tint,
-    ) {
-        (Some(value), None, 0.0) => WhiteBalance::ManualMultipliers {
-            red: value.red,
-            green: value.green,
-            blue: value.blue,
-        },
-        (None, temperature, tint) if temperature.is_some() || tint != 0.0 => {
-            WhiteBalance::TemperatureTint {
-                temperature: temperature.unwrap_or(TEMPERATURE_RANGE.neutral),
-                tint,
-            }
-        }
-        (None, None, 0.0) => WhiteBalance::AsShot,
-        (None, None, tint) => WhiteBalance::TemperatureTint {
-            temperature: TEMPERATURE_RANGE.neutral,
-            tint,
-        },
-        _ => unreachable!("white balance conflict was rejected above"),
-    };
     let mut recipe = EditRecipe {
         optics: optics_adjustments(&arguments)?,
         ..EditRecipe::default()
@@ -860,7 +873,6 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
         recipe.color.camera_profile = CameraProfileSelection::Matrix(profile);
     }
     recipe.rendering.profile = arguments.rendering_profile.into();
-    recipe.color.white_balance = white_balance;
     recipe.light.exposure_ev = arguments.exposure;
     recipe.light.contrast = arguments.contrast;
     recipe.light.highlights = arguments.highlights;
@@ -890,6 +902,9 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
         HighlightMethod::Off | HighlightMethod::Clip => {}
     }
     recipe.geometry.orientation_override = arguments.orientation.map(Into::into);
+    // Validate explicitly supplied values before decoding so malformed CLI
+    // input reports a recipe error even when the source itself is unreadable.
+    recipe.color.white_balance = white_balance_from_arguments(&arguments, None);
     recipe
         .validate()
         .context("could not validate the development recipe")?;
@@ -908,6 +923,17 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
         .decode(file)
         .with_context(|| format!("could not decode {} for development", file.display()))?;
     let decode_time = decode_started.elapsed();
+    let as_shot_coordinates = resolve_camera_colour(
+        &CameraCalibration::from_raw_info(&frame.info),
+        &recipe.color.camera_profile,
+        WhiteBalance::AsShot,
+    )
+    .ok()
+    .and_then(|resolved| resolved.as_shot_coordinates);
+    recipe.color.white_balance = white_balance_from_arguments(&arguments, as_shot_coordinates);
+    recipe
+        .validate()
+        .context("could not validate the development recipe")?;
     let result = pipeline
         .render_export(
             &frame,
@@ -1829,9 +1855,9 @@ mod tests {
     use super::{
         Cli, CliCropPolicy, CliDemosaic, CliHighlightMethod, CliMetadata, CliRenderingProfile,
         Command, DemosaicAlgorithm, DevelopArguments, QualityCropSpec, RgbMultipliers,
-        crop_display_image, develop_export_settings, extract_preview, format_photometric,
-        nearest_neighbor_2x, parse_lens_profile, parse_libraw_pgm, validate_highlight_options,
-        validate_preview_extension,
+        WhiteBalance, crop_display_image, develop_export_settings, extract_preview,
+        format_photometric, nearest_neighbor_2x, parse_lens_profile, parse_libraw_pgm,
+        validate_highlight_options, validate_preview_extension, white_balance_from_arguments,
     };
 
     #[test]
@@ -1902,6 +1928,37 @@ mod tests {
         let values = RgbMultipliers::from_str("1.2,1.0,0.8").expect("valid multipliers");
         assert_eq!((values.red, values.green, values.blue), (1.2, 1.0, 0.8));
         assert!(RgbMultipliers::from_str("1.0,1.0").is_err());
+
+        let mut custom = base.clone();
+        custom.temperature = Some(4_500.0);
+        assert_eq!(
+            white_balance_from_arguments(
+                &custom,
+                Some(rohditor_core::WhiteBalanceCoordinates {
+                    temperature: 5_800.0,
+                    tint: -0.15,
+                }),
+            ),
+            WhiteBalance::TemperatureTint {
+                temperature: 4_500.0,
+                tint: -0.15,
+            }
+        );
+        custom.temperature = None;
+        custom.tint = 0.2;
+        assert_eq!(
+            white_balance_from_arguments(
+                &custom,
+                Some(rohditor_core::WhiteBalanceCoordinates {
+                    temperature: 5_800.0,
+                    tint: -0.15,
+                }),
+            ),
+            WhiteBalance::TemperatureTint {
+                temperature: 5_800.0,
+                tint: 0.2,
+            }
+        );
     }
 
     #[test]

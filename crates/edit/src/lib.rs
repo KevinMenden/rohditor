@@ -26,7 +26,7 @@ pub struct EditError {
 }
 
 /// Schema version of the current non-destructive edit recipe.
-pub const EDIT_RECIPE_SCHEMA_VERSION: u32 = 9;
+pub const EDIT_RECIPE_SCHEMA_VERSION: u32 = 10;
 const LEGACY_EDIT_RECIPE_SCHEMA_VERSION: u32 = 1;
 const PREVIOUS_EDIT_RECIPE_SCHEMA_VERSION: u32 = 2;
 const PREVIOUS_RAW_EDIT_RECIPE_SCHEMA_VERSION: u32 = 3;
@@ -35,6 +35,7 @@ const PREVIOUS_LOCAL_RATIOS_EDIT_RECIPE_SCHEMA_VERSION: u32 = 5;
 const PREVIOUS_OPPOSED_EDIT_RECIPE_SCHEMA_VERSION: u32 = 6;
 const PREVIOUS_CAMERA_PROFILE_EDIT_RECIPE_SCHEMA_VERSION: u32 = 7;
 const PREVIOUS_OPTICS_EDIT_RECIPE_SCHEMA_VERSION: u32 = 8;
+const PREVIOUS_WHITE_BALANCE_EDIT_RECIPE_SCHEMA_VERSION: u32 = 9;
 
 /// Inclusive range and neutral value for one adjustment parameter.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -98,7 +99,7 @@ pub const WHITE_BALANCE_MULTIPLIER_RANGE: ParameterRange = ParameterRange {
 };
 pub const TEMPERATURE_RANGE: ParameterRange = ParameterRange {
     minimum: 2_000.0,
-    maximum: 12_000.0,
+    maximum: 25_000.0,
     neutral: 6_500.0,
 };
 pub const TINT_RANGE: ParameterRange = ParameterRange {
@@ -139,7 +140,9 @@ pub const COLOR_GRADING_RANGE: ParameterRange = ParameterRange {
 
 pub const HSL_CHANNEL_COUNT: usize = 8;
 
-/// White balance relative to the decoder's as-shot channel multipliers.
+/// White-balance selection for a RAW recipe. Manual multipliers are relative
+/// to the decoder's As Shot gains; Temperature/Tint is an absolute,
+/// camera-calibrated white point.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum WhiteBalance {
@@ -732,6 +735,24 @@ impl<'de> Deserialize<'de> for EditRecipe {
                 color: fields.color,
                 geometry: fields.geometry,
             }
+        } else if fields.schema_version == PREVIOUS_WHITE_BALANCE_EDIT_RECIPE_SCHEMA_VERSION {
+            if matches!(
+                fields.color.white_balance,
+                WhiteBalance::TemperatureTint { .. }
+            ) {
+                return Err(D::Error::custom(
+                    "schema 9 Temperature/Tint values used relative white-balance semantics and cannot be migrated without the source RAW",
+                ));
+            }
+            Self {
+                schema_version: EDIT_RECIPE_SCHEMA_VERSION,
+                raw: fields.raw,
+                optics: fields.optics,
+                rendering: fields.rendering.unwrap_or_default(),
+                light: fields.light,
+                color: fields.color,
+                geometry: fields.geometry,
+            }
         } else {
             Self {
                 schema_version: fields.schema_version,
@@ -883,7 +904,7 @@ mod tests {
     #[test]
     fn current_missing_rendering_defaults_to_standard_and_old_versions_migrate_to_neutral() {
         let current = r#"{
-            "schema_version": 9,
+            "schema_version": 10,
             "light": {},
             "color": {},
             "geometry": {}
@@ -926,7 +947,7 @@ mod tests {
     #[test]
     fn missing_highlight_fields_receive_the_current_defaults() {
         let json = r#"{
-            "schema_version": 9,
+            "schema_version": 10,
             "light": {},
             "color": {},
             "geometry": {}
