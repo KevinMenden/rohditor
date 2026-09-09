@@ -1,6 +1,6 @@
 struct PreviewParameters {
     exposure_gain: f32,
-    contrast_gain: f32,
+    rendering_profile: u32,
     saturation: f32,
     vibrance: f32,
     highlights: f32,
@@ -41,6 +41,9 @@ var<uniform> parameters: PreviewParameters;
 
 @group(0) @binding(4)
 var<storage, read> light_tone_lut: array<f32, 4096>;
+
+@group(0) @binding(5)
+var<storage, read> base_rendering_lut: array<f32, 4096>;
 
 const LUMINANCE_RATIO_TRANSITION: f32 = 0.02;
 
@@ -118,6 +121,29 @@ fn apply_light_tone(pixel: vec3<f32>) -> vec3<f32> {
     return apply_luminance_delta(pixel, current, desired);
 }
 
+fn apply_base_rendering(pixel: vec3<f32>) -> vec3<f32> {
+    if parameters.rendering_profile == 0u {
+        return pixel;
+    }
+    let current = dot(pixel, vec3<f32>(0.2627, 0.6780, 0.0593));
+    if current <= 0.0 {
+        return pixel;
+    }
+    let coordinate = current / (1.0 + current);
+    let position = coordinate * 4095.0;
+    let lower = min(u32(floor(position)), 4095u);
+    let upper = min(lower + 1u, 4095u);
+    let desired = mix(
+        base_rendering_lut[lower],
+        base_rendering_lut[upper],
+        position - f32(lower),
+    );
+    if desired == current {
+        return pixel;
+    }
+    return apply_luminance_delta(pixel, current, desired);
+}
+
 fn tone_curve_value(input: f32) -> f32 {
     if input < 0.0 || input > 1.0 {
         return input;
@@ -178,7 +204,8 @@ fn develop_preview(@builtin(global_invocation_id) invocation: vec3<u32>) {
         dot(parameters.camera_to_rec2020_row2.xyz, balanced),
     );
     let exposed = base * parameters.exposure_gain;
-    let toned = apply_tone_curve(apply_light_tone(exposed));
+    let rendered = apply_base_rendering(exposed);
+    let toned = apply_tone_curve(apply_light_tone(rendered));
     let luminance = dot(toned, vec3<f32>(0.2627, 0.6780, 0.0593));
     let saturation = parameters.saturation
         * (1.0 + parameters.vibrance * (1.0 - color_saturation(toned, luminance)));

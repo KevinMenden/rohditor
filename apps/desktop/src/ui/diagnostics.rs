@@ -81,6 +81,8 @@ pub(crate) struct PreviewModel {
     pub backend: String,
     pub algorithm: String,
     pub profile: String,
+    pub rendering: String,
+    pub output_policy: String,
     pub source_state: String,
     pub cache: CacheModel,
     pub timings: TimingModel,
@@ -200,6 +202,8 @@ pub(crate) fn show(
                 preview.source_state, preview.algorithm
             ));
             ui.weak(format!("Camera colour: {}", preview.profile));
+            ui.weak(format!("Rendering profile: {}", preview.rendering));
+            ui.weak(format!("Output gamut policy: {}", preview.output_policy));
             egui::Grid::new("preview_cache_diagnostics")
                 .num_columns(2)
                 .show(ui, |ui| {
@@ -429,6 +433,8 @@ pub(crate) struct PreviewReport<'a> {
     pub backend: &'a str,
     pub algorithm: &'a str,
     pub profile: &'a str,
+    pub rendering: &'a str,
+    pub output_policy: &'a str,
     pub source_state: &'a str,
     pub cache: CacheReport,
     pub timings_ms: TimingReport,
@@ -444,6 +450,8 @@ impl<'a> From<&'a PreviewModel> for PreviewReport<'a> {
             backend: &value.backend,
             algorithm: &value.algorithm,
             profile: &value.profile,
+            rendering: &value.rendering,
+            output_policy: &value.output_policy,
             source_state: &value.source_state,
             cache: CacheReport::from(value.cache),
             timings_ms: TimingReport::from(value.timings),

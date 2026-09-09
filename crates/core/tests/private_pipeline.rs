@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use rohditor_core::{CancellationToken, CpuPipeline, PreviewOptions, RenderOptions};
 use rohditor_demosaic::DemosaicAlgorithm;
-use rohditor_edit::EditRecipe;
+use rohditor_edit::{EditRecipe, RenderingProfileSelection};
 use rohditor_image::Orientation;
 use rohditor_raw::{RawDecoder, RawlerDecoder};
 
@@ -22,7 +22,8 @@ const PHASE_9_PREVIEW_PEAK_LIMIT_BYTES: usize = 600 * 1_024 * 1_024;
 fn neutral_recipe_develops_every_private_sample_deterministically() -> Result<(), Box<dyn Error>> {
     let decoder = RawlerDecoder::default();
     let pipeline = CpuPipeline::default();
-    let recipe = EditRecipe::default();
+    let mut recipe = EditRecipe::default();
+    recipe.rendering.profile = RenderingProfileSelection::NEUTRAL;
     let algorithms = [
         ("bilinear", DemosaicAlgorithm::Bilinear),
         ("mhc", DemosaicAlgorithm::MalvarHeCutler),
@@ -116,9 +117,11 @@ fn neutral_recipe_develops_every_private_sample_deterministically() -> Result<()
 fn source_scale_inspection_meets_phase_9_latency_and_memory_budgets() -> Result<(), Box<dyn Error>>
 {
     let frame = RawlerDecoder::default().decode(&private_corpus_directory().join(SAMPLES[0]))?;
+    let mut recipe = EditRecipe::default();
+    recipe.rendering.profile = RenderingProfileSelection::NEUTRAL;
     let result = CpuPipeline::default().render_source_scale_preview_cancellable(
         &frame,
-        &EditRecipe::default(),
+        &recipe,
         RenderOptions::default(),
         &CancellationToken::new(),
     )?;

@@ -2,7 +2,8 @@ use rayon::prelude::*;
 use rohditor_demosaic::WhiteBalanceGains;
 use rohditor_edit::{
     ColorGradingAdjustments, EditRecipe, HSL_CHANNEL_COUNT, HslAdjustments, LightToneLut,
-    TEMPERATURE_RANGE, TINT_RANGE, ToneCurve, WHITE_BALANCE_MULTIPLIER_RANGE, WhiteBalance,
+    RenderingProfileSelection, TEMPERATURE_RANGE, TINT_RANGE, ToneCurve,
+    WHITE_BALANCE_MULTIPLIER_RANGE, WhiteBalance,
 };
 use rohditor_image::{
     BayerPattern, CfaColor, DisplayRgbImage, DisplayTransfer, ImageRegion, LinearRgbImage,
@@ -17,6 +18,7 @@ use crate::color::{
 };
 use crate::{
     CancellationToken, DitherMode, OutputGeometry, OutputPolicy, PipelineError, RawCropPolicy,
+    standard_base_rendering_lut,
 };
 
 const REC2020_LUMINANCE: [f32; 3] = [0.2627, 0.6780, 0.0593];
@@ -397,13 +399,10 @@ pub(crate) fn apply_white_balance_cancellable(
     cancellation.checkpoint()
 }
 
-/// Apply global scene-linear adjustments in their documented fixed order.
+/// Apply global adjustments in their documented fixed order.
 ///
-/// Exposure is `2^EV`. The remaining Light controls share one bounded,
-/// monotonic luminance LUT with a protected toe and shoulder. Tonal changes
-/// scale the RGB triplet where safe to preserve chromaticity. Saturation and
-/// vibrance then operate around Rec.2020 luminance. Negative and HDR working
-/// samples remain available through the tonal LUT's identity extension.
+/// Exposure is scene-referred and precedes the selected base rendering. The
+/// remaining Light and Color controls operate on that rendered linear result.
 pub fn apply_adjustments(
     image: &mut LinearRgbImage<f32>,
     recipe: &EditRecipe,
@@ -421,6 +420,8 @@ pub(crate) fn apply_adjustments_cancellable(
         width = image.width(),
         height = image.height(),
         exposure_ev = recipe.light.exposure_ev,
+        rendering_profile = recipe.rendering.profile.display_name(),
+        rendering_process_version = recipe.rendering.profile.process_version(),
         contrast = recipe.light.contrast,
         highlights = recipe.light.highlights,
         shadows = recipe.light.shadows,
@@ -438,6 +439,10 @@ pub(crate) fn apply_adjustments_cancellable(
     let row_stride = image.row_stride();
     let light = recipe.light.clone();
     let color = recipe.color.clone();
+    let base_rendering_lut = match recipe.rendering.profile {
+        RenderingProfileSelection::RohditorNeutral => None,
+        RenderingProfileSelection::RohditorStandard { .. } => Some(standard_base_rendering_lut()),
+    };
     // Resolve stage participation once per recipe instead of repeatedly
     // checking all neutral controls for every pixel. This is especially
     // useful for the common global-adjustment path, where HSL and grading are
@@ -469,6 +474,9 @@ pub(crate) fn apply_adjustments_cancellable(
                         *value *= exposure_gain;
                     }
                 }
+                if let Some(base_rendering_lut) = base_rendering_lut {
+                    apply_base_rendering(pixel, base_rendering_lut);
+                }
                 if let Some(light_tone_lut) = &light_tone_lut {
                     apply_light_tone(pixel, light_tone_lut);
                 }
@@ -497,6 +505,15 @@ pub(crate) fn apply_adjustments_cancellable(
     )?;
     cancellation.checkpoint()?;
     Ok(())
+}
+
+fn apply_base_rendering(pixel: &mut [f32], lut: &crate::BaseRenderingLut) {
+    let current = luminance(pixel);
+    let target = lut.sample(current);
+    if !target.is_finite() || (target - current).abs() <= f32::EPSILON {
+        return;
+    }
+    apply_luminance_delta(pixel, current, target);
 }
 
 fn apply_light_tone(pixel: &mut [f32], light_tone_lut: &LightToneLut) {
@@ -1249,6 +1266,12 @@ mod tests {
     use super::*;
     use rohditor_demosaic::{DemosaicAlgorithm, demosaic};
 
+    fn neutral_recipe() -> EditRecipe {
+        let mut recipe = EditRecipe::default();
+        recipe.rendering.profile = RenderingProfileSelection::NEUTRAL;
+        recipe
+    }
+
     fn test_info(width: usize, height: usize, pattern: &str) -> RawFileInfo {
         RawFileInfo {
             format: "synthetic".to_owned(),
@@ -1555,16 +1578,78 @@ mod tests {
         let source = vec![0.1, 0.2, 0.3, 0.5, 0.6, 0.7];
         let mut neutral = LinearRgbImage::new(2, 1, 6, LinearRgbSpace::Rec2020D65, source.clone())
             .expect("valid image");
-        apply_adjustments(&mut neutral, &EditRecipe::default()).expect("neutral adjustment");
+        apply_adjustments(&mut neutral, &neutral_recipe()).expect("neutral adjustment");
         assert_eq!(neutral.data(), source);
 
         let mut raised = neutral;
-        let mut recipe = EditRecipe::default();
+        let mut recipe = neutral_recipe();
         recipe.light.exposure_ev = 2.0;
         apply_adjustments(&mut raised, &recipe).expect("exposure adjustment");
         for (actual, original) in raised.data().iter().zip(source) {
             assert_eq!(*actual, original * 4.0);
         }
+    }
+
+    #[test]
+    fn standard_differs_from_neutral_and_applies_exposure_first() {
+        let source = vec![0.09; 3];
+        let mut standard = LinearRgbImage::new(1, 1, 3, LinearRgbSpace::Rec2020D65, source.clone())
+            .expect("valid image");
+        let mut exposed = LinearRgbImage::new(1, 1, 3, LinearRgbSpace::Rec2020D65, source.clone())
+            .expect("valid image");
+        let mut neutral = LinearRgbImage::new(1, 1, 3, LinearRgbSpace::Rec2020D65, source.clone())
+            .expect("valid image");
+
+        apply_adjustments(&mut standard, &EditRecipe::default()).expect("Standard rendering");
+        let mut exposed_recipe = EditRecipe::default();
+        exposed_recipe.light.exposure_ev = 1.0;
+        apply_adjustments(&mut exposed, &exposed_recipe).expect("exposed Standard rendering");
+        apply_adjustments(&mut neutral, &neutral_recipe()).expect("Neutral rendering");
+
+        assert_ne!(standard.data(), source);
+        assert_eq!(neutral.data(), source);
+        for value in exposed.data() {
+            assert!((*value - crate::ROHDITOR_STANDARD_MIDDLE_GRAY).abs() < 2.0e-6);
+        }
+    }
+
+    #[test]
+    fn standard_tonal_scaling_preserves_positive_rgb_chromaticity() {
+        let source = [0.8, 0.4, 0.2];
+        let mut image = LinearRgbImage::new(1, 1, 3, LinearRgbSpace::Rec2020D65, source.to_vec())
+            .expect("valid image");
+        apply_adjustments(&mut image, &EditRecipe::default()).expect("Standard rendering");
+        let output = image.pixel(0, 0).expect("rendered pixel");
+        assert!((output[0] / output[1] - source[0] / source[1]).abs() < 1.0e-6);
+        assert!((output[1] / output[2] - source[1] / source[2]).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn neutral_plus_clip_preserves_the_pre_rendering_reference_and_light_follows_standard() {
+        let source = vec![0.15, 0.3, 0.6, 2.0, 2.0, 2.0];
+        let image = LinearRgbImage::new(2, 1, 6, LinearRgbSpace::Rec2020D65, source.clone())
+            .expect("valid image");
+        let direct = render_display_srgb8(&image, Orientation::Normal, OutputPolicy::ClipToSrgb)
+            .expect("direct legacy output");
+        let mut neutral = image.clone();
+        apply_adjustments(&mut neutral, &neutral_recipe()).expect("Neutral rendering");
+        let rendered =
+            render_display_srgb8(&neutral, Orientation::Normal, OutputPolicy::ClipToSrgb)
+                .expect("Neutral output");
+        assert_eq!(rendered.data(), direct.data());
+
+        let mut standard_then_light =
+            LinearRgbImage::new(1, 1, 3, LinearRgbSpace::Rec2020D65, vec![2.0; 3])
+                .expect("valid highlight");
+        let mut recipe = EditRecipe::default();
+        recipe.light.highlights = -0.5;
+        let standard_value = standard_base_rendering_lut().sample(2.0);
+        let expected = LightToneLut::new(&recipe.light).sample(standard_value);
+        apply_adjustments(&mut standard_then_light, &recipe).expect("ordered rendering");
+        assert!(
+            (standard_then_light.data()[0] - expected).abs() < 2.0e-6,
+            "Light controls must consume Standard's compressed result"
+        );
     }
 
     #[test]
@@ -1581,7 +1666,7 @@ mod tests {
                 .collect(),
         )
         .expect("valid image");
-        let mut recipe = EditRecipe::default();
+        let mut recipe = neutral_recipe();
         recipe.light.contrast = 1.0;
         recipe.color.saturation = 2.0;
         apply_adjustments(&mut image, &recipe).expect("valid adjustments");
@@ -1598,7 +1683,7 @@ mod tests {
         let source = vec![0.1, 0.1, 0.1, 0.9, 0.9, 0.9];
         let mut shadows = LinearRgbImage::new(2, 1, 6, LinearRgbSpace::Rec2020D65, source.clone())
             .expect("valid image");
-        let mut shadows_recipe = EditRecipe::default();
+        let mut shadows_recipe = neutral_recipe();
         shadows_recipe.light.shadows = 1.0;
         apply_adjustments(&mut shadows, &shadows_recipe).expect("shadow adjustment");
         assert!(shadows.pixel(0, 0).expect("shadow pixel")[0] > source[0]);
@@ -1606,7 +1691,7 @@ mod tests {
 
         let mut highlights =
             LinearRgbImage::new(2, 1, 6, LinearRgbSpace::Rec2020D65, source).expect("valid image");
-        let mut highlights_recipe = EditRecipe::default();
+        let mut highlights_recipe = neutral_recipe();
         highlights_recipe.light.highlights = -1.0;
         apply_adjustments(&mut highlights, &highlights_recipe).expect("highlight adjustment");
         assert!(highlights.pixel(1, 0).expect("highlight pixel")[0] < 0.9);
@@ -1623,7 +1708,7 @@ mod tests {
             vec![0.2, 0.2, 0.2, 0.8, 0.8, 0.8],
         )
         .expect("valid image");
-        let mut recipe = EditRecipe::default();
+        let mut recipe = neutral_recipe();
         recipe.light.tone_curve.darks = 0.1;
         recipe.light.tone_curve.highlights = -0.1;
         apply_adjustments(&mut image, &recipe).expect("tone curve adjustment");
@@ -1645,7 +1730,7 @@ mod tests {
             vec![0.9, 0.2, 0.2, 0.1, 0.1, 0.1],
         )
         .expect("valid image");
-        let mut recipe = EditRecipe::default();
+        let mut recipe = neutral_recipe();
         recipe.color.hsl.channels[0].hue = 0.5;
         recipe.color.grading.shadows[2] = 1.0;
         apply_adjustments(&mut image, &recipe).expect("color adjustment");
@@ -1660,7 +1745,7 @@ mod tests {
         let source = [-0.25, 1.5, 2.25];
         let mut image = LinearRgbImage::new(1, 1, 3, LinearRgbSpace::Rec2020D65, source.to_vec())
             .expect("valid HDR image");
-        let mut recipe = EditRecipe::default();
+        let mut recipe = neutral_recipe();
         recipe.color.hsl.channels[4].hue = 0.5;
 
         apply_adjustments(&mut image, &recipe).expect("valid HSL adjustment");
@@ -1753,7 +1838,7 @@ mod tests {
             ],
         )
         .expect("valid asymmetric HDR image");
-        let mut recipe = EditRecipe::default();
+        let mut recipe = neutral_recipe();
         recipe.light.exposure_ev = 1.25;
         recipe.light.contrast = -0.4;
         recipe.light.highlights = -0.7;
@@ -1810,7 +1895,7 @@ mod tests {
         let source = vec![-0.4, -0.2, -0.1];
         let mut image = LinearRgbImage::new(1, 1, 3, LinearRgbSpace::Rec2020D65, source.clone())
             .expect("valid image");
-        let mut recipe = EditRecipe::default();
+        let mut recipe = neutral_recipe();
         recipe.light.shadows = 1.0;
 
         apply_adjustments(&mut image, &recipe).expect("valid tonal adjustment");
@@ -1843,7 +1928,7 @@ mod tests {
         let mut image =
             LinearRgbImage::new(1, 1, 3, LinearRgbSpace::Rec2020D65, vec![0.4, 0.4, 0.4])
                 .expect("valid image");
-        let mut recipe = EditRecipe::default();
+        let mut recipe = neutral_recipe();
         recipe.color.grading.shadows[0] = 1.0;
 
         apply_adjustments(&mut image, &recipe).expect("valid grading adjustment");

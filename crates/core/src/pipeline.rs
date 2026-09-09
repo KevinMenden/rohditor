@@ -299,11 +299,12 @@ pub struct ExportRenderResult {
 }
 
 /// A linear Rec.2020 preview after normalization, white balance, demosaic, and
-/// camera color conversion, but before interactive adjustments.
+/// camera color conversion, but before base rendering and interactive adjustments.
 ///
 /// This is the cache/upload boundary shared by the CPU reference path and the
-/// Phase 5 GPU backend. Downstream light/color edits, orientation, and output
-/// conversion can change without rebuilding this base.
+/// Phase 5 GPU backend. Standard and Neutral consume this same scene-linear
+/// base; rendering, downstream edits, orientation, and output conversion can
+/// change without rebuilding it.
 #[derive(Debug, Clone)]
 pub struct DemosaicedBase {
     image: LinearRgbImage<f32>,

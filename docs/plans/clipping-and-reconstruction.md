@@ -21,9 +21,9 @@ default-method decision.
 
 | Area | Status | Role | Next decision |
 | --- | --- | --- | --- |
-| Off | **Implemented** | Preserve normalized CFA data unchanged | Remains the default |
+| Off | **Implemented** | Preserve normalized CFA data unchanged | Keep as the explicit pass-through reference |
 | Shared highlight crate and detection primitives | **Implemented** | Independent, deterministic CPU processing on normalized Bayer mosaics | Extend only when a new algorithm needs a real shared primitive |
-| Clip | **Implemented** | Destructive neutralizing baseline | Keep as a predictable fallback and comparison method |
+| Clip | **Implemented, default** | Destructive neutralizing baseline | Keep as the current predictable default until evidence supports another change |
 | Local ratios v1 | **Implemented** | Conservative reconstruction of small, partially clipped regions | Validate quality against Opposed before considering a default change |
 | Opposed / local inpainting | **Implemented, opt-in** | Camera-native local opposing-channel recovery with explicit fallbacks | Refresh benchmark/corpus evidence; do not change the default yet |
 | Segmentation reconstruction | **Planned later** | Region-aware recovery for larger clipped areas | Start only after Opposed failure cases are measured |
@@ -31,7 +31,7 @@ default-method decision.
 | LCh reconstruction | **Deferred** | Historical alternative | Add only if comparisons reveal a gap the selected methods do not cover |
 | Hard output-gamut clipping | **Implemented baseline** | Clamp linear sRGB to the display/output range | Preserve for compatibility and comparison |
 | Chroma-compressing gamut mapping | **Planned separately** | Map out-of-gamut RGB without independent channel clipping | Implement after its colorimetric contract is fixed |
-| Dedicated scene-to-display tone mapping | **Planned separately** | Compress scene-referred dynamic range | Reconcile with existing Light controls before adding a new stage |
+| Rohditor Standard base rendering | **Planned separately** | Provide a fixed, versioned scene-to-display baseline | Follow [`standard-rendering-profile.md`](standard-rendering-profile.md); do not duplicate its implementation here |
 
 The intended quality progression is:
 
@@ -47,7 +47,10 @@ RAW highlight handling
 RGB output handling
     current hard gamut clip
       -> chroma-compressing gamut map
-      -> dedicated tone mapper when HDR/scene-to-display needs justify it
+
+Scene-to-display rendering
+    current neutral/identity baseline
+      -> Rohditor Standard base rendering
 ```
 
 LCh is deliberately not on the main implementation path. It is not rejected
@@ -66,8 +69,9 @@ decode immutable RawFrame
   -> demosaic
   -> preview resample where applicable
   -> white balance and camera -> Rec.2020
-  -> scene-light and creative edits
-  -> scene-to-display tone mapping           future crates/tonemap
+  -> user Exposure
+  -> selected base rendering                 future Standard, Neutral identity
+  -> remaining Light and Color edits
   -> Rec.2020 -> output gamut mapping         current core, future crates/gamut
   -> output transfer function and quantize
 ```
@@ -204,8 +208,9 @@ Off is a true pass-through at the highlight stage:
 - diagnostics report `HighlightDiagnostics::Off`; and
 - reconstructed camera RGB remains reusable across WB changes.
 
-Off remains the recipe default. Neither the presence of more advanced methods
-nor a successful synthetic test is enough to change that default.
+Off remains the explicit pass-through/reference choice. It is not the current
+recipe default; changing the default away from Clip remains a separate,
+evidence-led decision.
 
 ### 3.3 Clip — implemented baseline
 
@@ -225,6 +230,7 @@ all WB gains by the same positive scale does not alter which sites Clip affects.
 
 Implemented behavior:
 
+- current shared recipe default;
 - default threshold `1.0`, validated in `0.5 ..= 1.5`;
 - negative and below-limit values remain unchanged;
 - values above a per-color limit are capped in place;
@@ -600,7 +606,7 @@ Working-gamut compression during camera-to-Rec.2020 conversion is a separate
 future decision. Do not silently reuse the output mapper there: its target,
 purpose, and acceptable appearance tradeoffs differ.
 
-## 7. Separate tone-mapping plan
+## 7. Separate base-rendering plan
 
 Tone mapping compresses scene-referred dynamic range; it does not reconstruct
 missing RAW channels and it is not gamut mapping.
@@ -612,60 +618,43 @@ four-region tone curve with CPU/GPU behavior. Those are creative Light edits.
 There is no dedicated scene-to-display tone-mapping stage or independent
 `rohditor-tonemap` crate.
 
-### 7.2 First tone-mapping slice
+### 7.2 Canonical implementation route
 
-**Entry condition:** real HDR or high-dynamic-range scene cases show that the
-existing Light controls plus output clipping cannot produce a stable default
-display rendering without manual compensation.
+The requirement for a pleasant default RAW rendering now satisfies the former
+entry condition for a dedicated scene-to-display transform. The complete first
+slice is planned in
+[`standard-rendering-profile.md`](standard-rendering-profile.md).
 
-**Goal:** add one understandable scene-to-display curve before considering a
-menu of filmic looks.
+That plan owns the `Rohditor Standard` and `Rohditor Neutral` recipe model,
+process version, curve contract, ordering around the existing Light controls,
+CPU/GPU implementation, cache identity, UI/CLI seams, tuning corpus, and
+acceptance gates. This roadmap continues to own the independent gamut work in
+Section 6.
 
-Implementation plan:
-
-1. Audit the existing Light-tone LUT and tone curve to eliminate semantic
-   overlap. State which operations are user edits and which are display-range
-   rendering policy.
-2. Specify one curve first—most likely a luminance-preserving shoulder or
-   sigmoid—with exposure anchor, middle-gray behavior, white point, asymptote,
-   negative-input policy, and invertibility/monotonicity requirements.
-3. Put reusable math in `rohditor-tonemap` only when the contract is stable.
-   Operate on typed linear RGB and preserve chromaticity by scaling from a
-   clearly defined luminance or norm; do not apply independent channel curves
-   accidentally.
-4. Decide ownership explicitly: creative parameters belong in the edit recipe;
-   target-display parameters belong in render/output settings. Do not store one
-   value in both.
-5. Add exact tests for black, middle gray, white, over-range highlights,
-   negatives, saturated colors, monotonicity, continuity, finite output, and
-   CPU/GPU parity.
-6. Compare tone-map-before-gamut-map with the reverse order on saturated HDR
-   fixtures and fix one pipeline order with tests.
-7. Integrate preview and export together, add method/version cache identity,
-   preserve async frame handoff, and benchmark the kernel separately.
-8. Evaluate highlight roll-off, local contrast, hue stability, and interaction
-   with existing Highlights/Whites and tone-curve controls on a fixed corpus.
-
-AgX-style transforms, multiple filmic curves, local tone mapping, and automatic
-parameter selection are out of scope for the first slice.
+Do not create a second tone-mapping checklist here. The shared non-negotiable
+boundary is that base rendering occurs before target-output gamut mapping, the
+two algorithms retain independent identities, and their order is verified on
+saturated HDR fixtures before either becomes a production default.
 
 ## 8. Execution order
 
 The recommended order is:
 
-1. Keep Off, Clip, and Local ratios stable and refresh their benchmark/private
-   corpus evidence when making quality claims.
-2. Keep the implemented Opposed contract and refresh its benchmark/private
-   corpus evidence.
-3. Compare all implemented RAW methods and decide whether any method is ready
-   to replace Off as the default. A default change is a separate, evidence-led
-   decision.
-4. Implement Segmentation only if region-level failures justify it.
-5. Run the Guided Laplacian research gate, then choose its typed domain and
-   crate before implementation.
-6. Pursue chroma-compressing gamut mapping independently of RAW reconstruction.
-7. Add a dedicated tone mapper only after its need and relationship to current
-   Light controls are demonstrated.
+1. Keep Off, Clip, Local ratios, and Opposed stable. Refresh their
+   benchmark/private-corpus evidence before making new quality or default
+   claims; Clip remains the current recipe default.
+2. Implement chroma-compressing gamut mapping independently of RAW
+   reconstruction, following Section 6.
+3. Implement Rohditor Standard following
+   [`standard-rendering-profile.md`](standard-rendering-profile.md). Development
+   may overlap the gamut work, but Standard must not become the production
+   default until the combined tone-before-gamut path passes both plans' gates.
+4. Implement Segmentation only if measured region-level reconstruction failures
+   justify it.
+5. Run the Guided Laplacian research gate only after its correct processing
+   domain and expected quality/cost benefit are clear.
+6. Keep LCh deferred unless comparisons reveal a gap the selected methods do
+   not cover.
 
 ## 9. Verification commands
 

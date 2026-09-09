@@ -4,14 +4,15 @@ use std::time::{Duration, Instant};
 
 use half::f16;
 use rohditor_core::{
-    CameraCalibration, CameraProfileKey, CancellationToken, CorrectionComponents, DemosaicedBase,
-    LINEAR_REC2020_TO_XYZ_D65, Matrix3, OpticsProvenance, OutputGeometry, ReconstructedPreview,
-    XYZ_D65_TO_LINEAR_SRGB, camera_profile_key, resolve_camera_colour,
+    BASE_RENDERING_LUT_SIZE, CameraCalibration, CameraProfileKey, CancellationToken,
+    CorrectionComponents, DemosaicedBase, LINEAR_REC2020_TO_XYZ_D65, Matrix3, OpticsProvenance,
+    OutputGeometry, ReconstructedPreview, XYZ_D65_TO_LINEAR_SRGB, camera_profile_key,
+    resolve_camera_colour, standard_base_rendering_lut,
 };
 use rohditor_demosaic::WhiteBalanceGains;
 use rohditor_edit::{
     EditRecipe, HighlightAdjustments, LIGHT_TONE_LUT_SIZE, LensProfileSelection, LightToneLut,
-    WhiteBalance,
+    RenderingProfileSelection, WhiteBalance,
 };
 use rohditor_image::{LinearRgbSpace, Orientation};
 
@@ -474,6 +475,7 @@ pub struct GpuPreviewProcessor {
     pipeline: wgpu::ComputePipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     parameters: wgpu::Buffer,
+    base_rendering_lut: wgpu::Buffer,
     light_tone_lut: wgpu::Buffer,
 }
 
@@ -544,6 +546,16 @@ impl GpuPreviewProcessor {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -575,6 +587,17 @@ impl GpuPreviewProcessor {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let base_rendering_lut = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("rohditor shared base-rendering LUT"),
+            size: (BASE_RENDERING_LUT_SIZE * size_of::<f32>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(
+            &base_rendering_lut,
+            0,
+            bytemuck::cast_slice(standard_base_rendering_lut().values()),
+        );
 
         Ok(Self {
             device: device.clone(),
@@ -583,6 +606,7 @@ impl GpuPreviewProcessor {
             pipeline,
             bind_group_layout,
             parameters,
+            base_rendering_lut,
             light_tone_lut,
         })
     }
@@ -813,6 +837,10 @@ impl GpuPreviewProcessor {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: self.light_tone_lut.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: self.base_rendering_lut.as_entire_binding(),
                 },
             ],
         });
@@ -1150,7 +1178,7 @@ fn build_parameters(
     let rec2020_to_srgb = LINEAR_REC2020_TO_XYZ_D65.then(XYZ_D65_TO_LINEAR_SRGB);
     let mut words = [0_u32; PARAMETER_WORDS];
     words[0] = recipe.light.exposure_ev.exp2().to_bits();
-    words[1] = recipe.light.contrast.exp2().to_bits();
+    words[1] = rendering_profile_code(recipe.rendering.profile);
     words[2] = recipe.color.saturation.to_bits();
     words[3] = recipe.color.vibrance.to_bits();
     words[4] = recipe.light.highlights.to_bits();
@@ -1177,6 +1205,13 @@ fn build_parameters(
     write_matrix_rows(&mut words[28..40], camera_to_linear_rec2020);
     write_matrix_rows(&mut words[40..52], rec2020_to_srgb);
     words
+}
+
+fn rendering_profile_code(profile: RenderingProfileSelection) -> u32 {
+    match profile {
+        RenderingProfileSelection::RohditorNeutral => 0,
+        RenderingProfileSelection::RohditorStandard { .. } => 1,
+    }
 }
 
 fn write_matrix_rows(destination: &mut [u32], matrix: Matrix3) {
@@ -1257,13 +1292,31 @@ mod tests {
             [1.0_f32.to_bits(), 0.0_f32.to_bits(), 0.0_f32.to_bits(), 0]
         );
         assert_eq!(f32::from_bits(parameters[0]), 2.0);
-        assert_eq!(f32::from_bits(parameters[1]), 2_f32.powf(-0.5));
+        assert_eq!(parameters[1], 1);
         assert_eq!(f32::from_bits(parameters[2]), 1.25);
         assert_eq!(f32::from_bits(parameters[3]), 0.4);
         assert_eq!(f32::from_bits(parameters[4]), 0.2);
         assert_eq!(f32::from_bits(parameters[7]), -0.1);
         assert_eq!(f32::from_bits(parameters[8]), 0.05);
         assert_eq!(f32::from_bits(parameters[11]), -0.04);
+
+        recipe.rendering.profile = RenderingProfileSelection::NEUTRAL;
+        let neutral_geometry =
+            OutputGeometry::new(7, 5, Orientation::Rotate90, None).expect("full-frame geometry");
+        let neutral_parameters = build_parameters(
+            (7, 5),
+            (5, 7),
+            Orientation::Rotate90,
+            neutral_geometry,
+            &recipe,
+            WhiteBalanceGains {
+                red: 1.0,
+                green: 1.0,
+                blue: 1.0,
+            },
+            Matrix3::identity(),
+        );
+        assert_eq!(neutral_parameters[1], 0);
     }
 
     #[test]
@@ -1498,7 +1551,7 @@ mod tests {
             max_long_edge: 16,
             ..PreviewOptions::default()
         };
-        let base_recipe = EditRecipe::default();
+        let base_recipe = standard_dynamic_recipe();
         let mut aggregate = vec![GpuParityStats::default(); controls.len()];
         let mut queue_samples = Vec::with_capacity(controls.len() * 8);
         let mut submission_samples = Vec::with_capacity(controls.len() * 8);
@@ -1583,8 +1636,9 @@ mod tests {
             max_long_edge: 8,
             ..PreviewOptions::default()
         };
+        let initial_recipe = standard_dynamic_recipe();
         let reconstructed = CpuPipeline::default()
-            .prepare_preview_reconstruction(&frame, &EditRecipe::default(), options)
+            .prepare_preview_reconstruction(&frame, &initial_recipe, options)
             .expect("synthetic reconstruction should develop");
         let source = processor
             .upload_prepared(
@@ -1593,9 +1647,9 @@ mod tests {
             )
             .expect("camera-native source should upload");
         let first = processor
-            .render(&source, &EditRecipe::default(), None)
+            .render(&source, &initial_recipe, None)
             .expect("initial GPU preview should render");
-        let mut adjusted_recipe = EditRecipe::default();
+        let mut adjusted_recipe = standard_dynamic_recipe();
         adjusted_recipe.color.white_balance = WhiteBalance::ManualMultipliers {
             red: 0.75,
             green: 1.0,
@@ -1734,8 +1788,9 @@ mod tests {
         let mut session = decoder.open(&path).expect("private ARW should open");
         let frame = session.decode().expect("private ARW should decode");
         let options = PreviewOptions::default();
+        let base_recipe = standard_dynamic_recipe();
         let reconstructed = CpuPipeline::default()
-            .prepare_preview_reconstruction(&frame, &EditRecipe::default(), options)
+            .prepare_preview_reconstruction(&frame, &base_recipe, options)
             .expect("private preview reconstruction should develop");
         let source = processor
             .upload_prepared(
@@ -1825,8 +1880,9 @@ mod tests {
         let mut session = decoder.open(&path).expect("private ARW should open");
         let frame = session.decode().expect("private ARW should decode");
         let options = PreviewOptions::default();
+        let base_recipe = standard_dynamic_recipe();
         let reconstructed = CpuPipeline::default()
-            .prepare_preview_reconstruction(&frame, &EditRecipe::default(), options)
+            .prepare_preview_reconstruction(&frame, &base_recipe, options)
             .expect("private preview reconstruction should develop");
         let source = processor
             .upload_prepared(
@@ -1835,7 +1891,7 @@ mod tests {
             )
             .expect("private camera-native source should upload");
         let mut gpu_frame = processor
-            .render(&source, &EditRecipe::default(), None)
+            .render(&source, &base_recipe, None)
             .expect("initial GPU preview should render");
         processor
             .wait_for_queue()
@@ -1843,7 +1899,7 @@ mod tests {
         let mut samples = Vec::new();
 
         for index in 1..=40 {
-            let mut recipe = EditRecipe::default();
+            let mut recipe = standard_dynamic_recipe();
             recipe.color.white_balance = WhiteBalance::ManualMultipliers {
                 red: 0.8 + index as f32 / 200.0,
                 green: 1.0,
@@ -2068,32 +2124,35 @@ mod tests {
     }
 
     fn gpu_control_matrix() -> Vec<(&'static str, EditRecipe)> {
-        let mut controls = Vec::new();
-        let mut recipe = EditRecipe::default();
+        let mut controls = vec![
+            ("standard", standard_dynamic_recipe()),
+            ("neutral", neutral_recipe()),
+        ];
+        let mut recipe = neutral_recipe();
         recipe.light.exposure_ev = 0.8;
         controls.push(("exposure", recipe));
 
-        let mut recipe = EditRecipe::default();
+        let mut recipe = neutral_recipe();
         recipe.light.contrast = -0.35;
         controls.push(("contrast", recipe));
 
-        let mut recipe = EditRecipe::default();
+        let mut recipe = neutral_recipe();
         recipe.light.highlights = 0.6;
         controls.push(("highlights", recipe));
 
-        let mut recipe = EditRecipe::default();
+        let mut recipe = neutral_recipe();
         recipe.light.shadows = -0.55;
         controls.push(("shadows", recipe));
 
-        let mut recipe = EditRecipe::default();
+        let mut recipe = neutral_recipe();
         recipe.light.whites = 0.45;
         controls.push(("whites", recipe));
 
-        let mut recipe = EditRecipe::default();
+        let mut recipe = neutral_recipe();
         recipe.light.blacks = -0.45;
         controls.push(("blacks", recipe));
 
-        let mut recipe = EditRecipe::default();
+        let mut recipe = neutral_recipe();
         recipe.light.tone_curve = ToneCurve {
             shadows: 0.15,
             darks: -0.1,
@@ -2102,15 +2161,15 @@ mod tests {
         };
         controls.push(("tone_curve", recipe));
 
-        let mut recipe = EditRecipe::default();
+        let mut recipe = neutral_recipe();
         recipe.color.saturation = 1.35;
         controls.push(("saturation", recipe));
 
-        let mut recipe = EditRecipe::default();
+        let mut recipe = neutral_recipe();
         recipe.color.vibrance = 0.65;
         controls.push(("vibrance", recipe));
 
-        let mut recipe = EditRecipe::default();
+        let mut recipe = neutral_recipe();
         recipe.color.white_balance = WhiteBalance::ManualMultipliers {
             red: 0.78,
             green: 1.0,
@@ -2118,14 +2177,14 @@ mod tests {
         };
         controls.push(("white_balance_manual", recipe));
 
-        let mut recipe = EditRecipe::default();
+        let mut recipe = neutral_recipe();
         recipe.color.white_balance = WhiteBalance::TemperatureTint {
             temperature: 4_800.0,
             tint: 0.2,
         };
         controls.push(("white_balance_temperature", recipe));
 
-        let mut recipe = EditRecipe::default();
+        let mut recipe = standard_dynamic_recipe();
         recipe.light.exposure_ev = 0.65;
         recipe.light.contrast = -0.25;
         recipe.light.highlights = 0.35;
@@ -2147,6 +2206,18 @@ mod tests {
         };
         controls.push(("combined_supported", recipe));
         controls
+    }
+
+    fn neutral_recipe() -> EditRecipe {
+        let mut recipe = standard_dynamic_recipe();
+        recipe.rendering.profile = RenderingProfileSelection::NEUTRAL;
+        recipe
+    }
+
+    fn standard_dynamic_recipe() -> EditRecipe {
+        let mut recipe = EditRecipe::default();
+        recipe.raw.highlights.method = HighlightMethod::Off;
+        recipe
     }
 
     fn all_test_orientations() -> [Orientation; 8] {

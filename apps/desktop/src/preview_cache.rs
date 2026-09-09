@@ -10,7 +10,9 @@ use rohditor_core::{
 #[cfg(test)]
 use rohditor_core::{DatabaseProvenance, LensProfileSummary};
 use rohditor_demosaic::DemosaicAlgorithm;
-use rohditor_edit::{EditRecipe, HighlightMethod, LensProfileSelection, WhiteBalance};
+use rohditor_edit::{
+    EditRecipe, HighlightMethod, LensProfileSelection, RenderingProfileSelection, WhiteBalance,
+};
 use rohditor_image::{DisplayRgbImage, Orientation};
 use rohditor_raw::{RawFrame, SourceIdentity};
 
@@ -96,6 +98,7 @@ impl PreviewCacheKeys {
         };
         let adjusted = AdjustedPreviewKey {
             demosaiced: demosaiced.clone(),
+            rendering_profile: RenderingProfileKey::from(recipe.rendering.profile),
             exposure_bits: recipe.light.exposure_ev.to_bits(),
             contrast_bits: recipe.light.contrast.to_bits(),
             highlights_bits: recipe.light.highlights.to_bits(),
@@ -348,6 +351,7 @@ impl From<WhiteBalance> for WhiteBalanceKey {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AdjustedPreviewKey {
     demosaiced: DemosaicedBaseKey,
+    rendering_profile: RenderingProfileKey,
     exposure_bits: u32,
     contrast_bits: u32,
     highlights_bits: u32,
@@ -365,6 +369,23 @@ struct AdjustedPreviewKey {
     orientation: Orientation,
     crop_bits: Option<[u64; 4]>,
     output_policy: OutputPolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RenderingProfileKey {
+    Neutral,
+    Standard { process_version: u16 },
+}
+
+impl From<RenderingProfileSelection> for RenderingProfileKey {
+    fn from(value: RenderingProfileSelection) -> Self {
+        match value {
+            RenderingProfileSelection::RohditorNeutral => Self::Neutral,
+            RenderingProfileSelection::RohditorStandard { process_version } => {
+                Self::Standard { process_version }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -715,6 +736,30 @@ mod tests {
         assert_ne!(
             opposed_keys.reconstructed,
             keys(&opposed_threshold).reconstructed
+        );
+    }
+
+    #[test]
+    fn rendering_profile_invalidates_only_adjusted_pixels_and_keys_process_version() {
+        let standard = EditRecipe::default();
+        let mut neutral = standard.clone();
+        neutral.rendering.profile = RenderingProfileSelection::RohditorNeutral;
+
+        let standard_keys = keys(&standard);
+        let neutral_keys = keys(&neutral);
+        assert_eq!(standard_keys.decoded, neutral_keys.decoded);
+        assert_eq!(standard_keys.reconstructed, neutral_keys.reconstructed);
+        assert_eq!(standard_keys.demosaiced, neutral_keys.demosaiced);
+        assert_ne!(standard_keys.adjusted, neutral_keys.adjusted);
+
+        let mut future_process = standard;
+        future_process.rendering.profile = RenderingProfileSelection::RohditorStandard {
+            process_version: rohditor_edit::ROHDITOR_STANDARD_PROCESS_VERSION + 1,
+        };
+        assert_ne!(
+            standard_keys.adjusted,
+            keys(&future_process).adjusted,
+            "pixel-producing process versions must not share adjusted cache entries"
         );
     }
 

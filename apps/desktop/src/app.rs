@@ -9,7 +9,7 @@ use eframe::egui;
 use rohditor_core::{
     CameraCalibration, DatabaseProvenance, DitherMode, ExportFormat, ExportMetadataPolicy,
     ExportSettings, HighlightDiagnostics, Histogram, JPEG_QUALITY_DEFAULT, MemoryEstimate,
-    PngBitDepth, PreviewOptions, ProfileMatch, StageTimings, camera_color_transform,
+    OutputPolicy, PngBitDepth, PreviewOptions, ProfileMatch, StageTimings, camera_color_transform,
     hsl_channel_weights_from_display_rgb, paths_refer_to_same_file, resolve_camera_colour,
     srgb_to_linear_srgb,
 };
@@ -1639,6 +1639,11 @@ impl RohditorApp {
                 next.color.camera_profile = selection;
                 changed |= document.edits.set_discrete(next);
             }
+            if let Some(selection) = output.rendering_profile {
+                let mut next = document.edits.recipe().clone();
+                next.rendering.profile = selection;
+                changed |= document.edits.set_discrete(next);
+            }
             if let Some(method) = output.highlight_method {
                 changed |= set_highlight_method(&mut document.edits, method);
             }
@@ -2270,6 +2275,12 @@ impl RohditorApp {
                     backend: preview.worker.backend.label().to_owned(),
                     algorithm: preview.worker.algorithm.stable_name().to_owned(),
                     profile: camera_profile_diagnostic(document),
+                    rendering: rendering_profile_diagnostic(
+                        document.edits.recipe().rendering.profile,
+                    ),
+                    output_policy: match self.settings.render_options().output_policy {
+                        OutputPolicy::ClipToSrgb => "Clip to sRGB".to_owned(),
+                    },
                     source_state: match preview.worker.resolution {
                         PreviewResolution::SourceScale => "1:1",
                         PreviewResolution::CropToolFullFrame => "crop authoring",
@@ -2454,6 +2465,13 @@ fn camera_profile_diagnostic(document: &Document) -> String {
     .unwrap_or_else(|error| format!("unavailable ({error})"))
 }
 
+fn rendering_profile_diagnostic(profile: rohditor_edit::RenderingProfileSelection) -> String {
+    match profile.process_version() {
+        Some(version) => format!("{} v{version}", profile.display_name()),
+        None => profile.display_name().to_owned(),
+    }
+}
+
 fn source_scale_selected(document: Option<&Document>) -> bool {
     document.is_some_and(|document| document.source_scale_requested)
 }
@@ -2625,6 +2643,7 @@ fn document_panel_model(
         has_adjustments: document.edits.recipe() != &EditRecipe::default(),
         camera_profile,
         camera_profile_choices,
+        rendering_profile: document.edits.recipe().rendering.profile,
         values: AdjustmentValues {
             white_balance_mode,
             white_balance_red,
@@ -3522,6 +3541,56 @@ mod tests {
                 red: 1.6,
                 green: 0.8,
                 blue: 1.2,
+            }
+        );
+    }
+
+    #[test]
+    fn temperature_edit_starts_from_as_shot_balance() {
+        let mut edits = EditSession::default();
+
+        assert!(apply_adjustment_interaction(
+            &mut edits,
+            AdjustmentInteraction {
+                target: AdjustmentTarget::WhiteBalanceTemperature,
+                value: 7_200.0,
+                changed: true,
+                drag_started: false,
+                dragged: false,
+                drag_stopped: false,
+                reset: false,
+            },
+        ));
+        assert_eq!(
+            edits.recipe().color.white_balance,
+            WhiteBalance::TemperatureTint {
+                temperature: 7_200.0,
+                tint: TINT_RANGE.neutral,
+            }
+        );
+    }
+
+    #[test]
+    fn tint_edit_starts_from_as_shot_balance() {
+        let mut edits = EditSession::default();
+
+        assert!(apply_adjustment_interaction(
+            &mut edits,
+            AdjustmentInteraction {
+                target: AdjustmentTarget::WhiteBalanceTint,
+                value: 0.25,
+                changed: true,
+                drag_started: false,
+                dragged: false,
+                drag_stopped: false,
+                reset: false,
+            },
+        ));
+        assert_eq!(
+            edits.recipe().color.white_balance,
+            WhiteBalance::TemperatureTint {
+                temperature: TEMPERATURE_RANGE.neutral,
+                tint: 0.25,
             }
         );
     }
