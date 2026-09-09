@@ -8,10 +8,14 @@ use thiserror::Error;
 mod geometry;
 mod light;
 mod optics;
+mod rendering;
 
 pub use geometry::{GeometryAdjustments, NormalizedCropRect};
 pub use light::{LIGHT_TONE_LUT_SIZE, LightToneLut};
 pub use optics::{LensProfileSelection, OpticsAdjustments};
+pub use rendering::{
+    ROHDITOR_STANDARD_PROCESS_VERSION, RenderingAdjustments, RenderingProfileSelection,
+};
 
 /// Validation errors for serialized, non-destructive edit recipes.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -22,7 +26,7 @@ pub struct EditError {
 }
 
 /// Schema version of the current non-destructive edit recipe.
-pub const EDIT_RECIPE_SCHEMA_VERSION: u32 = 8;
+pub const EDIT_RECIPE_SCHEMA_VERSION: u32 = 9;
 const LEGACY_EDIT_RECIPE_SCHEMA_VERSION: u32 = 1;
 const PREVIOUS_EDIT_RECIPE_SCHEMA_VERSION: u32 = 2;
 const PREVIOUS_RAW_EDIT_RECIPE_SCHEMA_VERSION: u32 = 3;
@@ -30,6 +34,7 @@ const PREVIOUS_HIGHLIGHT_EDIT_RECIPE_SCHEMA_VERSION: u32 = 4;
 const PREVIOUS_LOCAL_RATIOS_EDIT_RECIPE_SCHEMA_VERSION: u32 = 5;
 const PREVIOUS_OPPOSED_EDIT_RECIPE_SCHEMA_VERSION: u32 = 6;
 const PREVIOUS_CAMERA_PROFILE_EDIT_RECIPE_SCHEMA_VERSION: u32 = 7;
+const PREVIOUS_OPTICS_EDIT_RECIPE_SCHEMA_VERSION: u32 = 8;
 
 /// Inclusive range and neutral value for one adjustment parameter.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -135,21 +140,20 @@ pub const COLOR_GRADING_RANGE: ParameterRange = ParameterRange {
 pub const HSL_CHANNEL_COUNT: usize = 8;
 
 /// White balance relative to the decoder's as-shot channel multipliers.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum WhiteBalance {
+    #[default]
     AsShot,
-    ManualMultipliers { red: f32, green: f32, blue: f32 },
-    TemperatureTint { temperature: f32, tint: f32 },
-}
-
-impl Default for WhiteBalance {
-    fn default() -> Self {
-        Self::TemperatureTint {
-            temperature: TEMPERATURE_RANGE.neutral,
-            tint: TINT_RANGE.neutral,
-        }
-    }
+    ManualMultipliers {
+        red: f32,
+        green: f32,
+        blue: f32,
+    },
+    TemperatureTint {
+        temperature: f32,
+        tint: f32,
+    },
 }
 
 /// Camera color transform selected for a recipe. Automatic is intentionally
@@ -326,7 +330,8 @@ pub struct RawAdjustments {
     pub highlights: HighlightAdjustments,
 }
 
-/// Scene-light controls applied after camera color conversion.
+/// Exposure is scene-referred. The remaining Light controls are applied after
+/// the selected base rendering and operate on its linear display-rendered result.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LightAdjustments {
     #[serde(default)]
@@ -345,9 +350,10 @@ pub struct LightAdjustments {
     pub tone_curve: ToneCurve,
 }
 
-/// Four broad point-curve regions. Values are scene-linear luminance offsets
-/// around the identity curve; keeping the points grouped makes a future free
-/// point-curve editor a compatible extension of the recipe.
+/// Four broad point-curve regions. Values are linear luminance offsets around
+/// the identity curve, evaluated after the selected base rendering. Keeping
+/// the points grouped makes a future free point-curve editor a compatible
+/// extension of the recipe.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToneCurve {
     #[serde(default)]
@@ -480,6 +486,7 @@ pub struct EditRecipe {
     pub raw: RawAdjustments,
     #[serde(default)]
     pub optics: OpticsAdjustments,
+    pub rendering: RenderingAdjustments,
     pub light: LightAdjustments,
     pub color: ColorAdjustments,
     pub geometry: GeometryAdjustments,
@@ -491,6 +498,7 @@ impl Default for EditRecipe {
             schema_version: EDIT_RECIPE_SCHEMA_VERSION,
             raw: RawAdjustments::default(),
             optics: OpticsAdjustments::default(),
+            rendering: RenderingAdjustments::default(),
             light: LightAdjustments::default(),
             color: ColorAdjustments::default(),
             geometry: GeometryAdjustments::default(),
@@ -509,6 +517,7 @@ impl EditRecipe {
                 ),
             });
         }
+        self.rendering.profile.validate()?;
         if let LensProfileSelection::Lensfun { profile_id } = &self.optics.profile {
             if profile_id.trim().is_empty() {
                 return Err(EditError {
@@ -636,6 +645,8 @@ struct RecipeFields {
     #[serde(default)]
     optics: OpticsAdjustments,
     #[serde(default)]
+    rendering: Option<RenderingAdjustments>,
+    #[serde(default)]
     light: LightAdjustments,
     #[serde(default)]
     color: ColorAdjustments,
@@ -671,6 +682,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
                 schema_version: EDIT_RECIPE_SCHEMA_VERSION,
                 raw: legacy_raw_adjustments(),
                 optics: OpticsAdjustments::default(),
+                rendering: RenderingAdjustments::NEUTRAL,
                 light,
                 color,
                 geometry: GeometryAdjustments {
@@ -686,6 +698,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
                 schema_version: EDIT_RECIPE_SCHEMA_VERSION,
                 raw: legacy_raw_adjustments(),
                 optics: OpticsAdjustments::default(),
+                rendering: RenderingAdjustments::NEUTRAL,
                 light: fields.light,
                 color: fields.color,
                 geometry: fields.geometry,
@@ -700,15 +713,21 @@ impl<'de> Deserialize<'de> for EditRecipe {
                 schema_version: EDIT_RECIPE_SCHEMA_VERSION,
                 raw: fields.raw,
                 optics: OpticsAdjustments::default(),
+                rendering: RenderingAdjustments::NEUTRAL,
                 light: fields.light,
                 color: fields.color,
                 geometry: fields.geometry,
             }
-        } else if fields.schema_version == PREVIOUS_CAMERA_PROFILE_EDIT_RECIPE_SCHEMA_VERSION {
+        } else if matches!(
+            fields.schema_version,
+            PREVIOUS_CAMERA_PROFILE_EDIT_RECIPE_SCHEMA_VERSION
+                | PREVIOUS_OPTICS_EDIT_RECIPE_SCHEMA_VERSION
+        ) {
             Self {
                 schema_version: EDIT_RECIPE_SCHEMA_VERSION,
                 raw: fields.raw,
                 optics: fields.optics,
+                rendering: RenderingAdjustments::NEUTRAL,
                 light: fields.light,
                 color: fields.color,
                 geometry: fields.geometry,
@@ -718,6 +737,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
                 schema_version: fields.schema_version,
                 raw: fields.raw,
                 optics: fields.optics,
+                rendering: fields.rendering.unwrap_or_default(),
                 light: fields.light,
                 color: fields.color,
                 geometry: fields.geometry,
@@ -779,20 +799,22 @@ fn validate_parameter(
 mod tests {
     use super::{
         CameraProfileSelection, EDIT_RECIPE_SCHEMA_VERSION, EditRecipe, HIGHLIGHT_THRESHOLD_RANGE,
-        HighlightMethod, LensProfileSelection, NormalizedCropRect, WhiteBalance,
+        HighlightMethod, LensProfileSelection, NormalizedCropRect,
+        ROHDITOR_STANDARD_PROCESS_VERSION, RenderingAdjustments, RenderingProfileSelection,
+        WhiteBalance,
     };
 
     #[test]
-    fn neutral_recipe_has_documented_identity_values() {
+    fn default_recipe_uses_standard_with_neutral_visible_controls() {
         let recipe = EditRecipe::default();
         assert_eq!(recipe.schema_version, EDIT_RECIPE_SCHEMA_VERSION);
         assert_eq!(
-            recipe.color.white_balance,
-            WhiteBalance::TemperatureTint {
-                temperature: 6_500.0,
-                tint: 0.0,
+            recipe.rendering.profile,
+            RenderingProfileSelection::RohditorStandard {
+                process_version: ROHDITOR_STANDARD_PROCESS_VERSION,
             }
         );
+        assert_eq!(recipe.color.white_balance, WhiteBalance::AsShot);
         assert_eq!(recipe.light.exposure_ev, 0.0);
         assert_eq!(recipe.light.contrast, 0.0);
         assert_eq!(recipe.color.saturation, 1.0);
@@ -815,12 +837,79 @@ mod tests {
     #[test]
     fn deserialization_rejects_unknown_schema_versions() {
         let json = r#"{
-            "schema_version": 9,
+            "schema_version": 10,
             "light": {},
             "color": {},
             "geometry": {}
         }"#;
         assert!(serde_json::from_str::<EditRecipe>(json).is_err());
+    }
+
+    #[test]
+    fn rendering_profiles_round_trip_and_unknown_process_versions_are_rejected() {
+        for profile in [
+            RenderingProfileSelection::RohditorNeutral,
+            RenderingProfileSelection::RohditorStandard {
+                process_version: ROHDITOR_STANDARD_PROCESS_VERSION,
+            },
+        ] {
+            let mut recipe = EditRecipe::default();
+            recipe.rendering.profile = profile;
+            let json = serde_json::to_string(&recipe).expect("serialize rendering profile");
+            match profile {
+                RenderingProfileSelection::RohditorNeutral => {
+                    assert!(json.contains(r#""profile":"rohditor_neutral""#));
+                }
+                RenderingProfileSelection::RohditorStandard { process_version } => {
+                    assert!(json.contains(r#""profile":"rohditor_standard""#));
+                    assert!(json.contains(&format!(r#""process_version":{process_version}"#)));
+                }
+            }
+            let round_trip =
+                serde_json::from_str::<EditRecipe>(&json).expect("deserialize rendering profile");
+            assert_eq!(round_trip.rendering.profile, profile);
+        }
+
+        let mut recipe = EditRecipe::default();
+        recipe.rendering.profile = RenderingProfileSelection::RohditorStandard {
+            process_version: ROHDITOR_STANDARD_PROCESS_VERSION + 1,
+        };
+        let error = recipe
+            .validate()
+            .expect_err("future process version must fail");
+        assert_eq!(error.field, "rendering.profile.process_version");
+    }
+
+    #[test]
+    fn current_missing_rendering_defaults_to_standard_and_old_versions_migrate_to_neutral() {
+        let current = r#"{
+            "schema_version": 9,
+            "light": {},
+            "color": {},
+            "geometry": {}
+        }"#;
+        let current = serde_json::from_str::<EditRecipe>(current).expect("current default fields");
+        assert_eq!(
+            current.rendering.profile,
+            RenderingProfileSelection::STANDARD
+        );
+
+        for schema_version in 1..=8 {
+            let json = if schema_version == 1 {
+                format!(r#"{{"schema_version":{schema_version}}}"#)
+            } else {
+                format!(
+                    r#"{{"schema_version":{schema_version},"light":{{}},"color":{{}},"geometry":{{}}}}"#
+                )
+            };
+            let migrated = serde_json::from_str::<EditRecipe>(&json)
+                .unwrap_or_else(|error| panic!("schema {schema_version} should migrate: {error}"));
+            assert_eq!(
+                migrated.rendering,
+                RenderingAdjustments::NEUTRAL,
+                "schema {schema_version}"
+            );
+        }
     }
 
     #[test]
@@ -837,20 +926,14 @@ mod tests {
     #[test]
     fn missing_highlight_fields_receive_the_current_defaults() {
         let json = r#"{
-            "schema_version": 8,
+            "schema_version": 9,
             "light": {},
             "color": {},
             "geometry": {}
         }"#;
         let recipe = serde_json::from_str::<EditRecipe>(json).expect("current default fields");
         assert_eq!(recipe.raw.highlights.method, HighlightMethod::Clip);
-        assert_eq!(
-            recipe.color.white_balance,
-            WhiteBalance::TemperatureTint {
-                temperature: 6_500.0,
-                tint: 0.0,
-            }
-        );
+        assert_eq!(recipe.color.white_balance, WhiteBalance::AsShot);
         assert_eq!(recipe.raw.highlights.clip.threshold, 1.0);
         assert_eq!(recipe.raw.highlights.local_ratios.detection_threshold, 1.0);
         assert_eq!(recipe.raw.highlights.opposed.detection_threshold, 1.0);

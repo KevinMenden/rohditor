@@ -314,17 +314,18 @@ pub(crate) fn subsection_header(ui: &mut egui::Ui, title: &str) {
     ui.add_space(5.0);
 }
 
-pub(crate) fn adjustment_section(
+pub(crate) fn adjustment_section<R>(
     ui: &mut egui::Ui,
     title: &str,
-    add_contents: impl FnOnce(&mut egui::Ui),
-) {
-    theme::adjustment_section_frame().show(ui, |ui| {
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let result = theme::adjustment_section_frame().show(ui, |ui| {
         ui.label(egui::RichText::new(title).size(14.0).strong());
         ui.add_space(7.0);
-        add_contents(ui);
+        add_contents(ui)
     });
     ui.add_space(metrics::ADJUSTMENT_SECTION_GAP);
+    result.inner
 }
 
 pub(crate) fn icon_button(
@@ -428,17 +429,32 @@ pub(crate) fn toolbar_button(
 }
 
 pub(crate) fn primary_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> egui::Response {
-    ui.add_enabled(
-        enabled,
-        egui::Button::new(
-            egui::RichText::new(label)
-                .strong()
-                .color(colors::APP_BACKGROUND),
+    ui.add_enabled(enabled, primary_button_widget(label))
+}
+
+pub(crate) fn full_width_primary_button(
+    ui: &mut egui::Ui,
+    label: &str,
+    enabled: bool,
+) -> egui::Response {
+    ui.add_enabled_ui(enabled, |ui| {
+        ui.add_sized(
+            egui::vec2(ui.available_width(), 34.0),
+            primary_button_widget(label),
         )
-        .fill(colors::ACCENT)
-        .stroke(egui::Stroke::new(1.0_f32, colors::ACCENT_ACTIVE))
-        .corner_radius(metrics::RADIUS_SMALL),
+    })
+    .inner
+}
+
+fn primary_button_widget(label: &str) -> egui::Button<'_> {
+    egui::Button::new(
+        egui::RichText::new(label)
+            .strong()
+            .color(colors::APP_BACKGROUND),
     )
+    .fill(colors::ACCENT)
+    .stroke(egui::Stroke::new(1.0_f32, colors::ACCENT_ACTIVE))
+    .corner_radius(metrics::RADIUS_SMALL)
 }
 
 pub(crate) fn dropdown(

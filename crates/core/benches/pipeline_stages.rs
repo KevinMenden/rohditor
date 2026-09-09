@@ -6,7 +6,7 @@ use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_mai
 use rohditor_core::{
     OutputPolicy, RawCropPolicy, apply_adjustments, normalize_raw_preview, render_display_srgb8,
 };
-use rohditor_edit::EditRecipe;
+use rohditor_edit::{EditRecipe, RenderingProfileSelection};
 use rohditor_image::{LinearRgbImage, LinearRgbSpace, Orientation};
 use rohditor_raw::{
     CaptureMetadata, CfaPattern, LevelPattern, PhotometricInterpretation, RawFileInfo, RawFrame,
@@ -42,15 +42,17 @@ fn benchmark_adjustments(criterion: &mut Criterion) {
         (PREVIEW_WIDTH * PREVIEW_HEIGHT) as u64,
     ));
     let recipes = [
+        ("standard_2560x1703", EditRecipe::default()),
+        ("neutral_2560x1703", neutral_recipe()),
         ("fused_global_2560x1703", {
-            let mut recipe = EditRecipe::default();
+            let mut recipe = neutral_recipe();
             recipe.light.exposure_ev = 0.7;
             recipe.light.contrast = 0.25;
             recipe.color.saturation = 1.2;
             recipe
         }),
         ("tonal_curve_2560x1703", {
-            let mut recipe = EditRecipe::default();
+            let mut recipe = neutral_recipe();
             recipe.light.highlights = -0.4;
             recipe.light.shadows = 0.35;
             recipe.light.tone_curve.darks = 0.15;
@@ -58,14 +60,14 @@ fn benchmark_adjustments(criterion: &mut Criterion) {
             recipe
         }),
         ("hsl_2560x1703", {
-            let mut recipe = EditRecipe::default();
+            let mut recipe = neutral_recipe();
             recipe.color.hsl.channels[0].hue = 0.2;
             recipe.color.hsl.channels[3].saturation = -0.3;
             recipe.color.hsl.channels[5].luminance = 0.2;
             recipe
         }),
         ("grading_2560x1703", {
-            let mut recipe = EditRecipe::default();
+            let mut recipe = neutral_recipe();
             recipe.color.grading.shadows = [0.4, -0.1, 0.2];
             recipe.color.grading.midtones = [-0.2, 0.25, 0.1];
             recipe.color.grading.highlights = [0.1, 0.2, -0.3];
@@ -85,6 +87,12 @@ fn benchmark_adjustments(criterion: &mut Criterion) {
         });
     }
     group.finish();
+}
+
+fn neutral_recipe() -> EditRecipe {
+    let mut recipe = EditRecipe::default();
+    recipe.rendering.profile = RenderingProfileSelection::NEUTRAL;
+    recipe
 }
 
 fn benchmark_output_conversion(criterion: &mut Criterion) {

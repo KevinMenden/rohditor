@@ -1,6 +1,8 @@
 use eframe::egui;
 use rohditor_core::{HSL_CHANNEL_CENTERS, Histogram, evaluate_tone_curve};
-use rohditor_edit::{CameraProfileSelection, HighlightMethod, ToneCurve};
+use rohditor_edit::{
+    CameraProfileSelection, HighlightMethod, RenderingProfileSelection, ToneCurve,
+};
 
 use super::PickerMode;
 use super::optics::{self, OpticsAction, OpticsPanelModel};
@@ -118,6 +120,7 @@ pub(crate) struct DocumentPanelModel {
     pub values: AdjustmentValues,
     pub camera_profile: CameraProfileSelection,
     pub camera_profile_choices: Vec<CameraProfileChoice>,
+    pub rendering_profile: RenderingProfileSelection,
     pub ranges: AdjustmentRanges,
     pub export_ready: bool,
     pub export_in_progress: bool,
@@ -145,6 +148,7 @@ pub(crate) struct AdjustmentInteraction {
 #[derive(Debug, Default)]
 pub(crate) struct AdjustmentPanelOutput {
     pub camera_profile: Option<CameraProfileSelection>,
+    pub rendering_profile: Option<RenderingProfileSelection>,
     pub import_camera_profile: bool,
     pub white_balance_mode: Option<WhiteBalanceMode>,
     pub highlight_method: Option<HighlightMethod>,
@@ -245,11 +249,12 @@ pub(crate) fn show(
                                 document.has_adjustments,
                                 egui::Button::new("Reset all adjustments").frame(false),
                             )
-                            .on_hover_text("Restore the neutral recipe")
+                            .on_hover_text("Restore Rohditor Standard defaults")
                             .clicked();
                     });
-                    output.optics_filter =
-                        optics::show(ui, &mut document.optics, &mut output.optics_action);
+                    output.optics_filter = widgets::adjustment_section(ui, "Optics", |ui| {
+                        optics::show(ui, &mut document.optics, &mut output.optics_action)
+                    });
                     widgets::adjustment_section(ui, "Export", |ui| {
                         show_export_settings(ui, export_settings);
                         let export_label = if document.export_in_progress {
@@ -649,22 +654,16 @@ fn show_light_controls(
         );
         let _ = threshold_response.on_hover_text(tooltip);
     }
-    let auto_tone_response = ui
-        .add_enabled_ui(document.auto_tone_available, |ui| {
-            ui.add_sized(
-                egui::vec2(ui.available_width(), 34.0),
-                egui::Button::new(egui::RichText::new("Auto tone").strong())
-                    .fill(colors::ACCENT)
-                    .stroke(egui::Stroke::new(1.0_f32, colors::ACCENT_ACTIVE))
-                    .corner_radius(metrics::RADIUS_SMALL),
-            )
-        })
-        .inner
-        .on_hover_text(if document.auto_tone_available {
-            "Display-referred heuristic: set exposure and clipping guards from the current histogram"
-        } else {
-            "Auto tone becomes available when the current preview histogram is ready"
-        });
+    let auto_tone_response = widgets::full_width_primary_button(
+        ui,
+        "Auto tone",
+        document.auto_tone_available,
+    )
+    .on_hover_text(if document.auto_tone_available {
+        "Display-referred heuristic: set exposure and clipping guards from the current histogram"
+    } else {
+        "Auto tone becomes available when the current preview histogram is ready"
+    });
     output.auto_tone = auto_tone_response.clicked();
     record_slider(
         ui,
@@ -793,6 +792,47 @@ fn show_color_controls(
         output.import_camera_profile = true;
     }
     ui.add_space(4.0);
+    let original_rendering = document.rendering_profile;
+    let mut rendering = original_rendering;
+    widgets::dropdown(
+        ui,
+        "rendering_profile",
+        "Rendering profile",
+        rendering.display_name(),
+        |ui| {
+            ui.selectable_value(
+                &mut rendering,
+                RenderingProfileSelection::STANDARD,
+                "Rohditor Standard",
+            )
+            .on_hover_text("Balanced tone and highlight rolloff for a finished starting point");
+            ui.selectable_value(
+                &mut rendering,
+                RenderingProfileSelection::NEUTRAL,
+                "Rohditor Neutral",
+            )
+            .on_hover_text(
+                "No base tone or color rendering; useful for manual development and comparison",
+            );
+        },
+    );
+    ui.label(
+        egui::RichText::new(match rendering {
+            RenderingProfileSelection::RohditorStandard { .. } => {
+                "Balanced tone and highlight rolloff for a finished starting point"
+            }
+            RenderingProfileSelection::RohditorNeutral => {
+                "No base tone or color rendering; useful for manual development and comparison"
+            }
+        })
+        .small()
+        .color(colors::TEXT_MUTED),
+    );
+    if rendering != original_rendering {
+        output.rendering_profile = Some(rendering);
+        document.rendering_profile = rendering;
+    }
+    ui.add_space(4.0);
     widgets::subsection_header(ui, "White balance");
     let mut mode = document.values.white_balance_mode;
     widgets::dropdown(
@@ -853,7 +893,7 @@ fn show_color_controls(
     }
     ui.add_space(4.0);
 
-    if document.values.white_balance_mode == WhiteBalanceMode::TemperatureTint {
+    if document.values.white_balance_mode != WhiteBalanceMode::ManualMultipliers {
         record_slider(
             ui,
             &mut output.interactions,
@@ -886,7 +926,7 @@ fn show_color_controls(
                 scale: ValueScale::OffsetPercent,
             },
         );
-    } else if document.values.white_balance_mode == WhiteBalanceMode::ManualMultipliers {
+    } else {
         for (label, target, value) in [
             (
                 "Red multiplier",

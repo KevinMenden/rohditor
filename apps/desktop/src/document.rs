@@ -185,6 +185,29 @@ mod tests {
     }
 
     #[test]
+    fn rendering_profile_selection_is_one_undoable_edit_and_reset_uses_standard() {
+        let mut edits = EditSession::default();
+        let mut neutral = EditRecipe::default();
+        neutral.rendering.profile = rohditor_edit::RenderingProfileSelection::NEUTRAL;
+
+        assert!(edits.set_discrete(neutral));
+        assert_eq!(
+            edits.recipe().rendering.profile,
+            rohditor_edit::RenderingProfileSelection::NEUTRAL
+        );
+        assert!(edits.reset());
+        assert_eq!(
+            edits.recipe().rendering.profile,
+            rohditor_edit::RenderingProfileSelection::STANDARD
+        );
+        assert!(edits.undo());
+        assert_eq!(
+            edits.recipe().rendering.profile,
+            rohditor_edit::RenderingProfileSelection::NEUTRAL
+        );
+    }
+
+    #[test]
     fn one_slider_gesture_has_many_revisions_but_one_undo_step() {
         let mut edits = EditSession::default();
         edits.begin_gesture();

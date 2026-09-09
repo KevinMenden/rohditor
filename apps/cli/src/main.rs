@@ -19,8 +19,8 @@ use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_edit::{
     BLACKS_RANGE, CONTRAST_RANGE, CameraProfileSelection, EXPOSURE_EV_RANGE, EditRecipe,
     HIGHLIGHT_THRESHOLD_RANGE, HIGHLIGHTS_RANGE, HighlightMethod, LensProfileSelection,
-    OpticsAdjustments, SATURATION_RANGE, SHADOWS_RANGE, TEMPERATURE_RANGE, TINT_RANGE,
-    TONE_CURVE_RANGE, VIBRANCE_RANGE, WHITES_RANGE, WhiteBalance,
+    OpticsAdjustments, RenderingProfileSelection, SATURATION_RANGE, SHADOWS_RANGE,
+    TEMPERATURE_RANGE, TINT_RANGE, TONE_CURVE_RANGE, VIBRANCE_RANGE, WHITES_RANGE, WhiteBalance,
 };
 use rohditor_image::{DisplayRgbImage, DisplayTransfer, Orientation};
 use rohditor_raw::{
@@ -154,6 +154,10 @@ enum Command {
         /// Matrix-only DNG Camera Profile to embed in the recipe.
         #[arg(long, value_name = "PROFILE.dcp")]
         camera_profile: Option<PathBuf>,
+
+        /// Base rendering: Standard tone rendering or Neutral identity rendering.
+        #[arg(long, value_enum, default_value_t = CliRenderingProfile::Standard)]
+        rendering_profile: CliRenderingProfile,
 
         /// White-balance temperature in Kelvin (2000 to 12000). Use with --tint.
         #[arg(long, allow_hyphen_values = true)]
@@ -298,6 +302,22 @@ enum CliHighlightMethod {
     LocalRatios,
     #[value(name = "opposed")]
     Opposed,
+}
+
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+enum CliRenderingProfile {
+    #[default]
+    Standard,
+    Neutral,
+}
+
+impl From<CliRenderingProfile> for RenderingProfileSelection {
+    fn from(value: CliRenderingProfile) -> Self {
+        match value {
+            CliRenderingProfile::Standard => Self::STANDARD,
+            CliRenderingProfile::Neutral => Self::NEUTRAL,
+        }
+    }
 }
 
 impl From<CliHighlightMethod> for HighlightMethod {
@@ -466,6 +486,7 @@ fn main() -> Result<()> {
             highlight_detection_threshold,
             white_balance,
             camera_profile,
+            rendering_profile,
             temperature,
             tint,
             crop,
@@ -501,6 +522,7 @@ fn main() -> Result<()> {
                 highlight_detection_threshold,
                 white_balance,
                 camera_profile,
+                rendering_profile,
                 temperature,
                 tint,
                 crop,
@@ -671,6 +693,7 @@ struct DevelopArguments {
     highlight_detection_threshold: Option<f32>,
     white_balance: Option<RgbMultipliers>,
     camera_profile: Option<PathBuf>,
+    rendering_profile: CliRenderingProfile,
     temperature: Option<f32>,
     tint: f32,
     crop: CliCropPolicy,
@@ -816,6 +839,7 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
                 tint,
             }
         }
+        (None, None, 0.0) => WhiteBalance::AsShot,
         (None, None, tint) => WhiteBalance::TemperatureTint {
             temperature: TEMPERATURE_RANGE.neutral,
             tint,
@@ -835,6 +859,7 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
     if let Some(profile) = camera_profile {
         recipe.color.camera_profile = CameraProfileSelection::Matrix(profile);
     }
+    recipe.rendering.profile = arguments.rendering_profile.into();
     recipe.color.white_balance = white_balance;
     recipe.light.exposure_ev = arguments.exposure;
     recipe.light.contrast = arguments.contrast;
@@ -939,7 +964,7 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
     };
     let optics_report = format_optics_report(&recipe.optics, result.optics_provenance.as_ref());
     write_stdout(&format!(
-        "Developed {}x{} {}-bit sRGB {}{} with {} demosaic to {} ({} bytes, {})\n{}\n{}\n{}\nEstimated CPU buffer peak: {} MiB",
+        "Developed {}x{} {}-bit sRGB {}{} with {} demosaic to {} ({} bytes, {})\nRendering profile: {}{}\nOutput gamut policy: Clip to sRGB\n{}\n{}\n{}\nEstimated CPU buffer peak: {} MiB",
         report.width,
         report.height,
         report.bit_depth.bits(),
@@ -953,6 +978,12 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
         } else {
             "no EXIF"
         },
+        recipe.rendering.profile.display_name(),
+        recipe
+            .rendering
+            .profile
+            .process_version()
+            .map_or_else(String::new, |version| format!(" v{version}")),
         format_stage_timings(decode_time, result.timings, encode_time),
         highlight_report,
         optics_report,
@@ -1103,6 +1134,7 @@ fn quality_crops(
         output_policy: OutputPolicy::ClipToSrgb,
     };
     let mut recipe = EditRecipe::default();
+    recipe.rendering.profile = RenderingProfileSelection::NEUTRAL;
     recipe.geometry.orientation_override = Some(Orientation::Normal);
     let settings = ExportSettings {
         format: ExportFormat::Png {
@@ -1795,10 +1827,10 @@ mod tests {
     use rohditor_raw::{CfaPattern, EncodedPreviewFormat, PhotometricInterpretation};
 
     use super::{
-        Cli, CliCropPolicy, CliDemosaic, CliHighlightMethod, CliMetadata, Command,
-        DemosaicAlgorithm, DevelopArguments, QualityCropSpec, RgbMultipliers, crop_display_image,
-        develop_export_settings, extract_preview, format_photometric, nearest_neighbor_2x,
-        parse_lens_profile, parse_libraw_pgm, validate_highlight_options,
+        Cli, CliCropPolicy, CliDemosaic, CliHighlightMethod, CliMetadata, CliRenderingProfile,
+        Command, DemosaicAlgorithm, DevelopArguments, QualityCropSpec, RgbMultipliers,
+        crop_display_image, develop_export_settings, extract_preview, format_photometric,
+        nearest_neighbor_2x, parse_lens_profile, parse_libraw_pgm, validate_highlight_options,
         validate_preview_extension,
     };
 
@@ -1847,6 +1879,7 @@ mod tests {
             highlight_detection_threshold: None,
             white_balance: None,
             camera_profile: None,
+            rendering_profile: CliRenderingProfile::Standard,
             temperature: None,
             tint: 0.0,
             crop: CliCropPolicy::Recommended,
@@ -1946,6 +1979,36 @@ mod tests {
             panic!("expected develop command");
         };
         assert_eq!(camera_profile, Some(PathBuf::from("studio.dcp")));
+    }
+
+    #[test]
+    fn develop_parses_rendering_profile_and_defaults_to_standard() {
+        let defaulted = Cli::try_parse_from(["rohditor-cli", "develop", "input.arw", "output.jpg"])
+            .expect("default rendering should parse");
+        let Command::Develop {
+            rendering_profile, ..
+        } = defaulted.command
+        else {
+            panic!("expected develop command");
+        };
+        assert!(matches!(rendering_profile, CliRenderingProfile::Standard));
+
+        let neutral = Cli::try_parse_from([
+            "rohditor-cli",
+            "develop",
+            "input.arw",
+            "output.jpg",
+            "--rendering-profile",
+            "neutral",
+        ])
+        .expect("neutral rendering should parse");
+        let Command::Develop {
+            rendering_profile, ..
+        } = neutral.command
+        else {
+            panic!("expected develop command");
+        };
+        assert!(matches!(rendering_profile, CliRenderingProfile::Neutral));
     }
 
     #[test]

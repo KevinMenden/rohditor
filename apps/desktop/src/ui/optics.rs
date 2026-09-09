@@ -44,8 +44,6 @@ pub(crate) fn show(
     model: &mut OpticsPanelModel,
     action: &mut Option<OpticsAction>,
 ) -> Option<String> {
-    widgets::section_header(ui, "Optics");
-
     let mut filter_changed = false;
     if model.candidates.len() > 1 {
         ui.horizontal(|ui| {
