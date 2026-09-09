@@ -9,7 +9,8 @@ use crate::coordinator::{JobKind, PreviewResolution, WorkerEvent};
 use crate::ui::viewport::PreviewSource;
 
 use super::{
-    DocumentPreviewDiagnostics, RohditorApp, install_texture, white_balance_from_camera_sample,
+    DocumentPreviewDiagnostics, RohditorApp, document_as_shot_colour, install_texture,
+    white_balance_from_camera_sample,
 };
 
 impl RohditorApp {
@@ -210,6 +211,13 @@ impl RohditorApp {
                 self.pending_white_balance_pick = None;
                 let document = current_document;
                 document.preview_status = None;
+                let Some(resolved) = document_as_shot_colour(document) else {
+                    document.error = Some(
+                        "The RAW file did not provide a usable camera colour calibration"
+                            .to_owned(),
+                    );
+                    return;
+                };
                 let as_shot = document
                     .frame
                     .as_ref()
@@ -220,14 +228,9 @@ impl RohditorApp {
                             .as_ref()
                             .map(|info| info.as_shot_white_balance)
                     });
-                let Some(as_shot) = as_shot else {
-                    document.error = Some(
-                        "The RAW file did not provide usable as-shot white-balance metadata"
-                            .to_owned(),
-                    );
-                    return;
-                };
-                let Some(balance) = white_balance_from_camera_sample(sample, as_shot) else {
+                let Some(balance) =
+                    white_balance_from_camera_sample(sample, resolved.camera_to_xyz_d65, as_shot)
+                else {
                     document.error = Some(
                         "That sample could not be represented by the available white-balance range"
                             .to_owned(),

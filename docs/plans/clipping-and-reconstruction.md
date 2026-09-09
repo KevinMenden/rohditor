@@ -1,710 +1,427 @@
-# Clipping, highlight reconstruction, gamut mapping, and tone mapping
+# Highlight reconstruction, base rendering, and output gamut mapping
 
-**Status:** active consolidated plan
+**Status:** active implementation roadmap
 
-**Last implementation audit:** 2026-09-07
+**Last audit:** 2026-09-09
 
-**Canonical scope:** RAW highlight handling, later RGB gamut mapping, and later
-tone mapping
+This document is the current owner for three related but separate display
+problems:
 
-This document replaces the original architectural proposal and the separate
-Clip and Local ratios implementation plans. It records the contracts that have
-already landed and defines the remaining work without treating future ideas as
-implemented features.
+1. missing or unreliable sensor-channel information in RAW highlights;
+2. scene-to-display base rendering; and
+3. mapping complete RGB pixels into the chosen output gamut.
 
-Implementation status below describes the current source tree. It does not
-claim that old benchmark runs, private-corpus reviews, or host-GPU runs are
-current. Those evidence gates remain explicit wherever they affect a quality or
-default-method decision.
+They must remain separate stages. A highlight method must not be used to hide
+an output-gamut problem, and a gamut mapper must not alter the camera-native
+source retained for preview reuse.
 
-## 1. Current status and roadmap
+## 1. Current status
 
-| Area | Status | Role | Next decision |
+| Area | Status | Current behavior | Remaining work |
 | --- | --- | --- | --- |
-| Off | **Implemented** | Preserve normalized CFA data unchanged | Keep as the explicit pass-through reference |
-| Shared highlight crate and detection primitives | **Implemented** | Independent, deterministic CPU processing on normalized Bayer mosaics | Extend only when a new algorithm needs a real shared primitive |
-| Clip | **Implemented, default** | Destructive neutralizing baseline | Keep as the current predictable default until evidence supports another change |
-| Local ratios v1 | **Implemented** | Conservative reconstruction of small, partially clipped regions | Validate quality against Opposed before considering a default change |
-| Opposed / local inpainting | **Implemented, opt-in** | Camera-native local opposing-channel recovery with explicit fallbacks | Refresh benchmark/corpus evidence; do not change the default yet |
-| Segmentation reconstruction | **Planned later** | Region-aware recovery for larger clipped areas | Start only after Opposed failure cases are measured |
-| Guided Laplacian reconstruction | **Research planned** | Multiscale, structure-guided high-quality mode | Confirm its processing domain and cost before fixing an API |
-| LCh reconstruction | **Deferred** | Historical alternative | Add only if comparisons reveal a gap the selected methods do not cover |
-| Hard output-gamut clipping | **Implemented baseline** | Clamp linear sRGB to the display/output range | Preserve for compatibility and comparison |
-| Chroma-compressing gamut mapping | **Planned separately** | Map out-of-gamut RGB without independent channel clipping | Implement after its colorimetric contract is fixed |
-| Rohditor Standard base rendering | **Planned separately** | Provide a fixed, versioned scene-to-display baseline | Follow [`standard-rendering-profile.md`](standard-rendering-profile.md); do not duplicate its implementation here |
+| Highlight `Off` | Implemented | RAW-stage pass-through | Keep as reference method |
+| Highlight `Clip` | Implemented, current RAW default | WB-aware destructive channel ceiling | Keep as compatibility baseline |
+| Highlight `LocalRatios` | Implemented | Conservative local camera-native reconstruction | Refresh corpus evidence |
+| Highlight `Opposed` | Implemented, opt-in | Camera-native local inpainting with explicit fallback | Refresh corpus evidence; do not silently change default |
+| Segmentation reconstruction | Not implemented | No region/component model exists | Add only for measured large-region failures |
+| Guided Laplacian reconstruction | Research only | No fixed processing-domain contract | Research domain, cost, and fallback behavior |
+| LCh reconstruction | Deferred | No implementation | Reconsider only if the spatial methods leave a measured gap |
+| Rohditor Standard | Implemented, current recipe default | Versioned luminance base LUT, CPU/GPU/CLI/desktop integration | Qualify appearance and interaction with output gamut |
+| Rohditor Neutral | Implemented | Identity base rendering for migrated/reference recipes | Retain as an explicit comparison mode |
+| Hard sRGB clipping | Implemented baseline | Rec.2020 to linear sRGB, per-channel clamp, sRGB transfer | Preserve as a reference/output fallback |
+| Chroma compression | Not implemented | No dedicated mapper or `OutputPolicy` variant | Implement the first output-gamut vertical slice below |
+| Wide-gamut/monitor ICC output | Not implemented | Export embeds sRGB ICC | Separate future color-management scope |
 
-The intended quality progression is:
+The current recipe schema in this checkout is 10. Standard rendering is
+already present in `crates/core/src/rendering.rs` and
+`crates/edit/src/rendering.rs`; no separate Standard plan is present in this
+checkout, so this document records its remaining qualification gates directly.
 
-```text
-RAW highlight handling
-    Off
-      -> Clip                         implemented baseline
-      -> Local ratios v1              implemented reconstruction
-      -> Opposed / local inpainting   implemented, opt-in
-      -> Segmentation                 later
-      -> Guided Laplacian             later, after a research gate
+## 2. Pipeline boundary and ordering
 
-RGB output handling
-    current hard gamut clip
-      -> chroma-compressing gamut map
-
-Scene-to-display rendering
-    current neutral/identity baseline
-      -> Rohditor Standard base rendering
-```
-
-LCh is deliberately not on the main implementation path. It is not rejected
-forever, but building it now would add another perceptual-space method before
-Rohditor has evaluated the more promising spatial approaches.
-
-## 2. Boundaries and non-negotiable contracts
-
-Highlight reconstruction, gamut mapping, and tone mapping solve different
-problems and must not share a catch-all crate or ambiguous setting.
+The current CPU reference path is:
 
 ```text
-decode immutable RawFrame
-  -> select sensor crop and normalize CFA samples
-  -> RAW highlight operation                 crates/highlight
-  -> demosaic
-  -> preview resample where applicable
-  -> white balance and camera -> Rec.2020
+immutable RawFrame
+  -> crop and black/white normalization
+  -> RAW highlight method (rohditor-highlight)
+  -> Bayer demosaic
+  -> lens correction, when enabled
+  -> preview resampling, for reduced previews
+  -> white balance and camera -> linear Rec.2020/D65
   -> user Exposure
-  -> selected base rendering                 future Standard, Neutral identity
+  -> base rendering (Standard or Neutral)
   -> remaining Light and Color edits
-  -> Rec.2020 -> output gamut mapping         current core, future crates/gamut
-  -> output transfer function and quantize
+  -> linear Rec.2020/D65 -> linear sRGB
+  -> output gamut policy (current Clip, future ChromaCompress)
+  -> sRGB transfer function and quantization
 ```
 
-The ordering between a future tone mapper and gamut mapper must be verified
-with saturated-color fixtures before either new mode ships. The diagram states
-the starting contract, not permission to couple the two implementations.
-
-### 2.1 RAW highlight boundary
-
-- `raw` decodes metadata and immutable sensor data.
-- `rohditor-highlight` consumes `rohditor_image::MosaicImage<f32>` after black
-  subtraction and white normalization and before demosaic.
-- The highlight crate must not depend on `raw`, `core`, `edit`, `gpu`, or an
-  application crate.
-- `core` resolves metadata, white balance, recipe intent, stage ordering,
-  cancellation, diagnostics, and errors.
-- `edit` owns versioned, serializable user intent.
-- Preview, Source 1:1, and export use the same deterministic CPU highlight
-  implementation. GPU work begins downstream from the retained reconstructed
-  source.
-- Algorithms consume and update the normalized mosaic rather than mutating
-  `RawFrame` or inventing a duplicate `RawHighlightInput` type.
-- Visible samples are validated; stride padding is never classified, counted,
-  or changed.
-- Checked dimension and allocation arithmetic, cancellation, deterministic
-  output, and a CPU correctness reference are required for every method.
-
-Do not add a public reconstruction trait until runtime polymorphism or an
-external implementation creates a concrete need. The current closed enum and
-static dispatch are simpler and make recipe coverage exhaustive.
-
-### 2.2 Detection is not one universal threshold
-
-Detection is separated from treatment, but the meaning of a threshold remains
-method-specific:
-
-- **Clip level:** a WB-dependent treatment ceiling selected to make the
-  post-WB channel ceilings equal.
-- **Detection level:** a camera-native boundary above which a sample is
-  *suspected clipped* for reconstruction.
-
-A normalized value at or above `1.0` is not proof of physical sensor
-saturation. Rohditor intentionally retains over-range normalized values, and
-diagnostics must not describe every such value as destroyed information.
-
-The common comparison at a supplied level is:
-
-```text
-suspected_or_affected := sample >= level
-numerically_changed   := sample > level       # Clip only
-```
-
-`detect_clipping`, `detect_local_ratios`, and `detect_opposed` materialize masks
-for diagnostics and tests. Hot paths may use the same scalar classification
-without allocating a full-frame mask.
-
-### 2.3 CPU/GPU and retained-preview boundary
-
-RAW highlight methods are CPU-only until a GPU implementation has exact CPU
-parity coverage. Uploading their camera-native result to the existing GPU
-preview does not make the reconstruction algorithm GPU-accelerated.
-
-Cache identity must include every input that can change reconstructed camera
-RGB:
-
-```text
-Off
-Clip { clip threshold bits, white-balance key }
-LocalRatios { detection threshold bits, algorithm version }
-Opposed { detection threshold bits, algorithm version }
-future method { all numerical options, algorithm version, WB if required }
-```
-
-Off, Local ratios, and Opposed support dynamic downstream white balance. Clip
-does not, because its pre-WB limits depend on the selected WB gains. Each
-future method must prove which category it belongs to rather than inheriting
-one silently.
-The desktop retains the last valid frame while a CPU rebuild is pending and
-discards stale document/revision results.
-
-## 3. Implemented RAW highlight foundation
-
-### 3.1 Crate and public API
-
-`crates/highlight` is implemented with this focused layout:
-
-```text
-crates/highlight/
-  src/
-    lib.rs           public types, errors, cancellation, algorithm version
-    detect.rs        Clip, Local-ratio, and Opposed classifiers and masks
-    clip.rs          destructive Clip pass
-    cells.rs         compact logical Bayer-cell summaries
-    local_ratios.rs  Local ratios v1
-    opposed.rs       Opposed / local inpainting v1
-  tests/
-    clip.rs
-    local_ratios.rs
-    opposed.rs
-  benches/
-    clip.rs
-    local_ratios.rs
-    opposed.rs
-```
-
-The crate depends only on `rohditor-image`, Rayon, and `thiserror` in normal
-builds. Its implemented public concepts include:
-
-- `ChannelClipLevels`, `ClipOutput`, and `ClipStats`;
-- `ChannelDetectionLevels`, `LocalRatioOptions`, `LocalRatioOutput`, and
-  `ReconstructionStats`;
-- `OpposedOptions`, `OpposedOutput`, and `OpposedStats`;
-- cancellable and non-cancellable Clip, Local-ratio, and Opposed entry points;
-- materialized `ClippingMask` entry points for all three classifications; and
-- `LOCAL_RATIOS_ALGORITHM_VERSION` and `OPPOSED_ALGORITHM_VERSION` for
-  preview-cache identity.
-
-`ReconstructionStats` currently maintains these invariants:
-
-```text
-suspected_clipped_sites = reconstructed_sites + fallback_sites
-changed_sites <= reconstructed_sites
-fully_unsupported_sites <= fallback_sites
-sum(suspected_by_channel) = suspected_clipped_sites
-```
-
-### 3.2 Off — implemented
-
-Off is a true pass-through at the highlight stage:
-
-- it performs no image traversal or image-sized allocation;
-- negative and over-range normalized samples are retained;
-- diagnostics report `HighlightDiagnostics::Off`; and
-- reconstructed camera RGB remains reusable across WB changes.
-
-Off remains the explicit pass-through/reference choice. It is not the current
-recipe default; changing the default away from Clip remains a separate,
-evidence-led decision.
-
-### 3.3 Clip — implemented baseline
-
-Clip is destructive treatment, not reconstruction. It caps normalized CFA
-sites before demosaic and invents no spatial detail.
-
-For validated active WB gains `g` and user threshold `t`:
-
-```text
-common_ceiling = t * min(g_r, g_g, g_b)
-limit_c        = common_ceiling / g_c
-output_c       = min(input_c, limit_c)
-```
-
-This guarantees `output_c * g_c <= common_ceiling` for every color. Multiplying
-all WB gains by the same positive scale does not alter which sites Clip affects.
-
-Implemented behavior:
-
-- current shared recipe default;
-- default threshold `1.0`, validated in `0.5 ..= 1.5`;
-- negative and below-limit values remain unchanged;
-- values above a per-color limit are capped in place;
-- `affected`, `changed`, nominal-over-white, and per-channel counts are kept
-  distinct;
-- all Bayer layouts and non-tight row strides are supported;
-- the preview cache includes the active WB selection; and
-- CLI, desktop control, undo/reset, diagnostics, preview, Source 1:1, and export
-  paths are wired.
-
-Clip remains useful even after better reconstruction lands: it is robust,
-cheap, honest about discarding color, and often appropriate for naturally
-neutral highlights such as clouds or specular light sources.
-
-### 3.4 Local ratios v1 — implemented reconstruction
-
-Local ratios uses a separate camera-native detection threshold. `core` expands
-the current scalar setting to equal red, green, and blue detection levels; it
-does not derive those levels from white balance.
-
-The implemented v1 estimator:
-
-1. validates visible samples and counts suspected sites;
-2. returns without allocating summaries when no site is suspected;
-3. partitions the mosaic into logical 2x2 Bayer cells using the image's actual
-   shifted Bayer pattern;
-4. stores compact immutable cell RGB means and flags, including partial cells
-   at odd image edges;
-5. searches candidate cells at Chebyshev radii one and two;
-6. estimates the missing target/support ratio using medians;
-7. uses a `0.5 EV` cross-channel consistency guard when two support channels
-   exist;
-8. requires two independent estimates to agree within `1 EV`;
-9. caps an accepted estimate at four times the detection level; and
-10. writes `max(original, estimate)`, so reconstruction never darkens a
-    suspected clipped site.
-
-The candidate minimum is three with two supporting channels and five with one.
-Dark or non-finite ratio operands are rejected. Unsupported sites remain
-unchanged; Local ratios does not silently fall back to Clip.
-
-This method is deliberately conservative and local. It is designed for
-isolated sites and small clipped areas with trustworthy nearby color. It cannot
-recover a large fully clipped region and should not claim otherwise.
-
-Local-ratio integration includes its method-specific recipe group, diagnostics,
-cache identity, dynamic-WB reuse, CPU/GPU handoff, and dedicated Criterion
-target. Opposed's separate integration slice is recorded in section 3.5.
-
-### 3.5 Opposed / local inpainting — implemented slice
-
-Opposed is an original camera-native Bayer-domain method informed by the
-opposed/inpainting family in darktable and RawTherapee. It is not a line-by-line
-port of either demosaiced-RGB implementation.
-
-Its frozen contract is:
-
-1. The input is normalized `MosaicImage<f32>` before white balance and
-   demosaic. Detection uses one user-controlled camera-native threshold,
-   expanded to equal R/G/B levels by `core`; white balance is not part of the
-   math and the result is reusable across dynamic-WB changes.
-2. The method builds immutable logical 2x2 Bayer-cell summaries using the
-   actual shifted CFA phase. Suspected samples (`sample >= level`) are excluded
-   from means; finite positive, non-suspected samples are valid evidence.
-3. For a suspected target with at least one clean opposing channel, the
-   opposing reference is the cube of the mean cube-root of the surviving
-   opposing channels. A median chrominance offset is then gathered from clean
-   target-channel cells in Chebyshev rings one through three. Candidates must
-   be above `0.2 × level`; when two opposing channels survive, their ratio must
-   agree within `0.75 EV` with the target cell.
-4. At least three candidates are required. The result is finite, capped at
-   `4 × level`, and written as `max(original, estimate)`, so valid sites and
-   suspected sites are never darkened. The fixed radii, tolerance, candidate
-   count, and bound are not user controls.
-5. A partially supported site falls back unchanged when it has insufficient
-   clean evidence. A fully unsupported site is counted separately. Opposed
-   never falls back implicitly to Local ratios or Clip, and all suspected,
-   reconstructed, changed, fallback, and unsupported counts satisfy the same
-   exact accounting invariants as the Local-ratio path.
-
-The vertical slice includes `opposed.rs`, method-specific options/output/stats,
-materialized detection, checked scratch estimates, schema-6 migration, CPU
-dispatch, cache identity with `OPPOSED_ALGORITHM_VERSION`, CLI and desktop
-controls/diagnostics, dynamic-WB reuse, and downstream GPU source matching.
-Opposed remains CPU-only; GPU receives its retained camera-native result.
-
-### 3.6 Remaining validation for the implemented methods
-
-The implementation is landed, but these are ongoing evidence requirements,
-especially before changing the default or claiming broad quality superiority:
-
-- record fresh benchmark numbers for no-clipping, sparse, edge-adjacent, and
-  large unsupported cases at representative dimensions;
-- an initial release Criterion run on 2026-09-07 measured Opposed at 8.23 ms
-  with no clipping, 46.92 ms with sparse clipping, and 61.07 ms with a fully
-  unsupported 6000x4000 fixture; the 37x23 padded fixtures measured 42.85 µs
-  and 44.38 µs respectively. These are host-specific kernel baselines, not
-  image-quality evidence;
-- compare Off, Clip, Local ratios, and Opposed on identical Source 1:1 sensor
-  crops and full-resolution exports from the private camera corpus;
-- record suspected/reconstructed/changed/fallback counts and scratch bytes;
-- include colored lights, saturated object boundaries, specular highlights,
-  clouds, and large fully clipped regions;
-- record every crop where Clip is visibly preferable and use failures as the
-  input set for Opposed; and
-- run downstream GPU regression tests on the RX 9070 XT without describing
-  them as GPU reconstruction benchmarks.
-
-## 4. Remaining RAW reconstruction plan
-
-Every new method is its own vertical slice. Do not add empty modules, enum
-variants, recipe fields, or UI controls for later phases before their algorithm
-is implemented and tested.
-
-### 4.1 Phase 3 — Opposed / local inpainting — completed implementation
-
-**Status:** the CPU vertical slice is implemented and remains opt-in. Corpus
-quality review and benchmark evidence are still open.
-
-**Goal:** improve chrominance continuity and boundary behavior without taking
-on segmentation or a multiscale solver.
-
-The implementation uses a Rohditor-specific Bayer-domain contract rather than
-claiming source-level parity with either reference application. The exact
-contract is recorded in section 3.5; the remaining work in this section is
-evidence gathering and failure-case review.
-
-#### Step A: freeze the algorithm contract
-
-The source study and implementation decisions were:
-
-1. Trace both reference implementations from input buffer through masks,
-   dilation/neighborhood construction, opposing-channel or chrominance
-   estimates, transition handling, and fallbacks.
-2. Record the exact processing domain, normalization assumptions, CFA handling,
-   constants, border policy, numerical bounds, and cancellation points.
-3. Identify which behavior is algorithmic and which is coupled to the source
-   application's pipeline.
-4. Create an original method informed by both references. No reference source
-   was copied into Rohditor, so there is no derived-source header to preserve;
-   the source map remains in section 10.
-5. Define whether the result is WB-independent. Cache behavior is a conclusion
-   of the math, not an API preference.
-6. Define explicit behavior for partially supported and fully unsupported
-   sites. Any fallback to Local ratios or Clip must be named in the method
-   contract and counted; it must not occur implicitly.
-
-The contract should expose only controls that materially affect user intent.
-Start with a detection threshold if one is required. Do not expose kernel
-radii, iteration counts, mask expansion, or tolerance constants merely because
-the implementation contains them.
-
-#### Step B: implemented isolated algorithm
-
-- Add `opposed.rs`; add `mask.rs` or neighborhood helpers only when sharing is
-  real rather than speculative.
-- Reuse `MosaicImage<f32>`, typed detection levels, error handling, and
-  cancellation. Reuse `cells.rs` only if its logical-cell representation fits
-  the frozen contract.
-- Consume the input mosaic and avoid an output-sized clone. Account for every
-  mask, temporary plane, and pyramid-like allocation with checked arithmetic.
-- Add method-specific options, output, and statistics rather than stretching
-  Local-ratio counters into ambiguous meanings.
-- Keep scalar CPU processing as the reference. Parallelize only independent
-  passes with deterministic reductions.
-
-#### Step C: implemented crate correctness coverage
-
-Synthetic asymmetric tests must include:
-
-- all four Bayer phases and both green locations;
-- one-channel and multi-channel clipping;
-- a flat colored surface crossing the clipping boundary;
-- a red/green object edge that would expose color bleeding;
-- thin structure crossing a clipped patch;
-- a colored light, a neutral specular highlight, and a fully clipped patch;
-- mask boundaries, odd dimensions, padding, invalid floats, cancellation, and
-  deterministic results across Rayon thread counts;
-- exact fallback/statistics invariants; and
-- explicit comparison fixtures where Local ratios fails and Opposed improves
-  the defined metric without harming valid samples.
-
-Quality assertions should use measurable properties—unchanged valid sites,
-hue/chroma continuity, edge leakage, bounded output, and finite results—not
-large brittle golden images alone.
-
-#### Step D: implemented vertical slice
-
-- Extend `HighlightMethod`, method-specific recipe settings, validation, schema
-  migration, CLI parsing, desktop controls, undo/reset, and diagnostics.
-- Add an exhaustive core dispatch branch immediately after normalization.
-- Add the method and algorithm version to preview cache identity.
-- Prove dynamic-WB compatibility or require exact-WB rebuilding.
-- Update timing and scratch-memory estimates before enabling the method on
-  full-resolution inputs.
-- Preserve newest-wins CPU preview handoff and downstream GPU source checks.
-
-#### Step E: benchmark and evaluate — open
-
-Benchmark validation/mask construction, reconstruction, total highlight-stage
-time, scratch bytes, and full preview preparation on no-clipping, sparse,
-edge-adjacent, and larger clipped regions. Then compare Off, Clip, Local ratios,
-and Opposed on fixed private-corpus crops.
-
-The implementation is complete; the open benchmark/corpus gate determines
-whether its quality wins justify broader use. It does not automatically become
-the default when it lands.
-
-### 4.2 Phase 4 — Segmentation-based reconstruction
-
-**Prerequisite:** Opposed is implemented and its remaining large-region or
-cross-edge failures are captured as reproducible fixtures.
-
-**Goal:** reason about contiguous clipped regions and their boundaries instead
-of allowing every target site to borrow unrelated nearby color.
-
-Implementation plan:
-
-1. Define a deterministic region mask and connected-component labeling pass
-   over suspected clipped sites. Specify Bayer-cell versus photosite
-   connectivity and border behavior before coding.
-2. Extract each region's boundary and filter candidates using valid-channel
-   support, brightness floors, gradients, and edge consistency.
-3. Produce a region estimate and confidence from boundary evidence. Confidence
-   must affect a named acceptance/fallback rule, not merely diagnostics.
+The order is a contract, not an implementation suggestion:
+
+- highlight reconstruction sees normalized CFA data before demosaic;
+- Standard operates on scene-linear Rec.2020 luminance before creative Light
+  and Color controls;
+- gamut mapping sees complete, adjusted linear RGB pixels;
+- transfer encoding and dithering happen after gamut mapping; and
+- GPU preview starts from the retained camera-native/demosaiced source and
+  must produce the same downstream result as the CPU reference.
+
+The output mapper is target-output behavior. It is not a camera profile, a
+white-balance operation, a highlight method, a scene-light edit, or a monitor
+profile. Working-gamut compression during camera calibration is explicitly
+out of scope for the first slice.
+
+## 3. Landed RAW highlight behavior
+
+The implemented foundation lives in `crates/highlight` and is already wired
+through recipe validation, schema migration, CPU dispatch, preview cache
+identity, CLI controls, desktop controls, diagnostics, and retained GPU-source
+provenance.
+
+The available methods are:
+
+- `Off`: no traversal or image-sized allocation; normalized values are kept;
+- `Clip`: computes WB-dependent common ceilings and caps CFA samples in place;
+- `LocalRatios`: reconstructs small partially clipped regions from logical
+  Bayer-cell ratios; and
+- `Opposed`: reconstructs camera-native cells with opposing-channel evidence,
+  explicit fallbacks, and method-specific statistics.
+
+The following contracts are already implemented and should not be re-planned:
+
+- RAW data is immutable; normalized mosaics are the mutable stage product.
+- Every method supports the four Bayer phases, visible row strides, odd edges,
+  checked allocation, cancellation, finite-output validation, and deterministic
+  statistics.
+- Cache identity includes method-specific numeric inputs and algorithm
+  versions. Clip is WB-sensitive; LocalRatios and Opposed are reusable across
+  dynamic downstream white balance.
+- Uploading a reconstructed source to `rohditor-gpu` does not claim that RAW
+  reconstruction itself is GPU accelerated.
+
+### Remaining highlight evidence
+
+The implementation is complete, but quality/default evidence is not:
+
+- compare Off, Clip, LocalRatios, and Opposed on identical Source 1:1 crops and
+  full-resolution exports from the private Sony A6400 corpus;
+- include neutral specular highlights, colored lights, clouds, saturated object
+  edges, thin structure, large clipped regions, border-touching regions, and
+  fully unsupported areas;
+- record reconstruction/fallback/unsupported counts, scratch bytes, wall time,
+  and visible regressions; and
+- keep Clip as the current default until a measured alternative is clearly
+  better for the intended first-version scope.
+
+## 4. Remaining RAW reconstruction work
+
+Do not add enum variants, recipe fields, UI controls, or empty cache branches
+for these methods before an isolated algorithm and a complete vertical slice
+are ready.
+
+### 4.1 Segmentation-based reconstruction
+
+**Entry condition:** the Opposed corpus review contains reproducible failures
+where region identity or boundary evidence, rather than a local opposing
+estimate, is the missing information.
+
+Implementation slice:
+
+1. Define the mask domain and connectivity (Bayer photosites versus logical
+   cells), border policy, and deterministic connected-component labeling.
+2. Extract each component boundary and filter candidate evidence by valid
+   channels, brightness, gradients, and edge consistency.
+3. Produce a region estimate and confidence. Confidence must change a named
+   accept/fallback decision, not only a diagnostic number.
 4. Fall back explicitly to Opposed or leave the region unchanged when evidence
-   is insufficient. Count regions and sites by reconstructed, rejected, and
-   fallback outcomes.
-5. Keep stable component IDs and deterministic merge/reduction order so thread
-   count cannot alter results.
-6. Use compact labels and region metadata, checked allocation, cancellation
-   between passes, and explicit peak-memory accounting.
-7. Integrate recipe, cache, CLI, desktop, diagnostics, and CPU/GPU boundaries
-   as a complete vertical slice.
+   is insufficient; count regions and sites separately.
+5. Use checked compact labels, deterministic reductions, cancellation between
+   passes, and an explicit peak-memory estimate.
+6. Wire recipe/schema, cache identity, CLI, desktop, diagnostics, and retained
+   GPU-source behavior as one vertical slice.
 
-Required fixtures include two clipped objects separated diagonally, a clipped
-object touching an image border, nested or narrow regions, a large uniform
-patch, a boundary adjacent to a differently colored object, insufficient
-boundary evidence, and many tiny components. Benchmarks must include worst-case
-component counts as well as one large component.
+Required fixtures include diagonal-separated objects, narrow and nested
+regions, border-touching components, a large uniform patch, an adjacent object
+with a different color, insufficient boundary evidence, and many tiny
+components. Benchmarks must include both component-count and large-region
+worst cases.
 
-Do not begin this phase merely to match another editor's method list. Begin it
-when the Opposed corpus review demonstrates that region identity is the missing
-information.
+### 4.2 Guided Laplacian reconstruction
 
-### 4.3 Phase 5 — Guided Laplacian reconstruction
+This remains research-only. First determine whether the method belongs on
+normalized CFA data, demosaiced camera RGB, or another typed linear image. The
+processing domain determines the crate boundary; it must not be forced into
+the highlight crate merely for roadmap symmetry.
 
-**Prerequisite:** a research spike must first determine whether the chosen
-method belongs on normalized CFA data, demosaiced camera RGB, or another typed
-linear representation. The crate boundary follows that answer; it must not be
-forced into `rohditor-highlight` for roadmap symmetry.
+Before integration, write mathematical pseudocode for the pyramid, masks,
+chromaticity representation, boundary conditions, scale schedule, convergence,
+fallback, and output bounds. Prove a scalar single-scale prototype on tiny
+fixtures, then establish peak memory, cancellation, deterministic execution,
+and CPU quality against Opposed/Segmentation. GPU work is later and requires
+CPU parity fixtures first.
 
-**Goal:** recover multiscale chromatic structure in small-to-medium clipped
-regions using valid intensity/detail as guidance.
+## 5. Base rendering status and gates
 
-Research and implementation plan:
+Rohditor Standard is now implemented as a versioned base-rendering profile:
 
-1. Translate the reference algorithm into mathematical pseudocode: pyramid
-   construction, norm/chromaticity representation, Laplacian fitting, masks,
-   scale schedule, boundary conditions, convergence/fallback rules, and output
-   bounds.
-2. Create a scalar single-scale prototype on tiny fixtures and compare it with
-   hand-calculated results.
-3. Add multiscale reconstruction with typed pyramid levels, fallible checked
-   allocation, cancellation between levels/passes, and deterministic execution.
-4. Add fixtures for a thin bright line, hair-like detail, a lamp boundary,
-   textured metal, smooth gradients, color edges, and fully unsupported
-   regions. Compare structure preservation and halo width against Opposed and
-   Segmentation.
-5. Establish a strict peak-memory budget and representative CPU timing before
-   application integration. A high-quality method may be slower, but the UI
-   must communicate/rebuild asynchronously without blocking or flashing.
-6. Integrate it as a vertical slice only after the processing domain and
-   retained-preview cache contract are proven.
-7. Consider GPU acceleration only after CPU fixtures define parity tolerances
-   for every intermediate and final output. Validate on the host AMD GPU.
+- `RenderingProfileSelection::{RohditorNeutral,RohditorStandard}` is part of
+  the edit recipe;
+- Standard process version 1 uses a shared sampled luminance LUT with an
+  explicit middle-gray anchor and finite/negative-input policy;
+- CPU and GPU use the same LUT contract and cache identity includes the profile
+  and process version; and
+- CLI, desktop controls, diagnostics, and recipe migration are wired.
 
-The method is complete only when multiscale halos, transition seams, memory,
-and cancellation have explicit coverage. A visually impressive single image is
-not sufficient evidence.
+This does not mean Standard is fully qualified. Before calling it a release
+default, compare Standard and Neutral on the private corpus and synthetic
+scene-linear fixtures, especially saturated over-range colors. Verify that
+Exposure, the existing Light tone LUT, tone curve, HSL/grading, and output
+gamut mapping remain in the documented order and do not double-compress
+luminance.
 
-### 4.4 LCh reconstruction — deferred decision
+Standard and gamut mapping must retain independent identities. A rendering
+profile change invalidates adjusted pixels; a gamut-policy change invalidates
+only the output-adjusted level when the base is unchanged.
 
-No LCh implementation is currently planned. It mixes perceptual color-space
-logic into a problem that the current architecture treats in sensor or linear
-RGB domains, and it is lower priority than the spatial methods above.
+## 6. Output gamut mapping: first implementation slice
 
-Reconsider it only if the comparison corpus reveals a repeatable class of
-highlights where Clip, Opposed, Segmentation, and Guided Laplacian all have an
-unacceptable tradeoff and an LCh prototype addresses it. If reconsidered, its
-first task is to state the typed image domain and color-space conversion
-contract; it must not be added to the RAW crate by default.
+### 6.1 Current baseline
 
-## 5. Shared acceptance gates for every new highlight method
+The current output path converts linear Rec.2020/D65 to linear sRGB and then
+hard-clips each channel to `[0, 1]` before applying the sRGB transfer function.
+`OutputPolicy::ClipToSrgb` is the explicit compatibility policy. This is
+deterministic and easy to validate, but independent channel clipping can shift
+hue, remove chroma, and produce the familiar saturated-highlight color cast.
 
-Each method must satisfy all of these before handoff:
+The GPU shader currently performs the equivalent clamp in its transfer helper.
+The Rust `OutputPolicy` is already part of the adjusted preview cache key, but
+the GPU render contract currently has only the clipping path. A chroma policy
+must therefore be threaded through the GPU parameters rather than inferred
+from a default.
 
-### API and architecture
+### 6.2 Recommended v1 contract
 
-- The deterministic CPU pipeline remains the reference.
-- RAW data remains immutable; the normalized mosaic may be consumed in place.
-- The algorithm crate has no upward dependency on core, recipes, GPU, or UI.
-- Settings have one unambiguous meaning and are stored in a versioned recipe.
-- No method-specific data is flattened into misleading common diagnostics.
-- Preview, Source 1:1, and export run the same algorithm at equivalent source
-  coordinates and resolution.
+Implement one policy beside the baseline, named consistently with the existing
+API, for example `OutputPolicy::ChromaCompressToSrgb`.
+
+The contract is:
+
+- input: finite or non-finite linear Rec.2020/D65 pixels after all recipe
+  edits;
+- target: linear sRGB/D65, followed by the existing IEC sRGB transfer;
+- in-gamut identity: if converted linear sRGB is finite and every channel is
+  in `[0, 1]`, return it bit-for-bit before any perceptual conversion;
+- out-of-gamut mapping: convert linear sRGB to OKLab/OKLCH using signed cube
+  roots, preserve hue and (when feasible) OKLCH lightness, and binary-search
+  the largest chroma whose inverse conversion lies inside the target gamut;
+- lightness edge cases: clamp OKLCH lightness to the target range only when
+  necessary to obtain a valid output, and count this as a limited/fallback
+  case rather than pretending it was pure chroma compression;
+- neutral edge cases: near-zero chroma keeps a stable neutral axis and uses
+  target-range clamping without inventing a hue;
+- numerical policy: use a fixed iteration count and epsilon, clamp only the
+  final rounding residue, and never emit NaN or infinity; and
+- invalid-input fallback: use the existing hard-clip policy for non-finite or
+  otherwise unrepresentable pixels, with a diagnostic count.
+
+This is deliberately a bounded first mapper. It does not add multiple filmic
+variants, local gamut mapping, automatic intent selection, wide-gamut output,
+or an additional working-gamut compression step.
+
+The early in-gamut return is important: converting every pixel through OKLCH
+would make a supposedly neutral policy alter ordinary photographs. The binary
+search is also preferable to independently clamping channels because it gives
+one monotonic chroma control and a stable hue path for saturated colors.
+
+### 6.3 Ownership and data flow
+
+Implement the color math in the shared color boundary described by
+[`restructuring.md`](restructuring.md), initially as a `color::gamut` module if
+the crate extraction has not landed. The ownership should be:
+
+```text
+rohditor-edit       user recipe and creative intent
+rohditor-core       OutputPolicy, stage ordering, CPU reference, diagnostics
+rohditor-color      matrices, OKLab/OKLCH, gamut algorithm/version
+rohditor-gpu        shader implementation and uniform/texture contract
+apps/cli            output-gamut argument and report
+apps/desktop        preference/control, cache key, diagnostics text
+```
+
+The first slice should keep output policy in `RenderOptions`, as it is today,
+rather than adding a recipe field and another schema migration. If users later
+need the policy to travel with a document, promote it deliberately in a
+separate recipe change. Export and preview must receive the same effective
+policy; CLI hard-coded `ClipToSrgb` and desktop-only defaults must disappear.
+
+Add a version constant for the mapper (for example
+`CHROMA_COMPRESS_ALGORITHM_VERSION`). Include it in the adjusted cache key and
+diagnostics. Changing matrices, OKLab constants, search iterations, epsilon,
+or invalid-input fallback is a pixel-producing process change.
+
+### 6.4 CPU reference implementation
+
+Implement in this order:
+
+1. Add a small typed result/statistics structure: mapped pixel, whether it was
+   in-gamut, compressed, limited, clipped-fallback, or invalid.
+2. Add matrix conversion helpers and OKLab/OKLCH round trips with signed
+   `cbrt`, finite checks, and exact small asymmetric tests.
+3. Implement `clip` as the unchanged reference and `chroma-compress` with the
+   contract above. Keep the mapper independent of image traversal.
+4. Make `render_display_srgb8`, dithered 8-bit output, and 16-bit output call
+   one policy-dispatching per-pixel function. Transfer encoding and quantization
+   must remain after mapping.
+5. Thread policy and diagnostics through preview, source-scale inspection, and
+   export. Preserve transactional file output and existing sRGB ICC metadata.
+
+Do not duplicate the mapping algorithm in preview, export, and tests. The CPU
+per-pixel function is the reference used to define GPU tolerances.
+
+### 6.5 CPU correctness tests
+
+Required unit and integration coverage:
+
+- exact identity for neutral and in-gamut RGB values;
+- black, white, gray ramps, and near-neutral values;
+- red/green/blue primaries, secondaries, hue sweeps, and saturated gradients;
+- values below zero, above one, and mixed-sign channels;
+- boundary continuity just inside and outside the sRGB hull;
+- monotonic chroma reduction and stable hue/lightness within stated error;
+- fixed behavior for non-finite input and no non-finite output;
+- 8-bit and 16-bit quantization, dithering, orientation, and crop geometry;
+- Standard-before-gamut versus Neutral-before-gamut ordering on HDR fixtures;
+- unchanged `ClipToSrgb` output fixtures; and
+- deterministic results across Rayon thread counts.
+
+Generated sweeps should report maximum hue, lightness, chroma, and round-trip
+errors. Screenshots are useful for review but cannot replace numerical gates.
+
+### 6.6 Full vertical integration
+
+After the CPU mapper is stable:
+
+1. Add the output-policy CLI option and validation. The report must state the
+   selected policy and algorithm version.
+2. Add a desktop setting/control and diagnostics text. Changing it must reuse
+   the prepared/demosaiced base and invalidate only adjusted display pixels.
+3. Include policy/version in `AdjustedPreviewKey` tests, including Standard and
+   Neutral combinations.
+4. Ensure source-scale preview and full-resolution export use the same policy
+   and mapper, not a display-only shortcut.
+5. Keep sRGB ICC embedding accurate; do not imply that an sRGB export is a
+   wide-gamut or monitor-managed output.
+
+### 6.7 GPU parity
+
+Only after the CPU reference and vertical seams are complete:
+
+- add an explicit output-policy code and mapper version to the GPU render
+  parameters;
+- update WGSL and the Rust packed uniform layout together;
+- keep the intermediate `working_linear` texture in adjusted Rec.2020 before
+  target gamut mapping;
+- implement the same OKLab/OKLCH constants, signed-root behavior, fixed search
+  iterations, epsilon, and fallback policy in WGSL;
+- add structural shader/layout tests and CPU/GPU parity on synthetic saturated
+  fixtures; and
+- run the ignored hardware suite on the RX 9070 XT when available. A software
+  Vulkan adapter only proves shader compilation/dispatch structure.
+
+If the GPU implementation cannot meet the CPU tolerance, the desktop must
+fall back to the CPU preview rather than silently displaying a different
+gamut policy.
+
+### 6.8 Performance and visual qualification
+
+Benchmark the mapper separately from matrix conversion, transfer encoding,
+quantization, RAW decode, and UI rendering. Include in-gamut no-op, sparse
+out-of-gamut, saturated gradients, and full-frame worst cases. Record scratch
+bytes and peak working-set impact; the first mapper should not allocate an
+image-sized auxiliary buffer.
+
+Qualify on the private Sony A6400 corpus plus synthetic HDR/color charts. Look
+for hue shifts, gray neutrality, banding, clipped skies, saturated foliage,
+skin tones, and interaction with Standard. Record both visible wins and cases
+where hard clipping is preferable. Chroma compression should not become the
+unqualified default solely because it looks better on one image.
+
+## 7. Shared acceptance gates
+
+Every future highlight method and the gamut mapper must satisfy:
+
+### Architecture
+
+- CPU remains the deterministic correctness reference.
+- RAW data stays immutable and typed image states remain explicit.
+- Recipe, cache, CLI, desktop, preview, source-scale, and export meanings are
+  identical; no UI-only implementation is accepted.
+- Algorithm versions and all pixel-producing numeric inputs are explicit.
+- GPU provenance and fallback behavior are honest and observable.
 
 ### Correctness
 
-- Small asymmetric fixtures cover CFA phase, odd dimensions, non-tight stride,
-  thresholds, negative and over-range samples, invalid data, cancellation, and
-  deterministic multi-threading.
-- Valid or rejected samples obey the method's bit-preservation contract.
-- Fully unsupported regions degrade predictably and are counted honestly.
-- Cache invalidation, WB compatibility, stale-result rejection, CLI validation,
-  desktop control state, undo/reset, and diagnostics have focused tests.
+- Asymmetric fixtures cover odd dimensions, non-tight stride, boundaries,
+  invalid values, cancellation, and deterministic parallel execution.
+- Valid input preservation and unsupported/fallback behavior are measured,
+  not inferred from a single golden image.
+- CPU/GPU tolerances are stated in linear values and encoded sRGB codes.
+- Existing Clip/Neutral compatibility fixtures remain green.
 
-### Performance and evidence
+### Evidence
 
-- Kernel time is measured separately from RAW decode, demosaic, UI rendering,
-  and file I/O.
-- Scratch allocations and peak working set are included in rejection checks.
-- Representative benchmarks include no-op, sparse, boundary, and large-region
-  cases.
-- Private-corpus Source 1:1 and export comparisons record both wins and
-  regressions.
-- Downstream GPU tests run on the RX 9070 XT when cache/upload behavior changes;
-  a software rasterizer is not hardware validation.
+- Benchmarks separate kernel cost from decode, demosaic, optics, resampling,
+  UI, and file I/O.
+- Private-corpus Source 1:1 and export comparisons record regressions as well
+  as improvements.
+- Ignored GPU tests identify the actual adapter and do not call a CPU rasterizer
+  hardware parity.
 
-## 6. Separate gamut-mapping plan
+## 8. Recommended execution order
 
-Highlight reconstruction repairs missing or unreliable sensor samples. Gamut
-mapping operates later on complete RGB pixels and must remain a separate
-domain.
-
-### 6.1 Current state — baseline implemented
-
-Rohditor currently converts its linear Rec.2020 working image to linear sRGB,
-hard-clips each output channel to `[0, 1]`, applies the sRGB transfer function,
-and quantizes. `OutputPolicy::ClipToSrgb` names that behavior. This is a useful
-reference but can shift hue and lose chroma detail for saturated colors.
-
-There is not yet a dedicated gamut crate or a chroma-compressing mapper.
-
-### 6.2 First gamut slice — chroma compression
-
-**Goal:** preserve in-gamut pixels exactly and compress only the out-of-gamut
-chroma needed to reach the target gamut, with stable hue and lightness behavior.
-
-Implementation plan:
-
-1. Freeze the colorimetric contract: linear Rec.2020 input, sRGB/D65 target,
-   chosen perceptual or opponent representation, gamut-boundary calculation,
-   neutral-axis behavior, hue path, and numerical tolerances.
-2. Create `rohditor-gamut` only when that contract is ready. It should depend
-   on typed RGB/color primitives, not RAW metadata, recipes, the desktop, or
-   encoders.
-3. Move or wrap the current hard-clip reference without changing its output.
-   Add `ChromaCompress` beside it; do not add speculative `AcesLike` variants.
-4. Test identity for in-gamut RGB, neutrals, primary/secondary hue sweeps,
-   negative components, extreme finite values, continuity at the gamut
-   boundary, monotonic compression, and no NaN/infinity production.
-5. Use small exact fixtures plus dense generated sweeps. Track maximum hue,
-   lightness, and round-trip errors rather than relying only on screenshots.
-6. Integrate through `OutputPolicy` because this first mapper is target-output
-   behavior, not a scene edit. Preview and export must select the same mapper.
-7. Implement GPU preview parity only after the CPU reference is fixed. Test
-   tolerances in linear values and encoded sRGB codes on the host adapter.
-8. Benchmark the mapper separately from transfer encoding and quantization and
-   add clipping/compression counts to diagnostics if they remain cheap.
-
-Working-gamut compression during camera-to-Rec.2020 conversion is a separate
-future decision. Do not silently reuse the output mapper there: its target,
-purpose, and acceptable appearance tradeoffs differ.
-
-## 7. Separate base-rendering plan
-
-Tone mapping compresses scene-referred dynamic range; it does not reconstruct
-missing RAW channels and it is not gamut mapping.
-
-### 7.1 Current state
-
-Rohditor already has exposure, highlights/shadows/whites/blacks, contrast, and a
-four-region tone curve with CPU/GPU behavior. Those are creative Light edits.
-There is no dedicated scene-to-display tone-mapping stage or independent
-`rohditor-tonemap` crate.
-
-### 7.2 Canonical implementation route
-
-The requirement for a pleasant default RAW rendering now satisfies the former
-entry condition for a dedicated scene-to-display transform. The complete first
-slice is planned in
-[`standard-rendering-profile.md`](standard-rendering-profile.md).
-
-That plan owns the `Rohditor Standard` and `Rohditor Neutral` recipe model,
-process version, curve contract, ordering around the existing Light controls,
-CPU/GPU implementation, cache identity, UI/CLI seams, tuning corpus, and
-acceptance gates. This roadmap continues to own the independent gamut work in
-Section 6.
-
-Do not create a second tone-mapping checklist here. The shared non-negotiable
-boundary is that base rendering occurs before target-output gamut mapping, the
-two algorithms retain independent identities, and their order is verified on
-saturated HDR fixtures before either becomes a production default.
-
-## 8. Execution order
-
-The recommended order is:
-
-1. Keep Off, Clip, Local ratios, and Opposed stable. Refresh their
-   benchmark/private-corpus evidence before making new quality or default
-   claims; Clip remains the current recipe default.
-2. Implement chroma-compressing gamut mapping independently of RAW
-   reconstruction, following Section 6.
-3. Implement Rohditor Standard following
-   [`standard-rendering-profile.md`](standard-rendering-profile.md). Development
-   may overlap the gamut work, but Standard must not become the production
-   default until the combined tone-before-gamut path passes both plans' gates.
-4. Implement Segmentation only if measured region-level reconstruction failures
-   justify it.
-5. Run the Guided Laplacian research gate only after its correct processing
-   domain and expected quality/cost benefit are clear.
-6. Keep LCh deferred unless comparisons reveal a gap the selected methods do
-   not cover.
+1. Keep the landed highlight methods and Standard profile stable while
+   refreshing their corpus evidence.
+2. Split the shared color boundary as described in the maintainability plan,
+   or create the initial `color::gamut` module if extraction is not yet ready.
+3. Implement CPU `ChromaCompressToSrgb`, its tests, output-policy dispatch,
+   cache identity, CLI, desktop, source-scale, and export seams.
+4. Implement and qualify GPU parity; retain CPU fallback on mismatch.
+5. Decide whether the combined Standard-before-gamut result is suitable for a
+   release default. Keep Neutral and hard clipping available for comparison.
+6. Only then revisit Segmentation or Guided Laplacian if highlight evidence
+   shows that they solve a real first-version problem.
+7. Treat monitor ICC/wide-gamut display, output resize/sharpening, and local
+   masks as separate plans rather than expanding this gamut slice.
 
 ## 9. Verification commands
 
-For documentation-only changes, `./scripts/check.sh` is sufficient to confirm
-that the audited implementation still passes the normal workspace checks. For
-algorithm or integration changes, run the relevant focused and complete suites:
+For documentation-only changes, the normal workspace gate is enough. For the
+implementation, run focused tests while iterating and the full evidence suites
+before changing defaults:
 
 ```bash
 cargo test -p rohditor-highlight
-cargo test -p rohditor-edit
 cargo test -p rohditor-core
+cargo test -p rohditor-edit
 cargo test -p rohditor-gpu
-cargo test -p rohditor-desktop
 cargo test -p rohditor-cli
-cargo bench -p rohditor-highlight --bench clip
-cargo bench -p rohditor-highlight --bench local_ratios
-cargo bench -p rohditor-highlight --bench opposed
 ./scripts/check.sh
 cargo test --release --workspace --tests -- --ignored --nocapture
 cargo test --release -p rohditor-gpu -- --ignored --nocapture
 ```
 
-Add a dedicated benchmark command when each new algorithm lands. Ignored GPU
-tests validate downstream rendering and cache/upload behavior unless the new
-algorithm itself has a GPU implementation with CPU parity fixtures.
+The last two commands require the private corpus and a usable hardware Vulkan
+adapter. Record their availability and actual adapter identity in the change
+that alters image-processing or shader behavior.
 
-## 10. Reference implementations and licensing
+## 10. Reference and licensing notes
 
-Existing research identified these algorithm families:
+Highlight research may continue to consult darktable and RawTherapee's
+highlight reconstruction implementations. The gamut mapper should be an
+original, typed implementation with explicit colorimetric tests; do not copy a
+reference application's pipeline assumptions without recording the target
+space, transfer function, and license implications.
 
-- RawTherapee exposes luminance, CIELab, color-propagation, blend, and newer
-  opposed-style recovery. Its more advanced paths use substantial spatial
-  filtering rather than simple channel substitution.
-- darktable exposes Clip, LCh, color inpainting/opposed, segmentation, and
-  guided-Laplacian approaches. The latter two address region identity and
-  multiscale structure at greater complexity and cost.
-- Both projects provide useful evidence for an opposed/inpainting middle tier
-  between Local ratios and segmentation or Laplacian methods.
-
-Rohditor is GPL-3.0-or-later, so compatible GPL source may be studied and
-adapted. Derived work must retain the applicable attribution, copyright, and
-license notices. Prefer a Rust design built around Rohditor's typed images,
-fallible allocation, cancellation, and tests over a mechanical line-by-line
-translation.
-
-References:
-
-- [darktable highlight reconstruction manual](https://docs.darktable.org/usermanual/development/en/module-reference/processing-modules/highlight-reconstruction/)
-- [darktable `highlights.c`](https://github.com/darktable-org/darktable/blob/master/src/iop/highlights.c)
-- [darktable opposed reconstruction](https://github.com/darktable-org/darktable/blob/master/src/iop/hlreconstruct/opposed.c)
-- [darktable guided Laplacian reconstruction](https://github.com/darktable-org/darktable/blob/master/src/iop/hlreconstruct/laplacian.c)
-- [RawTherapee highlight reconstruction](https://github.com/RawTherapee/RawTherapee/blob/dev/rtengine/hilite_recon.cc)
-- [RawTherapee RAW highlight/WB ordering](https://github.com/RawTherapee/RawTherapee/blob/dev/rtengine/rawimagesource.cc)
+Rohditor is GPL-3.0-or-later. Any adapted GPL-compatible source must retain
+the applicable attribution, copyright, and license notices.

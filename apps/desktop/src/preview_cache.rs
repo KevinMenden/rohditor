@@ -5,7 +5,7 @@ use rohditor_core::{
     CameraProfileKey, CorrectionComponents, CpuPipeline, CpuPreviewWorkspace, DemosaicedBase,
     LOCAL_RATIOS_ALGORITHM_VERSION, MemoryEstimate, OPPOSED_ALGORITHM_VERSION,
     OPTICS_ALGORITHM_VERSION, OpticsProvenance, OutputPolicy, PreviewOptions, RawCropPolicy,
-    ReconstructedPreview, camera_profile_key,
+    ReconstructedPreview, WHITE_BALANCE_ALGORITHM_VERSION, camera_profile_key,
 };
 #[cfg(test)]
 use rohditor_core::{DatabaseProvenance, LensProfileSummary};
@@ -263,6 +263,7 @@ enum HighlightKey {
         threshold_bits: u32,
         white_balance: WhiteBalanceKey,
         camera_profile: Option<CameraProfileKey>,
+        white_balance_algorithm_version: u8,
     },
     LocalRatios {
         detection_threshold_bits: u32,
@@ -286,6 +287,7 @@ impl HighlightKey {
                     WhiteBalance::TemperatureTint { .. }
                 )
                 .then(|| camera_profile_key(&recipe.color.camera_profile)),
+                white_balance_algorithm_version: WHITE_BALANCE_ALGORITHM_VERSION,
             },
             HighlightMethod::LocalRatios => Self::LocalRatios {
                 detection_threshold_bits: recipe
@@ -328,6 +330,7 @@ enum WhiteBalanceKey {
     TemperatureTint {
         temperature_bits: u32,
         tint_bits: u32,
+        algorithm_version: u8,
     },
 }
 
@@ -343,6 +346,7 @@ impl From<WhiteBalance> for WhiteBalanceKey {
             WhiteBalance::TemperatureTint { temperature, tint } => Self::TemperatureTint {
                 temperature_bits: temperature.to_bits(),
                 tint_bits: tint.to_bits(),
+                algorithm_version: WHITE_BALANCE_ALGORITHM_VERSION,
             },
         }
     }
