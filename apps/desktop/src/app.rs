@@ -10,7 +10,7 @@ use rohditor_core::{
     CameraCalibration, DatabaseProvenance, DitherMode, ExportFormat, ExportMetadataPolicy,
     ExportSettings, HighlightDiagnostics, Histogram, JPEG_QUALITY_DEFAULT, MemoryEstimate,
     OutputPolicy, PngBitDepth, PreviewOptions, ProfileMatch, StageTimings, WhiteBalanceCoordinates,
-    camera_color_transform, camera_gains_from_coordinates, coordinates_from_camera_gains,
+    camera_color_transform, coordinates_from_camera_gains_relative_to_as_shot,
     hsl_channel_weights_from_display_rgb, paths_refer_to_same_file, resolve_camera_colour,
     srgb_to_linear_srgb,
 };
@@ -25,6 +25,8 @@ use rohditor_edit::{
 use rohditor_raw::{RawFileInfo, RawFrame};
 use tracing::{info, warn};
 
+#[cfg(test)]
+use rohditor_core::camera_gains_from_as_shot_coordinates;
 #[cfg(test)]
 use rohditor_edit::HighlightAdjustments;
 
@@ -310,6 +312,32 @@ struct WhiteBalanceModeMemory {
     temperature: Option<f32>,
     tint: Option<f32>,
     manual: [f32; 3],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResidentGpuRender {
+    Exact,
+    WhiteBalanceDraft,
+}
+
+fn white_balance_preview_request(
+    interaction: AdjustmentInteraction,
+    changed: bool,
+) -> (bool, bool) {
+    let is_white_balance = matches!(
+        interaction.target,
+        AdjustmentTarget::WhiteBalanceTemperature
+            | AdjustmentTarget::WhiteBalanceTint
+            | AdjustmentTarget::WhiteBalanceRed
+            | AdjustmentTarget::WhiteBalanceGreen
+            | AdjustmentTarget::WhiteBalanceBlue
+    );
+    (
+        is_white_balance && changed,
+        is_white_balance
+            && (interaction.drag_stopped
+                || (changed && !interaction.drag_started && !interaction.dragged)),
+    )
 }
 
 impl Default for WhiteBalanceModeMemory {
@@ -1032,15 +1060,48 @@ impl RohditorApp {
     }
 
     fn render_gpu_preview(&mut self, context: &egui::Context, document_id: u64) {
+        let _ = self.render_resident_gpu_preview(context, document_id, ResidentGpuRender::Exact);
+    }
+
+    fn render_gpu_white_balance_draft(
+        &mut self,
+        context: &egui::Context,
+        document_id: u64,
+    ) -> bool {
+        let supported = self.document.as_ref().is_some_and(|document| {
+            document.id == document_id
+                && document.gpu_preview.as_ref().is_some_and(|preview| {
+                    gpu_supports_recipe(document.edits.recipe())
+                        && preview
+                            .source
+                            .supports_white_balance_draft(document.edits.recipe())
+                        && preview
+                            .source
+                            .optics_matches_recipe(&document.edits.recipe().optics)
+                })
+        });
+        if !supported {
+            return false;
+        }
+        self.coordinator.cancel_preview(document_id);
+        self.render_resident_gpu_preview(context, document_id, ResidentGpuRender::WhiteBalanceDraft)
+    }
+
+    fn render_resident_gpu_preview(
+        &mut self,
+        context: &egui::Context,
+        document_id: u64,
+        render: ResidentGpuRender,
+    ) -> bool {
         let Some(document) = self
             .document
             .as_mut()
             .filter(|document| document.id == document_id)
         else {
-            return;
+            return false;
         };
         let Some(preview) = document.gpu_preview.take() else {
-            return;
+            return false;
         };
         document.pending_gpu_histogram = None;
         document.gpu_histogram_due = None;
@@ -1054,7 +1115,13 @@ impl RohditorApp {
             .map(|diagnostics| diagnostics.worker);
         document.preview_status = Some((
             revision,
-            "Applying edits to resident GPU preview".to_owned(),
+            match render {
+                ResidentGpuRender::Exact => "Applying edits to resident GPU preview",
+                ResidentGpuRender::WhiteBalanceDraft => {
+                    "Applying interactive white balance on the GPU"
+                }
+            }
+            .to_owned(),
         ));
 
         let result = self
@@ -1062,10 +1129,17 @@ impl RohditorApp {
             .as_ref()
             .ok_or_else(|| "the GPU processor is no longer active while applying edits".to_owned())
             .and_then(|runtime| {
-                let frame = runtime
-                    .processor
-                    .render(&preview.source, &recipe, Some(preview.frame))
-                    .map_err(|error| error.to_string())?;
+                let frame = match render {
+                    ResidentGpuRender::Exact => {
+                        runtime
+                            .processor
+                            .render(&preview.source, &recipe, Some(preview.frame))
+                    }
+                    ResidentGpuRender::WhiteBalanceDraft => runtime
+                        .processor
+                        .render_white_balance_draft(&preview.source, &recipe, Some(preview.frame)),
+                }
+                .map_err(|error| error.to_string())?;
                 register_or_update_gpu_texture(runtime, Some(texture_id), &frame);
                 Ok::<_, String>(frame)
             });
@@ -1119,6 +1193,7 @@ impl RohditorApp {
                     width = frame.output_dimensions().0,
                     height = frame.output_dimensions().1,
                     submission_us = frame.submission_time().as_micros(),
+                    white_balance_draft = render == ResidentGpuRender::WhiteBalanceDraft,
                     "GPU preview adjustment complete"
                 );
                 if let Some(document) = self.document.as_mut().filter(|document| {
@@ -1147,10 +1222,12 @@ impl RohditorApp {
                     document.error = None;
                 }
                 context.request_repaint();
+                true
             }
             Err(error) => {
                 self.clear_orphaned_gpu_display(document_id, texture_id);
                 self.handle_gpu_failure(context, document_id, error);
+                false
             }
         }
     }
@@ -1633,6 +1710,8 @@ impl RohditorApp {
         let output = adjustment_panel::show(context, model, &mut self.export_settings);
         let picker_mode = output.picker_mode;
         let mut changed_document = None;
+        let mut white_balance_draft = None;
+        let mut white_balance_exact = None;
         let mut white_balance_memory = self.white_balance_memory;
         if let Some(document) = self.document.as_mut() {
             if output.dismiss_error {
@@ -1657,18 +1736,23 @@ impl RohditorApp {
             if let Some(method) = output.highlight_method {
                 changed |= set_highlight_method(&mut document.edits, method);
             }
-            // Temperature/Tint controls are absolute camera-calibrated
-            // coordinates. Resolve the current profile after applying a
-            // profile selection so mode switches and slider edits start from
+            // Temperature is camera-calibrated and tint is relative to the
+            // As Shot locus offset. Resolve the current profile after applying
+            // a profile selection so mode switches and slider edits start from
             // this document's actual As Shot white point.
             let as_shot_coordinates = document_as_shot_coordinates(document);
             if let Some(mode) = output.white_balance_mode {
-                changed |= set_white_balance_mode(
+                let mode_changed = set_white_balance_mode(
                     &mut document.edits,
                     mode,
                     &mut white_balance_memory,
                     as_shot_coordinates,
                 );
+                changed |= mode_changed;
+                if mode_changed {
+                    white_balance_draft = Some(document.id);
+                    white_balance_exact = Some(document.id);
+                }
             }
             if let Some(action) = output.optics_action {
                 changed |= apply_optics_action(&mut document.edits, action);
@@ -1685,11 +1769,20 @@ impl RohditorApp {
                 auto_tone_applied = auto_changed;
             }
             for interaction in output.interactions {
-                changed |= apply_adjustment_interaction(
+                let interaction_changed = apply_adjustment_interaction(
                     &mut document.edits,
                     interaction,
                     as_shot_coordinates,
                 );
+                changed |= interaction_changed;
+                let (request_draft, request_exact) =
+                    white_balance_preview_request(interaction, interaction_changed);
+                if request_draft {
+                    white_balance_draft = Some(document.id);
+                }
+                if request_exact {
+                    white_balance_exact = Some(document.id);
+                }
             }
             if output.reset_all {
                 changed |= document.edits.reset();
@@ -1710,7 +1803,13 @@ impl RohditorApp {
             }
         }
         self.white_balance_memory = white_balance_memory;
-        if let Some(document_id) = changed_document {
+        let draft_rendered = white_balance_draft
+            .is_some_and(|document_id| self.render_gpu_white_balance_draft(context, document_id));
+        if let Some(document_id) = white_balance_exact {
+            self.queue_preview(context, document_id);
+        } else if let Some(document_id) = changed_document
+            && !draft_rendered
+        {
             self.queue_preview(context, document_id);
         }
         if output.import_camera_profile {
@@ -2597,6 +2696,20 @@ fn document_as_shot_colour(document: &Document) -> Option<rohditor_core::Resolve
         &document.edits.recipe().color.camera_profile,
         WhiteBalance::AsShot,
     )
+    .or_else(|_| {
+        // A RAW can omit As Shot multipliers while still carrying a usable
+        // camera matrix. Keep custom Temperature/Tint usable in that case; the
+        // As Shot mode itself will continue to report the authoritative
+        // metadata error when it is rendered.
+        resolve_camera_colour(
+            &calibration,
+            &document.edits.recipe().color.camera_profile,
+            WhiteBalance::TemperatureTint {
+                temperature: TEMPERATURE_RANGE.neutral,
+                tint: TINT_RANGE.neutral,
+            },
+        )
+    })
     .ok()
 }
 
@@ -2761,12 +2874,12 @@ fn document_panel_model(
             temperature: AdjustmentRange {
                 minimum: TEMPERATURE_RANGE.minimum,
                 maximum: TEMPERATURE_RANGE.maximum,
-                neutral: TEMPERATURE_RANGE.neutral,
+                neutral: as_shot_coordinates.temperature,
             },
             tint: AdjustmentRange {
                 minimum: TINT_RANGE.minimum,
                 maximum: TINT_RANGE.maximum,
-                neutral: TINT_RANGE.neutral,
+                neutral: as_shot_coordinates.tint,
             },
             exposure: AdjustmentRange {
                 minimum: EXPOSURE_EV_RANGE.minimum,
@@ -3012,7 +3125,21 @@ fn white_balance_from_camera_sample(
         green: desired_total[1],
         blue: desired_total[2],
     };
-    if let Ok(coordinates) = coordinates_from_camera_gains(camera_to_xyz_d65, gains) {
+    let [red, green, blue, _] = as_shot_white_balance?;
+    let [Some(red), Some(green), Some(blue)] = [red, green, blue]
+        .map(|value| value.filter(|number| number.is_finite() && *number > 1.0e-5))
+    else {
+        return None;
+    };
+    let as_shot_relative = [red / green, 1.0, blue / green];
+    let as_shot_gains = WhiteBalanceGains {
+        red: as_shot_relative[0],
+        green: as_shot_relative[1],
+        blue: as_shot_relative[2],
+    };
+    if let Ok(coordinates) =
+        coordinates_from_camera_gains_relative_to_as_shot(camera_to_xyz_d65, as_shot_gains, gains)
+    {
         return Some(WhiteBalance::TemperatureTint {
             temperature: coordinates.temperature,
             tint: coordinates.tint,
@@ -3022,14 +3149,7 @@ fn white_balance_from_camera_sample(
     // If the sampled neutral lies outside the calibrated locus, preserve the
     // exact camera-native result with the existing relative multiplier mode.
     // This is a bounded fallback for unusual sensors or strongly coloured
-    // patches; normal samples use the same absolute coordinates as the UI.
-    let [red, green, blue, _] = as_shot_white_balance?;
-    let [Some(red), Some(green), Some(blue)] = [red, green, blue]
-        .map(|value| value.filter(|number| number.is_finite() && *number > 1.0e-5))
-    else {
-        return None;
-    };
-    let as_shot_relative = [red / green, 1.0, blue / green];
+    // patches.
     let manual = [
         desired_total[0] / as_shot_relative[0],
         WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
@@ -3514,6 +3634,39 @@ mod tests {
     }
 
     #[test]
+    fn white_balance_drag_uses_gpu_drafts_and_commits_once_on_release() {
+        let dragging = AdjustmentInteraction {
+            target: AdjustmentTarget::WhiteBalanceTemperature,
+            value: 5_100.0,
+            changed: true,
+            drag_started: false,
+            dragged: true,
+            drag_stopped: false,
+            reset: false,
+        };
+        assert_eq!(white_balance_preview_request(dragging, true), (true, false));
+
+        let released = AdjustmentInteraction {
+            changed: false,
+            dragged: false,
+            drag_stopped: true,
+            ..dragging
+        };
+        assert_eq!(
+            white_balance_preview_request(released, false),
+            (false, true)
+        );
+
+        let typed = AdjustmentInteraction {
+            changed: true,
+            dragged: false,
+            drag_stopped: false,
+            ..dragging
+        };
+        assert_eq!(white_balance_preview_request(typed, true), (true, true));
+    }
+
+    #[test]
     fn white_balance_picker_uses_camera_native_channel_ratios() {
         let neutral = white_balance_from_camera_sample(
             [0.5, 0.5, 0.5],
@@ -3525,11 +3678,14 @@ mod tests {
             WhiteBalance::ManualMultipliers { red, green, blue } => {
                 WhiteBalanceGains { red, green, blue }
             }
-            WhiteBalance::TemperatureTint { temperature, tint } => camera_gains_from_coordinates(
-                rohditor_core::Matrix3::identity(),
-                WhiteBalanceCoordinates { temperature, tint },
-            )
-            .expect("temperature/tint gains"),
+            WhiteBalance::TemperatureTint { temperature, tint } => {
+                camera_gains_from_as_shot_coordinates(
+                    rohditor_core::Matrix3::identity(),
+                    WhiteBalanceGains::identity(),
+                    WhiteBalanceCoordinates { temperature, tint },
+                )
+                .expect("temperature/tint gains")
+            }
             WhiteBalance::AsShot => panic!("picker should not leave the balance as shot"),
         };
         assert!((neutral_gains.red - 1.0).abs() < 0.01);
@@ -3543,11 +3699,14 @@ mod tests {
         )
         .expect("colored sample");
         let gains = match colored {
-            WhiteBalance::TemperatureTint { temperature, tint } => camera_gains_from_coordinates(
-                rohditor_core::Matrix3::identity(),
-                WhiteBalanceCoordinates { temperature, tint },
-            )
-            .expect("temperature/tint gains"),
+            WhiteBalance::TemperatureTint { temperature, tint } => {
+                camera_gains_from_as_shot_coordinates(
+                    rohditor_core::Matrix3::identity(),
+                    WhiteBalanceGains::identity(),
+                    WhiteBalanceCoordinates { temperature, tint },
+                )
+                .expect("temperature/tint gains")
+            }
             WhiteBalance::ManualMultipliers { red, green, blue } => {
                 WhiteBalanceGains { red, green, blue }
             }
@@ -3574,11 +3733,18 @@ mod tests {
         )
         .expect("sample should fit the balance range")
         {
-            WhiteBalance::TemperatureTint { temperature, tint } => camera_gains_from_coordinates(
-                rohditor_core::Matrix3::identity(),
-                WhiteBalanceCoordinates { temperature, tint },
-            )
-            .expect("temperature/tint gains"),
+            WhiteBalance::TemperatureTint { temperature, tint } => {
+                camera_gains_from_as_shot_coordinates(
+                    rohditor_core::Matrix3::identity(),
+                    WhiteBalanceGains {
+                        red: 2.0,
+                        green: 1.0,
+                        blue: 1.5,
+                    },
+                    WhiteBalanceCoordinates { temperature, tint },
+                )
+                .expect("temperature/tint gains")
+            }
             WhiteBalance::ManualMultipliers { red, green, blue } => WhiteBalanceGains {
                 red: 2.0 * red,
                 green,
@@ -3646,6 +3812,28 @@ mod tests {
                 red: 1.6,
                 green: 0.8,
                 blue: 1.2,
+            }
+        );
+    }
+
+    #[test]
+    fn selecting_temperature_tint_starts_at_the_document_as_shot_coordinates() {
+        let mut edits = EditSession::default();
+        let mut memory = WhiteBalanceModeMemory::default();
+        assert!(set_white_balance_mode(
+            &mut edits,
+            WhiteBalanceMode::TemperatureTint,
+            &mut memory,
+            Some(WhiteBalanceCoordinates {
+                temperature: 5_100.0,
+                tint: -0.18,
+            }),
+        ));
+        assert_eq!(
+            edits.recipe().color.white_balance,
+            WhiteBalance::TemperatureTint {
+                temperature: 5_100.0,
+                tint: -0.18,
             }
         );
     }
