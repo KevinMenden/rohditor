@@ -239,9 +239,9 @@ one monotonic chroma control and a stable hue path for saturated colors.
 
 ### 6.3 Ownership and data flow
 
-Implement the color math in the shared color boundary described by
-[`restructuring.md`](restructuring.md), initially as a `color::gamut` module if
-the crate extraction has not landed. The ownership should be:
+Implement the color math in the shared `rohditor-color` boundary, initially as
+a `color::gamut` module if the crate extraction has not landed. The ownership
+should be:
 
 ```text
 rohditor-edit       user recipe and creative intent
