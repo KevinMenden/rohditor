@@ -97,6 +97,15 @@ impl From<EditError> for PipelineError {
     }
 }
 
+impl From<rohditor_color::ColorMathError> for PipelineError {
+    fn from(error: rohditor_color::ColorMathError) -> Self {
+        Self::InvalidMetadata {
+            field: "color_matrices",
+            reason: error.to_string(),
+        }
+    }
+}
+
 impl From<DemosaicError> for PipelineError {
     fn from(error: DemosaicError) -> Self {
         match error {

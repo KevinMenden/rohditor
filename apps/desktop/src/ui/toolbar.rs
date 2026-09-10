@@ -21,6 +21,7 @@ pub(crate) struct ToolbarModel {
     pub crop_active: bool,
     pub zoom_label: String,
     pub diagnostics_open: bool,
+    pub dirty: bool,
     pub export_ready: bool,
 }
 
@@ -37,6 +38,7 @@ pub(crate) struct ToolbarOutput {
     pub crop: bool,
     pub settings: bool,
     pub toggle_diagnostics: bool,
+    pub save: bool,
     pub export: bool,
     pub view_mode: Option<ViewMode>,
 }
@@ -54,6 +56,7 @@ impl ToolbarOutput {
         self.crop |= other.crop;
         self.settings |= other.settings;
         self.toggle_diagnostics |= other.toggle_diagnostics;
+        self.save |= other.save;
         self.export |= other.export;
         self.view_mode = other.view_mode.or(self.view_mode);
     }
@@ -141,6 +144,9 @@ pub(crate) fn show_top(context: &egui::Context, model: &ToolbarModel) -> Toolbar
                         output.view_mode = Some(ViewMode::Develop);
                     }
                     ui.add(egui::Separator::default().vertical().spacing(8.0));
+                    output.save = widgets::toolbar_button(ui, "Save", false, model.dirty)
+                        .on_hover_text("Save the current non-destructive edits beside the RAW file")
+                        .clicked();
                     output.export = widgets::primary_button(ui, "Export", model.export_ready)
                         .on_hover_text("Export the developed full-resolution image")
                         .clicked();
@@ -255,6 +261,13 @@ fn show_app_menu(ui: &mut egui::Ui, model: &ToolbarModel, output: &mut ToolbarOu
             .clicked()
         {
             output.reset = true;
+            ui.close();
+        }
+        if ui
+            .add_enabled(model.dirty, egui::Button::new("Save edits"))
+            .clicked()
+        {
+            output.save = true;
             ui.close();
         }
         ui.separator();

@@ -40,6 +40,7 @@ struct Gesture {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct EditSession {
     recipe: EditRecipe,
+    saved_recipe: EditRecipe,
     revision: u64,
     undo: VecDeque<EditRecipe>,
     redo: VecDeque<EditRecipe>,
@@ -47,12 +48,28 @@ pub(crate) struct EditSession {
 }
 
 impl EditSession {
+    pub(crate) fn from_saved(recipe: EditRecipe) -> Self {
+        Self {
+            saved_recipe: recipe.clone(),
+            recipe,
+            ..Self::default()
+        }
+    }
+
     pub(crate) const fn recipe(&self) -> &EditRecipe {
         &self.recipe
     }
 
     pub(crate) const fn revision(&self) -> u64 {
         self.revision
+    }
+
+    pub(crate) fn is_dirty(&self) -> bool {
+        self.recipe != self.saved_recipe
+    }
+
+    pub(crate) fn mark_saved(&mut self) {
+        self.saved_recipe = self.recipe.clone();
     }
 
     pub(crate) const fn gesture_active(&self) -> bool {
@@ -172,16 +189,36 @@ mod tests {
     #[test]
     fn discrete_edits_reset_and_undo_redo_advance_revision() {
         let mut edits = EditSession::default();
+        assert!(!edits.is_dirty());
         assert!(edits.set_discrete(exposed(1.0)));
+        assert!(edits.is_dirty());
         assert_eq!(edits.revision(), 1);
         assert!(edits.reset());
+        assert!(!edits.is_dirty());
         assert_eq!(edits.revision(), 2);
         assert!(edits.undo());
+        assert!(edits.is_dirty());
         assert_eq!(edits.recipe().light.exposure_ev, 1.0);
         assert_eq!(edits.revision(), 3);
         assert!(edits.redo());
+        assert!(!edits.is_dirty());
         assert_eq!(edits.recipe(), &EditRecipe::default());
         assert_eq!(edits.revision(), 4);
+    }
+
+    #[test]
+    fn loading_and_saving_a_recipe_establishes_a_clean_baseline() {
+        let recipe = exposed(0.75);
+        let mut edits = EditSession::from_saved(recipe.clone());
+        assert_eq!(edits.recipe(), &recipe);
+        assert!(!edits.is_dirty());
+
+        let mut next = recipe;
+        next.light.exposure_ev = 1.0;
+        assert!(edits.set_discrete(next));
+        assert!(edits.is_dirty());
+        edits.mark_saved();
+        assert!(!edits.is_dirty());
     }
 
     #[test]

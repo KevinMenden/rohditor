@@ -4,7 +4,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use rohditor_core::RenderOptions;
+use rohditor_core::{OutputPolicy, RenderOptions};
 use rohditor_demosaic::DemosaicAlgorithm;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -18,6 +18,7 @@ const SETTINGS_FILE_NAME: &str = "settings.json";
 pub(crate) struct AppSettings {
     schema_version: u32,
     demosaic: DemosaicAlgorithm,
+    output_policy: OutputPolicy,
 }
 
 impl Default for AppSettings {
@@ -25,6 +26,7 @@ impl Default for AppSettings {
         Self {
             schema_version: SCHEMA_VERSION,
             demosaic: DemosaicAlgorithm::MalvarHeCutler,
+            output_policy: OutputPolicy::ClipToSrgb,
         }
     }
 }
@@ -39,9 +41,18 @@ impl AppSettings {
         self.demosaic = demosaic;
     }
 
+    pub(crate) const fn output_policy(self) -> OutputPolicy {
+        self.output_policy
+    }
+
+    pub(crate) fn set_output_policy(&mut self, output_policy: OutputPolicy) {
+        self.output_policy = output_policy;
+    }
+
     pub(crate) fn render_options(self) -> RenderOptions {
         RenderOptions {
             demosaic: self.demosaic,
+            output_policy: self.output_policy,
             ..RenderOptions::default()
         }
     }
@@ -58,6 +69,8 @@ struct StoredSettings {
     schema_version: u32,
     #[serde(default)]
     demosaic: Option<String>,
+    #[serde(default)]
+    output_policy: Option<String>,
 }
 
 pub(crate) fn load() -> SettingsLoad {
@@ -137,9 +150,15 @@ fn decode(bytes: &[u8]) -> Result<AppSettings, String> {
         "amaze" => DemosaicAlgorithm::Amaze,
         value => return Err(format!("unknown demosaic algorithm {value:?}")),
     };
+    let output_policy = match stored.output_policy.as_deref().unwrap_or("clip_to_srgb") {
+        "clip_to_srgb" => OutputPolicy::ClipToSrgb,
+        "chroma_compress_to_srgb" => OutputPolicy::ChromaCompressToSrgb,
+        value => return Err(format!("unknown output gamut policy {value:?}")),
+    };
     Ok(AppSettings {
         schema_version: SCHEMA_VERSION,
         demosaic,
+        output_policy,
     })
 }
 
@@ -153,6 +172,13 @@ fn save_to_path(path: &Path, settings: AppSettings) -> io::Result<()> {
     let stored = StoredSettings {
         schema_version: settings.schema_version,
         demosaic: Some(settings.demosaic.stable_name().to_owned()),
+        output_policy: Some(
+            match settings.output_policy {
+                OutputPolicy::ClipToSrgb => "clip_to_srgb",
+                OutputPolicy::ChromaCompressToSrgb => "chroma_compress_to_srgb",
+            }
+            .to_owned(),
+        ),
     };
     let mut bytes = serde_json::to_vec_pretty(&stored).map_err(io::Error::other)?;
     bytes.push(b'\n');
@@ -216,6 +242,21 @@ mod tests {
             assert!(text.contains(&format!("\"demosaic\": \"{stable_name}\"")));
             assert_eq!(load_from_path(&path).settings, settings);
         }
+    }
+
+    #[test]
+    fn output_gamut_policy_round_trips_and_defaults_to_clip() {
+        let defaults = decode(br#"{"schema_version":1}"#).expect("missing policy uses default");
+        assert_eq!(defaults.output_policy(), OutputPolicy::ClipToSrgb);
+
+        let directory = TestDirectory::new();
+        let path = directory.path().join("settings.json");
+        let mut settings = AppSettings::default();
+        settings.set_output_policy(OutputPolicy::ChromaCompressToSrgb);
+        save_to_path(&path, settings).expect("save output gamut setting");
+        let text = fs::read_to_string(&path).expect("read saved settings");
+        assert!(text.contains("\"output_policy\": \"chroma_compress_to_srgb\""));
+        assert_eq!(load_from_path(&path).settings, settings);
     }
 
     #[test]

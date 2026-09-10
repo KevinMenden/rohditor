@@ -1,3 +1,4 @@
+// Top-level desktop composition; focused helpers live beside this module.
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -72,18 +73,20 @@ const LIBRARY_DECODE_BUDGET: usize = 8;
 /// Extra entries around the visible range kept warm for smooth scrolling.
 const LIBRARY_VISIBLE_MARGIN: usize = 24;
 
-#[path = "app/crop.rs"]
 pub(crate) mod crop;
-#[path = "app/events.rs"]
+#[path = "events.rs"]
 mod events;
-#[path = "app/gpu.rs"]
+#[path = "gpu.rs"]
 mod gpu;
+#[path = "lifecycle.rs"]
+mod lifecycle;
 
 use crop::CropToolSession;
 use gpu::{
     GpuDocumentPreview, GpuRuntime, PendingGpuHistogram, gpu_output_size, initialize_gpu_runtime,
     register_or_update_gpu_texture,
 };
+use lifecycle::PendingDocumentAction;
 
 #[derive(Debug, Clone, Copy)]
 struct DocumentPreviewDiagnostics {
@@ -163,13 +166,13 @@ struct DisplayPreviewPixels {
 }
 
 impl Document {
-    fn opening(id: u64, path: PathBuf) -> Self {
+    fn opening(id: u64, path: PathBuf, recipe: EditRecipe, warning: Option<String>) -> Self {
         Self {
             id,
             path,
             info: None,
             frame: None,
-            edits: EditSession::default(),
+            edits: EditSession::from_saved(recipe),
             texture: None,
             preview_pixels: None,
             preview_source: None,
@@ -192,7 +195,7 @@ impl Document {
             optics_profile_filter: String::new(),
             optics_database: None,
             optics_error: None,
-            warning: None,
+            warning,
             error: None,
             notice: None,
         }
@@ -200,6 +203,10 @@ impl Document {
 
     fn file_name(&self) -> String {
         display_file_name(&self.path)
+    }
+
+    fn is_dirty(&self) -> bool {
+        self.edits.is_dirty()
     }
 
     fn ticket(&self) -> PreviewTicket {
@@ -268,6 +275,7 @@ pub(crate) struct RohditorApp {
     export_settings: ExportUiSettings,
     settings: AppSettings,
     settings_warning: Option<String>,
+    pending_document_action: Option<PendingDocumentAction>,
     camera_profiles: CameraProfileRegistry,
     settings_dialog: Option<SettingsDialog>,
     ui_renderer: &'static str,
@@ -454,6 +462,7 @@ impl RohditorApp {
             export_settings: ExportUiSettings::with_jpeg_quality(JPEG_QUALITY_DEFAULT),
             settings,
             settings_warning,
+            pending_document_action: None,
             camera_profiles: CameraProfileRegistry::load(),
             settings_dialog: None,
             ui_renderer,
@@ -571,49 +580,6 @@ impl RohditorApp {
                 || document.preview_status.is_some()
                 || document.export_status.is_some()
         }) || self.pending_white_balance_pick.is_some()
-    }
-
-    fn open_path(&mut self, context: &egui::Context, path: PathBuf) {
-        self.close_document(context);
-        let document_id = self.next_document_id;
-        self.next_document_id = self.next_document_id.saturating_add(1);
-        self.document = Some(Document::opening(document_id, path.clone()));
-        if self.gpu_required_but_unavailable() {
-            if let Some(document) = self.document.as_mut() {
-                document.open_status = None;
-                document.error = self.startup_error.clone();
-            }
-            self.update_window_title(context);
-            return;
-        }
-        if let Err(error) = self.coordinator.open(document_id, path)
-            && let Some(document) = self.document.as_mut()
-        {
-            document.open_status = None;
-            document.error = Some(error);
-        }
-        self.update_window_title(context);
-    }
-
-    fn close_document(&mut self, context: &egui::Context) {
-        self.picker_mode = None;
-        self.color_mixer_channel = 0;
-        self.pending_white_balance_pick = None;
-        self.white_balance_memory = WhiteBalanceModeMemory::default();
-        self.crop_tool = None;
-        if let Some(mut document) = self.document.take() {
-            self.release_gpu_preview(&mut document);
-            self.coordinator.abandon(document.id);
-        }
-        self.update_window_title(context);
-    }
-
-    fn update_window_title(&self, context: &egui::Context) {
-        let title = self.document.as_ref().map_or_else(
-            || "Rohditor".to_owned(),
-            |document| format!("{} — Rohditor", document.file_name()),
-        );
-        context.send_viewport_cmd(egui::ViewportCommand::Title(title));
     }
 
     fn preview_options(&self) -> PreviewOptions {
@@ -802,6 +768,8 @@ impl RohditorApp {
         let model = settings_ui::SettingsWindowModel {
             active_demosaic: self.settings.demosaic(),
             draft_demosaic: dialog.draft.demosaic(),
+            active_output_policy: self.settings.output_policy(),
+            draft_output_policy: dialog.draft.output_policy(),
             warning: self.settings_warning.as_deref(),
         };
         let mut open = true;
@@ -814,6 +782,11 @@ impl RohditorApp {
             && let Some(dialog) = self.settings_dialog.as_mut()
         {
             dialog.draft.set_demosaic(demosaic);
+        }
+        if let Some(output_policy) = output.selected_output_policy
+            && let Some(dialog) = self.settings_dialog.as_mut()
+        {
+            dialog.draft.set_output_policy(output_policy);
         }
         if output.apply {
             self.apply_settings(context);
@@ -989,7 +962,12 @@ impl RohditorApp {
                     .map_err(|error| error.to_string())?;
                 let frame = runtime
                     .processor
-                    .render(&source, &recipe, reusable_frame)
+                    .render(
+                        &source,
+                        &recipe,
+                        self.settings.render_options().output_policy,
+                        reusable_frame,
+                    )
                     .map_err(|error| error.to_string())?;
                 let texture_id =
                     register_or_update_gpu_texture(runtime, previous_texture_id, &frame);
@@ -1129,15 +1107,22 @@ impl RohditorApp {
             .as_ref()
             .ok_or_else(|| "the GPU processor is no longer active while applying edits".to_owned())
             .and_then(|runtime| {
+                let output_policy = self.settings.render_options().output_policy;
                 let frame = match render {
-                    ResidentGpuRender::Exact => {
-                        runtime
-                            .processor
-                            .render(&preview.source, &recipe, Some(preview.frame))
+                    ResidentGpuRender::Exact => runtime.processor.render(
+                        &preview.source,
+                        &recipe,
+                        output_policy,
+                        Some(preview.frame),
+                    ),
+                    ResidentGpuRender::WhiteBalanceDraft => {
+                        runtime.processor.render_white_balance_draft(
+                            &preview.source,
+                            &recipe,
+                            output_policy,
+                            Some(preview.frame),
+                        )
                     }
-                    ResidentGpuRender::WhiteBalanceDraft => runtime
-                        .processor
-                        .render_white_balance_draft(&preview.source, &recipe, Some(preview.frame)),
                 }
                 .map_err(|error| error.to_string())?;
                 register_or_update_gpu_texture(runtime, Some(texture_id), &frame);
@@ -1155,6 +1140,7 @@ impl RohditorApp {
                     cache_hits: PreviewCacheHits::default(),
                     timings: StageTimings::default(),
                     highlight_diagnostics: HighlightDiagnostics::Off,
+                    output_gamut_diagnostics: None,
                     memory: MemoryEstimate::default(),
                     cache_resident_bytes: 0,
                     workspace_reused: false,
@@ -1589,6 +1575,7 @@ impl RohditorApp {
                 .as_ref()
                 .map_or_else(|| "FIT".to_owned(), |document| document.view.zoom_label()),
             diagnostics_open: self.show_diagnostics,
+            dirty: self.document.as_ref().is_some_and(Document::is_dirty),
             export_ready: self.view_mode == ViewMode::Develop
                 && self.document.as_ref().is_some_and(|document| {
                     document.frame.is_some() && document.export_status.is_none()
@@ -1612,10 +1599,13 @@ impl RohditorApp {
         if actions.settings {
             self.open_settings();
         }
+        if actions.save {
+            let _ = self.save_document();
+        }
         if actions.open_file {
             self.open_file_dialog(context);
         } else if actions.close {
-            self.close_document(context);
+            self.request_close_document(context);
         }
         if actions.open_folder {
             self.open_folder_dialog();
@@ -1694,7 +1684,7 @@ impl RohditorApp {
         };
         let output = toolbar::show_file_panel(context, &model);
         if output.close {
-            self.close_document(context);
+            self.request_close_document(context);
         }
     }
 
@@ -2400,9 +2390,13 @@ impl RohditorApp {
                     rendering: rendering_profile_diagnostic(
                         document.edits.recipe().rendering.profile,
                     ),
-                    output_policy: match self.settings.render_options().output_policy {
-                        OutputPolicy::ClipToSrgb => "Clip to sRGB".to_owned(),
-                    },
+                    output_policy: output_policy_diagnostic(
+                        self.settings.render_options().output_policy,
+                    ),
+                    output_gamut_statistics: preview
+                        .worker
+                        .output_gamut_diagnostics
+                        .map(output_gamut_statistics),
                     source_state: match preview.worker.resolution {
                         PreviewResolution::SourceScale => "1:1",
                         PreviewResolution::CropToolFullFrame => "crop authoring",
@@ -2592,6 +2586,24 @@ fn rendering_profile_diagnostic(profile: rohditor_edit::RenderingProfileSelectio
         Some(version) => format!("{} v{version}", profile.display_name()),
         None => profile.display_name().to_owned(),
     }
+}
+
+fn output_policy_diagnostic(policy: OutputPolicy) -> String {
+    match policy.algorithm_version() {
+        Some(version) => format!("{} v{version}", policy.display_name()),
+        None => policy.display_name().to_owned(),
+    }
+}
+
+fn output_gamut_statistics(diagnostics: rohditor_core::GamutMappingDiagnostics) -> String {
+    format!(
+        "{} in gamut, {} compressed, {} limited, {} clipped fallback, {} invalid",
+        diagnostics.in_gamut_pixels,
+        diagnostics.compressed_pixels,
+        diagnostics.limited_pixels,
+        diagnostics.clipped_fallback_pixels,
+        diagnostics.invalid_pixels,
+    )
 }
 
 fn source_scale_selected(document: Option<&Document>) -> bool {
@@ -2806,6 +2818,7 @@ fn document_panel_model(
             .map(|info| format!("{} {}", info.clean_make, info.clean_model)),
         sensor_dimensions: document.info.as_ref().map(|info| (info.width, info.height)),
         revision: document.edits.revision(),
+        dirty: document.is_dirty(),
         has_adjustments: document.edits.recipe() != &EditRecipe::default(),
         camera_profile,
         camera_profile_choices,
@@ -3415,6 +3428,8 @@ impl eframe::App for RohditorApp {
         }
         self.show_developer_diagnostics(context);
         self.show_application_settings(context);
+        self.show_unsaved_changes_dialog(context);
+        self.update_window_title(context);
         // eframe normally wakes the event loop from the worker's
         // `request_repaint` callback. Keep a short polling repaint while work
         // is visible as a fallback for compositor/renderer combinations where
@@ -3915,7 +3930,8 @@ mod tests {
     #[test]
     fn installing_a_cpu_preview_preserves_the_existing_view() {
         let context = egui::Context::default();
-        let mut document = Document::opening(7, PathBuf::from("fixture.arw"));
+        let mut document =
+            Document::opening(7, PathBuf::from("fixture.arw"), EditRecipe::default(), None);
         document.view.actual_size(0.0);
         let pixels = vec![255, 0, 0, 0, 255, 0];
 
@@ -3937,7 +3953,8 @@ mod tests {
 
     #[test]
     fn gpu_upload_guard_requires_the_current_revision_and_supported_recipe() {
-        let mut document = Document::opening(7, PathBuf::from("fixture.arw"));
+        let mut document =
+            Document::opening(7, PathBuf::from("fixture.arw"), EditRecipe::default(), None);
         let ticket = document.ticket();
         assert!(gpu_upload_matches_document(&document, ticket));
 
@@ -3984,7 +4001,8 @@ mod tests {
 
     #[test]
     fn source_scale_toolbar_selection_tracks_resolution_request() {
-        let mut document = Document::opening(7, PathBuf::from("fixture.arw"));
+        let mut document =
+            Document::opening(7, PathBuf::from("fixture.arw"), EditRecipe::default(), None);
         document.source_scale_requested = true;
         document.view.fit(0.0);
 
