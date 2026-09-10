@@ -15,7 +15,9 @@ use rohditor_raw::{CameraColorMatrix, CameraMatrixOrigin, RawFileInfo};
 use super::transforms::{
     LINEAR_REC2020_TO_XYZ_D65, Matrix3, XYZ_D65_TO_LINEAR_REC2020, XYZ_D65_TO_LINEAR_SRGB,
 };
-use crate::white_balance::{WhiteBalanceCoordinates, coordinates_from_camera_gains};
+use crate::white_balance::{
+    WhiteBalanceCoordinates, coordinates_from_camera_gains_relative_to_as_shot,
+};
 use crate::{OutputPolicy, PipelineError};
 
 /// Validated transform selected from the decoder's camera calibration metadata.
@@ -112,9 +114,9 @@ pub struct ResolvedCameraColour {
     pub camera_to_xyz_d65: Matrix3,
     pub camera_to_linear_rec2020: Matrix3,
     pub white_balance_gains: WhiteBalanceGains,
-    /// Best-effort Temperature/Tint projection of the camera's As Shot gains.
-    /// The source gains remain authoritative when the projection is outside the
-    /// user-facing coordinate range.
+    /// Best-effort UI coordinates for the camera's As Shot gains. Temperature
+    /// is projected from the calibration and Tint is zero at this anchor. The
+    /// source gains remain authoritative when projection is unavailable.
     pub as_shot_coordinates: Option<WhiteBalanceCoordinates>,
     pub provenance: CameraProfileProvenance,
 }
@@ -275,13 +277,16 @@ pub fn resolve_camera_colour(
         transform.camera_to_xyz_d65,
         white_balance,
     )?;
-    let as_shot_coordinates = crate::cpu::white_balance_gains_from_calibration(
+    let as_shot_gains = crate::cpu::white_balance_gains_from_calibration(
         calibration.as_shot_white_balance,
         transform.camera_to_xyz_d65,
         WhiteBalance::AsShot,
     )
-    .ok()
-    .and_then(|gains| coordinates_from_camera_gains(transform.camera_to_xyz_d65, gains).ok());
+    .ok();
+    let as_shot_coordinates = as_shot_gains.and_then(|gains| {
+        coordinates_from_camera_gains_relative_to_as_shot(transform.camera_to_xyz_d65, gains, gains)
+            .ok()
+    });
     let resolved = ResolvedCameraColour {
         source_illuminant: transform.source_illuminant.clone(),
         camera_to_xyz_d65: transform.camera_to_xyz_d65,
@@ -697,6 +702,58 @@ mod tests {
             manual_first.white_balance_gains,
             manual_second.white_balance_gains
         );
+        let temperature_tint = WhiteBalance::TemperatureTint {
+            temperature: 4_800.0,
+            tint: 0.2,
+        };
+        let temperature_first = resolve_camera_colour(&calibration, &first, temperature_tint)
+            .expect("first TT profile");
+        let temperature_second = resolve_camera_colour(&calibration, &second, temperature_tint)
+            .expect("second TT profile");
+        assert_ne!(
+            temperature_first.white_balance_gains,
+            temperature_second.white_balance_gains
+        );
+    }
+
+    #[test]
+    fn camera_matrix_projects_a_realistic_as_shot_balance_into_ui_coordinates() {
+        let calibration = CameraCalibration {
+            make: "SONY".to_owned(),
+            model: "ILCE-6400".to_owned(),
+            clean_make: "Sony".to_owned(),
+            clean_model: "ILCE-6400".to_owned(),
+            as_shot_white_balance: [Some(2.511_718_8), Some(1.0), Some(1.851_562_5), None],
+            xyz_to_camera: [[0.0; 3]; 4],
+            color_matrices: vec![CameraColorMatrix {
+                illuminant: "D65".to_owned(),
+                values: vec![
+                    0.7657, -0.2847, -0.0607, -0.4083, 1.1966, 0.2389, -0.0684, 0.1418, 0.5844,
+                ],
+                origin: CameraMatrixOrigin::DecoderDatabase,
+            }],
+        };
+        let resolved = resolve_camera_colour(
+            &calibration,
+            &CameraProfileSelection::Automatic,
+            WhiteBalance::AsShot,
+        )
+        .expect("Sony-like calibration should resolve");
+        let coordinates = resolved
+            .as_shot_coordinates
+            .expect("As Shot should be visible in Temperature/Tint controls");
+        assert!((2_000.0..=25_000.0).contains(&coordinates.temperature));
+        assert!((-1.0..=1.0).contains(&coordinates.tint));
+        assert!((coordinates.temperature - 5_200.0).abs() < 500.0);
+        assert!(coordinates.tint.abs() < 1.0e-6);
+        let reconstructed = crate::camera_gains_from_as_shot_coordinates(
+            resolved.camera_to_xyz_d65,
+            resolved.white_balance_gains,
+            coordinates,
+        )
+        .expect("the displayed As Shot coordinates should preserve the source balance");
+        assert!((reconstructed.red - resolved.white_balance_gains.red).abs() < 2.0e-3);
+        assert!((reconstructed.blue - resolved.white_balance_gains.blue).abs() < 2.0e-3);
     }
 
     #[test]

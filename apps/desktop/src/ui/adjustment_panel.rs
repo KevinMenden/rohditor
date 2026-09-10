@@ -869,7 +869,9 @@ fn show_color_controls(
     }
     let white_balance_hint = match mode {
         WhiteBalanceMode::AsShot => "Using the camera's as-shot white balance",
-        WhiteBalanceMode::TemperatureTint => "Temperature is in Kelvin; tint shifts green/magenta",
+        WhiteBalanceMode::TemperatureTint => {
+            "Camera-calibrated temperature (Kelvin) and green/magenta tint"
+        }
         WhiteBalanceMode::ManualMultipliers => {
             "Manual values are relative to the camera multipliers"
         }
