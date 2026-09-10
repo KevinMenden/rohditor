@@ -45,6 +45,7 @@ These extractions are complete and should not be planned again:
 | Bayer algorithms | `rohditor-demosaic` | Bilinear, MHC, RCD, AMaZE, cancellation and algorithm tests |
 | RAW highlight algorithms | `rohditor-highlight` | Off, Clip, Local ratios, Opposed, detection, statistics, scratch estimates |
 | Camera profiles | `rohditor-camera-profile` | Matrix-only DCP parsing, validation, profile payloads and evaluator identity |
+| Shared color math (initial) | `rohditor-color` | sRGB transfer and the versioned output-gamut mapper; matrix/calibration extraction remains |
 | Lens correction | `rohditor-optics` | Lensfun database, matching, distortion/vignetting/TCA correction and provenance |
 | Catalog primitives | `rohditor-catalog` | Folder scan, embedded-preview thumbnails, cache and catalog ordering |
 | RAW decoding | `rohditor-raw` | `rawler` adapter, immutable `RawFrame`, metadata and decoder errors |
@@ -145,16 +146,18 @@ edit/src/
 Keep the existing public names and derive/serde behavior during the move.
 Recipe migration tests should remain next to the migration code.
 
-### 4.2 Extract the shared color boundary before gamut mapping
+### 4.2 Finish the shared color boundary
 
-The next plausible new library is `rohditor-color`, not a collection of
-single-purpose matrix crates. It should own pure, reusable color operations:
+The initial `rohditor-color` library now owns pure sRGB transfer and the
+versioned Chroma Compress v1 mapper. Continue that boundary instead of creating
+single-purpose matrix crates. It should ultimately own these pure, reusable
+color operations:
 
 - `Matrix3` and matrix composition/inversion;
 - chromatic adaptation and standard RGB/XYZ matrices;
 - linear sRGB transfer functions;
 - Rec.2020/D65 to target-space conversion;
-- the output gamut mapper and its versioned diagnostics once implemented.
+- the output gamut mapper and its versioned diagnostics (implemented for v1).
 
 It must not accept `RawFileInfo`, own recipe migration, or depend on GPU/UI.
 `rohditor-core` should translate decoder/profile metadata into narrow
@@ -306,9 +309,10 @@ explicitly names a product change.
 3. **Desktop/GPU/CLI splits.** Move private implementation code behind the
    existing facades. Preserve document/revision IDs, newest-wins scheduling,
    cache eviction, and retained-frame behavior.
-4. **Shared color boundary.** Extract `rohditor-color` only after the module
-   split shows a stable calibration/transform API. Move pure matrix/transfer
-   tests with it and leave recipe/RAW adapters in core.
+4. **Shared color boundary (in progress).** `rohditor-color` now owns transfer
+   and output-gamut math. Move pure matrix/transform tests into it once the
+   core color module split shows a stable calibration API; leave recipe/RAW
+   adapters in core.
 5. **Output boundary.** Separate quantized render results from codecs. Extract
    `rohditor-export` only if the dependency graph remains one-way and the
    resulting public API is smaller than the current core facade.

@@ -17,7 +17,10 @@ struct PreviewParameters {
     output_width: u32,
     output_height: u32,
     crop_origin: vec2<u32>,
-    _crop_padding: u32,
+    output_policy: u32,
+    output_policy_version: u32,
+    chroma_search_iterations: u32,
+    chroma_epsilon: f32,
     white_balance: vec4<f32>,
     camera_to_rec2020_row0: vec4<f32>,
     camera_to_rec2020_row1: vec4<f32>,
@@ -81,6 +84,95 @@ fn linear_srgb_to_srgb(value: f32) -> f32 {
         return 12.92 * clipped;
     }
     return 1.055 * pow(clipped, 1.0 / 2.4) - 0.055;
+}
+
+fn finite_value(value: f32) -> bool {
+    return value == value && abs(value) <= 3.402823e38;
+}
+
+fn finite_rgb(value: vec3<f32>) -> bool {
+    return finite_value(value.r) && finite_value(value.g) && finite_value(value.b);
+}
+
+fn in_srgb_gamut(value: vec3<f32>) -> bool {
+    return all(value >= vec3<f32>(0.0)) && all(value <= vec3<f32>(1.0));
+}
+
+fn sanitize_and_clip(value: f32) -> f32 {
+    if !finite_value(value) {
+        return select(0.0, 1.0, value > 0.0);
+    }
+    return clamp(value, 0.0, 1.0);
+}
+
+fn signed_cbrt(value: f32) -> f32 {
+    return sign(value) * pow(abs(value), 1.0 / 3.0);
+}
+
+fn linear_srgb_to_oklab(rgb: vec3<f32>) -> vec3<f32> {
+    let lms = vec3<f32>(
+        dot(vec3<f32>(0.41222146, 0.53633255, 0.051445995), rgb),
+        dot(vec3<f32>(0.2119035, 0.6806995, 0.10739696), rgb),
+        dot(vec3<f32>(0.08830246, 0.28171885, 0.6299787), rgb),
+    );
+    let roots = vec3<f32>(signed_cbrt(lms.r), signed_cbrt(lms.g), signed_cbrt(lms.b));
+    return vec3<f32>(
+        dot(vec3<f32>(0.21045426, 0.7936178, -0.004072047), roots),
+        dot(vec3<f32>(1.9779985, -2.4285922, 0.4505937), roots),
+        dot(vec3<f32>(0.025904037, 0.78277177, -0.80867577), roots),
+    );
+}
+
+fn oklab_to_linear_srgb(lab: vec3<f32>) -> vec3<f32> {
+    let roots = vec3<f32>(
+        lab.x + 0.39633778 * lab.y + 0.21580376 * lab.z,
+        lab.x - 0.105561346 * lab.y - 0.06385417 * lab.z,
+        lab.x - 0.08948418 * lab.y - 1.2914855 * lab.z,
+    );
+    let lms = roots * roots * roots;
+    return vec3<f32>(
+        dot(vec3<f32>(4.0767417, -3.3077116, 0.23096994), lms),
+        dot(vec3<f32>(-1.268438, 2.6097574, -0.34131938), lms),
+        dot(vec3<f32>(-0.0041960863, -0.7034186, 1.7076147), lms),
+    );
+}
+
+fn chroma_compress_to_srgb(rgb: vec3<f32>) -> vec3<f32> {
+    if !finite_rgb(rgb) {
+        return vec3<f32>(
+            sanitize_and_clip(rgb.r),
+            sanitize_and_clip(rgb.g),
+            sanitize_and_clip(rgb.b),
+        );
+    }
+    if in_srgb_gamut(rgb) {
+        return rgb;
+    }
+    let lab = linear_srgb_to_oklab(rgb);
+    if !finite_rgb(lab) {
+        return clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+    }
+    let lightness = clamp(lab.x, 0.0, 1.0);
+    let chroma = length(lab.yz);
+    if chroma <= parameters.chroma_epsilon {
+        return clamp(oklab_to_linear_srgb(vec3<f32>(lightness, 0.0, 0.0)), vec3<f32>(0.0), vec3<f32>(1.0));
+    }
+    var lower = 0.0;
+    var upper = 1.0;
+    for (var iteration = 0u; iteration < parameters.chroma_search_iterations; iteration += 1u) {
+        let scale = (lower + upper) * 0.5;
+        let candidate = oklab_to_linear_srgb(vec3<f32>(lightness, lab.yz * scale));
+        if finite_rgb(candidate) && in_srgb_gamut(candidate) {
+            lower = scale;
+        } else {
+            upper = scale;
+        }
+    }
+    let mapped = oklab_to_linear_srgb(vec3<f32>(lightness, lab.yz * lower));
+    if !finite_rgb(mapped) {
+        return clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+    }
+    return clamp(mapped, vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
 fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
@@ -221,10 +313,14 @@ fn develop_preview(@builtin(global_invocation_id) invocation: vec3<u32>) {
         dot(parameters.rec2020_to_srgb_row1.xyz, adjusted),
         dot(parameters.rec2020_to_srgb_row2.xyz, adjusted),
     );
+    var mapped_linear_srgb = linear_srgb;
+    if parameters.output_policy == 1u && parameters.output_policy_version == 1u {
+        mapped_linear_srgb = chroma_compress_to_srgb(linear_srgb);
+    }
     let encoded = vec3<f32>(
-        linear_srgb_to_srgb(linear_srgb.r),
-        linear_srgb_to_srgb(linear_srgb.g),
-        linear_srgb_to_srgb(linear_srgb.b),
+        linear_srgb_to_srgb(mapped_linear_srgb.r),
+        linear_srgb_to_srgb(mapped_linear_srgb.g),
+        linear_srgb_to_srgb(mapped_linear_srgb.b),
     );
     textureStore(display_srgb, vec2<i32>(output), vec4<f32>(encoded, 1.0));
 }

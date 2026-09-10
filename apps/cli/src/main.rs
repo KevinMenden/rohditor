@@ -160,6 +160,10 @@ enum Command {
         #[arg(long, value_enum, default_value_t = CliRenderingProfile::Standard)]
         rendering_profile: CliRenderingProfile,
 
+        /// Target sRGB gamut handling after rendering and creative edits.
+        #[arg(long, value_enum, default_value_t = CliOutputGamut::Clip)]
+        output_gamut: CliOutputGamut,
+
         /// Absolute camera-calibrated white-balance temperature in Kelvin
         /// (2000 to 25000). If omitted, the source's As Shot estimate is used.
         #[arg(long, allow_hyphen_values = true)]
@@ -312,6 +316,23 @@ enum CliRenderingProfile {
     #[default]
     Standard,
     Neutral,
+}
+
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+enum CliOutputGamut {
+    #[default]
+    Clip,
+    #[value(name = "chroma-compress")]
+    ChromaCompress,
+}
+
+impl From<CliOutputGamut> for OutputPolicy {
+    fn from(value: CliOutputGamut) -> Self {
+        match value {
+            CliOutputGamut::Clip => Self::ClipToSrgb,
+            CliOutputGamut::ChromaCompress => Self::ChromaCompressToSrgb,
+        }
+    }
 }
 
 impl From<CliRenderingProfile> for RenderingProfileSelection {
@@ -490,6 +511,7 @@ fn main() -> Result<()> {
             white_balance,
             camera_profile,
             rendering_profile,
+            output_gamut,
             temperature,
             tint,
             crop,
@@ -526,6 +548,7 @@ fn main() -> Result<()> {
                 white_balance,
                 camera_profile,
                 rendering_profile,
+                output_gamut,
                 temperature,
                 tint,
                 crop,
@@ -697,6 +720,7 @@ struct DevelopArguments {
     white_balance: Option<RgbMultipliers>,
     camera_profile: Option<PathBuf>,
     rendering_profile: CliRenderingProfile,
+    output_gamut: CliOutputGamut,
     temperature: Option<f32>,
     tint: f32,
     crop: CliCropPolicy,
@@ -941,7 +965,7 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
             RenderOptions {
                 raw_crop_policy: arguments.crop.into(),
                 demosaic: arguments.demosaic.into(),
-                output_policy: OutputPolicy::ClipToSrgb,
+                output_policy: arguments.output_gamut.into(),
             },
             export_settings.format.bit_depth(),
             export_settings.dithering,
@@ -990,7 +1014,7 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
     };
     let optics_report = format_optics_report(&recipe.optics, result.optics_provenance.as_ref());
     write_stdout(&format!(
-        "Developed {}x{} {}-bit sRGB {}{} with {} demosaic to {} ({} bytes, {})\nRendering profile: {}{}\nOutput gamut policy: Clip to sRGB\n{}\n{}\n{}\nEstimated CPU buffer peak: {} MiB",
+        "Developed {}x{} {}-bit sRGB {}{} with {} demosaic to {} ({} bytes, {})\nRendering profile: {}{}\nOutput gamut policy: {}{}\nOutput gamut pixels: {} in gamut, {} compressed, {} limited, {} clipped fallback, {} invalid\n{}\n{}\n{}\nEstimated CPU buffer peak: {} MiB",
         report.width,
         report.height,
         report.bit_depth.bits(),
@@ -1010,6 +1034,15 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
             .profile
             .process_version()
             .map_or_else(String::new, |version| format!(" v{version}")),
+        OutputPolicy::from(arguments.output_gamut).display_name(),
+        OutputPolicy::from(arguments.output_gamut)
+            .algorithm_version()
+            .map_or_else(String::new, |version| format!(" v{version}")),
+        result.output_gamut_diagnostics.in_gamut_pixels,
+        result.output_gamut_diagnostics.compressed_pixels,
+        result.output_gamut_diagnostics.limited_pixels,
+        result.output_gamut_diagnostics.clipped_fallback_pixels,
+        result.output_gamut_diagnostics.invalid_pixels,
         format_stage_timings(decode_time, result.timings, encode_time),
         highlight_report,
         optics_report,
@@ -1853,9 +1886,9 @@ mod tests {
     use rohditor_raw::{CfaPattern, EncodedPreviewFormat, PhotometricInterpretation};
 
     use super::{
-        Cli, CliCropPolicy, CliDemosaic, CliHighlightMethod, CliMetadata, CliRenderingProfile,
-        Command, DemosaicAlgorithm, DevelopArguments, QualityCropSpec, RgbMultipliers,
-        WhiteBalance, crop_display_image, develop_export_settings, extract_preview,
+        Cli, CliCropPolicy, CliDemosaic, CliHighlightMethod, CliMetadata, CliOutputGamut,
+        CliRenderingProfile, Command, DemosaicAlgorithm, DevelopArguments, QualityCropSpec,
+        RgbMultipliers, WhiteBalance, crop_display_image, develop_export_settings, extract_preview,
         format_photometric, nearest_neighbor_2x, parse_lens_profile, parse_libraw_pgm,
         validate_highlight_options, validate_preview_extension, white_balance_from_arguments,
     };
@@ -1906,6 +1939,7 @@ mod tests {
             white_balance: None,
             camera_profile: None,
             rendering_profile: CliRenderingProfile::Standard,
+            output_gamut: CliOutputGamut::Clip,
             temperature: None,
             tint: 0.0,
             crop: CliCropPolicy::Recommended,
@@ -2066,6 +2100,30 @@ mod tests {
             panic!("expected develop command");
         };
         assert!(matches!(rendering_profile, CliRenderingProfile::Neutral));
+    }
+
+    #[test]
+    fn develop_parses_output_gamut_and_defaults_to_clip() {
+        let defaulted = Cli::try_parse_from(["rohditor-cli", "develop", "input.arw", "output.jpg"])
+            .expect("default output gamut should parse");
+        let Command::Develop { output_gamut, .. } = defaulted.command else {
+            panic!("expected develop command");
+        };
+        assert!(matches!(output_gamut, CliOutputGamut::Clip));
+
+        let compressed = Cli::try_parse_from([
+            "rohditor-cli",
+            "develop",
+            "input.arw",
+            "output.jpg",
+            "--output-gamut",
+            "chroma-compress",
+        ])
+        .expect("chroma compression should parse");
+        let Command::Develop { output_gamut, .. } = compressed.command else {
+            panic!("expected develop command");
+        };
+        assert!(matches!(output_gamut, CliOutputGamut::ChromaCompress));
     }
 
     #[test]

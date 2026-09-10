@@ -58,6 +58,9 @@ pub use rendering::{
     BASE_RENDERING_LUT_SIZE, BaseRenderingLut, ROHDITOR_STANDARD_MIDDLE_GRAY,
     standard_base_rendering_lut,
 };
+pub use rohditor_color::{
+    CHROMA_COMPRESS_ALGORITHM_VERSION, GamutMapStatus, GamutMappingDiagnostics,
+};
 pub use rohditor_highlight::{
     ClipStats, LOCAL_RATIOS_ALGORITHM_VERSION, OPPOSED_ALGORITHM_VERSION, OpposedStats,
     ReconstructionStats,
