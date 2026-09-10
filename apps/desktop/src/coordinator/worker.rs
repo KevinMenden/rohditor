@@ -1,3 +1,4 @@
+// Worker orchestration is re-exported through the coordinator facade.
 use std::any::Any;
 use std::collections::HashSet;
 use std::fmt;
@@ -26,12 +27,9 @@ use tracing::{info, info_span};
 use crate::document::PreviewTicket;
 use crate::preview_cache::{PreviewCache, PreviewCacheHits, PreviewCacheKeys};
 
-#[path = "coordinator/scheduler.rs"]
-mod scheduler;
-
 #[cfg(test)]
-use scheduler::should_replace_preview;
-use scheduler::{PreviewCompletion, PreviewMailbox};
+use super::scheduler::should_replace_preview;
+use super::scheduler::{PreviewCompletion, PreviewMailbox};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum JobKind {
@@ -227,8 +225,8 @@ pub(crate) enum WorkerEvent {
 }
 
 #[derive(Debug)]
-struct PreviewJob {
-    ticket: PreviewTicket,
+pub(crate) struct PreviewJob {
+    pub(crate) ticket: PreviewTicket,
     frame: Arc<RawFrame>,
     recipe: EditRecipe,
     options: PreviewOptions,
@@ -237,7 +235,7 @@ struct PreviewJob {
 }
 
 #[derive(Debug)]
-struct ExportJob {
+pub(crate) struct ExportJob {
     document_id: u64,
     export_id: u64,
     recipe_revision: u64,
@@ -249,7 +247,7 @@ struct ExportJob {
 }
 
 #[derive(Debug)]
-struct WhiteBalanceSampleJob {
+pub(crate) struct WhiteBalanceSampleJob {
     ticket: PreviewTicket,
     frame: Arc<RawFrame>,
     recipe: EditRecipe,
@@ -258,7 +256,7 @@ struct WhiteBalanceSampleJob {
 }
 
 #[derive(Debug)]
-enum WorkerRequest {
+pub(crate) enum WorkerRequest {
     Open { document_id: u64, path: PathBuf },
     PreviewAvailable,
     SampleWhiteBalance(Box<WhiteBalanceSampleJob>),

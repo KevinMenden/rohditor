@@ -1,3 +1,4 @@
+// Cache storage and key construction are exposed through one local facade.
 use std::mem::size_of;
 use std::sync::Arc;
 
