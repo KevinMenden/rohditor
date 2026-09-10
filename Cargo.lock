@@ -2859,6 +2859,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rohditor-color"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+]
+
+[[package]]
 name = "rohditor-core"
 version = "0.1.0"
 dependencies = [
@@ -2867,6 +2874,7 @@ dependencies = [
  "image",
  "rayon",
  "rohditor-camera-profile",
+ "rohditor-color",
  "rohditor-demosaic",
  "rohditor-edit",
  "rohditor-highlight",
@@ -2931,6 +2939,7 @@ dependencies = [
  "bytemuck",
  "half",
  "pollster",
+ "rohditor-color",
  "rohditor-core",
  "rohditor-demosaic",
  "rohditor-edit",

@@ -18,14 +18,15 @@ use crate::cpu::{
     apply_adjustments_cancellable, apply_camera_color_transform_cancellable,
     apply_white_balance_cancellable, normalize_raw_cancellable, preview_dimensions,
     render_display_srgb8_cancellable_with_geometry,
+    render_display_srgb8_dithered_with_geometry_and_diagnostics,
+    render_display_srgb16_with_geometry_and_diagnostics,
 };
 use crate::demosaic::demosaic_cancellable;
 use crate::highlight::{HighlightDiagnostics, apply_cancellable as apply_highlight_cancellable};
 use crate::resample::resize_area_cancellable;
 use crate::{
-    CancellationToken, DitherMode, ExportImage, OutputBitDepth, OutputGeometry, PipelineError,
-    apply_adjustments, render_display_srgb8_dithered_with_geometry,
-    render_display_srgb8_with_geometry, render_display_srgb16_with_geometry,
+    CancellationToken, DitherMode, ExportImage, GamutMappingDiagnostics, OutputBitDepth,
+    OutputGeometry, PipelineError, apply_adjustments,
 };
 
 /// Default longest edge of an interactively developed preview.
@@ -47,6 +48,25 @@ pub enum RawCropPolicy {
 pub enum OutputPolicy {
     #[default]
     ClipToSrgb,
+    ChromaCompressToSrgb,
+}
+
+impl OutputPolicy {
+    #[must_use]
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::ClipToSrgb => "Clip to sRGB",
+            Self::ChromaCompressToSrgb => "Chroma compress to sRGB",
+        }
+    }
+
+    #[must_use]
+    pub const fn algorithm_version(self) -> Option<u16> {
+        match self {
+            Self::ClipToSrgb => None,
+            Self::ChromaCompressToSrgb => Some(rohditor_color::CHROMA_COMPRESS_ALGORITHM_VERSION),
+        }
+    }
 }
 
 /// Stable options that are not edits to the image itself.
@@ -280,6 +300,7 @@ pub struct RenderResult {
     pub histogram: Histogram,
     pub timings: StageTimings,
     pub highlight_diagnostics: HighlightDiagnostics,
+    pub output_gamut_diagnostics: GamutMappingDiagnostics,
     /// Compatibility projection for Clip-only callers.
     pub highlight_stats: crate::ClipStats,
     pub optics_provenance: Option<OpticsProvenance>,
@@ -292,6 +313,7 @@ pub struct ExportRenderResult {
     pub image: ExportImage,
     pub timings: StageTimings,
     pub highlight_diagnostics: HighlightDiagnostics,
+    pub output_gamut_diagnostics: GamutMappingDiagnostics,
     /// Compatibility projection for Clip-only callers.
     pub highlight_stats: crate::ClipStats,
     pub optics_provenance: Option<OpticsProvenance>,
@@ -685,7 +707,7 @@ impl CpuPipeline {
         timings.adjustments = adjustments_started.elapsed();
 
         let output_started = Instant::now();
-        let image = render_display_srgb8_cancellable_with_geometry(
+        let (image, output_gamut_diagnostics) = render_display_srgb8_cancellable_with_geometry(
             working,
             geometry,
             output_policy,
@@ -700,6 +722,7 @@ impl CpuPipeline {
             histogram,
             timings,
             highlight_diagnostics: base.highlight_diagnostics,
+            output_gamut_diagnostics,
             highlight_stats: base.highlight_stats(),
             optics_provenance: base.optics_provenance.clone(),
             memory,
@@ -744,7 +767,7 @@ impl CpuPipeline {
         apply_adjustments_cancellable(&mut base.image, recipe, cancellation)?;
         base.timings.adjustments = adjustments_started.elapsed();
         let output_started = Instant::now();
-        let image = render_display_srgb8_cancellable_with_geometry(
+        let (image, output_gamut_diagnostics) = render_display_srgb8_cancellable_with_geometry(
             &base.image,
             geometry,
             options.output_policy,
@@ -758,6 +781,7 @@ impl CpuPipeline {
             histogram,
             timings: base.timings,
             highlight_diagnostics: base.highlight_diagnostics,
+            output_gamut_diagnostics,
             highlight_stats: base.highlight_stats(),
             optics_provenance: base.optics_provenance.clone(),
             memory,
@@ -781,21 +805,26 @@ impl CpuPipeline {
         apply_adjustments(&mut base.image, recipe)?;
         base.timings.adjustments = adjustments_started.elapsed();
         let output_started = Instant::now();
-        let image = match bit_depth {
+        let (image, output_gamut_diagnostics) = match bit_depth {
             OutputBitDepth::Eight => {
-                ExportImage::Rgb8(render_display_srgb8_dithered_with_geometry(
+                let (image, diagnostics) =
+                    render_display_srgb8_dithered_with_geometry_and_diagnostics(
+                        &base.image,
+                        geometry,
+                        options.output_policy,
+                        dithering,
+                    )?;
+                (ExportImage::Rgb8(image), diagnostics)
+            }
+            OutputBitDepth::Sixteen => {
+                let (image, diagnostics) = render_display_srgb16_with_geometry_and_diagnostics(
                     &base.image,
                     geometry,
                     options.output_policy,
                     dithering,
-                )?)
+                )?;
+                (ExportImage::Rgb16(image), diagnostics)
             }
-            OutputBitDepth::Sixteen => ExportImage::Rgb16(render_display_srgb16_with_geometry(
-                &base.image,
-                geometry,
-                options.output_policy,
-                dithering,
-            )?),
         };
         base.timings.output_conversion = output_started.elapsed();
         base.timings.total = total_started.elapsed();
@@ -804,6 +833,7 @@ impl CpuPipeline {
             image,
             timings: base.timings,
             highlight_diagnostics: base.highlight_diagnostics,
+            output_gamut_diagnostics,
             highlight_stats: base.highlight_stats(),
             optics_provenance: base.optics_provenance,
             memory,
@@ -1306,7 +1336,13 @@ fn render_base(
     base.timings.adjustments = adjustments_started.elapsed();
 
     let output_started = Instant::now();
-    let image = render_display_srgb8_with_geometry(&base.image, geometry, output_policy)?;
+    let (image, output_gamut_diagnostics) =
+        render_display_srgb8_dithered_with_geometry_and_diagnostics(
+            &base.image,
+            geometry,
+            output_policy,
+            DitherMode::None,
+        )?;
     base.timings.output_conversion = output_started.elapsed();
     base.timings.total = base.timings.metadata
         + base.timings.normalization
@@ -1323,6 +1359,7 @@ fn render_base(
         image,
         timings: base.timings,
         highlight_diagnostics: base.highlight_diagnostics,
+        output_gamut_diagnostics,
         highlight_stats: base.highlight_stats(),
         optics_provenance: base.optics_provenance.clone(),
         memory,

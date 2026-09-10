@@ -4,6 +4,7 @@ members = [
     "apps/desktop",
     "crates/catalog",
     "crates/camera-profile",
+    "crates/color",
     "crates/core",
     "crates/demosaic",
     "crates/edit",

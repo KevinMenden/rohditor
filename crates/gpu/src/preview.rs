@@ -3,10 +3,11 @@ use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use half::f16;
+use rohditor_color::{CHROMA_COMPRESS_EPSILON, CHROMA_COMPRESS_SEARCH_ITERATIONS};
 use rohditor_core::{
     BASE_RENDERING_LUT_SIZE, CameraCalibration, CameraProfileKey, CancellationToken,
     CorrectionComponents, DemosaicedBase, LINEAR_REC2020_TO_XYZ_D65, Matrix3, OpticsProvenance,
-    OutputGeometry, ReconstructedPreview, XYZ_D65_TO_LINEAR_SRGB, camera_profile_key,
+    OutputGeometry, OutputPolicy, ReconstructedPreview, XYZ_D65_TO_LINEAR_SRGB, camera_profile_key,
     resolve_camera_colour, standard_base_rendering_lut,
 };
 use rohditor_demosaic::WhiteBalanceGains;
@@ -20,9 +21,11 @@ use crate::{GpuCapabilities, GpuPreviewError};
 
 const WORKGROUP_EDGE: u32 = 16;
 // Keep this in sync with PreviewParameters in preview.wgsl. The vec2 crop
-// origin begins after 17 scalar words and is therefore aligned to word 18;
-// the following vec4 values begin at word 24. That makes the uniform 208
-// bytes, including the padding required by WGSL uniform layout rules.
+// origin begins after 17 scalar words and is therefore aligned to word 18.
+// Output policy/version occupy words 20 and 21. Words 22 and 23 carry the
+// shared chroma-compression search contract; vec4 values begin at word 24.
+// That makes the uniform 208 bytes, including the padding required by WGSL
+// uniform layout rules.
 const PARAMETER_WORDS: usize = 52;
 
 /// One uploaded, immutable camera-native preview source. White balance and the
@@ -717,10 +720,12 @@ impl GpuPreviewProcessor {
     /// Apply downstream edits to an uploaded base and write an egui-compatible
     /// oriented display texture. Passing the prior frame reuses its GPU textures
     /// whenever dimensions are unchanged.
+    /// Render with an explicit target-gamut policy shared with CPU preview and export.
     pub fn render(
         &self,
         source: &GpuPreviewSource,
         recipe: &EditRecipe,
+        output_policy: OutputPolicy,
         reusable: Option<GpuPreviewFrame>,
     ) -> Result<GpuPreviewFrame, GpuPreviewError> {
         recipe
@@ -799,10 +804,10 @@ impl GpuPreviewProcessor {
 
         let parameters = build_parameters(
             source_dimensions,
-            output_dimensions,
             orientation,
             output_geometry,
             recipe,
+            output_policy,
             white_balance_gains,
             camera_to_linear_rec2020,
         );
@@ -1168,10 +1173,10 @@ fn pack_rgba16f(
 
 fn build_parameters(
     source_dimensions: (u32, u32),
-    output_dimensions: (u32, u32),
     orientation: Orientation,
     output_geometry: OutputGeometry,
     recipe: &EditRecipe,
+    output_policy: OutputPolicy,
     white_balance_gains: WhiteBalanceGains,
     camera_to_linear_rec2020: Matrix3,
 ) -> [u32; PARAMETER_WORDS] {
@@ -1192,19 +1197,33 @@ fn build_parameters(
     words[12] = orientation_code(orientation);
     words[13] = source_dimensions.0;
     words[14] = source_dimensions.1;
-    words[15] = output_dimensions.0;
-    words[16] = output_dimensions.1;
+    let output_dimensions = output_geometry.output_dimensions();
+    words[15] =
+        u32::try_from(output_dimensions.0).expect("GPU output width was validated as a u32");
+    words[16] =
+        u32::try_from(output_dimensions.1).expect("GPU output height was validated as a u32");
     let crop = output_geometry.crop();
-    // Word 17 is padding inserted to align crop_origin: vec2<u32> to eight
-    // bytes. Words 21 through 23 align white_balance: vec4<f32> to sixteen.
+    // Word 17 aligns crop_origin: vec2<u32> to eight bytes. Words 22 and 23
+    // complete the next sixteen-byte uniform slot before white_balance.
     words[18] = u32::try_from(crop.left).expect("GPU crop origin was dimension-validated");
     words[19] = u32::try_from(crop.top).expect("GPU crop origin was dimension-validated");
+    words[20] = output_policy_code(output_policy);
+    words[21] = u32::from(output_policy.algorithm_version().unwrap_or(0));
+    words[22] = CHROMA_COMPRESS_SEARCH_ITERATIONS;
+    words[23] = CHROMA_COMPRESS_EPSILON.to_bits();
     words[24] = white_balance_gains.red.to_bits();
     words[25] = white_balance_gains.green.to_bits();
     words[26] = white_balance_gains.blue.to_bits();
     write_matrix_rows(&mut words[28..40], camera_to_linear_rec2020);
     write_matrix_rows(&mut words[40..52], rec2020_to_srgb);
     words
+}
+
+fn output_policy_code(output_policy: OutputPolicy) -> u32 {
+    match output_policy {
+        OutputPolicy::ClipToSrgb => 0,
+        OutputPolicy::ChromaCompressToSrgb => 1,
+    }
 }
 
 fn rendering_profile_code(profile: RenderingProfileSelection) -> u32 {
@@ -1268,10 +1287,10 @@ mod tests {
             OutputGeometry::new(7, 5, Orientation::Rotate90, None).expect("full-frame geometry");
         let parameters = build_parameters(
             (7, 5),
-            (5, 7),
             Orientation::Rotate90,
             geometry,
             &recipe,
+            OutputPolicy::ChromaCompressToSrgb,
             WhiteBalanceGains {
                 red: 1.0,
                 green: 1.0,
@@ -1281,6 +1300,13 @@ mod tests {
         );
         assert_eq!(parameters[12], 5);
         assert_eq!(parameters[13..17], [7, 5, 5, 7]);
+        assert_eq!(parameters[20], 1);
+        assert_eq!(
+            parameters[21],
+            u32::from(rohditor_color::CHROMA_COMPRESS_ALGORITHM_VERSION)
+        );
+        assert_eq!(parameters[22], CHROMA_COMPRESS_SEARCH_ITERATIONS);
+        assert_eq!(f32::from_bits(parameters[23]), CHROMA_COMPRESS_EPSILON);
         assert_eq!(parameters.len(), 52);
         assert_eq!(parameters[18..20], [0, 0]);
         assert_eq!(f32::from_bits(parameters[24]), 1.0);
@@ -1305,10 +1331,10 @@ mod tests {
             OutputGeometry::new(7, 5, Orientation::Rotate90, None).expect("full-frame geometry");
         let neutral_parameters = build_parameters(
             (7, 5),
-            (5, 7),
             Orientation::Rotate90,
             neutral_geometry,
             &recipe,
+            OutputPolicy::ClipToSrgb,
             WhiteBalanceGains {
                 red: 1.0,
                 green: 1.0,
@@ -1317,6 +1343,8 @@ mod tests {
             Matrix3::identity(),
         );
         assert_eq!(neutral_parameters[1], 0);
+        assert_eq!(neutral_parameters[20], 0);
+        assert_eq!(neutral_parameters[21], 0);
     }
 
     #[test]
@@ -1477,10 +1505,56 @@ mod tests {
                 )
                 .expect("camera-native source should upload");
             let gpu = processor
-                .render(&source, &recipe, None)
+                .render(&source, &recipe, OutputPolicy::ClipToSrgb, None)
                 .expect("GPU preview should render");
             assert_gpu_reconstructed_frame_matches_cpu(&processor, &frame, options, &recipe, &gpu);
         }
+    }
+
+    #[test]
+    #[ignore = "requires a locally available Vulkan-capable GPU; run cargo test -p rohditor-gpu -- --ignored"]
+    fn gpu_chroma_compression_matches_cpu_reference() {
+        let _gpu_test_guard = gpu_test_guard();
+        let Some(processor) = gpu_test_processor() else {
+            return;
+        };
+        let mut recipe = EditRecipe::default();
+        recipe.light.exposure_ev = 2.0;
+        recipe.color.saturation = 2.0;
+        let frame = synthetic_frame(Orientation::Normal);
+        let mut options = PreviewOptions {
+            max_long_edge: 8,
+            ..PreviewOptions::default()
+        };
+        options.render.output_policy = OutputPolicy::ChromaCompressToSrgb;
+        let reconstructed = CpuPipeline::default()
+            .prepare_preview_reconstruction(&frame, &recipe, options)
+            .expect("synthetic reconstruction should develop");
+        let source = processor
+            .upload_prepared(
+                GpuPreviewUpload::from_reconstructed_preview(
+                    &reconstructed,
+                    recipe.color.white_balance,
+                )
+                .expect("camera-native source upload should work"),
+            )
+            .expect("camera-native source should upload");
+        let gpu = processor
+            .render(&source, &recipe, OutputPolicy::ChromaCompressToSrgb, None)
+            .expect("GPU chroma-compressed preview should render");
+        assert_gpu_reconstructed_frame_matches_cpu(&processor, &frame, options, &recipe, &gpu);
+    }
+
+    #[test]
+    #[ignore = "requires a locally available Vulkan adapter; CPU rasterizers provide structural validation"]
+    fn gpu_shader_and_uniform_contract_validate_on_available_vulkan_adapter() {
+        let _gpu_test_guard = gpu_test_guard();
+        let processor = gpu_test_processor_with_hardware_requirement(false)
+            .expect("the requested structural Vulkan adapter should be accepted");
+        assert_eq!(
+            processor.parameters.size(),
+            (PARAMETER_WORDS * size_of::<u32>()) as u64
+        );
     }
 
     #[test]
@@ -1517,7 +1591,7 @@ mod tests {
                 bottom: 0.625,
             });
             let first = processor
-                .render(&source, &recipe, None)
+                .render(&source, &recipe, OutputPolicy::ClipToSrgb, None)
                 .expect("cropped GPU preview should render");
             assert_gpu_reconstructed_frame_matches_cpu(
                 &processor, &frame, options, &recipe, &first,
@@ -1530,7 +1604,7 @@ mod tests {
                 bottom: 0.75,
             });
             let second = processor
-                .render(&source, &recipe, Some(first))
+                .render(&source, &recipe, OutputPolicy::ClipToSrgb, Some(first))
                 .expect("shifted crop should render from the resident source");
             assert!(second.textures_reused());
             assert_gpu_reconstructed_frame_matches_cpu(
@@ -1574,7 +1648,7 @@ mod tests {
 
             for (control_index, (label, recipe)) in controls.iter().enumerate() {
                 let gpu = processor
-                    .render(&source, recipe, reusable.take())
+                    .render(&source, recipe, OutputPolicy::ClipToSrgb, reusable.take())
                     .unwrap_or_else(|error| panic!("{label} should render: {error}"));
                 processor
                     .wait_for_queue()
@@ -1647,7 +1721,7 @@ mod tests {
             )
             .expect("camera-native source should upload");
         let first = processor
-            .render(&source, &initial_recipe, None)
+            .render(&source, &initial_recipe, OutputPolicy::ClipToSrgb, None)
             .expect("initial GPU preview should render");
         let mut adjusted_recipe = standard_dynamic_recipe();
         adjusted_recipe.color.white_balance = WhiteBalance::ManualMultipliers {
@@ -1657,7 +1731,12 @@ mod tests {
         };
         adjusted_recipe.light.exposure_ev = 0.4;
         let second = processor
-            .render(&source, &adjusted_recipe, Some(first))
+            .render(
+                &source,
+                &adjusted_recipe,
+                OutputPolicy::ClipToSrgb,
+                Some(first),
+            )
             .expect("white balance should be a resident GPU edit");
         assert!(second.textures_reused());
         assert_gpu_reconstructed_frame_matches_cpu(
@@ -1692,7 +1771,7 @@ mod tests {
             .upload_base(&base)
             .expect("base upload should work");
         let first = processor
-            .render(&source, &initial_recipe, None)
+            .render(&source, &initial_recipe, OutputPolicy::ClipToSrgb, None)
             .expect("initial GPU preview should render");
         assert!(!first.textures_reused());
         let mut adjusted_recipe = EditRecipe::default();
@@ -1700,7 +1779,12 @@ mod tests {
         adjusted_recipe.light.contrast = 0.3;
         adjusted_recipe.color.saturation = 0.8;
         let second = processor
-            .render(&source, &adjusted_recipe, Some(first))
+            .render(
+                &source,
+                &adjusted_recipe,
+                OutputPolicy::ClipToSrgb,
+                Some(first),
+            )
             .expect("resident source should render downstream edits");
         assert!(second.textures_reused());
         assert_gpu_frame_matches_cpu(&processor, &base, &adjusted_recipe, &second);
@@ -1748,7 +1832,7 @@ mod tests {
             )
             .expect("private camera-native source should upload");
         let gpu = processor
-            .render(&source, &recipe, None)
+            .render(&source, &recipe, OutputPolicy::ClipToSrgb, None)
             .expect("private GPU preview should render");
         let stats =
             gpu_reconstructed_frame_parity_stats(&processor, &frame, options, &recipe, &gpu);
@@ -1806,7 +1890,7 @@ mod tests {
 
         for (control_index, (label, recipe)) in controls.iter().enumerate() {
             let gpu = processor
-                .render(&source, recipe, reusable.take())
+                .render(&source, recipe, OutputPolicy::ClipToSrgb, reusable.take())
                 .unwrap_or_else(|error| panic!("{label} should render: {error}"));
             processor
                 .wait_for_queue()
@@ -1891,7 +1975,7 @@ mod tests {
             )
             .expect("private camera-native source should upload");
         let mut gpu_frame = processor
-            .render(&source, &base_recipe, None)
+            .render(&source, &base_recipe, OutputPolicy::ClipToSrgb, None)
             .expect("initial GPU preview should render");
         processor
             .wait_for_queue()
@@ -1909,7 +1993,7 @@ mod tests {
             recipe.light.contrast = index as f32 / 80.0;
             recipe.color.saturation = 0.75 + index as f32 / 80.0;
             gpu_frame = processor
-                .render(&source, &recipe, Some(gpu_frame))
+                .render(&source, &recipe, OutputPolicy::ClipToSrgb, Some(gpu_frame))
                 .expect("cached GPU adjustment should render");
             processor
                 .wait_for_queue()
@@ -1951,6 +2035,12 @@ mod tests {
     }
 
     fn gpu_test_processor() -> Option<GpuPreviewProcessor> {
+        gpu_test_processor_with_hardware_requirement(true)
+    }
+
+    fn gpu_test_processor_with_hardware_requirement(
+        require_hardware: bool,
+    ) -> Option<GpuPreviewProcessor> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
             ..wgpu::InstanceDescriptor::default()
@@ -1962,12 +2052,12 @@ mod tests {
         }))
         .expect("a Vulkan adapter is required for the GPU parity test");
         let adapter_info = adapter.get_info();
-        if matches!(adapter_info.device_type, wgpu::DeviceType::Cpu) {
+        if require_hardware && matches!(adapter_info.device_type, wgpu::DeviceType::Cpu) {
             eprintln!("skipping GPU parity test because Vulkan selected a CPU rasterizer");
             return None;
         }
         eprintln!(
-            "GPU parity test uses {} ({:?}, {:?})",
+            "GPU validation uses {} ({:?}, {:?})",
             adapter_info.name, adapter_info.backend, adapter_info.device_type
         );
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {

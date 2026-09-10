@@ -10,6 +10,7 @@ bytemuck.workspace = true
 image.workspace = true
 rayon.workspace = true
 rohditor-camera-profile = { path = "../camera-profile" }
+rohditor-color = { path = "../color" }
 rohditor-demosaic = { path = "../demosaic" }
 rohditor-edit = { path = "../edit" }
 rohditor-highlight = { path = "../highlight" }
