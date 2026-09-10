@@ -1,5 +1,7 @@
 use rayon::prelude::*;
 use rohditor_camera_profile::{CAMERA_PROFILE_EVALUATOR_VERSION, CalibrationIlluminant};
+use rohditor_color::{GamutMapResult, clip_linear_srgb, compress_linear_srgb_chroma};
+pub use rohditor_color::{linear_srgb_to_srgb, srgb_to_linear_srgb};
 use rohditor_demosaic::WhiteBalanceGains;
 use rohditor_edit::{CameraProfileSelection, WhiteBalance};
 use rohditor_image::{
@@ -7,8 +9,8 @@ use rohditor_image::{
 };
 use rohditor_raw::{CameraColorMatrix, CameraMatrixOrigin, RawFileInfo};
 
-use crate::PipelineError;
 use crate::white_balance::{WhiteBalanceCoordinates, coordinates_from_camera_gains};
+use crate::{OutputPolicy, PipelineError};
 
 const D65_WHITE: [f32; 3] = [0.950_455_9, 1.0, 1.089_057_8];
 const D50_WHITE: [f32; 3] = [0.964_22, 1.0, 0.825_21];
@@ -473,10 +475,12 @@ pub fn convert_rec2020_to_display_srgb(
                 .iter()
                 .zip(output_row.as_chunks_mut::<3>().0.iter_mut())
             {
-                destination.copy_from_slice(&encode_rec2020_for_srgb_output(
+                let (encoded, _) = encode_rec2020_for_srgb_output(
                     rec2020_to_srgb,
                     [source[0], source[1], source[2]],
-                ));
+                    OutputPolicy::ClipToSrgb,
+                );
+                destination.copy_from_slice(&encoded);
             }
         });
     DisplayRgbImage::new(
@@ -494,34 +498,28 @@ pub fn convert_rec2020_to_display_srgb(
 pub(crate) fn encode_rec2020_for_srgb_output(
     rec2020_to_srgb: Matrix3,
     source: [f32; 3],
-) -> [f32; 3] {
-    clip_linear_srgb_for_output(rec2020_to_srgb.transform(source)).map(linear_srgb_to_srgb)
+    output_policy: OutputPolicy,
+) -> ([f32; 3], rohditor_color::GamutMapStatus) {
+    let mapped = map_rec2020_for_srgb_output(rec2020_to_srgb, source, output_policy);
+    (mapped.linear_srgb.map(linear_srgb_to_srgb), mapped.status)
 }
 
-/// Phase 2's initial highlight and gamut policy: hard clip linear sRGB to [0, 1].
+pub(crate) fn map_rec2020_for_srgb_output(
+    rec2020_to_srgb: Matrix3,
+    source: [f32; 3],
+    output_policy: OutputPolicy,
+) -> GamutMapResult {
+    let linear_srgb = rec2020_to_srgb.transform(source);
+    match output_policy {
+        OutputPolicy::ClipToSrgb => clip_linear_srgb(linear_srgb),
+        OutputPolicy::ChromaCompressToSrgb => compress_linear_srgb_chroma(linear_srgb),
+    }
+}
+
+/// Compatibility helper for hard-clipping linear sRGB to [0, 1].
 #[must_use]
 pub fn clip_linear_srgb_for_output(rgb: [f32; 3]) -> [f32; 3] {
-    rgb.map(|value| value.clamp(0.0, 1.0))
-}
-
-/// Apply the IEC sRGB transfer function to one linear-light component.
-#[must_use]
-pub fn linear_srgb_to_srgb(value: f32) -> f32 {
-    if value <= 0.003_130_8 {
-        12.92 * value
-    } else {
-        1.055 * value.powf(1.0 / 2.4) - 0.055
-    }
-}
-
-/// Decode one sRGB component back to linear light.
-#[must_use]
-pub fn srgb_to_linear_srgb(value: f32) -> f32 {
-    if value <= 0.040_45 {
-        value / 12.92
-    } else {
-        ((value + 0.055) / 1.055).powf(2.4)
-    }
+    clip_linear_srgb(rgb).linear_srgb
 }
 
 fn parse_camera_matrix(

@@ -6,13 +6,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
+#[cfg(test)]
+use rohditor_core::camera_gains_from_coordinates;
 use rohditor_core::{
     CameraCalibration, DatabaseProvenance, DitherMode, ExportFormat, ExportMetadataPolicy,
     ExportSettings, HighlightDiagnostics, Histogram, JPEG_QUALITY_DEFAULT, MemoryEstimate,
     OutputPolicy, PngBitDepth, PreviewOptions, ProfileMatch, StageTimings, WhiteBalanceCoordinates,
-    camera_color_transform, camera_gains_from_coordinates, coordinates_from_camera_gains,
-    hsl_channel_weights_from_display_rgb, paths_refer_to_same_file, resolve_camera_colour,
-    srgb_to_linear_srgb,
+    camera_color_transform, coordinates_from_camera_gains, hsl_channel_weights_from_display_rgb,
+    paths_refer_to_same_file, resolve_camera_colour, srgb_to_linear_srgb,
 };
 use rohditor_demosaic::{DemosaicAlgorithm, WhiteBalanceGains};
 use rohditor_edit::{
@@ -774,6 +775,8 @@ impl RohditorApp {
         let model = settings_ui::SettingsWindowModel {
             active_demosaic: self.settings.demosaic(),
             draft_demosaic: dialog.draft.demosaic(),
+            active_output_policy: self.settings.output_policy(),
+            draft_output_policy: dialog.draft.output_policy(),
             warning: self.settings_warning.as_deref(),
         };
         let mut open = true;
@@ -786,6 +789,11 @@ impl RohditorApp {
             && let Some(dialog) = self.settings_dialog.as_mut()
         {
             dialog.draft.set_demosaic(demosaic);
+        }
+        if let Some(output_policy) = output.selected_output_policy
+            && let Some(dialog) = self.settings_dialog.as_mut()
+        {
+            dialog.draft.set_output_policy(output_policy);
         }
         if output.apply {
             self.apply_settings(context);
@@ -961,7 +969,12 @@ impl RohditorApp {
                     .map_err(|error| error.to_string())?;
                 let frame = runtime
                     .processor
-                    .render(&source, &recipe, reusable_frame)
+                    .render(
+                        &source,
+                        &recipe,
+                        self.settings.render_options().output_policy,
+                        reusable_frame,
+                    )
                     .map_err(|error| error.to_string())?;
                 let texture_id =
                     register_or_update_gpu_texture(runtime, previous_texture_id, &frame);
@@ -1064,7 +1077,12 @@ impl RohditorApp {
             .and_then(|runtime| {
                 let frame = runtime
                     .processor
-                    .render(&preview.source, &recipe, Some(preview.frame))
+                    .render(
+                        &preview.source,
+                        &recipe,
+                        self.settings.render_options().output_policy,
+                        Some(preview.frame),
+                    )
                     .map_err(|error| error.to_string())?;
                 register_or_update_gpu_texture(runtime, Some(texture_id), &frame);
                 Ok::<_, String>(frame)
@@ -1081,6 +1099,7 @@ impl RohditorApp {
                     cache_hits: PreviewCacheHits::default(),
                     timings: StageTimings::default(),
                     highlight_diagnostics: HighlightDiagnostics::Off,
+                    output_gamut_diagnostics: None,
                     memory: MemoryEstimate::default(),
                     cache_resident_bytes: 0,
                     workspace_reused: false,
@@ -2301,9 +2320,13 @@ impl RohditorApp {
                     rendering: rendering_profile_diagnostic(
                         document.edits.recipe().rendering.profile,
                     ),
-                    output_policy: match self.settings.render_options().output_policy {
-                        OutputPolicy::ClipToSrgb => "Clip to sRGB".to_owned(),
-                    },
+                    output_policy: output_policy_diagnostic(
+                        self.settings.render_options().output_policy,
+                    ),
+                    output_gamut_statistics: preview
+                        .worker
+                        .output_gamut_diagnostics
+                        .map(output_gamut_statistics),
                     source_state: match preview.worker.resolution {
                         PreviewResolution::SourceScale => "1:1",
                         PreviewResolution::CropToolFullFrame => "crop authoring",
@@ -2493,6 +2516,24 @@ fn rendering_profile_diagnostic(profile: rohditor_edit::RenderingProfileSelectio
         Some(version) => format!("{} v{version}", profile.display_name()),
         None => profile.display_name().to_owned(),
     }
+}
+
+fn output_policy_diagnostic(policy: OutputPolicy) -> String {
+    match policy.algorithm_version() {
+        Some(version) => format!("{} v{version}", policy.display_name()),
+        None => policy.display_name().to_owned(),
+    }
+}
+
+fn output_gamut_statistics(diagnostics: rohditor_core::GamutMappingDiagnostics) -> String {
+    format!(
+        "{} in gamut, {} compressed, {} limited, {} clipped fallback, {} invalid",
+        diagnostics.in_gamut_pixels,
+        diagnostics.compressed_pixels,
+        diagnostics.limited_pixels,
+        diagnostics.clipped_fallback_pixels,
+        diagnostics.invalid_pixels,
+    )
 }
 
 fn source_scale_selected(document: Option<&Document>) -> bool {

@@ -18,8 +18,8 @@ use crate::color::{
 };
 use crate::white_balance::camera_gains_from_coordinates;
 use crate::{
-    CancellationToken, DitherMode, OutputGeometry, OutputPolicy, PipelineError, RawCropPolicy,
-    standard_base_rendering_lut,
+    CancellationToken, DitherMode, GamutMappingDiagnostics, OutputGeometry, OutputPolicy,
+    PipelineError, RawCropPolicy, standard_base_rendering_lut,
 };
 
 const REC2020_LUMINANCE: [f32; 3] = [0.2627, 0.6780, 0.0593];
@@ -803,7 +803,7 @@ pub(crate) fn render_display_srgb8_cancellable_with_geometry(
     geometry: OutputGeometry,
     output_policy: OutputPolicy,
     cancellation: &CancellationToken,
-) -> Result<DisplayRgbImage<u8>, PipelineError> {
+) -> Result<(DisplayRgbImage<u8>, GamutMappingDiagnostics), PipelineError> {
     render_display_srgb8_dithered_cancellable_with_geometry(
         image,
         geometry,
@@ -826,6 +826,22 @@ pub fn render_display_srgb8_dithered_with_geometry(
         dithering,
         &CancellationToken::new(),
     )
+    .map(|(image, _)| image)
+}
+
+pub(crate) fn render_display_srgb8_dithered_with_geometry_and_diagnostics(
+    image: &LinearRgbImage<f32>,
+    geometry: OutputGeometry,
+    output_policy: OutputPolicy,
+    dithering: DitherMode,
+) -> Result<(DisplayRgbImage<u8>, GamutMappingDiagnostics), PipelineError> {
+    render_display_srgb8_dithered_cancellable_with_geometry(
+        image,
+        geometry,
+        output_policy,
+        dithering,
+        &CancellationToken::new(),
+    )
 }
 
 fn render_display_srgb8_dithered_cancellable_with_geometry(
@@ -834,7 +850,7 @@ fn render_display_srgb8_dithered_cancellable_with_geometry(
     output_policy: OutputPolicy,
     dithering: DitherMode,
     cancellation: &CancellationToken,
-) -> Result<DisplayRgbImage<u8>, PipelineError> {
+) -> Result<(DisplayRgbImage<u8>, GamutMappingDiagnostics), PipelineError> {
     let span = tracing::info_span!(
         "cpu.output_conversion",
         width = image.width(),
@@ -860,37 +876,47 @@ fn render_display_srgb8_dithered_cancellable_with_geometry(
     })?;
     let mut output = allocate_zeroed_u8(elements)?;
     let rec2020_to_srgb = LINEAR_REC2020_TO_XYZ_D65.then(XYZ_D65_TO_LINEAR_SRGB);
-    output.par_chunks_mut(row_stride).enumerate().try_for_each(
-        |(output_y, output_row)| -> Result<(), PipelineError> {
-            cancellation.checkpoint()?;
-            for (output_x, destination) in output_row.as_chunks_mut::<3>().0.iter_mut().enumerate()
-            {
-                let (source_x, source_y) = geometry.source_coordinate_in_bounds(output_x, output_y);
-                let start = source_y * image.row_stride() + source_x * 3;
-                let source = &image.data()[start..start + 3];
-                let encoded = match output_policy {
-                    OutputPolicy::ClipToSrgb => encode_rec2020_for_srgb_output(
+    let diagnostics = output
+        .par_chunks_mut(row_stride)
+        .enumerate()
+        .try_fold(
+            GamutMappingDiagnostics::default,
+            |mut diagnostics, (output_y, output_row)| -> Result<_, PipelineError> {
+                cancellation.checkpoint()?;
+                for (output_x, destination) in
+                    output_row.as_chunks_mut::<3>().0.iter_mut().enumerate()
+                {
+                    let (source_x, source_y) =
+                        geometry.source_coordinate_in_bounds(output_x, output_y);
+                    let start = source_y * image.row_stride() + source_x * 3;
+                    let source = &image.data()[start..start + 3];
+                    let (encoded, status) = encode_rec2020_for_srgb_output(
                         rec2020_to_srgb,
                         [source[0], source[1], source[2]],
-                    ),
-                };
-                for (encoded, output) in encoded.into_iter().zip(destination) {
-                    let dither = quantization_dither(dithering, output_x, output_y);
-                    *output = (encoded * 255.0 + dither).round().clamp(0.0, 255.0) as u8;
+                        output_policy,
+                    );
+                    diagnostics.record(status);
+                    for (encoded, output) in encoded.into_iter().zip(destination) {
+                        let dither = quantization_dither(dithering, output_x, output_y);
+                        *output = (encoded * 255.0 + dither).round().clamp(0.0, 255.0) as u8;
+                    }
                 }
-            }
-            Ok(())
-        },
-    )?;
+                Ok(diagnostics)
+            },
+        )
+        .try_reduce(GamutMappingDiagnostics::default, |left, right| {
+            Ok(left.merge(right))
+        })?;
     cancellation.checkpoint()?;
-    DisplayRgbImage::new(
+    let image = DisplayRgbImage::new(
         output_width,
         output_height,
         row_stride,
         DisplayTransfer::Srgb,
         output,
     )
-    .map_err(Into::into)
+    .map_err(PipelineError::from)?;
+    Ok((image, diagnostics))
 }
 
 /// Convert linear Rec.2020 directly to clipped, transfer-encoded sRGB16 while
@@ -912,6 +938,16 @@ pub fn render_display_srgb16_with_geometry(
     output_policy: OutputPolicy,
     dithering: DitherMode,
 ) -> Result<DisplayRgbImage<u16>, PipelineError> {
+    render_display_srgb16_with_geometry_and_diagnostics(image, geometry, output_policy, dithering)
+        .map(|(image, _)| image)
+}
+
+pub(crate) fn render_display_srgb16_with_geometry_and_diagnostics(
+    image: &LinearRgbImage<f32>,
+    geometry: OutputGeometry,
+    output_policy: OutputPolicy,
+    dithering: DitherMode,
+) -> Result<(DisplayRgbImage<u16>, GamutMappingDiagnostics), PipelineError> {
     let span = tracing::info_span!(
         "cpu.output_conversion",
         width = image.width(),
@@ -936,35 +972,46 @@ pub fn render_display_srgb16_with_geometry(
     })?;
     let mut output = allocate_zeroed_u16(elements)?;
     let rec2020_to_srgb = LINEAR_REC2020_TO_XYZ_D65.then(XYZ_D65_TO_LINEAR_SRGB);
-    output
+    let diagnostics = output
         .par_chunks_mut(row_stride)
         .enumerate()
-        .for_each(|(output_y, output_row)| {
-            for (output_x, destination) in output_row.as_chunks_mut::<3>().0.iter_mut().enumerate()
-            {
-                let (source_x, source_y) = geometry.source_coordinate_in_bounds(output_x, output_y);
-                let start = source_y * image.row_stride() + source_x * 3;
-                let source = &image.data()[start..start + 3];
-                let encoded = match output_policy {
-                    OutputPolicy::ClipToSrgb => encode_rec2020_for_srgb_output(
+        .fold(
+            GamutMappingDiagnostics::default,
+            |mut diagnostics, (output_y, output_row)| {
+                for (output_x, destination) in
+                    output_row.as_chunks_mut::<3>().0.iter_mut().enumerate()
+                {
+                    let (source_x, source_y) =
+                        geometry.source_coordinate_in_bounds(output_x, output_y);
+                    let start = source_y * image.row_stride() + source_x * 3;
+                    let source = &image.data()[start..start + 3];
+                    let (encoded, status) = encode_rec2020_for_srgb_output(
                         rec2020_to_srgb,
                         [source[0], source[1], source[2]],
-                    ),
-                };
-                for (encoded, output) in encoded.into_iter().zip(destination) {
-                    let dither = quantization_dither(dithering, output_x, output_y);
-                    *output = (encoded * 65_535.0 + dither).round().clamp(0.0, 65_535.0) as u16;
+                        output_policy,
+                    );
+                    diagnostics.record(status);
+                    for (encoded, output) in encoded.into_iter().zip(destination) {
+                        let dither = quantization_dither(dithering, output_x, output_y);
+                        *output = (encoded * 65_535.0 + dither).round().clamp(0.0, 65_535.0) as u16;
+                    }
                 }
-            }
-        });
-    DisplayRgbImage::new(
+                diagnostics
+            },
+        )
+        .reduce(
+            GamutMappingDiagnostics::default,
+            GamutMappingDiagnostics::merge,
+        );
+    let image = DisplayRgbImage::new(
         output_width,
         output_height,
         row_stride,
         DisplayTransfer::Srgb,
         output,
     )
-    .map_err(Into::into)
+    .map_err(PipelineError::from)?;
+    Ok((image, diagnostics))
 }
 
 fn quantization_dither(mode: DitherMode, x: usize, y: usize) -> f32 {
@@ -1898,6 +1945,88 @@ mod tests {
         assert_eq!(rotated.pixel(0, 0), normal.pixel(0, 2));
         assert_eq!(rotated.pixel(2, 0), normal.pixel(0, 0));
         assert_eq!(rotated.pixel(0, 1), normal.pixel(1, 2));
+    }
+
+    #[test]
+    fn output_policy_dispatch_preserves_clip_and_reports_chroma_compression() {
+        let image = LinearRgbImage::new(
+            2,
+            1,
+            6,
+            LinearRgbSpace::Rec2020D65,
+            vec![1.0, 0.0, 0.0, 0.18, 0.18, 0.18],
+        )
+        .expect("valid wide-gamut fixture");
+        let geometry =
+            OutputGeometry::new(2, 1, Orientation::Normal, None).expect("valid output geometry");
+        let (clipped, clip_diagnostics) =
+            render_display_srgb8_dithered_with_geometry_and_diagnostics(
+                &image,
+                geometry,
+                OutputPolicy::ClipToSrgb,
+                DitherMode::None,
+            )
+            .expect("clip output");
+        let (compressed, compression_diagnostics) =
+            render_display_srgb8_dithered_with_geometry_and_diagnostics(
+                &image,
+                geometry,
+                OutputPolicy::ChromaCompressToSrgb,
+                DitherMode::None,
+            )
+            .expect("compressed output");
+        let (_, compression_16_diagnostics) = render_display_srgb16_with_geometry_and_diagnostics(
+            &image,
+            geometry,
+            OutputPolicy::ChromaCompressToSrgb,
+            DitherMode::None,
+        )
+        .expect("16-bit compressed output");
+
+        assert_eq!(clipped.pixel(0, 0), Some([255, 0, 0].as_slice()));
+        assert_ne!(compressed.pixel(0, 0), clipped.pixel(0, 0));
+        assert_eq!(clipped.pixel(1, 0), compressed.pixel(1, 0));
+        assert_eq!(clip_diagnostics.clipped_fallback_pixels, 1);
+        assert_eq!(clip_diagnostics.in_gamut_pixels, 1);
+        assert_eq!(compression_diagnostics.compressed_pixels, 1);
+        assert_eq!(compression_diagnostics.in_gamut_pixels, 1);
+        assert_eq!(compression_16_diagnostics, compression_diagnostics);
+    }
+
+    #[test]
+    fn chroma_compression_is_deterministic_across_rayon_thread_counts() {
+        let width = 31;
+        let height = 7;
+        let data = (0..width * height)
+            .flat_map(|index| {
+                let phase = (index % 17) as f32 / 16.0;
+                [1.4 * phase, 0.8 - phase, 1.2 * (1.0 - phase)]
+            })
+            .collect();
+        let image = LinearRgbImage::new(width, height, width * 3, LinearRgbSpace::Rec2020D65, data)
+            .expect("valid asymmetric gamut fixture");
+        let geometry = OutputGeometry::new(width, height, Orientation::Normal, None)
+            .expect("valid output geometry");
+        let render = |threads| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("test thread pool")
+                .install(|| {
+                    render_display_srgb8_dithered_with_geometry_and_diagnostics(
+                        &image,
+                        geometry,
+                        OutputPolicy::ChromaCompressToSrgb,
+                        DitherMode::Ordered8x8,
+                    )
+                    .expect("deterministic compressed output")
+                })
+        };
+        let one = render(1);
+        let four = render(4);
+        assert_eq!(one.0.data(), four.0.data());
+        assert_eq!(one.1, four.1);
+        assert_eq!(one.1.total_pixels(), (width * height) as u64);
     }
 
     #[test]

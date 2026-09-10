@@ -178,11 +178,10 @@ pub(crate) fn xyz_from_temperature(temperature: f32) -> [f32; 3] {
 
 fn xy_from_temperature(temperature: f32) -> (f32, f32) {
     if temperature <= 4_000.0 {
-        let x = -0.266_123_9e9 / temperature.powi(3) - 0.234_358_0e6 / temperature.powi(2)
+        let x = -0.266_123_9e9 / temperature.powi(3) - 2.343_58e5 / temperature.powi(2)
             + 0.877_695_6e3 / temperature
             + 0.179_910;
-        let y =
-            -1.106_381_4 * x.powi(3) - 1.348_110_2 * x.powi(2) + 2.185_558_32 * x - 0.202_196_83;
+        let y = -1.106_381_4 * x.powi(3) - 1.348_110_2 * x.powi(2) + 2.185_558_3 * x - 0.202_196_83;
         (x, y)
     } else {
         let x = if temperature <= 7_000.0 {
