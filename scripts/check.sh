@@ -14,6 +14,12 @@ assert_no_dependencies() {
 assert_no_dependencies rohditor-image 'rohditor-(core|demosaic|edit|gpu|raw|cli|desktop)'
 assert_no_dependencies rohditor-edit 'rohditor-(core|demosaic|gpu|raw|cli|desktop)'
 assert_no_dependencies rohditor-demosaic 'rohditor-(core|edit|gpu|raw|cli|desktop)'
+assert_no_dependencies rohditor-highlight 'rohditor-(core|demosaic|edit|gpu|raw|cli|desktop)'
+assert_no_dependencies rohditor-optics 'rohditor-(core|gpu|cli|desktop)'
+assert_no_dependencies rohditor-raw 'rohditor-(core|demosaic|edit|gpu|cli|desktop)'
+assert_no_dependencies rohditor-color 'rohditor-(core|gpu|cli|desktop)'
+assert_no_dependencies rohditor-core 'rohditor-(gpu|cli|desktop)'
+assert_no_dependencies rohditor-gpu 'rohditor-(cli|desktop)'
 assert_no_dependencies rohditor-cli 'rohditor-(gpu|desktop)'
 
 if grep -Eq 'pub use rohditor_(demosaic|edit|image)' \

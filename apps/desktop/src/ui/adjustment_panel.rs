@@ -116,6 +116,7 @@ pub(crate) struct DocumentPanelModel {
     pub camera: Option<String>,
     pub sensor_dimensions: Option<(usize, usize)>,
     pub revision: u64,
+    pub dirty: bool,
     pub has_adjustments: bool,
     pub values: AdjustmentValues,
     pub camera_profile: CameraProfileSelection,
@@ -438,11 +439,15 @@ fn document_summary(ui: &mut egui::Ui, document: &DocumentPanelModel) {
         );
     }
     if let Some((width, height)) = document.sensor_dimensions {
+        let save_state = if document.dirty { "UNSAVED" } else { "SAVED" };
         ui.label(
-            egui::RichText::new(format!("{width} × {height}  ·  REV {}", document.revision))
-                .monospace()
-                .small()
-                .color(colors::TEXT_MUTED),
+            egui::RichText::new(format!(
+                "{width} × {height}  ·  REV {}  ·  {save_state}",
+                document.revision
+            ))
+            .monospace()
+            .small()
+            .color(colors::TEXT_MUTED),
         );
     }
 }
