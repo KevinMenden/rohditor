@@ -1,11 +1,13 @@
+// Cache storage and key construction are exposed through one local facade.
 use std::mem::size_of;
 use std::sync::Arc;
 
 use rohditor_core::{
     CameraProfileKey, CorrectionComponents, CpuPipeline, CpuPreviewWorkspace, DemosaicedBase,
-    LOCAL_RATIOS_ALGORITHM_VERSION, MemoryEstimate, OPPOSED_ALGORITHM_VERSION,
-    OPTICS_ALGORITHM_VERSION, OpticsProvenance, OutputPolicy, PreviewOptions, RawCropPolicy,
-    ReconstructedPreview, WHITE_BALANCE_ALGORITHM_VERSION, camera_profile_key,
+    GamutMappingDiagnostics, LOCAL_RATIOS_ALGORITHM_VERSION, MemoryEstimate,
+    OPPOSED_ALGORITHM_VERSION, OPTICS_ALGORITHM_VERSION, OpticsProvenance, OutputPolicy,
+    PreviewOptions, RawCropPolicy, ReconstructedPreview, WHITE_BALANCE_ALGORITHM_VERSION,
+    camera_profile_key,
 };
 #[cfg(test)]
 use rohditor_core::{DatabaseProvenance, LensProfileSummary};
@@ -141,6 +143,7 @@ impl PreviewCacheKeys {
                 ]
             }),
             output_policy: options.render.output_policy,
+            output_policy_version: options.render.output_policy.algorithm_version(),
         };
         Self {
             decoded,
@@ -373,6 +376,7 @@ struct AdjustedPreviewKey {
     orientation: Orientation,
     crop_bits: Option<[u64; 4]>,
     output_policy: OutputPolicy,
+    output_policy_version: Option<u16>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -423,6 +427,7 @@ pub(crate) struct AdjustedPreviewEntry {
     key: AdjustedPreviewKey,
     pub image: DisplayRgbImage<u8>,
     pub memory: MemoryEstimate,
+    pub output_gamut_diagnostics: GamutMappingDiagnostics,
 }
 
 /// Bounded one-document preview cache with deterministic cascading eviction.
@@ -539,11 +544,13 @@ impl PreviewCache {
         keys: &PreviewCacheKeys,
         image: DisplayRgbImage<u8>,
         memory: MemoryEstimate,
+        output_gamut_diagnostics: GamutMappingDiagnostics,
     ) {
         self.adjusted = Some(AdjustedPreviewEntry {
             key: keys.adjusted.clone(),
             image,
             memory,
+            output_gamut_diagnostics,
         });
     }
 
@@ -660,6 +667,15 @@ mod tests {
         PreviewCacheKeys::new(7, &frame(), recipe, PreviewOptions::default())
     }
 
+    fn keys_with_output_policy(
+        recipe: &EditRecipe,
+        output_policy: OutputPolicy,
+    ) -> PreviewCacheKeys {
+        let mut options = PreviewOptions::default();
+        options.render.output_policy = output_policy;
+        PreviewCacheKeys::new(7, &frame(), recipe, options)
+    }
+
     #[test]
     fn highlight_cache_key_tracks_only_the_dependencies_of_reconstruction() {
         let mut off = EditRecipe::default();
@@ -764,6 +780,21 @@ mod tests {
             standard_keys.adjusted,
             keys(&future_process).adjusted,
             "pixel-producing process versions must not share adjusted cache entries"
+        );
+    }
+
+    #[test]
+    fn output_gamut_policy_invalidates_only_adjusted_pixels_and_keys_version() {
+        let recipe = EditRecipe::default();
+        let clip = keys_with_output_policy(&recipe, OutputPolicy::ClipToSrgb);
+        let compressed = keys_with_output_policy(&recipe, OutputPolicy::ChromaCompressToSrgb);
+        assert_eq!(clip.decoded, compressed.decoded);
+        assert_eq!(clip.reconstructed, compressed.reconstructed);
+        assert_eq!(clip.demosaiced, compressed.demosaiced);
+        assert_ne!(clip.adjusted, compressed.adjusted);
+        assert_eq!(
+            compressed.adjusted.output_policy_version,
+            Some(rohditor_core::CHROMA_COMPRESS_ALGORITHM_VERSION)
         );
     }
 

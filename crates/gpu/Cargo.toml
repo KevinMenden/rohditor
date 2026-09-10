@@ -11,6 +11,7 @@ workspace = true
 [dependencies]
 bytemuck.workspace = true
 half.workspace = true
+rohditor-color = { path = "../color" }
 rohditor-core = { path = "../core" }
 rohditor-demosaic = { path = "../demosaic" }
 rohditor-edit = { path = "../edit" }

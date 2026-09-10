@@ -29,7 +29,7 @@ source retained for preview reuse.
 | Rohditor Standard | Implemented, current recipe default | Versioned luminance base LUT, CPU/GPU/CLI/desktop integration | Qualify appearance and interaction with output gamut |
 | Rohditor Neutral | Implemented | Identity base rendering for migrated/reference recipes | Retain as an explicit comparison mode |
 | Hard sRGB clipping | Implemented baseline | Rec.2020 to linear sRGB, per-channel clamp, sRGB transfer | Preserve as a reference/output fallback |
-| Chroma compression | Not implemented | No dedicated mapper or `OutputPolicy` variant | Implement the first output-gamut vertical slice below |
+| Chroma compression | Implemented, opt-in | Versioned OKLab/OKLCH mapper across CPU/GPU/CLI/desktop/export | Complete private-corpus visual review and hardware-GPU parity |
 | Wide-gamut/monitor ICC output | Not implemented | Export embeds sRGB ICC | Separate future color-management scope |
 
 The current recipe schema in this checkout is 10. Standard rendering is
@@ -53,7 +53,7 @@ immutable RawFrame
   -> base rendering (Standard or Neutral)
   -> remaining Light and Color edits
   -> linear Rec.2020/D65 -> linear sRGB
-  -> output gamut policy (current Clip, future ChromaCompress)
+  -> output gamut policy (Clip default, opt-in ChromaCompress v1)
   -> sRGB transfer function and quantization
 ```
 
@@ -186,19 +186,22 @@ only the output-adjusted level when the base is unchanged.
 
 ## 6. Output gamut mapping: first implementation slice
 
+**Implementation status:** landed as opt-in Chroma Compress v1. Hard clipping
+remains the default until private-corpus visual qualification and real-hardware
+GPU parity are complete.
+
 ### 6.1 Current baseline
 
-The current output path converts linear Rec.2020/D65 to linear sRGB and then
-hard-clips each channel to `[0, 1]` before applying the sRGB transfer function.
-`OutputPolicy::ClipToSrgb` is the explicit compatibility policy. This is
-deterministic and easy to validate, but independent channel clipping can shift
-hue, remove chroma, and produce the familiar saturated-highlight color cast.
+The output path converts linear Rec.2020/D65 to linear sRGB, applies the
+selected gamut policy, and then applies the sRGB transfer function.
+`OutputPolicy::ClipToSrgb` remains the explicit compatibility policy and the
+default. It is deterministic and easy to validate, but independent channel
+clipping can shift hue, remove chroma, and produce the familiar
+saturated-highlight color cast.
 
-The GPU shader currently performs the equivalent clamp in its transfer helper.
-The Rust `OutputPolicy` is already part of the adjusted preview cache key, but
-the GPU render contract currently has only the clipping path. A chroma policy
-must therefore be threaded through the GPU parameters rather than inferred
-from a default.
+The CPU and GPU paths now also implement `ChromaCompressToSrgb`. The policy and
+its algorithm version are explicit GPU parameters and adjusted-cache inputs;
+they are never inferred from a UI or shader default.
 
 ### 6.2 Recommended v1 contract
 
@@ -236,9 +239,9 @@ one monotonic chroma control and a stable hue path for saturated colors.
 
 ### 6.3 Ownership and data flow
 
-Implement the color math in the shared color boundary described by
-[`restructuring.md`](restructuring.md), initially as a `color::gamut` module if
-the crate extraction has not landed. The ownership should be:
+Implement the color math in the shared `rohditor-color` boundary, initially as
+a `color::gamut` module if the crate extraction has not landed. The ownership
+should be:
 
 ```text
 rohditor-edit       user recipe and creative intent

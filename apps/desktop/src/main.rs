@@ -3,6 +3,7 @@ mod camera_profiles;
 mod catalog;
 mod coordinator;
 mod document;
+mod persistence;
 mod preview_cache;
 mod session;
 mod settings;

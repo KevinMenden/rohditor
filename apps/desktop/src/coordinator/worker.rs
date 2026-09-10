@@ -1,3 +1,4 @@
+// Worker orchestration is re-exported through the coordinator facade.
 use std::any::Any;
 use std::collections::HashSet;
 use std::fmt;
@@ -12,9 +13,9 @@ use eframe::egui;
 use image::RgbImage;
 use rohditor_core::{
     CancellationToken, CorrectionComponents, CpuPipeline, DatabaseProvenance, ExportReport,
-    ExportSettings, HighlightDiagnostics, Histogram, MemoryEstimate, OpticsProvenance,
-    OpticsService, PipelineError, PreviewOptions, ProfileMatch, RenderOptions, StageTimings,
-    export_image, optics_query_from_info,
+    ExportSettings, GamutMappingDiagnostics, HighlightDiagnostics, Histogram, MemoryEstimate,
+    OpticsProvenance, OpticsService, PipelineError, PreviewOptions, ProfileMatch, RenderOptions,
+    StageTimings, export_image, optics_query_from_info,
 };
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_edit::EditRecipe;
@@ -26,12 +27,9 @@ use tracing::{info, info_span};
 use crate::document::PreviewTicket;
 use crate::preview_cache::{PreviewCache, PreviewCacheHits, PreviewCacheKeys};
 
-#[path = "coordinator/scheduler.rs"]
-mod scheduler;
-
 #[cfg(test)]
-use scheduler::should_replace_preview;
-use scheduler::{PreviewCompletion, PreviewMailbox};
+use super::scheduler::should_replace_preview;
+use super::scheduler::{PreviewCompletion, PreviewMailbox};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum JobKind {
@@ -83,6 +81,7 @@ pub(crate) struct WorkerPreviewDiagnostics {
     pub cache_hits: PreviewCacheHits,
     pub timings: StageTimings,
     pub highlight_diagnostics: HighlightDiagnostics,
+    pub output_gamut_diagnostics: Option<GamutMappingDiagnostics>,
     pub memory: MemoryEstimate,
     pub cache_resident_bytes: usize,
     pub workspace_reused: bool,
@@ -226,8 +225,8 @@ pub(crate) enum WorkerEvent {
 }
 
 #[derive(Debug)]
-struct PreviewJob {
-    ticket: PreviewTicket,
+pub(crate) struct PreviewJob {
+    pub(crate) ticket: PreviewTicket,
     frame: Arc<RawFrame>,
     recipe: EditRecipe,
     options: PreviewOptions,
@@ -236,7 +235,7 @@ struct PreviewJob {
 }
 
 #[derive(Debug)]
-struct ExportJob {
+pub(crate) struct ExportJob {
     document_id: u64,
     export_id: u64,
     recipe_revision: u64,
@@ -248,7 +247,7 @@ struct ExportJob {
 }
 
 #[derive(Debug)]
-struct WhiteBalanceSampleJob {
+pub(crate) struct WhiteBalanceSampleJob {
     ticket: PreviewTicket,
     frame: Arc<RawFrame>,
     recipe: EditRecipe,
@@ -257,7 +256,7 @@ struct WhiteBalanceSampleJob {
 }
 
 #[derive(Debug)]
-enum WorkerRequest {
+pub(crate) enum WorkerRequest {
     Open { document_id: u64, path: PathBuf },
     PreviewAvailable,
     SampleWhiteBalance(Box<WhiteBalanceSampleJob>),
@@ -929,6 +928,7 @@ fn process_source_scale_preview(
                 },
                 timings: result.timings,
                 highlight_diagnostics: result.highlight_diagnostics,
+                output_gamut_diagnostics: Some(result.output_gamut_diagnostics),
                 memory: result.memory,
                 cache_resident_bytes: 0,
                 workspace_reused: false,
@@ -1095,6 +1095,7 @@ fn process_gpu_base(
         cache_hits,
         timings,
         highlight_diagnostics: reconstructed.highlight_diagnostics(),
+        output_gamut_diagnostics: None,
         memory,
         cache_resident_bytes,
         workspace_reused: false,
@@ -1153,6 +1154,7 @@ fn develop_preview(
                 cache_hits,
                 timings,
                 highlight_diagnostics,
+                output_gamut_diagnostics: Some(cached.output_gamut_diagnostics),
                 memory,
                 cache_resident_bytes: preview_cache.resident_bytes(),
                 workspace_reused: false,
@@ -1191,7 +1193,12 @@ fn develop_preview(
     let highlight_diagnostics = result.highlight_diagnostics;
     let (optics_applied, optics_fallback, optics_scale) =
         optics_metrics(result.optics_provenance.as_ref());
-    preview_cache.insert_adjusted(keys, result.image.clone(), memory);
+    preview_cache.insert_adjusted(
+        keys,
+        result.image.clone(),
+        memory,
+        result.output_gamut_diagnostics,
+    );
     let diagnostics = WorkerPreviewDiagnostics {
         backend: PreviewBackend::Cpu,
         resolution: job.resolution,
@@ -1199,6 +1206,7 @@ fn develop_preview(
         cache_hits,
         timings,
         highlight_diagnostics,
+        output_gamut_diagnostics: Some(result.output_gamut_diagnostics),
         memory,
         cache_resident_bytes: preview_cache.resident_bytes(),
         workspace_reused,
