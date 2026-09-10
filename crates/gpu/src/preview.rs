@@ -90,6 +90,25 @@ impl GpuPreviewSource {
     /// without uploading a new camera-native texture.
     #[must_use]
     pub fn matches_recipe(&self, recipe: &EditRecipe) -> bool {
+        self.matches_recipe_with_clip_draft(recipe, false)
+    }
+
+    /// Whether this source can provide an interactive white-balance draft.
+    ///
+    /// Clip derives its exact per-channel RAW ceilings from white balance, but
+    /// the retained camera-native pixels are still a useful draft everywhere
+    /// except already-clipped highlights. The desktop replaces this draft with
+    /// an exact reconstruction when the gesture ends.
+    #[must_use]
+    pub fn supports_white_balance_draft(&self, recipe: &EditRecipe) -> bool {
+        self.matches_recipe_with_clip_draft(recipe, true)
+    }
+
+    fn matches_recipe_with_clip_draft(
+        &self,
+        recipe: &EditRecipe,
+        allow_stale_clip_white_balance: bool,
+    ) -> bool {
         if !highlight_adjustments_match(self.highlight_adjustments, recipe.raw.highlights) {
             return false;
         }
@@ -99,7 +118,14 @@ impl GpuPreviewSource {
             return false;
         }
         if !self.white_balance_dynamic && recipe.color.white_balance != self.white_balance {
-            return false;
+            let clipped_camera_source = allow_stale_clip_white_balance
+                && self.calibration.is_some()
+                && self.highlight_adjustments.method == rohditor_edit::HighlightMethod::Clip
+                && self.highlight_camera_profile
+                    == camera_profile_key(&recipe.color.camera_profile);
+            if !clipped_camera_source {
+                return false;
+            }
         }
         if self.highlight_adjustments.method == rohditor_edit::HighlightMethod::Clip
             && matches!(
@@ -116,8 +142,9 @@ impl GpuPreviewSource {
     fn resolve_recipe_colour(
         &self,
         recipe: &EditRecipe,
+        allow_stale_clip_white_balance: bool,
     ) -> Result<(WhiteBalanceGains, Matrix3), GpuPreviewError> {
-        if !self.matches_recipe(recipe) {
+        if !self.matches_recipe_with_clip_draft(recipe, allow_stale_clip_white_balance) {
             return Err(GpuPreviewError::BaseMismatch {
                 reason: "the GPU source provenance does not match the requested recipe".to_owned(),
             });
@@ -723,6 +750,27 @@ impl GpuPreviewProcessor {
         recipe: &EditRecipe,
         reusable: Option<GpuPreviewFrame>,
     ) -> Result<GpuPreviewFrame, GpuPreviewError> {
+        self.render_with_clip_draft(source, recipe, reusable, false)
+    }
+
+    /// Apply a white-balance edit immediately to a resident clipped source.
+    /// Only clipped highlight pixels may differ from the exact CPU rebuild.
+    pub fn render_white_balance_draft(
+        &self,
+        source: &GpuPreviewSource,
+        recipe: &EditRecipe,
+        reusable: Option<GpuPreviewFrame>,
+    ) -> Result<GpuPreviewFrame, GpuPreviewError> {
+        self.render_with_clip_draft(source, recipe, reusable, true)
+    }
+
+    fn render_with_clip_draft(
+        &self,
+        source: &GpuPreviewSource,
+        recipe: &EditRecipe,
+        reusable: Option<GpuPreviewFrame>,
+        allow_stale_clip_white_balance: bool,
+    ) -> Result<GpuPreviewFrame, GpuPreviewError> {
         recipe
             .validate()
             .map_err(|error| GpuPreviewError::InvalidInput {
@@ -746,7 +794,7 @@ impl GpuPreviewProcessor {
             });
         }
         let (white_balance_gains, camera_to_linear_rec2020) =
-            source.resolve_recipe_colour(recipe)?;
+            source.resolve_recipe_colour(recipe, allow_stale_clip_white_balance)?;
         let orientation = recipe
             .geometry
             .orientation_override
@@ -1667,6 +1715,49 @@ mod tests {
             &adjusted_recipe,
             &second,
         );
+    }
+
+    #[test]
+    #[ignore = "requires a locally available Vulkan-capable GPU; run cargo test -p rohditor-gpu -- --ignored"]
+    fn clipped_gpu_source_renders_an_interactive_white_balance_draft() {
+        let _gpu_test_guard = gpu_test_guard();
+        let Some(processor) = gpu_test_processor() else {
+            return;
+        };
+        let frame = synthetic_frame(Orientation::Normal);
+        let options = PreviewOptions {
+            max_long_edge: 8,
+            ..PreviewOptions::default()
+        };
+        let initial_recipe = EditRecipe::default();
+        let reconstructed = CpuPipeline::default()
+            .prepare_preview_reconstruction(&frame, &initial_recipe, options)
+            .expect("synthetic clipped reconstruction should develop");
+        let source = processor
+            .upload_prepared(
+                GpuPreviewUpload::from_reconstructed_preview_for_recipe(
+                    &reconstructed,
+                    &initial_recipe,
+                    &CancellationToken::new(),
+                )
+                .expect("clipped camera-native source should pack"),
+            )
+            .expect("clipped camera-native source should upload");
+        let first = processor
+            .render(&source, &initial_recipe, None)
+            .expect("initial clipped preview should render");
+
+        let mut adjusted = initial_recipe;
+        adjusted.color.white_balance = WhiteBalance::TemperatureTint {
+            temperature: 5_000.0,
+            tint: 0.05,
+        };
+        assert!(!source.matches_recipe(&adjusted));
+        assert!(source.supports_white_balance_draft(&adjusted));
+        let draft = processor
+            .render_white_balance_draft(&source, &adjusted, Some(first))
+            .expect("white balance draft should render on the resident source");
+        assert!(draft.textures_reused());
     }
 
     #[test]

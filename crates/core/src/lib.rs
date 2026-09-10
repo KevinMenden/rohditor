@@ -68,6 +68,6 @@ pub use rohditor_optics::{
     ProfileMatch, ProfileRequest,
 };
 pub use white_balance::{
-    WHITE_BALANCE_ALGORITHM_VERSION, WhiteBalanceCoordinates, camera_gains_from_coordinates,
-    coordinates_from_camera_gains,
+    WHITE_BALANCE_ALGORITHM_VERSION, WhiteBalanceCoordinates,
+    camera_gains_from_as_shot_coordinates, coordinates_from_camera_gains_relative_to_as_shot,
 };

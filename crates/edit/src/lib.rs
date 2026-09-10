@@ -141,8 +141,8 @@ pub const COLOR_GRADING_RANGE: ParameterRange = ParameterRange {
 pub const HSL_CHANNEL_COUNT: usize = 8;
 
 /// White-balance selection for a RAW recipe. Manual multipliers are relative
-/// to the decoder's As Shot gains; Temperature/Tint is an absolute,
-/// camera-calibrated white point.
+/// to the decoder's As Shot gains. Temperature is camera-calibrated, while
+/// Tint is an offset around the As Shot locus position.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum WhiteBalance {
@@ -858,7 +858,7 @@ mod tests {
     #[test]
     fn deserialization_rejects_unknown_schema_versions() {
         let json = r#"{
-            "schema_version": 10,
+            "schema_version": 11,
             "light": {},
             "color": {},
             "geometry": {}
@@ -931,6 +931,46 @@ mod tests {
                 "schema {schema_version}"
             );
         }
+
+        let v9_as_shot = r#"{
+            "schema_version": 9,
+            "light": {},
+            "color": { "white_balance": { "mode": "as_shot" } },
+            "geometry": {}
+        }"#;
+        let migrated = serde_json::from_str::<EditRecipe>(v9_as_shot)
+            .expect("schema 9 As Shot should migrate");
+        assert_eq!(migrated.schema_version, EDIT_RECIPE_SCHEMA_VERSION);
+        assert_eq!(migrated.color.white_balance, WhiteBalance::AsShot);
+
+        let v9_manual = r#"{
+            "schema_version": 9,
+            "light": {},
+            "color": { "white_balance": {
+                "mode": "manual_multipliers", "red": 1.1, "green": 0.9, "blue": 1.2
+            } },
+            "geometry": {}
+        }"#;
+        let migrated = serde_json::from_str::<EditRecipe>(v9_manual)
+            .expect("schema 9 manual white balance should migrate");
+        assert_eq!(
+            migrated.color.white_balance,
+            WhiteBalance::ManualMultipliers {
+                red: 1.1,
+                green: 0.9,
+                blue: 1.2,
+            }
+        );
+
+        let v9_temperature_tint = r#"{
+            "schema_version": 9,
+            "light": {},
+            "color": { "white_balance": {
+                "mode": "temperature_tint", "temperature": 6500.0, "tint": 0.0
+            } },
+            "geometry": {}
+        }"#;
+        assert!(serde_json::from_str::<EditRecipe>(v9_temperature_tint).is_err());
     }
 
     #[test]

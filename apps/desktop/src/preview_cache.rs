@@ -966,6 +966,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn temperature_tint_cache_keys_carry_the_conversion_version() {
+        let mut recipe = EditRecipe::default();
+        recipe.color.white_balance = WhiteBalance::TemperatureTint {
+            temperature: 5_500.0,
+            tint: 0.1,
+        };
+        assert!(matches!(
+            keys(&recipe).demosaiced.white_balance,
+            WhiteBalanceKey::TemperatureTint {
+                algorithm_version: WHITE_BALANCE_ALGORITHM_VERSION,
+                ..
+            }
+        ));
+        recipe.raw.highlights.method = HighlightMethod::Clip;
+        assert!(matches!(
+            keys(&recipe).reconstructed.highlight,
+            HighlightKey::Clip {
+                white_balance_algorithm_version: WHITE_BALANCE_ALGORITHM_VERSION,
+                ..
+            }
+        ));
+    }
+
     fn camera_profile(matrix_offset: f32, digest: char) -> MatrixCameraProfile {
         MatrixCameraProfile {
             format_version: 1,

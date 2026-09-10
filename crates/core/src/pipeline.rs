@@ -162,7 +162,7 @@ impl ReconstructedPreview {
         &self.profile_selection
     }
 
-    /// Decoder as-shot multipliers used as the relative WB baseline.
+    /// Decoder as-shot multipliers used by As Shot and Manual white balance.
     #[must_use]
     pub const fn as_shot_white_balance(&self) -> [Option<f32>; 4] {
         self.calibration.as_shot_white_balance

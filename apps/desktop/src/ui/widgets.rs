@@ -125,15 +125,41 @@ fn adjustment_slider_with_track(
                 ui.spacing_mut().slider_rail_height = 0.0;
                 ui.visuals_mut().widgets.inactive.bg_fill = colors::PANEL_RAISED;
             }
-            ui.add(
-                egui::Slider::new(value, spec.minimum..=spec.maximum)
-                    .show_value(false)
-                    .trailing_fill(matches!(track, SliderTrack::Standard))
-                    .step_by(spec.step),
-            )
+            if matches!(track, SliderTrack::Temperature) {
+                // Kelvin is reciprocal on a black-body locus. A mired slider
+                // gives the cool and warm ends comparable visual control while
+                // the recipe continues to store the user-facing Kelvin value.
+                let mut mired = mired_from_temperature(*value, spec);
+                let response = ui.add(
+                    egui::Slider::new(
+                        &mut mired,
+                        mired_from_temperature(spec.maximum, spec)
+                            ..=mired_from_temperature(spec.minimum, spec),
+                    )
+                    .show_value(false),
+                );
+                if response.changed() {
+                    *value = temperature_from_mired(mired, spec);
+                }
+                response
+            } else if matches!(track, SliderTrack::Tint) {
+                // Camera-derived As Shot tint values are not generally exact
+                // multiples of the UI's keyboard step. A stepped egui slider
+                // rounds its input during layout and reports an edit even when
+                // the user did nothing, which would replace As Shot before RAW
+                // metadata finished loading.
+                ui.add(egui::Slider::new(value, spec.minimum..=spec.maximum).show_value(false))
+            } else {
+                ui.add(
+                    egui::Slider::new(value, spec.minimum..=spec.maximum)
+                        .show_value(false)
+                        .trailing_fill(matches!(track, SliderTrack::Standard))
+                        .step_by(spec.step),
+                )
+            }
         })
         .inner;
-    paint_neutral_marker(ui, slider_response.rect, spec);
+    paint_neutral_marker(ui, slider_response.rect, spec, track);
     let response = value_response
         .union(slider_response)
         .on_hover_text("Drag, use arrow keys, or click the value to type.");
@@ -211,7 +237,7 @@ fn slider_track_color(
         }
         SliderTrack::Temperature => two_sided_ramp_color(
             position,
-            normalized_value(spec.neutral, spec),
+            mired_slider_position(spec.neutral, spec),
             TEMPERATURE_COOL,
             TEMPERATURE_NEUTRAL,
             TEMPERATURE_WARM,
@@ -228,6 +254,21 @@ fn slider_track_color(
 
 fn normalized_value(value: f32, spec: AdjustmentSpec<'_>) -> f32 {
     ((value - spec.minimum) / (spec.maximum - spec.minimum)).clamp(0.0, 1.0)
+}
+
+fn mired_from_temperature(value: f32, spec: AdjustmentSpec<'_>) -> f32 {
+    let temperature = value.clamp(spec.minimum, spec.maximum).max(f32::EPSILON);
+    1_000_000.0 / temperature
+}
+
+fn mired_slider_position(value: f32, spec: AdjustmentSpec<'_>) -> f32 {
+    let minimum = mired_from_temperature(spec.maximum, spec);
+    let maximum = mired_from_temperature(spec.minimum, spec);
+    ((mired_from_temperature(value, spec) - minimum) / (maximum - minimum)).clamp(0.0, 1.0)
+}
+
+fn temperature_from_mired(value: f32, spec: AdjustmentSpec<'_>) -> f32 {
+    (1_000_000.0 / value.max(f32::EPSILON)).clamp(spec.minimum, spec.maximum)
 }
 
 fn two_sided_ramp_color(
@@ -274,12 +315,20 @@ fn interpolate_channel(start: u8, end: u8, fraction: f32) -> u8 {
     (f32::from(start) + (f32::from(end) - f32::from(start)) * fraction).round() as u8
 }
 
-fn paint_neutral_marker(ui: &egui::Ui, rect: egui::Rect, spec: AdjustmentSpec<'_>) {
+fn paint_neutral_marker(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    spec: AdjustmentSpec<'_>,
+    track: SliderTrack,
+) {
     let span = spec.maximum - spec.minimum;
     if span <= f32::EPSILON {
         return;
     }
-    let normalized = ((spec.neutral - spec.minimum) / span).clamp(0.0, 1.0);
+    let normalized = match track {
+        SliderTrack::Temperature => mired_slider_position(spec.neutral, spec),
+        _ => ((spec.neutral - spec.minimum) / span).clamp(0.0, 1.0),
+    };
     let marker_x = egui::lerp(rect.left()..=rect.right(), normalized);
     let marker = egui::Stroke::new(1.0_f32, colors::TEXT_DISABLED);
     ui.painter().line_segment(
@@ -561,6 +610,90 @@ mod tests {
         };
         assert_eq!(format_adjustment_value(0.35, spec), "+0.35");
         assert_eq!(parse_adjustment_value("+0.35 EV", spec), Some(0.35));
+    }
+
+    #[test]
+    fn temperature_slider_uses_monotonic_mired_coordinates() {
+        let spec = AdjustmentSpec {
+            label: "Temperature",
+            minimum: 2_000.0,
+            maximum: 25_000.0,
+            neutral: 6_500.0,
+            decimals: 0,
+            step: 10.0,
+            suffix: " K",
+            scale: ValueScale::Raw,
+        };
+        let cool = mired_slider_position(10_000.0, spec);
+        let warm = mired_slider_position(3_000.0, spec);
+        assert!(cool < warm);
+        assert!(
+            (temperature_from_mired(mired_from_temperature(5_200.0, spec), spec) - 5_200.0).abs()
+                < 0.01
+        );
+        // A reciprocal scale should not place neutral at the linear Kelvin
+        // position (the two scales intentionally differ).
+        assert!(
+            (mired_slider_position(spec.neutral, spec) - normalized_value(spec.neutral, spec))
+                .abs()
+                > 0.01
+        );
+    }
+
+    #[test]
+    fn camera_derived_white_balance_sliders_do_not_edit_idle_values() {
+        fn assert_idle(mut temperature: f32, mut tint: f32) {
+            let original = (temperature, tint);
+            let context = egui::Context::default();
+            let mut temperature_changed = true;
+            let mut tint_changed = true;
+            let temperature_neutral = temperature;
+            let tint_neutral = tint;
+            let _ = context.run(egui::RawInput::default(), |context| {
+                egui::CentralPanel::default().show(context, |ui| {
+                    temperature_changed = temperature_adjustment_slider(
+                        ui,
+                        &mut temperature,
+                        AdjustmentSpec {
+                            label: "Temperature",
+                            minimum: 2_000.0,
+                            maximum: 25_000.0,
+                            neutral: temperature_neutral,
+                            decimals: 0,
+                            step: 10.0,
+                            suffix: " K",
+                            scale: ValueScale::Raw,
+                        },
+                    )
+                    .response
+                    .changed();
+                    tint_changed = tint_adjustment_slider(
+                        ui,
+                        &mut tint,
+                        AdjustmentSpec {
+                            label: "Tint",
+                            minimum: -1.0,
+                            maximum: 1.0,
+                            neutral: tint_neutral,
+                            decimals: 0,
+                            step: 0.01,
+                            suffix: "%",
+                            scale: ValueScale::OffsetPercent,
+                        },
+                    )
+                    .response
+                    .changed();
+                });
+            });
+            assert!(!temperature_changed);
+            assert!(!tint_changed);
+            assert_eq!((temperature, tint), original);
+        }
+
+        // The fallback values are shown before RAW metadata arrives; the
+        // camera-derived pair replaces them once the source has been decoded.
+        assert_idle(6_500.0, 0.0);
+        assert_idle(5_203.303_7, 0.776_805_3);
     }
 
     #[test]

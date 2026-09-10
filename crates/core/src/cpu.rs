@@ -16,7 +16,7 @@ use crate::color::{
     CameraColorTransform, LINEAR_REC2020_TO_XYZ_D65, XYZ_D65_TO_LINEAR_SRGB,
     camera_color_transform, encode_rec2020_for_srgb_output,
 };
-use crate::white_balance::camera_gains_from_coordinates;
+use crate::white_balance::camera_gains_from_as_shot_coordinates;
 use crate::{
     CancellationToken, DitherMode, OutputGeometry, OutputPolicy, PipelineError, RawCropPolicy,
     standard_base_rendering_lut,
@@ -205,7 +205,8 @@ fn phase_preserving_sample(
     phase + source_phase_index * 2
 }
 
-/// Parse and combine as-shot gains with optional relative manual multipliers.
+/// Resolve As Shot, relative Manual multipliers, or absolute camera-calibrated
+/// Temperature/Tint coordinates into effective camera gains.
 pub fn white_balance_gains(
     info: &RawFileInfo,
     selection: WhiteBalance,
@@ -231,34 +232,43 @@ pub fn white_balance_gains_from_calibration(
     selection: WhiteBalance,
 ) -> Result<WhiteBalanceGains, PipelineError> {
     validate_white_balance_selection(selection)?;
-    let [red, green, blue, _] = as_shot_white_balance;
-    let values =
-        [red, green, blue].map(|value| value.filter(|number| number.is_finite() && *number > 0.0));
-    let [Some(red), Some(green), Some(blue)] = values else {
-        return Err(PipelineError::InvalidMetadata {
-            field: "as_shot_white_balance",
-            reason: "finite positive R, G, and B multipliers are required".to_owned(),
-        });
+    let as_shot_gains = || {
+        let [red, green, blue, _] = as_shot_white_balance;
+        let values = [red, green, blue]
+            .map(|value| value.filter(|number| number.is_finite() && *number > 0.0));
+        let [Some(red), Some(green), Some(blue)] = values else {
+            return Err(PipelineError::InvalidMetadata {
+                field: "as_shot_white_balance",
+                reason: "finite positive R, G, and B multipliers are required".to_owned(),
+            });
+        };
+        Ok(WhiteBalanceGains {
+            red: red / green,
+            green: 1.0,
+            blue: blue / green,
+        })
     };
-    let mut gains = WhiteBalanceGains {
-        red: red / green,
-        green: 1.0,
-        blue: blue / green,
-    };
-    match selection {
-        WhiteBalance::AsShot => {}
-        WhiteBalance::ManualMultipliers { red, green, blue } => {
-            gains.red *= red;
-            gains.green *= green;
-            gains.blue *= blue;
-        }
+    let gains = match selection {
         WhiteBalance::TemperatureTint { temperature, tint } => {
-            gains = camera_gains_from_coordinates(
+            // If metadata omits As Shot, identity is still a coherent zero
+            // point because the normalized camera transform maps it to D65.
+            let reference = as_shot_gains().unwrap_or_else(|_| WhiteBalanceGains::identity());
+            camera_gains_from_as_shot_coordinates(
                 camera_to_xyz_d65,
+                reference,
                 crate::WhiteBalanceCoordinates { temperature, tint },
-            )?;
+            )?
         }
-    }
+        WhiteBalance::AsShot | WhiteBalance::ManualMultipliers { .. } => {
+            let mut gains = as_shot_gains()?;
+            if let WhiteBalance::ManualMultipliers { red, green, blue } = selection {
+                gains.red *= red;
+                gains.green *= green;
+                gains.blue *= blue;
+            }
+            gains
+        }
+    };
     gains.validate()?;
     Ok(gains)
 }
@@ -1454,7 +1464,7 @@ mod tests {
     }
 
     #[test]
-    fn neutral_temperature_tint_preserves_as_shot_gains() {
+    fn neutral_temperature_tint_resolves_to_a_positive_camera_balance() {
         let info = test_info(2, 2, "RGGB");
         let as_shot = white_balance_gains(&info, WhiteBalance::AsShot).expect("as-shot balance");
         let at_d65 = white_balance_gains(
@@ -1501,6 +1511,24 @@ mod tests {
         assert!(
             (camera_basis.red - display_basis.red).abs() > 1.0e-3
                 || (camera_basis.blue - display_basis.blue).abs() > 1.0e-3
+        );
+    }
+
+    #[test]
+    fn temperature_tint_has_a_d65_fallback_without_as_shot_metadata() {
+        let gains = white_balance_gains_from_calibration(
+            [None; 4],
+            crate::Matrix3::identity(),
+            WhiteBalance::TemperatureTint {
+                temperature: 5_500.0,
+                tint: 0.1,
+            },
+        )
+        .expect("D65-relative coordinates should resolve without As Shot metadata");
+        assert!(
+            [gains.red, gains.green, gains.blue]
+                .into_iter()
+                .all(|value| value.is_finite() && value > 0.0)
         );
     }
 

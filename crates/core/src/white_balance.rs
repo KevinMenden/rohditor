@@ -4,21 +4,36 @@ use rohditor_edit::{TEMPERATURE_RANGE, TINT_RANGE};
 use crate::{Matrix3, PipelineError};
 
 /// Version of the camera-calibrated Temperature/Tint conversion.
-pub const WHITE_BALANCE_ALGORITHM_VERSION: u8 = 2;
+pub const WHITE_BALANCE_ALGORITHM_VERSION: u8 = 4;
 
 /// User-facing white-balance coordinates for a RAW image.
 ///
 /// Temperature is a correlated colour temperature in Kelvin. Tint is a
-/// normalized green-to-magenta control: negative values move toward green and
-/// positive values move toward magenta.
+/// normalized offset from the camera's As Shot locus position: negative values
+/// move toward green and positive values move toward magenta.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WhiteBalanceCoordinates {
     pub temperature: f32,
     pub tint: f32,
 }
 
-/// Convert normalized camera gains into the same coordinates shown by the UI.
-pub fn coordinates_from_camera_gains(
+/// Convert normalized camera gains into physical locus coordinates for tests.
+#[cfg(test)]
+pub(crate) fn coordinates_from_camera_gains(
+    camera_to_xyz_d65: Matrix3,
+    gains: WhiteBalanceGains,
+) -> Result<WhiteBalanceCoordinates, PipelineError> {
+    let coordinates = physical_coordinates_from_camera_gains(camera_to_xyz_d65, gains)?;
+    if !TINT_RANGE.contains(coordinates.tint) {
+        return Err(PipelineError::InvalidMetadata {
+            field: "white_balance",
+            reason: "camera white point is outside the Temperature/Tint range".to_owned(),
+        });
+    }
+    Ok(coordinates)
+}
+
+fn physical_coordinates_from_camera_gains(
     camera_to_xyz_d65: Matrix3,
     gains: WhiteBalanceGains,
 ) -> Result<WhiteBalanceCoordinates, PipelineError> {
@@ -33,7 +48,8 @@ pub fn coordinates_from_camera_gains(
 }
 
 /// Convert absolute Temperature/Tint coordinates into normalized camera gains.
-pub fn camera_gains_from_coordinates(
+#[cfg(test)]
+pub(crate) fn camera_gains_from_coordinates(
     camera_to_xyz_d65: Matrix3,
     coordinates: WhiteBalanceCoordinates,
 ) -> Result<WhiteBalanceGains, PipelineError> {
@@ -45,6 +61,64 @@ pub fn camera_gains_from_coordinates(
             reason: "temperature or tint is outside its declared range".to_owned(),
         });
     }
+    camera_gains_from_physical_coordinates(camera_to_xyz_d65, coordinates)
+}
+
+/// Convert UI Temperature/Tint coordinates into normalized camera gains.
+///
+/// Temperature is absolute, while tint is an offset from the camera's As Shot
+/// locus offset. Camera matrices used for rendering are not guaranteed to put
+/// an actual capture illuminant directly on the ideal daylight locus. Keeping
+/// that camera-specific offset as the zero point makes entering custom mode
+/// continuous and gives the tint slider useful room in both directions.
+pub fn camera_gains_from_as_shot_coordinates(
+    camera_to_xyz_d65: Matrix3,
+    as_shot_gains: WhiteBalanceGains,
+    coordinates: WhiteBalanceCoordinates,
+) -> Result<WhiteBalanceGains, PipelineError> {
+    if !TEMPERATURE_RANGE.contains(coordinates.temperature)
+        || !TINT_RANGE.contains(coordinates.tint)
+    {
+        return Err(PipelineError::InvalidRecipe {
+            field: "color.white_balance",
+            reason: "temperature or tint is outside its declared range".to_owned(),
+        });
+    }
+    let as_shot = physical_coordinates_from_camera_gains(camera_to_xyz_d65, as_shot_gains)?;
+    camera_gains_from_physical_coordinates(
+        camera_to_xyz_d65,
+        WhiteBalanceCoordinates {
+            temperature: coordinates.temperature,
+            tint: as_shot.tint + coordinates.tint,
+        },
+    )
+}
+
+/// Project camera gains into UI coordinates relative to the As Shot tint.
+pub fn coordinates_from_camera_gains_relative_to_as_shot(
+    camera_to_xyz_d65: Matrix3,
+    as_shot_gains: WhiteBalanceGains,
+    gains: WhiteBalanceGains,
+) -> Result<WhiteBalanceCoordinates, PipelineError> {
+    let as_shot = physical_coordinates_from_camera_gains(camera_to_xyz_d65, as_shot_gains)?;
+    let physical = physical_coordinates_from_camera_gains(camera_to_xyz_d65, gains)?;
+    let coordinates = WhiteBalanceCoordinates {
+        temperature: physical.temperature,
+        tint: physical.tint - as_shot.tint,
+    };
+    if !TINT_RANGE.contains(coordinates.tint) {
+        return Err(PipelineError::InvalidMetadata {
+            field: "white_balance",
+            reason: "camera white point is outside the relative Tint range".to_owned(),
+        });
+    }
+    Ok(coordinates)
+}
+
+fn camera_gains_from_physical_coordinates(
+    camera_to_xyz_d65: Matrix3,
+    coordinates: WhiteBalanceCoordinates,
+) -> Result<WhiteBalanceGains, PipelineError> {
     let xyz = xyz_from_coordinates(coordinates)?;
     let camera_white = camera_to_xyz_d65.inverse()?.transform(xyz);
     if camera_white
@@ -78,6 +152,30 @@ fn coordinates_from_xyz(xyz: [f32; 3]) -> Result<WhiteBalanceCoordinates, Pipeli
             reason: "camera white point is not a finite positive XYZ value".to_owned(),
         });
     }
+    let uv = uv_from_xyz(xyz)?;
+    let (temperature, normal) = nearest_locus_point(uv);
+    let locus = locus_uv(temperature);
+    let distance = dot2(sub2(uv, locus), normal);
+    let tint = -distance / TINT_DUV_PER_FULL_VALUE;
+    // At the ends of the temperature range the normal coordinate cannot
+    // represent points that continue along the locus direction. Reject those
+    // projections instead of silently changing a picker sample; callers can
+    // preserve the exact camera-native result with relative Manual values.
+    let represented_uv = uv_from_xyz(xyz_from_coordinates(WhiteBalanceCoordinates {
+        temperature,
+        tint,
+    })?)?;
+    if distance_squared(uv, represented_uv).sqrt() > 1.0e-4 {
+        return Err(PipelineError::InvalidMetadata {
+            field: "white_balance",
+            reason: "camera white point cannot be represented by Temperature/Tint".to_owned(),
+        });
+    }
+
+    Ok(WhiteBalanceCoordinates { temperature, tint })
+}
+
+fn uv_from_xyz(xyz: [f32; 3]) -> Result<[f32; 2], PipelineError> {
     let denominator = xyz[0] + 15.0 * xyz[1] + 3.0 * xyz[2];
     if !denominator.is_finite() || denominator <= 1.0e-8 {
         return Err(PipelineError::InvalidMetadata {
@@ -85,18 +183,7 @@ fn coordinates_from_xyz(xyz: [f32; 3]) -> Result<WhiteBalanceCoordinates, Pipeli
             reason: "camera white point has an invalid chromaticity denominator".to_owned(),
         });
     }
-    let uv = [4.0 * xyz[0] / denominator, 9.0 * xyz[1] / denominator];
-    let (temperature, normal) = nearest_locus_point(uv);
-    let locus = locus_uv(temperature);
-    let distance = dot2(sub2(uv, locus), normal);
-    let tint = -distance / TINT_DUV_PER_FULL_VALUE;
-    if !TINT_RANGE.contains(tint) {
-        return Err(PipelineError::InvalidMetadata {
-            field: "white_balance",
-            reason: "camera white point is outside the Temperature/Tint range".to_owned(),
-        });
-    }
-    Ok(WhiteBalanceCoordinates { temperature, tint })
+    Ok([4.0 * xyz[0] / denominator, 9.0 * xyz[1] / denominator])
 }
 
 fn xyz_from_coordinates(coordinates: WhiteBalanceCoordinates) -> Result<[f32; 3], PipelineError> {
@@ -178,11 +265,10 @@ pub(crate) fn xyz_from_temperature(temperature: f32) -> [f32; 3] {
 
 fn xy_from_temperature(temperature: f32) -> (f32, f32) {
     if temperature <= 4_000.0 {
-        let x = -0.266_123_9e9 / temperature.powi(3) - 0.234_358_0e6 / temperature.powi(2)
+        let x = -0.266_123_9e9 / temperature.powi(3) - 2.343_58e5 / temperature.powi(2)
             + 0.877_695_6e3 / temperature
             + 0.179_910;
-        let y =
-            -1.106_381_4 * x.powi(3) - 1.348_110_2 * x.powi(2) + 2.185_558_32 * x - 0.202_196_83;
+        let y = -1.106_381_4 * x.powi(3) - 1.348_110_2 * x.powi(2) + 2.185_558_3 * x - 0.202_196_83;
         (x, y)
     } else {
         let x = if temperature <= 7_000.0 {
@@ -238,7 +324,12 @@ fn dot2(first: [f32; 2], second: [f32; 2]) -> f32 {
     first[0] * second[0] + first[1] * second[1]
 }
 
-const TINT_DUV_PER_FULL_VALUE: f32 = 0.02;
+// One full UI tint unit spans a deliberately broad signed Duv interval. RAW
+// camera matrices and As Shot gains can differ materially from an ideal
+// daylight locus; keeping this wide enough avoids collapsing those valid
+// source balances to the UI fallback while still making normal adjustments
+// smooth around zero.
+const TINT_DUV_PER_FULL_VALUE: f32 = 0.1;
 
 #[cfg(test)]
 mod tests {
@@ -275,5 +366,25 @@ mod tests {
             (first.temperature - second.temperature).abs() > 1.0
                 || (first.tint - second.tint).abs() > 0.01
         );
+    }
+
+    #[test]
+    fn relative_tint_zero_preserves_the_as_shot_balance() {
+        let matrix = Matrix3::identity();
+        let as_shot = camera_gains_from_coordinates(
+            matrix,
+            WhiteBalanceCoordinates {
+                temperature: 5_200.0,
+                tint: 0.4,
+            },
+        )
+        .expect("representable As Shot gains");
+        let displayed = coordinates_from_camera_gains_relative_to_as_shot(matrix, as_shot, as_shot)
+            .expect("As Shot should have UI coordinates");
+        assert!(displayed.tint.abs() < 1.0e-6);
+        let reconstructed =
+            camera_gains_from_as_shot_coordinates(matrix, as_shot, displayed).expect("gains");
+        assert!((reconstructed.red - as_shot.red).abs() < 2.0e-3);
+        assert!((reconstructed.blue - as_shot.blue).abs() < 2.0e-3);
     }
 }
