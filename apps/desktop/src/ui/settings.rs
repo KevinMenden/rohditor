@@ -1,6 +1,7 @@
 //! Presentation-only application settings dialog.
 
 use eframe::egui;
+use rohditor_core::OutputPolicy;
 use rohditor_demosaic::DemosaicAlgorithm;
 
 use super::theme::colors;
@@ -9,12 +10,15 @@ use super::theme::colors;
 pub(crate) struct SettingsWindowModel<'a> {
     pub active_demosaic: DemosaicAlgorithm,
     pub draft_demosaic: DemosaicAlgorithm,
+    pub active_output_policy: OutputPolicy,
+    pub draft_output_policy: OutputPolicy,
     pub warning: Option<&'a str>,
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct SettingsWindowOutput {
     pub selected_demosaic: Option<DemosaicAlgorithm>,
+    pub selected_output_policy: Option<OutputPolicy>,
     pub cancel: bool,
     pub apply: bool,
 }
@@ -55,6 +59,23 @@ pub(crate) fn show(
                 output.selected_demosaic = Some(selected);
             }
 
+            ui.add_space(12.0);
+            ui.label("Output gamut mapping");
+            let mut output_policy = model.draft_output_policy;
+            ui.radio_value(
+                &mut output_policy,
+                OutputPolicy::ClipToSrgb,
+                "Clip to sRGB (compatibility)",
+            );
+            ui.radio_value(
+                &mut output_policy,
+                OutputPolicy::ChromaCompressToSrgb,
+                "Chroma compress to sRGB",
+            );
+            if output_policy != model.draft_output_policy {
+                output.selected_output_policy = Some(output_policy);
+            }
+
             ui.add_space(8.0);
             ui.label(
                 egui::RichText::new("Used for preview, Source 1:1, and export.")
@@ -71,7 +92,8 @@ pub(crate) fn show(
 
             ui.add_space(12.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let dirty = model.draft_demosaic != model.active_demosaic;
+                let dirty = model.draft_demosaic != model.active_demosaic
+                    || model.draft_output_policy != model.active_output_policy;
                 output.apply = ui.add_enabled(dirty, egui::Button::new("Apply")).clicked();
                 output.cancel = ui.button("Cancel").clicked();
             });
@@ -83,7 +105,8 @@ pub(crate) fn show(
     if context.input(|input| input.key_pressed(egui::Key::Escape)) {
         output.cancel = true;
     }
-    if model.draft_demosaic != model.active_demosaic
+    if (model.draft_demosaic != model.active_demosaic
+        || model.draft_output_policy != model.active_output_policy)
         && context.input(|input| input.key_pressed(egui::Key::Enter))
     {
         output.apply = true;

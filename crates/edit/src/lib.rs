@@ -857,13 +857,16 @@ mod tests {
 
     #[test]
     fn deserialization_rejects_unknown_schema_versions() {
-        let json = r#"{
-            "schema_version": 10,
-            "light": {},
-            "color": {},
-            "geometry": {}
-        }"#;
-        assert!(serde_json::from_str::<EditRecipe>(json).is_err());
+        let json = format!(
+            r#"{{
+            "schema_version": {},
+            "light": {{}},
+            "color": {{}},
+            "geometry": {{}}
+        }}"#,
+            EDIT_RECIPE_SCHEMA_VERSION + 1
+        );
+        assert!(serde_json::from_str::<EditRecipe>(&json).is_err());
     }
 
     #[test]

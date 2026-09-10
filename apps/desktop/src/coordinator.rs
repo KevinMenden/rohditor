@@ -12,9 +12,9 @@ use eframe::egui;
 use image::RgbImage;
 use rohditor_core::{
     CancellationToken, CorrectionComponents, CpuPipeline, DatabaseProvenance, ExportReport,
-    ExportSettings, HighlightDiagnostics, Histogram, MemoryEstimate, OpticsProvenance,
-    OpticsService, PipelineError, PreviewOptions, ProfileMatch, RenderOptions, StageTimings,
-    export_image, optics_query_from_info,
+    ExportSettings, GamutMappingDiagnostics, HighlightDiagnostics, Histogram, MemoryEstimate,
+    OpticsProvenance, OpticsService, PipelineError, PreviewOptions, ProfileMatch, RenderOptions,
+    StageTimings, export_image, optics_query_from_info,
 };
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_edit::EditRecipe;
@@ -83,6 +83,7 @@ pub(crate) struct WorkerPreviewDiagnostics {
     pub cache_hits: PreviewCacheHits,
     pub timings: StageTimings,
     pub highlight_diagnostics: HighlightDiagnostics,
+    pub output_gamut_diagnostics: Option<GamutMappingDiagnostics>,
     pub memory: MemoryEstimate,
     pub cache_resident_bytes: usize,
     pub workspace_reused: bool,
@@ -929,6 +930,7 @@ fn process_source_scale_preview(
                 },
                 timings: result.timings,
                 highlight_diagnostics: result.highlight_diagnostics,
+                output_gamut_diagnostics: Some(result.output_gamut_diagnostics),
                 memory: result.memory,
                 cache_resident_bytes: 0,
                 workspace_reused: false,
@@ -1095,6 +1097,7 @@ fn process_gpu_base(
         cache_hits,
         timings,
         highlight_diagnostics: reconstructed.highlight_diagnostics(),
+        output_gamut_diagnostics: None,
         memory,
         cache_resident_bytes,
         workspace_reused: false,
@@ -1153,6 +1156,7 @@ fn develop_preview(
                 cache_hits,
                 timings,
                 highlight_diagnostics,
+                output_gamut_diagnostics: Some(cached.output_gamut_diagnostics),
                 memory,
                 cache_resident_bytes: preview_cache.resident_bytes(),
                 workspace_reused: false,
@@ -1191,7 +1195,12 @@ fn develop_preview(
     let highlight_diagnostics = result.highlight_diagnostics;
     let (optics_applied, optics_fallback, optics_scale) =
         optics_metrics(result.optics_provenance.as_ref());
-    preview_cache.insert_adjusted(keys, result.image.clone(), memory);
+    preview_cache.insert_adjusted(
+        keys,
+        result.image.clone(),
+        memory,
+        result.output_gamut_diagnostics,
+    );
     let diagnostics = WorkerPreviewDiagnostics {
         backend: PreviewBackend::Cpu,
         resolution: job.resolution,
@@ -1199,6 +1208,7 @@ fn develop_preview(
         cache_hits,
         timings,
         highlight_diagnostics,
+        output_gamut_diagnostics: Some(result.output_gamut_diagnostics),
         memory,
         cache_resident_bytes: preview_cache.resident_bytes(),
         workspace_reused,
