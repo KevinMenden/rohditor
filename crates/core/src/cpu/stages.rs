@@ -1,3 +1,4 @@
+// The public CPU facade re-exports these processing stages.
 use rayon::prelude::*;
 use rohditor_demosaic::WhiteBalanceGains;
 use rohditor_edit::{
@@ -42,992 +43,1033 @@ pub const HSL_HUE_SHIFT_PER_FULL_VALUE: f32 = 0.125;
 // ratio to magnify tiny numerical differences. The continuous transition also
 // keeps half-float source quantization from changing the visible result.
 const LUMINANCE_RATIO_TRANSITION: f32 = 0.02;
-/// Crop the decoded sensor frame and normalize samples as `(sample-black)/(white-black)`.
-///
-/// Negative values and values above one are intentionally retained for later
-/// highlight handling. Level patterns remain indexed in original sensor coordinates.
-pub fn normalize_raw(
-    frame: &RawFrame,
-    crop_policy: RawCropPolicy,
-) -> Result<MosaicImage<f32>, PipelineError> {
-    normalize_raw_impl(frame, crop_policy, None, &CancellationToken::new())
-}
 
-pub(crate) fn normalize_raw_cancellable(
-    frame: &RawFrame,
-    crop_policy: RawCropPolicy,
-    cancellation: &CancellationToken,
-) -> Result<MosaicImage<f32>, PipelineError> {
-    normalize_raw_impl(frame, crop_policy, None, cancellation)
-}
+pub(super) mod normalize {
+    use super::*;
 
-/// Normalize a resolution-limited Bayer mosaic for interactive development.
-///
-/// Samples are selected on their original color-filter phase, so reducing the
-/// mosaic never turns a red, green, or blue sensor site into a different CFA
-/// color. The output preserves the crop aspect ratio and never exceeds
-/// `max_long_edge` on its longest side.
-pub fn normalize_raw_preview(
-    frame: &RawFrame,
-    crop_policy: RawCropPolicy,
-    max_long_edge: usize,
-) -> Result<MosaicImage<f32>, PipelineError> {
-    normalize_raw_impl(
-        frame,
-        crop_policy,
-        Some(max_long_edge),
-        &CancellationToken::new(),
-    )
-}
+    /// Crop the decoded sensor frame and normalize samples as `(sample-black)/(white-black)`.
+    ///
+    /// Negative values and values above one are intentionally retained for later
+    /// highlight handling. Level patterns remain indexed in original sensor coordinates.
+    pub fn normalize_raw(
+        frame: &RawFrame,
+        crop_policy: RawCropPolicy,
+    ) -> Result<MosaicImage<f32>, PipelineError> {
+        normalize_raw_impl(frame, crop_policy, None, &CancellationToken::new())
+    }
 
-fn normalize_raw_impl(
-    frame: &RawFrame,
-    crop_policy: RawCropPolicy,
-    max_long_edge: Option<usize>,
-    cancellation: &CancellationToken,
-) -> Result<MosaicImage<f32>, PipelineError> {
-    cancellation.checkpoint()?;
-    validate_raw_layout(frame)?;
-    let (pattern, crop) = development_geometry(&frame.info, crop_policy)?;
-    validate_levels(&frame.info, pattern)?;
+    pub(crate) fn normalize_raw_cancellable(
+        frame: &RawFrame,
+        crop_policy: RawCropPolicy,
+        cancellation: &CancellationToken,
+    ) -> Result<MosaicImage<f32>, PipelineError> {
+        normalize_raw_impl(frame, crop_policy, None, cancellation)
+    }
 
-    let (output_width, output_height) = match max_long_edge {
-        Some(max_long_edge) => preview_dimensions(crop.width, crop.height, max_long_edge)?,
-        None => (crop.width, crop.height),
-    };
-    let span = tracing::info_span!(
-        "cpu.normalize",
-        source_width = frame.info.width,
-        source_height = frame.info.height,
-        output_width,
-        output_height,
-        preview = max_long_edge.is_some()
-    );
-    let _guard = span.enter();
+    /// Normalize a resolution-limited Bayer mosaic for interactive development.
+    ///
+    /// Samples are selected on their original color-filter phase, so reducing the
+    /// mosaic never turns a red, green, or blue sensor site into a different CFA
+    /// color. The output preserves the crop aspect ratio and never exceeds
+    /// `max_long_edge` on its longest side.
+    pub fn normalize_raw_preview(
+        frame: &RawFrame,
+        crop_policy: RawCropPolicy,
+        max_long_edge: usize,
+    ) -> Result<MosaicImage<f32>, PipelineError> {
+        normalize_raw_impl(
+            frame,
+            crop_policy,
+            Some(max_long_edge),
+            &CancellationToken::new(),
+        )
+    }
 
-    let elements = output_width.checked_mul(output_height).ok_or_else(|| {
-        invalid_dimensions(
+    fn normalize_raw_impl(
+        frame: &RawFrame,
+        crop_policy: RawCropPolicy,
+        max_long_edge: Option<usize>,
+        cancellation: &CancellationToken,
+    ) -> Result<MosaicImage<f32>, PipelineError> {
+        cancellation.checkpoint()?;
+        validate_raw_layout(frame)?;
+        let (pattern, crop) = development_geometry(&frame.info, crop_policy)?;
+        validate_levels(&frame.info, pattern)?;
+
+        let (output_width, output_height) = match max_long_edge {
+            Some(max_long_edge) => preview_dimensions(crop.width, crop.height, max_long_edge)?,
+            None => (crop.width, crop.height),
+        };
+        let span = tracing::info_span!(
+            "cpu.normalize",
+            source_width = frame.info.width,
+            source_height = frame.info.height,
+            output_width,
+            output_height,
+            preview = max_long_edge.is_some()
+        );
+        let _guard = span.enter();
+
+        let elements = output_width.checked_mul(output_height).ok_or_else(|| {
+            invalid_dimensions(
+                output_width,
+                output_height,
+                output_width,
+                "preview crop overflowed",
+            )
+        })?;
+        let mut normalized = allocate_zeroed_f32(elements)?;
+        normalized
+            .par_chunks_mut(output_width)
+            .enumerate()
+            .try_for_each(|(output_y, output_row)| -> Result<(), PipelineError> {
+                cancellation.checkpoint()?;
+                let crop_y = phase_preserving_sample(output_y, output_height, crop.height);
+                let sensor_y = crop.y + crop_y;
+                for (output_x, destination) in output_row.iter_mut().enumerate() {
+                    let crop_x = phase_preserving_sample(output_x, output_width, crop.width);
+                    let sensor_x = crop.x + crop_x;
+                    let sample = frame.mosaic[sensor_y * frame.row_stride + sensor_x];
+                    let black_index = level_index(&frame.info.black_levels, sensor_x, sensor_y, 0);
+                    let black = frame.info.black_levels.values[black_index];
+                    let color = pattern.color_at(sensor_x, sensor_y);
+                    let white = white_level(&frame.info, black_index, color);
+                    *destination = (f32::from(sample) - black) / (white - black);
+                }
+                Ok(())
+            })?;
+        cancellation.checkpoint()?;
+
+        MosaicImage::new(
             output_width,
             output_height,
             output_width,
-            "preview crop overflowed",
+            pattern.shifted(crop.x, crop.y),
+            normalized,
         )
-    })?;
-    let mut normalized = allocate_zeroed_f32(elements)?;
-    normalized
-        .par_chunks_mut(output_width)
-        .enumerate()
-        .try_for_each(|(output_y, output_row)| -> Result<(), PipelineError> {
-            cancellation.checkpoint()?;
-            let crop_y = phase_preserving_sample(output_y, output_height, crop.height);
-            let sensor_y = crop.y + crop_y;
-            for (output_x, destination) in output_row.iter_mut().enumerate() {
-                let crop_x = phase_preserving_sample(output_x, output_width, crop.width);
-                let sensor_x = crop.x + crop_x;
-                let sample = frame.mosaic[sensor_y * frame.row_stride + sensor_x];
-                let black_index = level_index(&frame.info.black_levels, sensor_x, sensor_y, 0);
-                let black = frame.info.black_levels.values[black_index];
-                let color = pattern.color_at(sensor_x, sensor_y);
-                let white = white_level(&frame.info, black_index, color);
-                *destination = (f32::from(sample) - black) / (white - black);
-            }
-            Ok(())
-        })?;
-    cancellation.checkpoint()?;
-
-    MosaicImage::new(
-        output_width,
-        output_height,
-        output_width,
-        pattern.shifted(crop.x, crop.y),
-        normalized,
-    )
-    .map_err(Into::into)
-}
-
-pub(crate) fn preview_dimensions(
-    width: usize,
-    height: usize,
-    max_long_edge: usize,
-) -> Result<(usize, usize), PipelineError> {
-    if width < 2 || height < 2 {
-        return Err(invalid_dimensions(
-            width,
-            height,
-            width,
-            "preview development requires a crop of at least 2x2 pixels",
-        ));
-    }
-    if max_long_edge < 2 {
-        return Err(invalid_dimensions(
-            width,
-            height,
-            width,
-            "preview long edge must be at least 2 pixels",
-        ));
-    }
-    let long_edge = width.max(height);
-    if long_edge <= max_long_edge {
-        return Ok((width, height));
+        .map_err(Into::into)
     }
 
-    let scale = |dimension: usize| -> Result<usize, PipelineError> {
-        let numerator = dimension
-            .checked_mul(max_long_edge)
-            .and_then(|value| value.checked_add(long_edge / 2))
-            .ok_or_else(|| {
-                invalid_dimensions(width, height, width, "preview scale calculation overflowed")
-            })?;
-        Ok((numerator / long_edge).clamp(2, dimension))
-    };
-    Ok((scale(width)?, scale(height)?))
-}
+    pub(crate) fn preview_dimensions(
+        width: usize,
+        height: usize,
+        max_long_edge: usize,
+    ) -> Result<(usize, usize), PipelineError> {
+        if width < 2 || height < 2 {
+            return Err(invalid_dimensions(
+                width,
+                height,
+                width,
+                "preview development requires a crop of at least 2x2 pixels",
+            ));
+        }
+        if max_long_edge < 2 {
+            return Err(invalid_dimensions(
+                width,
+                height,
+                width,
+                "preview long edge must be at least 2 pixels",
+            ));
+        }
+        let long_edge = width.max(height);
+        if long_edge <= max_long_edge {
+            return Ok((width, height));
+        }
 
-fn phase_preserving_sample(
-    output_index: usize,
-    output_length: usize,
-    source_length: usize,
-) -> usize {
-    if output_length == source_length {
-        return output_index;
+        let scale = |dimension: usize| -> Result<usize, PipelineError> {
+            let numerator = dimension
+                .checked_mul(max_long_edge)
+                .and_then(|value| value.checked_add(long_edge / 2))
+                .ok_or_else(|| {
+                    invalid_dimensions(width, height, width, "preview scale calculation overflowed")
+                })?;
+            Ok((numerator / long_edge).clamp(2, dimension))
+        };
+        Ok((scale(width)?, scale(height)?))
     }
 
-    let phase = output_index & 1;
-    let output_phase_count = (output_length + (1 - phase)) / 2;
-    let source_phase_count = (source_length + (1 - phase)) / 2;
-    let output_phase_index = output_index / 2;
-    let source_phase_index = if output_phase_count <= 1 {
-        0
-    } else {
-        (output_phase_index * (source_phase_count - 1) + (output_phase_count - 1) / 2)
-            / (output_phase_count - 1)
-    };
-    phase + source_phase_index * 2
+    fn phase_preserving_sample(
+        output_index: usize,
+        output_length: usize,
+        source_length: usize,
+    ) -> usize {
+        if output_length == source_length {
+            return output_index;
+        }
+
+        let phase = output_index & 1;
+        let output_phase_count = (output_length + (1 - phase)) / 2;
+        let source_phase_count = (source_length + (1 - phase)) / 2;
+        let output_phase_index = output_index / 2;
+        let source_phase_index = if output_phase_count <= 1 {
+            0
+        } else {
+            (output_phase_index * (source_phase_count - 1) + (output_phase_count - 1) / 2)
+                / (output_phase_count - 1)
+        };
+        phase + source_phase_index * 2
+    }
 }
 
 /// Parse and combine as-shot gains with optional relative manual multipliers.
-pub fn white_balance_gains(
-    info: &RawFileInfo,
-    selection: WhiteBalance,
-) -> Result<WhiteBalanceGains, PipelineError> {
-    let camera_to_xyz_d65 = if matches!(selection, WhiteBalance::TemperatureTint { .. }) {
-        camera_color_transform(info)?.camera_to_xyz_d65
-    } else {
-        // As-shot and manual relative multipliers do not require a camera
-        // matrix. Keep this public helper useful for demosaic-only callers;
-        // full pipeline entry points validate the transform separately.
-        crate::Matrix3::identity()
-    };
-    white_balance_gains_from_calibration(info.as_shot_white_balance, camera_to_xyz_d65, selection)
-}
+pub(super) mod white_balance {
+    use super::*;
 
-/// Resolve white balance using as-shot gains and the selected camera
-/// calibration. The compact calibration form is suitable for preview/GPU
-/// boundaries that need to evaluate many recipes without retaining RAW
-/// metadata or rebuilding image pixels.
-pub fn white_balance_gains_from_calibration(
-    as_shot_white_balance: [Option<f32>; 4],
-    camera_to_xyz_d65: crate::Matrix3,
-    selection: WhiteBalance,
-) -> Result<WhiteBalanceGains, PipelineError> {
-    validate_white_balance_selection(selection)?;
-    let [red, green, blue, _] = as_shot_white_balance;
-    let values =
-        [red, green, blue].map(|value| value.filter(|number| number.is_finite() && *number > 0.0));
-    let [Some(red), Some(green), Some(blue)] = values else {
-        return Err(PipelineError::InvalidMetadata {
-            field: "as_shot_white_balance",
-            reason: "finite positive R, G, and B multipliers are required".to_owned(),
-        });
-    };
-    let mut gains = WhiteBalanceGains {
-        red: red / green,
-        green: 1.0,
-        blue: blue / green,
-    };
-    match selection {
-        WhiteBalance::AsShot => {}
-        WhiteBalance::ManualMultipliers { red, green, blue } => {
-            gains.red *= red;
-            gains.green *= green;
-            gains.blue *= blue;
+    pub fn white_balance_gains(
+        info: &RawFileInfo,
+        selection: WhiteBalance,
+    ) -> Result<WhiteBalanceGains, PipelineError> {
+        let camera_to_xyz_d65 = if matches!(selection, WhiteBalance::TemperatureTint { .. }) {
+            camera_color_transform(info)?.camera_to_xyz_d65
+        } else {
+            // As-shot and manual relative multipliers do not require a camera
+            // matrix. Keep this public helper useful for demosaic-only callers;
+            // full pipeline entry points validate the transform separately.
+            crate::Matrix3::identity()
+        };
+        white_balance_gains_from_calibration(
+            info.as_shot_white_balance,
+            camera_to_xyz_d65,
+            selection,
+        )
+    }
+
+    /// Resolve white balance using as-shot gains and the selected camera
+    /// calibration. The compact calibration form is suitable for preview/GPU
+    /// boundaries that need to evaluate many recipes without retaining RAW
+    /// metadata or rebuilding image pixels.
+    pub fn white_balance_gains_from_calibration(
+        as_shot_white_balance: [Option<f32>; 4],
+        camera_to_xyz_d65: crate::Matrix3,
+        selection: WhiteBalance,
+    ) -> Result<WhiteBalanceGains, PipelineError> {
+        validate_white_balance_selection(selection)?;
+        let [red, green, blue, _] = as_shot_white_balance;
+        let values = [red, green, blue]
+            .map(|value| value.filter(|number| number.is_finite() && *number > 0.0));
+        let [Some(red), Some(green), Some(blue)] = values else {
+            return Err(PipelineError::InvalidMetadata {
+                field: "as_shot_white_balance",
+                reason: "finite positive R, G, and B multipliers are required".to_owned(),
+            });
+        };
+        let mut gains = WhiteBalanceGains {
+            red: red / green,
+            green: 1.0,
+            blue: blue / green,
+        };
+        match selection {
+            WhiteBalance::AsShot => {}
+            WhiteBalance::ManualMultipliers { red, green, blue } => {
+                gains.red *= red;
+                gains.green *= green;
+                gains.blue *= blue;
+            }
+            WhiteBalance::TemperatureTint { temperature, tint } => {
+                gains = camera_gains_from_coordinates(
+                    camera_to_xyz_d65,
+                    crate::WhiteBalanceCoordinates { temperature, tint },
+                )?;
+            }
         }
-        WhiteBalance::TemperatureTint { temperature, tint } => {
-            gains = camera_gains_from_coordinates(
-                camera_to_xyz_d65,
-                crate::WhiteBalanceCoordinates { temperature, tint },
-            )?;
+        gains.validate()?;
+        Ok(gains)
+    }
+
+    fn validate_white_balance_selection(selection: WhiteBalance) -> Result<(), PipelineError> {
+        let valid = match selection {
+            WhiteBalance::AsShot => true,
+            WhiteBalance::ManualMultipliers { red, green, blue } => [red, green, blue]
+                .into_iter()
+                .all(|value| WHITE_BALANCE_MULTIPLIER_RANGE.contains(value)),
+            WhiteBalance::TemperatureTint { temperature, tint } => {
+                TEMPERATURE_RANGE.contains(temperature) && TINT_RANGE.contains(tint)
+            }
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(PipelineError::InvalidRecipe {
+                field: "color.white_balance",
+                reason: "white-balance values are outside their declared finite ranges".to_owned(),
+            })
         }
     }
-    gains.validate()?;
-    Ok(gains)
-}
 
-fn validate_white_balance_selection(selection: WhiteBalance) -> Result<(), PipelineError> {
-    let valid = match selection {
-        WhiteBalance::AsShot => true,
-        WhiteBalance::ManualMultipliers { red, green, blue } => [red, green, blue]
-            .into_iter()
-            .all(|value| WHITE_BALANCE_MULTIPLIER_RANGE.contains(value)),
-        WhiteBalance::TemperatureTint { temperature, tint } => {
-            TEMPERATURE_RANGE.contains(temperature) && TINT_RANGE.contains(tint)
-        }
-    };
-    if valid {
+    pub(crate) fn apply_camera_color_transform_cancellable(
+        image: &mut LinearRgbImage<f32>,
+        transform: &CameraColorTransform,
+        cancellation: &CancellationToken,
+    ) -> Result<(), PipelineError> {
+        let span = tracing::info_span!(
+            "cpu.color_conversion",
+            width = image.width(),
+            height = image.height(),
+            target = "linear Rec.2020/D65"
+        );
+        let _guard = span.enter();
+        cancellation.checkpoint()?;
+        require_space(image, LinearRgbSpace::CameraNative)?;
+        let width_samples = image.width() * 3;
+        let row_stride = image.row_stride();
+        image.data_mut().par_chunks_mut(row_stride).try_for_each(
+            |row| -> Result<(), PipelineError> {
+                cancellation.checkpoint()?;
+                for pixel in row[..width_samples].as_chunks_mut::<3>().0 {
+                    let converted = transform
+                        .camera_to_linear_rec2020
+                        .transform([pixel[0], pixel[1], pixel[2]]);
+                    pixel.copy_from_slice(&converted);
+                }
+                Ok(())
+            },
+        )?;
+        cancellation.checkpoint()?;
+        image.set_space(LinearRgbSpace::Rec2020D65);
         Ok(())
-    } else {
-        Err(PipelineError::InvalidRecipe {
-            field: "color.white_balance",
-            reason: "white-balance values are outside their declared finite ranges".to_owned(),
-        })
     }
-}
 
-pub(crate) fn apply_camera_color_transform_cancellable(
-    image: &mut LinearRgbImage<f32>,
-    transform: &CameraColorTransform,
-    cancellation: &CancellationToken,
-) -> Result<(), PipelineError> {
-    let span = tracing::info_span!(
-        "cpu.color_conversion",
-        width = image.width(),
-        height = image.height(),
-        target = "linear Rec.2020/D65"
-    );
-    let _guard = span.enter();
-    cancellation.checkpoint()?;
-    require_space(image, LinearRgbSpace::CameraNative)?;
-    let width_samples = image.width() * 3;
-    let row_stride = image.row_stride();
-    image.data_mut().par_chunks_mut(row_stride).try_for_each(
-        |row| -> Result<(), PipelineError> {
-            cancellation.checkpoint()?;
-            for pixel in row[..width_samples].as_chunks_mut::<3>().0 {
-                let converted = transform
-                    .camera_to_linear_rec2020
-                    .transform([pixel[0], pixel[1], pixel[2]]);
-                pixel.copy_from_slice(&converted);
-            }
-            Ok(())
-        },
-    )?;
-    cancellation.checkpoint()?;
-    image.set_space(LinearRgbSpace::Rec2020D65);
-    Ok(())
-}
-
-pub(crate) fn apply_white_balance_cancellable(
-    image: &mut LinearRgbImage<f32>,
-    gains: WhiteBalanceGains,
-    cancellation: &CancellationToken,
-) -> Result<(), PipelineError> {
-    cancellation.checkpoint()?;
-    gains.validate()?;
-    require_space(image, LinearRgbSpace::CameraNative)?;
-    let width_samples = image.width() * 3;
-    let row_stride = image.row_stride();
-    image.data_mut().par_chunks_mut(row_stride).try_for_each(
-        |row| -> Result<(), PipelineError> {
-            cancellation.checkpoint()?;
-            for pixel in row[..width_samples].as_chunks_mut::<3>().0 {
-                pixel[0] *= gains.red;
-                pixel[1] *= gains.green;
-                pixel[2] *= gains.blue;
-            }
-            Ok(())
-        },
-    )?;
-    cancellation.checkpoint()
+    pub(crate) fn apply_white_balance_cancellable(
+        image: &mut LinearRgbImage<f32>,
+        gains: WhiteBalanceGains,
+        cancellation: &CancellationToken,
+    ) -> Result<(), PipelineError> {
+        cancellation.checkpoint()?;
+        gains.validate()?;
+        require_space(image, LinearRgbSpace::CameraNative)?;
+        let width_samples = image.width() * 3;
+        let row_stride = image.row_stride();
+        image.data_mut().par_chunks_mut(row_stride).try_for_each(
+            |row| -> Result<(), PipelineError> {
+                cancellation.checkpoint()?;
+                for pixel in row[..width_samples].as_chunks_mut::<3>().0 {
+                    pixel[0] *= gains.red;
+                    pixel[1] *= gains.green;
+                    pixel[2] *= gains.blue;
+                }
+                Ok(())
+            },
+        )?;
+        cancellation.checkpoint()
+    }
 }
 
 /// Apply global adjustments in their documented fixed order.
-///
-/// Exposure is scene-referred and precedes the selected base rendering. The
-/// remaining Light and Color controls operate on that rendered linear result.
-pub fn apply_adjustments(
-    image: &mut LinearRgbImage<f32>,
-    recipe: &EditRecipe,
-) -> Result<(), PipelineError> {
-    apply_adjustments_cancellable(image, recipe, &CancellationToken::new())
-}
+pub(super) mod adjustments {
+    use super::*;
 
-pub(crate) fn apply_adjustments_cancellable(
-    image: &mut LinearRgbImage<f32>,
-    recipe: &EditRecipe,
-    cancellation: &CancellationToken,
-) -> Result<(), PipelineError> {
-    let span = tracing::info_span!(
-        "cpu.adjustments",
-        width = image.width(),
-        height = image.height(),
-        exposure_ev = recipe.light.exposure_ev,
-        rendering_profile = recipe.rendering.profile.display_name(),
-        rendering_process_version = recipe.rendering.profile.process_version(),
-        contrast = recipe.light.contrast,
-        highlights = recipe.light.highlights,
-        shadows = recipe.light.shadows,
-        whites = recipe.light.whites,
-        blacks = recipe.light.blacks,
-        saturation = recipe.color.saturation,
-        vibrance = recipe.color.vibrance
-    );
-    let _guard = span.enter();
-    cancellation.checkpoint()?;
-    require_space(image, LinearRgbSpace::Rec2020D65)?;
-    recipe.validate()?;
-    let exposure_gain = recipe.light.exposure_ev.exp2();
-    let width_samples = image.width() * 3;
-    let row_stride = image.row_stride();
-    let light = recipe.light.clone();
-    let color = recipe.color.clone();
-    let base_rendering_lut = match recipe.rendering.profile {
-        RenderingProfileSelection::RohditorNeutral => None,
-        RenderingProfileSelection::RohditorStandard { .. } => Some(standard_base_rendering_lut()),
-    };
-    // Resolve stage participation once per recipe instead of repeatedly
-    // checking all neutral controls for every pixel. This is especially
-    // useful for the common global-adjustment path, where HSL and grading are
-    // normally neutral but the image still contains millions of pixels.
-    let has_light_tone = light.contrast != 0.0
-        || light.highlights != 0.0
-        || light.shadows != 0.0
-        || light.whites != 0.0
-        || light.blacks != 0.0;
-    let light_tone_lut = has_light_tone.then(|| LightToneLut::new(&light));
-    let has_tone_curve = light.tone_curve.shadows != 0.0
-        || light.tone_curve.darks != 0.0
-        || light.tone_curve.lights != 0.0
-        || light.tone_curve.highlights != 0.0;
-    let has_saturation = (color.saturation - 1.0).abs() > f32::EPSILON || color.vibrance != 0.0;
-    let has_hsl =
-        color.hsl.channels.iter().any(|channel| {
+    pub use super::{HSL_CHANNEL_CENTERS, HSL_HUE_SHIFT_PER_FULL_VALUE};
+
+    ///
+    /// Exposure is scene-referred and precedes the selected base rendering. The
+    /// remaining Light and Color controls operate on that rendered linear result.
+    pub fn apply_adjustments(
+        image: &mut LinearRgbImage<f32>,
+        recipe: &EditRecipe,
+    ) -> Result<(), PipelineError> {
+        apply_adjustments_cancellable(image, recipe, &CancellationToken::new())
+    }
+
+    pub(crate) fn apply_adjustments_cancellable(
+        image: &mut LinearRgbImage<f32>,
+        recipe: &EditRecipe,
+        cancellation: &CancellationToken,
+    ) -> Result<(), PipelineError> {
+        let span = tracing::info_span!(
+            "cpu.adjustments",
+            width = image.width(),
+            height = image.height(),
+            exposure_ev = recipe.light.exposure_ev,
+            rendering_profile = recipe.rendering.profile.display_name(),
+            rendering_process_version = recipe.rendering.profile.process_version(),
+            contrast = recipe.light.contrast,
+            highlights = recipe.light.highlights,
+            shadows = recipe.light.shadows,
+            whites = recipe.light.whites,
+            blacks = recipe.light.blacks,
+            saturation = recipe.color.saturation,
+            vibrance = recipe.color.vibrance
+        );
+        let _guard = span.enter();
+        cancellation.checkpoint()?;
+        require_space(image, LinearRgbSpace::Rec2020D65)?;
+        recipe.validate()?;
+        let exposure_gain = recipe.light.exposure_ev.exp2();
+        let width_samples = image.width() * 3;
+        let row_stride = image.row_stride();
+        let light = recipe.light.clone();
+        let color = recipe.color.clone();
+        let base_rendering_lut = match recipe.rendering.profile {
+            RenderingProfileSelection::RohditorNeutral => None,
+            RenderingProfileSelection::RohditorStandard { .. } => {
+                Some(standard_base_rendering_lut())
+            }
+        };
+        // Resolve stage participation once per recipe instead of repeatedly
+        // checking all neutral controls for every pixel. This is especially
+        // useful for the common global-adjustment path, where HSL and grading are
+        // normally neutral but the image still contains millions of pixels.
+        let has_light_tone = light.contrast != 0.0
+            || light.highlights != 0.0
+            || light.shadows != 0.0
+            || light.whites != 0.0
+            || light.blacks != 0.0;
+        let light_tone_lut = has_light_tone.then(|| LightToneLut::new(&light));
+        let has_tone_curve = light.tone_curve.shadows != 0.0
+            || light.tone_curve.darks != 0.0
+            || light.tone_curve.lights != 0.0
+            || light.tone_curve.highlights != 0.0;
+        let has_saturation = (color.saturation - 1.0).abs() > f32::EPSILON || color.vibrance != 0.0;
+        let has_hsl = color.hsl.channels.iter().any(|channel| {
             channel.hue != 0.0 || channel.saturation != 0.0 || channel.luminance != 0.0
         });
-    let has_grading = color.grading.shadows != [0.0; 3]
-        || color.grading.midtones != [0.0; 3]
-        || color.grading.highlights != [0.0; 3];
-    image.data_mut().par_chunks_mut(row_stride).try_for_each(
-        |row| -> Result<(), PipelineError> {
-            cancellation.checkpoint()?;
-            for pixel in row[..width_samples].as_chunks_mut::<3>().0 {
-                if light.exposure_ev != 0.0 {
-                    for value in pixel.iter_mut() {
-                        *value *= exposure_gain;
-                    }
-                }
-                if let Some(base_rendering_lut) = base_rendering_lut {
-                    apply_base_rendering(pixel, base_rendering_lut);
-                }
-                if let Some(light_tone_lut) = &light_tone_lut {
-                    apply_light_tone(pixel, light_tone_lut);
-                }
-                if has_tone_curve {
-                    apply_tone_curve(pixel, &light.tone_curve);
-                }
-                if has_saturation {
-                    let luminance = luminance(pixel);
-                    let saturation = color.saturation
-                        * (1.0 + color.vibrance * (1.0 - color_saturation(pixel, luminance)));
-                    if (saturation - 1.0).abs() > f32::EPSILON {
+        let has_grading = color.grading.shadows != [0.0; 3]
+            || color.grading.midtones != [0.0; 3]
+            || color.grading.highlights != [0.0; 3];
+        image.data_mut().par_chunks_mut(row_stride).try_for_each(
+            |row| -> Result<(), PipelineError> {
+                cancellation.checkpoint()?;
+                for pixel in row[..width_samples].as_chunks_mut::<3>().0 {
+                    if light.exposure_ev != 0.0 {
                         for value in pixel.iter_mut() {
-                            *value = luminance + saturation * (*value - luminance);
+                            *value *= exposure_gain;
                         }
                     }
+                    if let Some(base_rendering_lut) = base_rendering_lut {
+                        apply_base_rendering(pixel, base_rendering_lut);
+                    }
+                    if let Some(light_tone_lut) = &light_tone_lut {
+                        apply_light_tone(pixel, light_tone_lut);
+                    }
+                    if has_tone_curve {
+                        apply_tone_curve(pixel, &light.tone_curve);
+                    }
+                    if has_saturation {
+                        let luminance = luminance(pixel);
+                        let saturation = color.saturation
+                            * (1.0 + color.vibrance * (1.0 - color_saturation(pixel, luminance)));
+                        if (saturation - 1.0).abs() > f32::EPSILON {
+                            for value in pixel.iter_mut() {
+                                *value = luminance + saturation * (*value - luminance);
+                            }
+                        }
+                    }
+                    if has_hsl {
+                        apply_hsl_adjustments(pixel, &color.hsl);
+                    }
+                    if has_grading {
+                        apply_color_grading(pixel, &color.grading);
+                    }
                 }
-                if has_hsl {
-                    apply_hsl_adjustments(pixel, &color.hsl);
-                }
-                if has_grading {
-                    apply_color_grading(pixel, &color.grading);
-                }
-            }
-            Ok(())
-        },
-    )?;
-    cancellation.checkpoint()?;
-    Ok(())
-}
+                Ok(())
+            },
+        )?;
+        cancellation.checkpoint()?;
+        Ok(())
+    }
 
-fn apply_base_rendering(pixel: &mut [f32], lut: &crate::BaseRenderingLut) {
-    let current = luminance(pixel);
-    let target = lut.sample(current);
-    if !target.is_finite() || (target - current).abs() <= f32::EPSILON {
-        return;
-    }
-    apply_luminance_delta(pixel, current, target);
-}
-
-fn apply_light_tone(pixel: &mut [f32], light_tone_lut: &LightToneLut) {
-    let current = luminance(pixel);
-    let target = light_tone_lut.sample(current);
-    if !target.is_finite() || (target - current).abs() <= f32::EPSILON {
-        return;
-    }
-    apply_luminance_delta(pixel, current, target);
-}
-
-fn apply_tone_curve(pixel: &mut [f32], curve: &ToneCurve) {
-    if curve.shadows == 0.0 && curve.darks == 0.0 && curve.lights == 0.0 && curve.highlights == 0.0
-    {
-        return;
-    }
-    let current = luminance(pixel);
-    let target = evaluate_tone_curve(curve, current);
-    if !target.is_finite() || (target - current).abs() <= f32::EPSILON {
-        return;
-    }
-    apply_luminance_delta(pixel, current, target);
-}
-
-/// Evaluate the monotonic scene-linear tone curve used by both the CPU and
-/// the editor graph. The four recipe values are offsets at fixed inputs;
-/// output points are projected into a non-decreasing curve so crossing
-/// controls cannot invert tonal order. Values outside [0, 1] are left on the
-/// identity extension to preserve HDR and negative working samples.
-pub fn evaluate_tone_curve(curve: &ToneCurve, input: f32) -> f32 {
-    if !input.is_finite() || !(0.0..=1.0).contains(&input) {
-        return input;
-    }
-    const INPUTS: [f32; 6] = [0.0, 0.12, 0.35, 0.65, 0.88, 1.0];
-    let mut outputs = [
-        0.0,
-        INPUTS[1] + curve.shadows,
-        INPUTS[2] + curve.darks,
-        INPUTS[3] + curve.lights,
-        INPUTS[4] + curve.highlights,
-        1.0,
-    ];
-    for output in &mut outputs {
-        *output = output.clamp(0.0, 1.0);
-    }
-    for index in 1..outputs.len() {
-        outputs[index] = outputs[index].max(outputs[index - 1]);
-    }
-    let Some(index) = INPUTS.windows(2).position(|pair| input <= pair[1]) else {
-        return 1.0;
-    };
-    let span = INPUTS[index + 1] - INPUTS[index];
-    let fraction = (input - INPUTS[index]) / span;
-    outputs[index] + (outputs[index + 1] - outputs[index]) * fraction
-}
-
-#[inline(always)]
-fn apply_luminance_delta(pixel: &mut [f32], current: f32, target: f32) {
-    if !current.is_finite() || !target.is_finite() {
-        return;
-    }
-    if (current > 1.0e-6 && target >= LUMINANCE_RATIO_TRANSITION)
-        || (current < -1.0e-6 && target <= -LUMINANCE_RATIO_TRANSITION)
-    {
-        let scale = target / current;
-        let updated = [pixel[0] * scale, pixel[1] * scale, pixel[2] * scale];
-        if updated.iter().all(|value| value.is_finite()) {
-            pixel.copy_from_slice(&updated);
+    fn apply_base_rendering(pixel: &mut [f32], lut: &crate::BaseRenderingLut) {
+        let current = luminance(pixel);
+        let target = lut.sample(current);
+        if !target.is_finite() || (target - current).abs() <= f32::EPSILON {
             return;
         }
-    }
-    let delta = target - current;
-    if !delta.is_finite() {
-        return;
-    }
-    // Crossing zero with a multiplicative scale would flip the sign of every
-    // channel, so additive output is the stable endpoint of the transition.
-    let additive = [pixel[0] + delta, pixel[1] + delta, pixel[2] + delta];
-    if additive.iter().any(|value| !value.is_finite()) {
-        return;
-    }
-    if current.abs() <= 1.0e-6 || current.signum() != target.signum() {
-        pixel.copy_from_slice(&additive);
-        return;
+        apply_luminance_delta(pixel, current, target);
     }
 
-    let ratio_weight = smoothstep(0.0, LUMINANCE_RATIO_TRANSITION, target.abs());
-    if ratio_weight <= f32::EPSILON {
-        pixel.copy_from_slice(&additive);
-        return;
-    }
-    let scale = target / current;
-    let scaled = [pixel[0] * scale, pixel[1] * scale, pixel[2] * scale];
-    let updated = [
-        additive[0] + (scaled[0] - additive[0]) * ratio_weight,
-        additive[1] + (scaled[1] - additive[1]) * ratio_weight,
-        additive[2] + (scaled[2] - additive[2]) * ratio_weight,
-    ];
-    if updated.iter().all(|value| value.is_finite()) {
-        pixel.copy_from_slice(&updated);
-    }
-}
-
-fn apply_hsl_adjustments(pixel: &mut [f32], adjustments: &HslAdjustments) {
-    let [red, green, blue] = [pixel[0], pixel[1], pixel[2]];
-    if [red, green, blue]
-        .into_iter()
-        .any(|value| !value.is_finite())
-    {
-        return;
-    }
-    // HSL itself is bounded, but the working image is not. Normalize around
-    // the pixel's signed range, apply HSL there, and restore the original
-    // scale/offset so HDR and negative values are not silently clipped.
-    let offset = (-red.min(green).min(blue)).max(0.0);
-    let shifted = [red + offset, green + offset, blue + offset];
-    if shifted.iter().any(|value| !value.is_finite()) {
-        return;
-    }
-    let scale = shifted.into_iter().fold(0.0, f32::max);
-    if !scale.is_finite() || scale <= f32::EPSILON {
-        return;
-    }
-    let [mut hue, mut saturation, mut lightness] =
-        rgb_to_hsl([shifted[0] / scale, shifted[1] / scale, shifted[2] / scale]);
-    // Hue is undefined for a neutral pixel. Fade the mixer in over the first
-    // small amount of chroma so luminance edits cannot accidentally target
-    // gray pixels through the arbitrary red/zero hue returned by rgb_to_hsl.
-    let chroma_weight = smoothstep(0.0, 0.05, saturation);
-    if chroma_weight <= f32::EPSILON {
-        return;
-    }
-    let channel_weights = hsl_channel_weights(hue);
-    let mut hue_shift = 0.0;
-    let mut saturation_shift = 0.0;
-    let mut lightness_shift = 0.0;
-    for (channel, weight) in adjustments.channels.iter().zip(channel_weights) {
-        let weight = weight * chroma_weight;
-        hue_shift += channel.hue * HSL_HUE_SHIFT_PER_FULL_VALUE * weight;
-        saturation_shift += channel.saturation * 0.5 * weight;
-        lightness_shift += channel.luminance * 0.25 * weight;
-    }
-    if hue_shift == 0.0 && saturation_shift == 0.0 && lightness_shift == 0.0 {
-        return;
-    }
-    hue = (hue + hue_shift).rem_euclid(1.0);
-    saturation = (saturation + saturation_shift).clamp(0.0, 1.0);
-    lightness = (lightness + lightness_shift).clamp(0.0, 1.0);
-    let converted = hsl_to_rgb([hue, saturation, lightness]);
-    let restored = converted.map(|value| value * scale - offset);
-    if restored.iter().all(|value| value.is_finite()) {
-        pixel.copy_from_slice(&restored);
-    }
-}
-
-/// Interpolate between the two named HSL color centers surrounding `hue`.
-///
-/// Exact centers receive one full band. Between centers the two feathered
-/// weights always sum to one, including across the Magenta/Red wraparound, so
-/// applying the same value to every band has exactly one adjustment's effect.
-#[must_use]
-pub fn hsl_channel_weights(hue: f32) -> [f32; HSL_CHANNEL_COUNT] {
-    let mut weights = [0.0; HSL_CHANNEL_COUNT];
-    if !hue.is_finite() {
-        return weights;
-    }
-    let hue = hue.rem_euclid(1.0);
-    let last = HSL_CHANNEL_CENTERS.len() - 1;
-    let (left, right, start, end) = HSL_CHANNEL_CENTERS
-        .windows(2)
-        .enumerate()
-        .find_map(|(index, centers)| {
-            (hue >= centers[0] && hue < centers[1]).then_some((
-                index,
-                index + 1,
-                centers[0],
-                centers[1],
-            ))
-        })
-        .unwrap_or((last, 0, HSL_CHANNEL_CENTERS[last], 1.0));
-    let fraction = ((hue - start) / (end - start)).clamp(0.0, 1.0);
-    weights[left] = 1.0 - fraction;
-    weights[right] = fraction;
-    weights
-}
-
-/// Find Color Mixer band weights for one display-encoded sRGB sample.
-///
-/// The sample is transformed back into Rohditor's linear Rec.2020 working
-/// space before its hue is classified. Nearly neutral samples have no stable
-/// hue and deliberately return `None`.
-#[must_use]
-pub fn hsl_channel_weights_from_display_rgb(
-    display_rgb: [u8; 3],
-) -> Option<[f32; HSL_CHANNEL_COUNT]> {
-    let linear_srgb = display_rgb.map(|value| crate::srgb_to_linear_srgb(f32::from(value) / 255.0));
-    let linear_srgb_to_rec2020 = crate::XYZ_D65_TO_LINEAR_SRGB
-        .inverse()
-        .ok()?
-        .then(crate::XYZ_D65_TO_LINEAR_REC2020);
-    let working = linear_srgb_to_rec2020.transform(linear_srgb);
-    if working.iter().any(|value| !value.is_finite()) {
-        return None;
-    }
-    let minimum = working.into_iter().fold(f32::INFINITY, f32::min);
-    let offset = (-minimum).max(0.0);
-    let shifted = working.map(|value| value + offset);
-    let scale = shifted.into_iter().fold(0.0, f32::max);
-    if !scale.is_finite() || scale <= f32::EPSILON {
-        return None;
-    }
-    let [hue, saturation, _] = rgb_to_hsl(shifted.map(|value| value / scale));
-    (saturation >= 0.02).then(|| hsl_channel_weights(hue))
-}
-
-fn apply_color_grading(pixel: &mut [f32], grading: &ColorGradingAdjustments) {
-    if grading.shadows == [0.0; 3] && grading.midtones == [0.0; 3] && grading.highlights == [0.0; 3]
-    {
-        return;
-    }
-    let value = luminance(pixel).clamp(0.0, 1.0);
-    let shadows = 1.0 - smoothstep(0.0, 0.5, value);
-    let midtones = smoothstep(0.15, 0.45, value) * (1.0 - smoothstep(0.55, 0.85, value));
-    let highlights = smoothstep(0.5, 1.0, value);
-    let grade = [0, 1, 2].map(|index| {
-        grading.shadows[index] * shadows
-            + grading.midtones[index] * midtones
-            + grading.highlights[index] * highlights
-    });
-    // Treat the RGB controls as a tint rather than an additive lift. Positive
-    // multipliers preserve the sign of HDR/filter-lobe values, while the
-    // luminance renormalization keeps a grade from silently changing exposure.
-    let target = [0, 1, 2].map(|index| pixel[index] * (1.0 + 0.25 * grade[index]));
-    if target.iter().any(|value| !value.is_finite()) {
-        return;
-    }
-    let source_luminance = luminance(pixel);
-    let target_luminance = luminance(&target);
-    if source_luminance.abs() > 1.0e-6
-        && source_luminance.is_finite()
-        && target_luminance.abs() > 1.0e-6
-        && target_luminance.is_finite()
-        && source_luminance.signum() == target_luminance.signum()
-    {
-        let scale = source_luminance / target_luminance;
-        let graded = target.map(|value| value * scale);
-        if graded.iter().all(|value| value.is_finite()) {
-            pixel.copy_from_slice(&graded);
+    fn apply_light_tone(pixel: &mut [f32], light_tone_lut: &LightToneLut) {
+        let current = luminance(pixel);
+        let target = light_tone_lut.sample(current);
+        if !target.is_finite() || (target - current).abs() <= f32::EPSILON {
+            return;
         }
-    } else {
-        pixel.copy_from_slice(&target);
+        apply_luminance_delta(pixel, current, target);
     }
-}
 
-fn rgb_to_hsl([red, green, blue]: [f32; 3]) -> [f32; 3] {
-    let maximum = red.max(green).max(blue);
-    let minimum = red.min(green).min(blue);
-    let lightness = (maximum + minimum) * 0.5;
-    let chroma = maximum - minimum;
-    if chroma <= f32::EPSILON {
-        return [0.0, 0.0, lightness];
+    fn apply_tone_curve(pixel: &mut [f32], curve: &ToneCurve) {
+        if curve.shadows == 0.0
+            && curve.darks == 0.0
+            && curve.lights == 0.0
+            && curve.highlights == 0.0
+        {
+            return;
+        }
+        let current = luminance(pixel);
+        let target = evaluate_tone_curve(curve, current);
+        if !target.is_finite() || (target - current).abs() <= f32::EPSILON {
+            return;
+        }
+        apply_luminance_delta(pixel, current, target);
     }
-    let saturation = chroma / (1.0 - (2.0 * lightness - 1.0).abs());
-    let hue = if maximum == red {
-        ((green - blue) / chroma).rem_euclid(6.0) / 6.0
-    } else if maximum == green {
-        ((blue - red) / chroma + 2.0) / 6.0
-    } else {
-        ((red - green) / chroma + 4.0) / 6.0
-    };
-    [hue, saturation, lightness]
-}
 
-fn hsl_to_rgb([hue, saturation, lightness]: [f32; 3]) -> [f32; 3] {
-    if saturation <= f32::EPSILON {
-        return [lightness; 3];
+    /// Evaluate the monotonic scene-linear tone curve used by both the CPU and
+    /// the editor graph. The four recipe values are offsets at fixed inputs;
+    /// output points are projected into a non-decreasing curve so crossing
+    /// controls cannot invert tonal order. Values outside [0, 1] are left on the
+    /// identity extension to preserve HDR and negative working samples.
+    pub fn evaluate_tone_curve(curve: &ToneCurve, input: f32) -> f32 {
+        if !input.is_finite() || !(0.0..=1.0).contains(&input) {
+            return input;
+        }
+        const INPUTS: [f32; 6] = [0.0, 0.12, 0.35, 0.65, 0.88, 1.0];
+        let mut outputs = [
+            0.0,
+            INPUTS[1] + curve.shadows,
+            INPUTS[2] + curve.darks,
+            INPUTS[3] + curve.lights,
+            INPUTS[4] + curve.highlights,
+            1.0,
+        ];
+        for output in &mut outputs {
+            *output = output.clamp(0.0, 1.0);
+        }
+        for index in 1..outputs.len() {
+            outputs[index] = outputs[index].max(outputs[index - 1]);
+        }
+        let Some(index) = INPUTS.windows(2).position(|pair| input <= pair[1]) else {
+            return 1.0;
+        };
+        let span = INPUTS[index + 1] - INPUTS[index];
+        let fraction = (input - INPUTS[index]) / span;
+        outputs[index] + (outputs[index + 1] - outputs[index]) * fraction
     }
-    let chroma = (1.0 - (2.0 * lightness - 1.0).abs()) * saturation;
-    let hue_prime = hue * 6.0;
-    let secondary = chroma * (1.0 - ((hue_prime.rem_euclid(2.0)) - 1.0).abs());
-    let (red, green, blue) = match hue_prime {
-        value if value < 1.0 => (chroma, secondary, 0.0),
-        value if value < 2.0 => (secondary, chroma, 0.0),
-        value if value < 3.0 => (0.0, chroma, secondary),
-        value if value < 4.0 => (0.0, secondary, chroma),
-        value if value < 5.0 => (secondary, 0.0, chroma),
-        _ => (chroma, 0.0, secondary),
-    };
-    let match_value = lightness - chroma * 0.5;
-    [red + match_value, green + match_value, blue + match_value]
-}
 
-fn luminance(pixel: &[f32]) -> f32 {
-    pixel[0] * REC2020_LUMINANCE[0]
-        + pixel[1] * REC2020_LUMINANCE[1]
-        + pixel[2] * REC2020_LUMINANCE[2]
-}
+    #[inline(always)]
+    pub(super) fn apply_luminance_delta(pixel: &mut [f32], current: f32, target: f32) {
+        if !current.is_finite() || !target.is_finite() {
+            return;
+        }
+        if (current > 1.0e-6 && target >= LUMINANCE_RATIO_TRANSITION)
+            || (current < -1.0e-6 && target <= -LUMINANCE_RATIO_TRANSITION)
+        {
+            let scale = target / current;
+            let updated = [pixel[0] * scale, pixel[1] * scale, pixel[2] * scale];
+            if updated.iter().all(|value| value.is_finite()) {
+                pixel.copy_from_slice(&updated);
+                return;
+            }
+        }
+        let delta = target - current;
+        if !delta.is_finite() {
+            return;
+        }
+        // Crossing zero with a multiplicative scale would flip the sign of every
+        // channel, so additive output is the stable endpoint of the transition.
+        let additive = [pixel[0] + delta, pixel[1] + delta, pixel[2] + delta];
+        if additive.iter().any(|value| !value.is_finite()) {
+            return;
+        }
+        if current.abs() <= 1.0e-6 || current.signum() != target.signum() {
+            pixel.copy_from_slice(&additive);
+            return;
+        }
 
-fn color_saturation(pixel: &[f32], luminance: f32) -> f32 {
-    let chroma = pixel
-        .iter()
-        .map(|value| (value - luminance).abs())
-        .fold(0.0, f32::max);
-    (chroma / luminance.abs().max(1.0e-6)).clamp(0.0, 1.0)
-}
+        let ratio_weight = smoothstep(0.0, LUMINANCE_RATIO_TRANSITION, target.abs());
+        if ratio_weight <= f32::EPSILON {
+            pixel.copy_from_slice(&additive);
+            return;
+        }
+        let scale = target / current;
+        let scaled = [pixel[0] * scale, pixel[1] * scale, pixel[2] * scale];
+        let updated = [
+            additive[0] + (scaled[0] - additive[0]) * ratio_weight,
+            additive[1] + (scaled[1] - additive[1]) * ratio_weight,
+            additive[2] + (scaled[2] - additive[2]) * ratio_weight,
+        ];
+        if updated.iter().all(|value| value.is_finite()) {
+            pixel.copy_from_slice(&updated);
+        }
+    }
 
-fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
-    let normalized = ((value - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
-    normalized * normalized * (3.0 - 2.0 * normalized)
+    pub(super) fn apply_hsl_adjustments(pixel: &mut [f32], adjustments: &HslAdjustments) {
+        let [red, green, blue] = [pixel[0], pixel[1], pixel[2]];
+        if [red, green, blue]
+            .into_iter()
+            .any(|value| !value.is_finite())
+        {
+            return;
+        }
+        // HSL itself is bounded, but the working image is not. Normalize around
+        // the pixel's signed range, apply HSL there, and restore the original
+        // scale/offset so HDR and negative values are not silently clipped.
+        let offset = (-red.min(green).min(blue)).max(0.0);
+        let shifted = [red + offset, green + offset, blue + offset];
+        if shifted.iter().any(|value| !value.is_finite()) {
+            return;
+        }
+        let scale = shifted.into_iter().fold(0.0, f32::max);
+        if !scale.is_finite() || scale <= f32::EPSILON {
+            return;
+        }
+        let [mut hue, mut saturation, mut lightness] =
+            rgb_to_hsl([shifted[0] / scale, shifted[1] / scale, shifted[2] / scale]);
+        // Hue is undefined for a neutral pixel. Fade the mixer in over the first
+        // small amount of chroma so luminance edits cannot accidentally target
+        // gray pixels through the arbitrary red/zero hue returned by rgb_to_hsl.
+        let chroma_weight = smoothstep(0.0, 0.05, saturation);
+        if chroma_weight <= f32::EPSILON {
+            return;
+        }
+        let channel_weights = hsl_channel_weights(hue);
+        let mut hue_shift = 0.0;
+        let mut saturation_shift = 0.0;
+        let mut lightness_shift = 0.0;
+        for (channel, weight) in adjustments.channels.iter().zip(channel_weights) {
+            let weight = weight * chroma_weight;
+            hue_shift += channel.hue * HSL_HUE_SHIFT_PER_FULL_VALUE * weight;
+            saturation_shift += channel.saturation * 0.5 * weight;
+            lightness_shift += channel.luminance * 0.25 * weight;
+        }
+        if hue_shift == 0.0 && saturation_shift == 0.0 && lightness_shift == 0.0 {
+            return;
+        }
+        hue = (hue + hue_shift).rem_euclid(1.0);
+        saturation = (saturation + saturation_shift).clamp(0.0, 1.0);
+        lightness = (lightness + lightness_shift).clamp(0.0, 1.0);
+        let converted = hsl_to_rgb([hue, saturation, lightness]);
+        let restored = converted.map(|value| value * scale - offset);
+        if restored.iter().all(|value| value.is_finite()) {
+            pixel.copy_from_slice(&restored);
+        }
+    }
+
+    /// Interpolate between the two named HSL color centers surrounding `hue`.
+    ///
+    /// Exact centers receive one full band. Between centers the two feathered
+    /// weights always sum to one, including across the Magenta/Red wraparound, so
+    /// applying the same value to every band has exactly one adjustment's effect.
+    #[must_use]
+    pub fn hsl_channel_weights(hue: f32) -> [f32; HSL_CHANNEL_COUNT] {
+        let mut weights = [0.0; HSL_CHANNEL_COUNT];
+        if !hue.is_finite() {
+            return weights;
+        }
+        let hue = hue.rem_euclid(1.0);
+        let last = HSL_CHANNEL_CENTERS.len() - 1;
+        let (left, right, start, end) = HSL_CHANNEL_CENTERS
+            .windows(2)
+            .enumerate()
+            .find_map(|(index, centers)| {
+                (hue >= centers[0] && hue < centers[1]).then_some((
+                    index,
+                    index + 1,
+                    centers[0],
+                    centers[1],
+                ))
+            })
+            .unwrap_or((last, 0, HSL_CHANNEL_CENTERS[last], 1.0));
+        let fraction = ((hue - start) / (end - start)).clamp(0.0, 1.0);
+        weights[left] = 1.0 - fraction;
+        weights[right] = fraction;
+        weights
+    }
+
+    /// Find Color Mixer band weights for one display-encoded sRGB sample.
+    ///
+    /// The sample is transformed back into Rohditor's linear Rec.2020 working
+    /// space before its hue is classified. Nearly neutral samples have no stable
+    /// hue and deliberately return `None`.
+    #[must_use]
+    pub fn hsl_channel_weights_from_display_rgb(
+        display_rgb: [u8; 3],
+    ) -> Option<[f32; HSL_CHANNEL_COUNT]> {
+        let linear_srgb =
+            display_rgb.map(|value| crate::srgb_to_linear_srgb(f32::from(value) / 255.0));
+        let linear_srgb_to_rec2020 = crate::XYZ_D65_TO_LINEAR_SRGB
+            .inverse()
+            .ok()?
+            .then(crate::XYZ_D65_TO_LINEAR_REC2020);
+        let working = linear_srgb_to_rec2020.transform(linear_srgb);
+        if working.iter().any(|value| !value.is_finite()) {
+            return None;
+        }
+        let minimum = working.into_iter().fold(f32::INFINITY, f32::min);
+        let offset = (-minimum).max(0.0);
+        let shifted = working.map(|value| value + offset);
+        let scale = shifted.into_iter().fold(0.0, f32::max);
+        if !scale.is_finite() || scale <= f32::EPSILON {
+            return None;
+        }
+        let [hue, saturation, _] = rgb_to_hsl(shifted.map(|value| value / scale));
+        (saturation >= 0.02).then(|| hsl_channel_weights(hue))
+    }
+
+    fn apply_color_grading(pixel: &mut [f32], grading: &ColorGradingAdjustments) {
+        if grading.shadows == [0.0; 3]
+            && grading.midtones == [0.0; 3]
+            && grading.highlights == [0.0; 3]
+        {
+            return;
+        }
+        let value = luminance(pixel).clamp(0.0, 1.0);
+        let shadows = 1.0 - smoothstep(0.0, 0.5, value);
+        let midtones = smoothstep(0.15, 0.45, value) * (1.0 - smoothstep(0.55, 0.85, value));
+        let highlights = smoothstep(0.5, 1.0, value);
+        let grade = [0, 1, 2].map(|index| {
+            grading.shadows[index] * shadows
+                + grading.midtones[index] * midtones
+                + grading.highlights[index] * highlights
+        });
+        // Treat the RGB controls as a tint rather than an additive lift. Positive
+        // multipliers preserve the sign of HDR/filter-lobe values, while the
+        // luminance renormalization keeps a grade from silently changing exposure.
+        let target = [0, 1, 2].map(|index| pixel[index] * (1.0 + 0.25 * grade[index]));
+        if target.iter().any(|value| !value.is_finite()) {
+            return;
+        }
+        let source_luminance = luminance(pixel);
+        let target_luminance = luminance(&target);
+        if source_luminance.abs() > 1.0e-6
+            && source_luminance.is_finite()
+            && target_luminance.abs() > 1.0e-6
+            && target_luminance.is_finite()
+            && source_luminance.signum() == target_luminance.signum()
+        {
+            let scale = source_luminance / target_luminance;
+            let graded = target.map(|value| value * scale);
+            if graded.iter().all(|value| value.is_finite()) {
+                pixel.copy_from_slice(&graded);
+            }
+        } else {
+            pixel.copy_from_slice(&target);
+        }
+    }
+
+    pub(super) fn rgb_to_hsl([red, green, blue]: [f32; 3]) -> [f32; 3] {
+        let maximum = red.max(green).max(blue);
+        let minimum = red.min(green).min(blue);
+        let lightness = (maximum + minimum) * 0.5;
+        let chroma = maximum - minimum;
+        if chroma <= f32::EPSILON {
+            return [0.0, 0.0, lightness];
+        }
+        let saturation = chroma / (1.0 - (2.0 * lightness - 1.0).abs());
+        let hue = if maximum == red {
+            ((green - blue) / chroma).rem_euclid(6.0) / 6.0
+        } else if maximum == green {
+            ((blue - red) / chroma + 2.0) / 6.0
+        } else {
+            ((red - green) / chroma + 4.0) / 6.0
+        };
+        [hue, saturation, lightness]
+    }
+
+    pub(super) fn hsl_to_rgb([hue, saturation, lightness]: [f32; 3]) -> [f32; 3] {
+        if saturation <= f32::EPSILON {
+            return [lightness; 3];
+        }
+        let chroma = (1.0 - (2.0 * lightness - 1.0).abs()) * saturation;
+        let hue_prime = hue * 6.0;
+        let secondary = chroma * (1.0 - ((hue_prime.rem_euclid(2.0)) - 1.0).abs());
+        let (red, green, blue) = match hue_prime {
+            value if value < 1.0 => (chroma, secondary, 0.0),
+            value if value < 2.0 => (secondary, chroma, 0.0),
+            value if value < 3.0 => (0.0, chroma, secondary),
+            value if value < 4.0 => (0.0, secondary, chroma),
+            value if value < 5.0 => (secondary, 0.0, chroma),
+            _ => (chroma, 0.0, secondary),
+        };
+        let match_value = lightness - chroma * 0.5;
+        [red + match_value, green + match_value, blue + match_value]
+    }
+
+    pub(super) fn luminance(pixel: &[f32]) -> f32 {
+        pixel[0] * REC2020_LUMINANCE[0]
+            + pixel[1] * REC2020_LUMINANCE[1]
+            + pixel[2] * REC2020_LUMINANCE[2]
+    }
+
+    fn color_saturation(pixel: &[f32], luminance: f32) -> f32 {
+        let chroma = pixel
+            .iter()
+            .map(|value| (value - luminance).abs())
+            .fold(0.0, f32::max);
+        (chroma / luminance.abs().max(1.0e-6)).clamp(0.0, 1.0)
+    }
+
+    fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
+        let normalized = ((value - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+        normalized * normalized * (3.0 - 2.0 * normalized)
+    }
 }
 
 /// Convert linear Rec.2020 to clipped, transfer-encoded sRGB8 while physically
 /// applying the requested EXIF orientation. Quantization uses nearest code value.
-pub fn render_display_srgb8(
-    image: &LinearRgbImage<f32>,
-    orientation: Orientation,
-    output_policy: OutputPolicy,
-) -> Result<DisplayRgbImage<u8>, PipelineError> {
-    render_display_srgb8_dithered(image, orientation, output_policy, DitherMode::None)
-}
+pub(super) mod display {
+    use super::*;
 
-/// Convert through an already-resolved output geometry. This is the pipeline
-/// entry point for recipe-aware orientation and user crop output.
-pub fn render_display_srgb8_with_geometry(
-    image: &LinearRgbImage<f32>,
-    geometry: OutputGeometry,
-    output_policy: OutputPolicy,
-) -> Result<DisplayRgbImage<u8>, PipelineError> {
-    render_display_srgb8_dithered_with_geometry(image, geometry, output_policy, DitherMode::None)
-}
+    pub fn render_display_srgb8(
+        image: &LinearRgbImage<f32>,
+        orientation: Orientation,
+        output_policy: OutputPolicy,
+    ) -> Result<DisplayRgbImage<u8>, PipelineError> {
+        render_display_srgb8_dithered(image, orientation, output_policy, DitherMode::None)
+    }
 
-/// Convert linear Rec.2020 to clipped, transfer-encoded sRGB8 with explicit
-/// deterministic output dithering.
-pub fn render_display_srgb8_dithered(
-    image: &LinearRgbImage<f32>,
-    orientation: Orientation,
-    output_policy: OutputPolicy,
-    dithering: DitherMode,
-) -> Result<DisplayRgbImage<u8>, PipelineError> {
-    let geometry = OutputGeometry::new(image.width(), image.height(), orientation, None)?;
-    render_display_srgb8_dithered_with_geometry(image, geometry, output_policy, dithering)
-}
-
-pub(crate) fn render_display_srgb8_cancellable_with_geometry(
-    image: &LinearRgbImage<f32>,
-    geometry: OutputGeometry,
-    output_policy: OutputPolicy,
-    cancellation: &CancellationToken,
-) -> Result<(DisplayRgbImage<u8>, GamutMappingDiagnostics), PipelineError> {
-    render_display_srgb8_dithered_cancellable_with_geometry(
-        image,
-        geometry,
-        output_policy,
-        DitherMode::None,
-        cancellation,
-    )
-}
-
-pub fn render_display_srgb8_dithered_with_geometry(
-    image: &LinearRgbImage<f32>,
-    geometry: OutputGeometry,
-    output_policy: OutputPolicy,
-    dithering: DitherMode,
-) -> Result<DisplayRgbImage<u8>, PipelineError> {
-    render_display_srgb8_dithered_cancellable_with_geometry(
-        image,
-        geometry,
-        output_policy,
-        dithering,
-        &CancellationToken::new(),
-    )
-    .map(|(image, _)| image)
-}
-
-pub(crate) fn render_display_srgb8_dithered_with_geometry_and_diagnostics(
-    image: &LinearRgbImage<f32>,
-    geometry: OutputGeometry,
-    output_policy: OutputPolicy,
-    dithering: DitherMode,
-) -> Result<(DisplayRgbImage<u8>, GamutMappingDiagnostics), PipelineError> {
-    render_display_srgb8_dithered_cancellable_with_geometry(
-        image,
-        geometry,
-        output_policy,
-        dithering,
-        &CancellationToken::new(),
-    )
-}
-
-fn render_display_srgb8_dithered_cancellable_with_geometry(
-    image: &LinearRgbImage<f32>,
-    geometry: OutputGeometry,
-    output_policy: OutputPolicy,
-    dithering: DitherMode,
-    cancellation: &CancellationToken,
-) -> Result<(DisplayRgbImage<u8>, GamutMappingDiagnostics), PipelineError> {
-    let span = tracing::info_span!(
-        "cpu.output_conversion",
-        width = image.width(),
-        height = image.height(),
-        bit_depth = 8,
-        output_width = geometry.output_dimensions().0,
-        output_height = geometry.output_dimensions().1
-    );
-    let _guard = span.enter();
-    cancellation.checkpoint()?;
-    require_space(image, LinearRgbSpace::Rec2020D65)?;
-    let (output_width, output_height) = geometry.output_dimensions();
-    let row_stride = output_width.checked_mul(3).ok_or_else(|| {
-        invalid_dimensions(output_width, output_height, 0, "RGB stride overflowed")
-    })?;
-    let elements = row_stride.checked_mul(output_height).ok_or_else(|| {
-        invalid_dimensions(
-            output_width,
-            output_height,
-            row_stride,
-            "RGB sample count overflowed",
+    /// Convert through an already-resolved output geometry. This is the pipeline
+    /// entry point for recipe-aware orientation and user crop output.
+    pub fn render_display_srgb8_with_geometry(
+        image: &LinearRgbImage<f32>,
+        geometry: OutputGeometry,
+        output_policy: OutputPolicy,
+    ) -> Result<DisplayRgbImage<u8>, PipelineError> {
+        render_display_srgb8_dithered_with_geometry(
+            image,
+            geometry,
+            output_policy,
+            DitherMode::None,
         )
-    })?;
-    let mut output = allocate_zeroed_u8(elements)?;
-    let rec2020_to_srgb = LINEAR_REC2020_TO_XYZ_D65.then(XYZ_D65_TO_LINEAR_SRGB);
-    let diagnostics = output
-        .par_chunks_mut(row_stride)
-        .enumerate()
-        .try_fold(
-            GamutMappingDiagnostics::default,
-            |mut diagnostics, (output_y, output_row)| -> Result<_, PipelineError> {
-                cancellation.checkpoint()?;
-                for (output_x, destination) in
-                    output_row.as_chunks_mut::<3>().0.iter_mut().enumerate()
-                {
-                    let (source_x, source_y) =
-                        geometry.source_coordinate_in_bounds(output_x, output_y);
-                    let start = source_y * image.row_stride() + source_x * 3;
-                    let source = &image.data()[start..start + 3];
-                    let (encoded, status) = encode_rec2020_for_srgb_output(
-                        rec2020_to_srgb,
-                        [source[0], source[1], source[2]],
-                        output_policy,
-                    );
-                    diagnostics.record(status);
-                    for (encoded, output) in encoded.into_iter().zip(destination) {
-                        let dither = quantization_dither(dithering, output_x, output_y);
-                        *output = (encoded * 255.0 + dither).round().clamp(0.0, 255.0) as u8;
-                    }
-                }
-                Ok(diagnostics)
-            },
+    }
+
+    /// Convert linear Rec.2020 to clipped, transfer-encoded sRGB8 with explicit
+    /// deterministic output dithering.
+    pub fn render_display_srgb8_dithered(
+        image: &LinearRgbImage<f32>,
+        orientation: Orientation,
+        output_policy: OutputPolicy,
+        dithering: DitherMode,
+    ) -> Result<DisplayRgbImage<u8>, PipelineError> {
+        let geometry = OutputGeometry::new(image.width(), image.height(), orientation, None)?;
+        render_display_srgb8_dithered_with_geometry(image, geometry, output_policy, dithering)
+    }
+
+    pub(crate) fn render_display_srgb8_cancellable_with_geometry(
+        image: &LinearRgbImage<f32>,
+        geometry: OutputGeometry,
+        output_policy: OutputPolicy,
+        cancellation: &CancellationToken,
+    ) -> Result<(DisplayRgbImage<u8>, GamutMappingDiagnostics), PipelineError> {
+        render_display_srgb8_dithered_cancellable_with_geometry(
+            image,
+            geometry,
+            output_policy,
+            DitherMode::None,
+            cancellation,
         )
-        .try_reduce(GamutMappingDiagnostics::default, |left, right| {
-            Ok(left.merge(right))
-        })?;
-    cancellation.checkpoint()?;
-    let image = DisplayRgbImage::new(
-        output_width,
-        output_height,
-        row_stride,
-        DisplayTransfer::Srgb,
-        output,
-    )
-    .map_err(PipelineError::from)?;
-    Ok((image, diagnostics))
-}
+    }
 
-/// Convert linear Rec.2020 directly to clipped, transfer-encoded sRGB16 while
-/// physically applying the requested EXIF orientation.
-pub fn render_display_srgb16(
-    image: &LinearRgbImage<f32>,
-    orientation: Orientation,
-    output_policy: OutputPolicy,
-    dithering: DitherMode,
-) -> Result<DisplayRgbImage<u16>, PipelineError> {
-    let geometry = OutputGeometry::new(image.width(), image.height(), orientation, None)?;
-    render_display_srgb16_with_geometry(image, geometry, output_policy, dithering)
-}
-
-/// 16-bit counterpart to [`render_display_srgb8_with_geometry`].
-pub fn render_display_srgb16_with_geometry(
-    image: &LinearRgbImage<f32>,
-    geometry: OutputGeometry,
-    output_policy: OutputPolicy,
-    dithering: DitherMode,
-) -> Result<DisplayRgbImage<u16>, PipelineError> {
-    render_display_srgb16_with_geometry_and_diagnostics(image, geometry, output_policy, dithering)
+    pub fn render_display_srgb8_dithered_with_geometry(
+        image: &LinearRgbImage<f32>,
+        geometry: OutputGeometry,
+        output_policy: OutputPolicy,
+        dithering: DitherMode,
+    ) -> Result<DisplayRgbImage<u8>, PipelineError> {
+        render_display_srgb8_dithered_cancellable_with_geometry(
+            image,
+            geometry,
+            output_policy,
+            dithering,
+            &CancellationToken::new(),
+        )
         .map(|(image, _)| image)
-}
+    }
 
-pub(crate) fn render_display_srgb16_with_geometry_and_diagnostics(
-    image: &LinearRgbImage<f32>,
-    geometry: OutputGeometry,
-    output_policy: OutputPolicy,
-    dithering: DitherMode,
-) -> Result<(DisplayRgbImage<u16>, GamutMappingDiagnostics), PipelineError> {
-    let span = tracing::info_span!(
-        "cpu.output_conversion",
-        width = image.width(),
-        height = image.height(),
-        bit_depth = 16,
-        output_width = geometry.output_dimensions().0,
-        output_height = geometry.output_dimensions().1
-    );
-    let _guard = span.enter();
-    require_space(image, LinearRgbSpace::Rec2020D65)?;
-    let (output_width, output_height) = geometry.output_dimensions();
-    let row_stride = output_width.checked_mul(3).ok_or_else(|| {
-        invalid_dimensions(output_width, output_height, 0, "RGB stride overflowed")
-    })?;
-    let elements = row_stride.checked_mul(output_height).ok_or_else(|| {
-        invalid_dimensions(
+    pub(crate) fn render_display_srgb8_dithered_with_geometry_and_diagnostics(
+        image: &LinearRgbImage<f32>,
+        geometry: OutputGeometry,
+        output_policy: OutputPolicy,
+        dithering: DitherMode,
+    ) -> Result<(DisplayRgbImage<u8>, GamutMappingDiagnostics), PipelineError> {
+        render_display_srgb8_dithered_cancellable_with_geometry(
+            image,
+            geometry,
+            output_policy,
+            dithering,
+            &CancellationToken::new(),
+        )
+    }
+
+    fn render_display_srgb8_dithered_cancellable_with_geometry(
+        image: &LinearRgbImage<f32>,
+        geometry: OutputGeometry,
+        output_policy: OutputPolicy,
+        dithering: DitherMode,
+        cancellation: &CancellationToken,
+    ) -> Result<(DisplayRgbImage<u8>, GamutMappingDiagnostics), PipelineError> {
+        let span = tracing::info_span!(
+            "cpu.output_conversion",
+            width = image.width(),
+            height = image.height(),
+            bit_depth = 8,
+            output_width = geometry.output_dimensions().0,
+            output_height = geometry.output_dimensions().1
+        );
+        let _guard = span.enter();
+        cancellation.checkpoint()?;
+        require_space(image, LinearRgbSpace::Rec2020D65)?;
+        let (output_width, output_height) = geometry.output_dimensions();
+        let row_stride = output_width.checked_mul(3).ok_or_else(|| {
+            invalid_dimensions(output_width, output_height, 0, "RGB stride overflowed")
+        })?;
+        let elements = row_stride.checked_mul(output_height).ok_or_else(|| {
+            invalid_dimensions(
+                output_width,
+                output_height,
+                row_stride,
+                "RGB sample count overflowed",
+            )
+        })?;
+        let mut output = allocate_zeroed_u8(elements)?;
+        let rec2020_to_srgb = LINEAR_REC2020_TO_XYZ_D65.then(XYZ_D65_TO_LINEAR_SRGB);
+        let diagnostics = output
+            .par_chunks_mut(row_stride)
+            .enumerate()
+            .try_fold(
+                GamutMappingDiagnostics::default,
+                |mut diagnostics, (output_y, output_row)| -> Result<_, PipelineError> {
+                    cancellation.checkpoint()?;
+                    for (output_x, destination) in
+                        output_row.as_chunks_mut::<3>().0.iter_mut().enumerate()
+                    {
+                        let (source_x, source_y) =
+                            geometry.source_coordinate_in_bounds(output_x, output_y);
+                        let start = source_y * image.row_stride() + source_x * 3;
+                        let source = &image.data()[start..start + 3];
+                        let (encoded, status) = encode_rec2020_for_srgb_output(
+                            rec2020_to_srgb,
+                            [source[0], source[1], source[2]],
+                            output_policy,
+                        );
+                        diagnostics.record(status);
+                        for (encoded, output) in encoded.into_iter().zip(destination) {
+                            let dither = quantization_dither(dithering, output_x, output_y);
+                            *output = (encoded * 255.0 + dither).round().clamp(0.0, 255.0) as u8;
+                        }
+                    }
+                    Ok(diagnostics)
+                },
+            )
+            .try_reduce(GamutMappingDiagnostics::default, |left, right| {
+                Ok(left.merge(right))
+            })?;
+        cancellation.checkpoint()?;
+        let image = DisplayRgbImage::new(
             output_width,
             output_height,
             row_stride,
-            "RGB sample count overflowed",
+            DisplayTransfer::Srgb,
+            output,
         )
-    })?;
-    let mut output = allocate_zeroed_u16(elements)?;
-    let rec2020_to_srgb = LINEAR_REC2020_TO_XYZ_D65.then(XYZ_D65_TO_LINEAR_SRGB);
-    let diagnostics = output
-        .par_chunks_mut(row_stride)
-        .enumerate()
-        .fold(
-            GamutMappingDiagnostics::default,
-            |mut diagnostics, (output_y, output_row)| {
-                for (output_x, destination) in
-                    output_row.as_chunks_mut::<3>().0.iter_mut().enumerate()
-                {
-                    let (source_x, source_y) =
-                        geometry.source_coordinate_in_bounds(output_x, output_y);
-                    let start = source_y * image.row_stride() + source_x * 3;
-                    let source = &image.data()[start..start + 3];
-                    let (encoded, status) = encode_rec2020_for_srgb_output(
-                        rec2020_to_srgb,
-                        [source[0], source[1], source[2]],
-                        output_policy,
-                    );
-                    diagnostics.record(status);
-                    for (encoded, output) in encoded.into_iter().zip(destination) {
-                        let dither = quantization_dither(dithering, output_x, output_y);
-                        *output = (encoded * 65_535.0 + dither).round().clamp(0.0, 65_535.0) as u16;
-                    }
-                }
-                diagnostics
-            },
-        )
-        .reduce(
-            GamutMappingDiagnostics::default,
-            GamutMappingDiagnostics::merge,
-        );
-    let image = DisplayRgbImage::new(
-        output_width,
-        output_height,
-        row_stride,
-        DisplayTransfer::Srgb,
-        output,
-    )
-    .map_err(PipelineError::from)?;
-    Ok((image, diagnostics))
-}
+        .map_err(PipelineError::from)?;
+        Ok((image, diagnostics))
+    }
 
-fn quantization_dither(mode: DitherMode, x: usize, y: usize) -> f32 {
-    const BAYER_8X8: [[u8; 8]; 8] = [
-        [0, 32, 8, 40, 2, 34, 10, 42],
-        [48, 16, 56, 24, 50, 18, 58, 26],
-        [12, 44, 4, 36, 14, 46, 6, 38],
-        [60, 28, 52, 20, 62, 30, 54, 22],
-        [3, 35, 11, 43, 1, 33, 9, 41],
-        [51, 19, 59, 27, 49, 17, 57, 25],
-        [15, 47, 7, 39, 13, 45, 5, 37],
-        [63, 31, 55, 23, 61, 29, 53, 21],
-    ];
-    match mode {
-        DitherMode::None => 0.0,
-        DitherMode::Ordered8x8 => (f32::from(BAYER_8X8[y & 7][x & 7]) + 0.5) / 64.0 - 0.5,
+    /// Convert linear Rec.2020 directly to clipped, transfer-encoded sRGB16 while
+    /// physically applying the requested EXIF orientation.
+    pub fn render_display_srgb16(
+        image: &LinearRgbImage<f32>,
+        orientation: Orientation,
+        output_policy: OutputPolicy,
+        dithering: DitherMode,
+    ) -> Result<DisplayRgbImage<u16>, PipelineError> {
+        let geometry = OutputGeometry::new(image.width(), image.height(), orientation, None)?;
+        render_display_srgb16_with_geometry(image, geometry, output_policy, dithering)
+    }
+
+    /// 16-bit counterpart to [`render_display_srgb8_with_geometry`].
+    pub fn render_display_srgb16_with_geometry(
+        image: &LinearRgbImage<f32>,
+        geometry: OutputGeometry,
+        output_policy: OutputPolicy,
+        dithering: DitherMode,
+    ) -> Result<DisplayRgbImage<u16>, PipelineError> {
+        render_display_srgb16_with_geometry_and_diagnostics(
+            image,
+            geometry,
+            output_policy,
+            dithering,
+        )
+        .map(|(image, _)| image)
+    }
+
+    pub(crate) fn render_display_srgb16_with_geometry_and_diagnostics(
+        image: &LinearRgbImage<f32>,
+        geometry: OutputGeometry,
+        output_policy: OutputPolicy,
+        dithering: DitherMode,
+    ) -> Result<(DisplayRgbImage<u16>, GamutMappingDiagnostics), PipelineError> {
+        let span = tracing::info_span!(
+            "cpu.output_conversion",
+            width = image.width(),
+            height = image.height(),
+            bit_depth = 16,
+            output_width = geometry.output_dimensions().0,
+            output_height = geometry.output_dimensions().1
+        );
+        let _guard = span.enter();
+        require_space(image, LinearRgbSpace::Rec2020D65)?;
+        let (output_width, output_height) = geometry.output_dimensions();
+        let row_stride = output_width.checked_mul(3).ok_or_else(|| {
+            invalid_dimensions(output_width, output_height, 0, "RGB stride overflowed")
+        })?;
+        let elements = row_stride.checked_mul(output_height).ok_or_else(|| {
+            invalid_dimensions(
+                output_width,
+                output_height,
+                row_stride,
+                "RGB sample count overflowed",
+            )
+        })?;
+        let mut output = allocate_zeroed_u16(elements)?;
+        let rec2020_to_srgb = LINEAR_REC2020_TO_XYZ_D65.then(XYZ_D65_TO_LINEAR_SRGB);
+        let diagnostics = output
+            .par_chunks_mut(row_stride)
+            .enumerate()
+            .fold(
+                GamutMappingDiagnostics::default,
+                |mut diagnostics, (output_y, output_row)| {
+                    for (output_x, destination) in
+                        output_row.as_chunks_mut::<3>().0.iter_mut().enumerate()
+                    {
+                        let (source_x, source_y) =
+                            geometry.source_coordinate_in_bounds(output_x, output_y);
+                        let start = source_y * image.row_stride() + source_x * 3;
+                        let source = &image.data()[start..start + 3];
+                        let (encoded, status) = encode_rec2020_for_srgb_output(
+                            rec2020_to_srgb,
+                            [source[0], source[1], source[2]],
+                            output_policy,
+                        );
+                        diagnostics.record(status);
+                        for (encoded, output) in encoded.into_iter().zip(destination) {
+                            let dither = quantization_dither(dithering, output_x, output_y);
+                            *output =
+                                (encoded * 65_535.0 + dither).round().clamp(0.0, 65_535.0) as u16;
+                        }
+                    }
+                    diagnostics
+                },
+            )
+            .reduce(
+                GamutMappingDiagnostics::default,
+                GamutMappingDiagnostics::merge,
+            );
+        let image = DisplayRgbImage::new(
+            output_width,
+            output_height,
+            row_stride,
+            DisplayTransfer::Srgb,
+            output,
+        )
+        .map_err(PipelineError::from)?;
+        Ok((image, diagnostics))
+    }
+
+    fn quantization_dither(mode: DitherMode, x: usize, y: usize) -> f32 {
+        const BAYER_8X8: [[u8; 8]; 8] = [
+            [0, 32, 8, 40, 2, 34, 10, 42],
+            [48, 16, 56, 24, 50, 18, 58, 26],
+            [12, 44, 4, 36, 14, 46, 6, 38],
+            [60, 28, 52, 20, 62, 30, 54, 22],
+            [3, 35, 11, 43, 1, 33, 9, 41],
+            [51, 19, 59, 27, 49, 17, 57, 25],
+            [15, 47, 7, 39, 13, 45, 5, 37],
+            [63, 31, 55, 23, 61, 29, 53, 21],
+        ];
+        match mode {
+            DitherMode::None => 0.0,
+            DitherMode::Ordered8x8 => (f32::from(BAYER_8X8[y & 7][x & 7]) + 0.5) / 64.0 - 0.5,
+        }
     }
 }
 
@@ -1243,6 +1285,22 @@ fn invalid_dimensions(
         reason: reason.to_owned(),
     }
 }
+
+#[cfg(test)]
+use adjustments::{
+    apply_adjustments, apply_hsl_adjustments, apply_luminance_delta, evaluate_tone_curve,
+    hsl_channel_weights, hsl_channel_weights_from_display_rgb, hsl_to_rgb, luminance, rgb_to_hsl,
+};
+#[cfg(test)]
+use display::{
+    render_display_srgb8, render_display_srgb8_dithered,
+    render_display_srgb8_dithered_with_geometry_and_diagnostics, render_display_srgb16,
+    render_display_srgb16_with_geometry_and_diagnostics,
+};
+#[cfg(test)]
+use normalize::{normalize_raw, normalize_raw_preview};
+#[cfg(test)]
+use white_balance::{white_balance_gains, white_balance_gains_from_calibration};
 
 #[cfg(test)]
 mod tests {

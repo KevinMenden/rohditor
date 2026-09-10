@@ -1,3 +1,4 @@
+// The public pipeline facade re-exports this orchestration layer.
 use std::mem::size_of;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -484,360 +485,379 @@ pub struct CpuPipeline {
     optics: Option<Arc<OpticsService>>,
 }
 
-impl Default for CpuPipeline {
-    fn default() -> Self {
-        Self::without_optics()
-    }
-}
+pub(super) mod render {
+    use super::*;
 
-impl CpuPipeline {
-    /// Construct a pipeline with one immutable optics database snapshot.
-    #[must_use]
-    pub fn new(optics: Arc<OpticsService>) -> Self {
-        Self {
-            optics: Some(optics),
+    impl Default for CpuPipeline {
+        fn default() -> Self {
+            Self::without_optics()
         }
     }
 
-    /// Construct a pipeline for recipes whose optics profile is off.
-    #[must_use]
-    pub const fn without_optics() -> Self {
-        Self { optics: None }
-    }
+    impl CpuPipeline {
+        /// Construct a pipeline with one immutable optics database snapshot.
+        #[must_use]
+        pub fn new(optics: Arc<OpticsService>) -> Self {
+            Self {
+                optics: Some(optics),
+            }
+        }
 
-    /// The shared optics service, when this processor has one.
-    #[must_use]
-    pub fn optics_service(&self) -> Option<&Arc<OpticsService>> {
-        self.optics.as_ref()
-    }
+        /// Construct a pipeline for recipes whose optics profile is off.
+        #[must_use]
+        pub const fn without_optics() -> Self {
+            Self { optics: None }
+        }
 
-    /// Resolve the plan identity used by a reconstructed camera-native cache
-    /// entry without allocating or processing image pixels.
-    #[must_use]
-    pub fn optics_cache_provenance(
-        &self,
-        frame: &RawFrame,
-        recipe: &EditRecipe,
-        options: RenderOptions,
-    ) -> Option<OpticsProvenance> {
-        crate::optics::cache_provenance(self.optics.as_deref(), frame, recipe, options)
-    }
+        /// The shared optics service, when this processor has one.
+        #[must_use]
+        pub fn optics_service(&self) -> Option<&Arc<OpticsService>> {
+            self.optics.as_ref()
+        }
 
-    pub fn render(
-        &self,
-        frame: &RawFrame,
-        recipe: &EditRecipe,
-        options: RenderOptions,
-    ) -> Result<RenderResult, PipelineError> {
-        let total_started = Instant::now();
-        let base = prepare_base(self.optics.as_deref(), frame, recipe, options)?;
-        let mut result = render_base(base, recipe, options.output_policy)?;
-        result.timings.total = total_started.elapsed();
-        Ok(result)
-    }
+        /// Resolve the plan identity used by a reconstructed camera-native cache
+        /// entry without allocating or processing image pixels.
+        #[must_use]
+        pub fn optics_cache_provenance(
+            &self,
+            frame: &RawFrame,
+            recipe: &EditRecipe,
+            options: RenderOptions,
+        ) -> Option<OpticsProvenance> {
+            crate::optics::cache_provenance(self.optics.as_deref(), frame, recipe, options)
+        }
 
-    /// Build the stable linear base for an interactive preview.
-    ///
-    /// Only the recipe's white balance participates in the resulting pixels;
-    /// downstream edits are validated but deliberately left for
-    /// [`Self::render_preview_from_base`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`PipelineError`] for invalid metadata, recipes, dimensions,
-    /// color transforms, allocation failures, or working-set limits.
-    pub fn prepare_preview_base(
-        &self,
-        frame: &RawFrame,
-        recipe: &EditRecipe,
-        options: PreviewOptions,
-    ) -> Result<DemosaicedBase, PipelineError> {
-        self.prepare_preview_base_cancellable(frame, recipe, options, &CancellationToken::new())
-    }
+        pub fn render(
+            &self,
+            frame: &RawFrame,
+            recipe: &EditRecipe,
+            options: RenderOptions,
+        ) -> Result<RenderResult, PipelineError> {
+            let total_started = Instant::now();
+            let base = prepare_base(self.optics.as_deref(), frame, recipe, options)?;
+            let mut result = render_base(base, recipe, options.output_policy)?;
+            result.timings.total = total_started.elapsed();
+            Ok(result)
+        }
 
-    /// Build the preview base while observing a cooperative cancellation token.
-    pub fn prepare_preview_base_cancellable(
-        &self,
-        frame: &RawFrame,
-        recipe: &EditRecipe,
-        options: PreviewOptions,
-        cancellation: &CancellationToken,
-    ) -> Result<DemosaicedBase, PipelineError> {
-        let reconstructed =
-            self.prepare_preview_reconstruction_cancellable(frame, recipe, options, cancellation)?;
-        let mut base = self.prepare_preview_base_from_reconstruction_cancellable(
-            &reconstructed,
-            recipe,
-            cancellation,
-        )?;
-        base.timings.metadata += reconstructed.timings.metadata;
-        base.timings.normalization = reconstructed.timings.normalization;
-        base.timings.highlight_processing = reconstructed.timings.highlight_processing;
-        base.timings.highlight_clipping = reconstructed.timings.highlight_clipping;
-        base.timings.demosaic = reconstructed.timings.demosaic;
-        base.timings.optics = reconstructed.timings.optics;
-        base.timings.resampling = reconstructed.timings.resampling;
-        base.timings.total += reconstructed.timings.total;
-        Ok(base)
-    }
+        /// Build the stable linear base for an interactive preview.
+        ///
+        /// Only the recipe's white balance participates in the resulting pixels;
+        /// downstream edits are validated but deliberately left for
+        /// [`Self::render_preview_from_base`].
+        ///
+        /// # Errors
+        ///
+        /// Returns [`PipelineError`] for invalid metadata, recipes, dimensions,
+        /// color transforms, allocation failures, or working-set limits.
+        pub fn prepare_preview_base(
+            &self,
+            frame: &RawFrame,
+            recipe: &EditRecipe,
+            options: PreviewOptions,
+        ) -> Result<DemosaicedBase, PipelineError> {
+            self.prepare_preview_base_cancellable(frame, recipe, options, &CancellationToken::new())
+        }
 
-    /// Reconstruct and antialias a camera-native preview base for reuse across
-    /// white-balance and downstream edit changes.
-    pub fn prepare_preview_reconstruction(
-        &self,
-        frame: &RawFrame,
-        recipe: &EditRecipe,
-        options: PreviewOptions,
-    ) -> Result<ReconstructedPreview, PipelineError> {
-        self.prepare_preview_reconstruction_cancellable(
-            frame,
-            recipe,
-            options,
-            &CancellationToken::new(),
-        )
-    }
+        /// Build the preview base while observing a cooperative cancellation token.
+        pub fn prepare_preview_base_cancellable(
+            &self,
+            frame: &RawFrame,
+            recipe: &EditRecipe,
+            options: PreviewOptions,
+            cancellation: &CancellationToken,
+        ) -> Result<DemosaicedBase, PipelineError> {
+            let reconstructed = self.prepare_preview_reconstruction_cancellable(
+                frame,
+                recipe,
+                options,
+                cancellation,
+            )?;
+            let mut base = self.prepare_preview_base_from_reconstruction_cancellable(
+                &reconstructed,
+                recipe,
+                cancellation,
+            )?;
+            base.timings.metadata += reconstructed.timings.metadata;
+            base.timings.normalization = reconstructed.timings.normalization;
+            base.timings.highlight_processing = reconstructed.timings.highlight_processing;
+            base.timings.highlight_clipping = reconstructed.timings.highlight_clipping;
+            base.timings.demosaic = reconstructed.timings.demosaic;
+            base.timings.optics = reconstructed.timings.optics;
+            base.timings.resampling = reconstructed.timings.resampling;
+            base.timings.total += reconstructed.timings.total;
+            Ok(base)
+        }
 
-    /// Cancellable form of [`Self::prepare_preview_reconstruction`].
-    pub fn prepare_preview_reconstruction_cancellable(
-        &self,
-        frame: &RawFrame,
-        recipe: &EditRecipe,
-        options: PreviewOptions,
-        cancellation: &CancellationToken,
-    ) -> Result<ReconstructedPreview, PipelineError> {
-        prepare_reconstructed_preview(self.optics.as_deref(), frame, recipe, options, cancellation)
-    }
+        /// Reconstruct and antialias a camera-native preview base for reuse across
+        /// white-balance and downstream edit changes.
+        pub fn prepare_preview_reconstruction(
+            &self,
+            frame: &RawFrame,
+            recipe: &EditRecipe,
+            options: PreviewOptions,
+        ) -> Result<ReconstructedPreview, PipelineError> {
+            self.prepare_preview_reconstruction_cancellable(
+                frame,
+                recipe,
+                options,
+                &CancellationToken::new(),
+            )
+        }
 
-    /// Apply white balance and camera color conversion to a retained
-    /// reconstructed preview.
-    pub fn prepare_preview_base_from_reconstruction(
-        &self,
-        reconstructed: &ReconstructedPreview,
-        recipe: &EditRecipe,
-    ) -> Result<DemosaicedBase, PipelineError> {
-        self.prepare_preview_base_from_reconstruction_cancellable(
-            reconstructed,
-            recipe,
-            &CancellationToken::new(),
-        )
-    }
+        /// Cancellable form of [`Self::prepare_preview_reconstruction`].
+        pub fn prepare_preview_reconstruction_cancellable(
+            &self,
+            frame: &RawFrame,
+            recipe: &EditRecipe,
+            options: PreviewOptions,
+            cancellation: &CancellationToken,
+        ) -> Result<ReconstructedPreview, PipelineError> {
+            prepare_reconstructed_preview(
+                self.optics.as_deref(),
+                frame,
+                recipe,
+                options,
+                cancellation,
+            )
+        }
 
-    /// Cancellable form of [`Self::prepare_preview_base_from_reconstruction`].
-    pub fn prepare_preview_base_from_reconstruction_cancellable(
-        &self,
-        reconstructed: &ReconstructedPreview,
-        recipe: &EditRecipe,
-        cancellation: &CancellationToken,
-    ) -> Result<DemosaicedBase, PipelineError> {
-        prepare_demosaiced_preview(reconstructed, recipe, cancellation)
-    }
+        /// Apply white balance and camera color conversion to a retained
+        /// reconstructed preview.
+        pub fn prepare_preview_base_from_reconstruction(
+            &self,
+            reconstructed: &ReconstructedPreview,
+            recipe: &EditRecipe,
+        ) -> Result<DemosaicedBase, PipelineError> {
+            self.prepare_preview_base_from_reconstruction_cancellable(
+                reconstructed,
+                recipe,
+                &CancellationToken::new(),
+            )
+        }
 
-    /// Apply downstream edits and output conversion to a reusable preview base.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`PipelineError`] when the recipe is invalid, its white balance
-    /// does not match the base, output conversion fails, or the retained-base
-    /// working set exceeds the configured limit.
-    pub fn render_preview_from_base(
-        &self,
-        base: &DemosaicedBase,
-        recipe: &EditRecipe,
-        output_policy: OutputPolicy,
-    ) -> Result<RenderResult, PipelineError> {
-        self.render_preview_from_base_reusing(
-            base,
-            recipe,
-            output_policy,
-            &mut CpuPreviewWorkspace::default(),
-        )
-    }
+        /// Cancellable form of [`Self::prepare_preview_base_from_reconstruction`].
+        pub fn prepare_preview_base_from_reconstruction_cancellable(
+            &self,
+            reconstructed: &ReconstructedPreview,
+            recipe: &EditRecipe,
+            cancellation: &CancellationToken,
+        ) -> Result<DemosaicedBase, PipelineError> {
+            prepare_demosaiced_preview(reconstructed, recipe, cancellation)
+        }
 
-    /// Apply downstream edits using a retained scene-linear working allocation.
-    pub fn render_preview_from_base_reusing(
-        &self,
-        base: &DemosaicedBase,
-        recipe: &EditRecipe,
-        output_policy: OutputPolicy,
-        workspace: &mut CpuPreviewWorkspace,
-    ) -> Result<RenderResult, PipelineError> {
-        self.render_preview_from_base_reusing_cancellable(
-            base,
-            recipe,
-            output_policy,
-            workspace,
-            &CancellationToken::new(),
-        )
-    }
+        /// Apply downstream edits and output conversion to a reusable preview base.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`PipelineError`] when the recipe is invalid, its white balance
+        /// does not match the base, output conversion fails, or the retained-base
+        /// working set exceeds the configured limit.
+        pub fn render_preview_from_base(
+            &self,
+            base: &DemosaicedBase,
+            recipe: &EditRecipe,
+            output_policy: OutputPolicy,
+        ) -> Result<RenderResult, PipelineError> {
+            self.render_preview_from_base_reusing(
+                base,
+                recipe,
+                output_policy,
+                &mut CpuPreviewWorkspace::default(),
+            )
+        }
 
-    /// Cancellable form of [`Self::render_preview_from_base_reusing`].
-    pub fn render_preview_from_base_reusing_cancellable(
-        &self,
-        base: &DemosaicedBase,
-        recipe: &EditRecipe,
-        output_policy: OutputPolicy,
-        workspace: &mut CpuPreviewWorkspace,
-        cancellation: &CancellationToken,
-    ) -> Result<RenderResult, PipelineError> {
-        let total_started = Instant::now();
-        cancellation.checkpoint()?;
-        validate_base_recipe(base, recipe)?;
-        let retained_base_bytes = base
-            .image
-            .data()
-            .len()
-            .checked_mul(size_of::<f32>())
-            .ok_or_else(|| dimension_overflow(base.image.width(), base.image.height()))?;
-        let geometry = output_geometry(base.image(), base.source_orientation, recipe)?;
-        let mut memory = memory_estimate(base, size_of::<u8>(), geometry)?;
-        let retained_peak = base
-            .decoded_raw_bytes
-            .checked_add(retained_base_bytes)
-            .and_then(|bytes| bytes.checked_add(retained_base_bytes))
-            .and_then(|bytes| bytes.checked_add(memory.display_rgb_bytes))
-            .ok_or_else(|| dimension_overflow(base.image.width(), base.image.height()))?;
-        memory.estimated_peak_bytes = memory.estimated_peak_bytes.max(retained_peak);
-        validate_working_set(memory.estimated_peak_bytes)?;
+        /// Apply downstream edits using a retained scene-linear working allocation.
+        pub fn render_preview_from_base_reusing(
+            &self,
+            base: &DemosaicedBase,
+            recipe: &EditRecipe,
+            output_policy: OutputPolicy,
+            workspace: &mut CpuPreviewWorkspace,
+        ) -> Result<RenderResult, PipelineError> {
+            self.render_preview_from_base_reusing_cancellable(
+                base,
+                recipe,
+                output_policy,
+                workspace,
+                &CancellationToken::new(),
+            )
+        }
 
-        let working = workspace.reset_from(base);
-        cancellation.checkpoint()?;
-        let mut timings = StageTimings::default();
-        let adjustments_started = Instant::now();
-        apply_adjustments_cancellable(working, recipe, cancellation)?;
-        timings.adjustments = adjustments_started.elapsed();
+        /// Cancellable form of [`Self::render_preview_from_base_reusing`].
+        pub fn render_preview_from_base_reusing_cancellable(
+            &self,
+            base: &DemosaicedBase,
+            recipe: &EditRecipe,
+            output_policy: OutputPolicy,
+            workspace: &mut CpuPreviewWorkspace,
+            cancellation: &CancellationToken,
+        ) -> Result<RenderResult, PipelineError> {
+            let total_started = Instant::now();
+            cancellation.checkpoint()?;
+            validate_base_recipe(base, recipe)?;
+            let retained_base_bytes = base
+                .image
+                .data()
+                .len()
+                .checked_mul(size_of::<f32>())
+                .ok_or_else(|| dimension_overflow(base.image.width(), base.image.height()))?;
+            let geometry = output_geometry(base.image(), base.source_orientation, recipe)?;
+            let mut memory = memory_estimate(base, size_of::<u8>(), geometry)?;
+            let retained_peak = base
+                .decoded_raw_bytes
+                .checked_add(retained_base_bytes)
+                .and_then(|bytes| bytes.checked_add(retained_base_bytes))
+                .and_then(|bytes| bytes.checked_add(memory.display_rgb_bytes))
+                .ok_or_else(|| dimension_overflow(base.image.width(), base.image.height()))?;
+            memory.estimated_peak_bytes = memory.estimated_peak_bytes.max(retained_peak);
+            validate_working_set(memory.estimated_peak_bytes)?;
 
-        let output_started = Instant::now();
-        let (image, output_gamut_diagnostics) = render_display_srgb8_cancellable_with_geometry(
-            working,
-            geometry,
-            output_policy,
-            cancellation,
-        )?;
-        let histogram = Histogram::from_display_rgb8(&image);
-        timings.output_conversion = output_started.elapsed();
-        timings.total = total_started.elapsed();
+            let working = workspace.reset_from(base);
+            cancellation.checkpoint()?;
+            let mut timings = StageTimings::default();
+            let adjustments_started = Instant::now();
+            apply_adjustments_cancellable(working, recipe, cancellation)?;
+            timings.adjustments = adjustments_started.elapsed();
 
-        Ok(RenderResult {
-            image,
-            histogram,
-            timings,
-            highlight_diagnostics: base.highlight_diagnostics,
-            output_gamut_diagnostics,
-            highlight_stats: base.highlight_stats(),
-            optics_provenance: base.optics_provenance.clone(),
-            memory,
-        })
-    }
+            let output_started = Instant::now();
+            let (image, output_gamut_diagnostics) = render_display_srgb8_cancellable_with_geometry(
+                working,
+                geometry,
+                output_policy,
+                cancellation,
+            )?;
+            let histogram = Histogram::from_display_rgb8(&image);
+            timings.output_conversion = output_started.elapsed();
+            timings.total = total_started.elapsed();
 
-    /// Render an sRGB8 preview after full-crop demosaic and antialiased linear
-    /// reduction.
-    pub fn render_preview(
-        &self,
-        frame: &RawFrame,
-        recipe: &EditRecipe,
-        options: PreviewOptions,
-    ) -> Result<RenderResult, PipelineError> {
-        let total_started = Instant::now();
-        let base = self.prepare_preview_base(frame, recipe, options)?;
-        let mut result = render_base(base, recipe, options.render.output_policy)?;
-        result.timings.total = total_started.elapsed();
-        Ok(result)
-    }
+            Ok(RenderResult {
+                image,
+                histogram,
+                timings,
+                highlight_diagnostics: base.highlight_diagnostics,
+                output_gamut_diagnostics,
+                highlight_stats: base.highlight_stats(),
+                optics_provenance: base.optics_provenance.clone(),
+                memory,
+            })
+        }
 
-    /// Render a cancellable full-resolution 8-bit display image for temporary
-    /// one-source-pixel inspection in the desktop viewport.
-    ///
-    /// Unlike the retained preview-base path, this mutates one full-resolution
-    /// linear buffer in place and releases it after output conversion. This
-    /// keeps source-scale inspection within the Phase 9 transient-memory
-    /// budget without making a 24 MP linear cache resident.
-    pub fn render_source_scale_preview_cancellable(
-        &self,
-        frame: &RawFrame,
-        recipe: &EditRecipe,
-        options: RenderOptions,
-        cancellation: &CancellationToken,
-    ) -> Result<RenderResult, PipelineError> {
-        let total_started = Instant::now();
-        let mut base =
-            prepare_base_cancellable(self.optics.as_deref(), frame, recipe, options, cancellation)?;
-        let geometry = output_geometry(&base.image, base.source_orientation, recipe)?;
-        let memory = memory_estimate(&base, size_of::<u8>(), geometry)?;
-        let adjustments_started = Instant::now();
-        apply_adjustments_cancellable(&mut base.image, recipe, cancellation)?;
-        base.timings.adjustments = adjustments_started.elapsed();
-        let output_started = Instant::now();
-        let (image, output_gamut_diagnostics) = render_display_srgb8_cancellable_with_geometry(
-            &base.image,
-            geometry,
-            options.output_policy,
-            cancellation,
-        )?;
-        let histogram = Histogram::from_display_rgb8(&image);
-        base.timings.output_conversion = output_started.elapsed();
-        base.timings.total = total_started.elapsed();
-        Ok(RenderResult {
-            image,
-            histogram,
-            timings: base.timings,
-            highlight_diagnostics: base.highlight_diagnostics,
-            output_gamut_diagnostics,
-            highlight_stats: base.highlight_stats(),
-            optics_provenance: base.optics_provenance.clone(),
-            memory,
-        })
-    }
+        /// Render an sRGB8 preview after full-crop demosaic and antialiased linear
+        /// reduction.
+        pub fn render_preview(
+            &self,
+            frame: &RawFrame,
+            recipe: &EditRecipe,
+            options: PreviewOptions,
+        ) -> Result<RenderResult, PipelineError> {
+            let total_started = Instant::now();
+            let base = self.prepare_preview_base(frame, recipe, options)?;
+            let mut result = render_base(base, recipe, options.render.output_policy)?;
+            result.timings.total = total_started.elapsed();
+            Ok(result)
+        }
 
-    /// Render full-resolution output samples for a subsequent file export.
-    pub fn render_export(
-        &self,
-        frame: &RawFrame,
-        recipe: &EditRecipe,
-        options: RenderOptions,
-        bit_depth: OutputBitDepth,
-        dithering: DitherMode,
-    ) -> Result<ExportRenderResult, PipelineError> {
-        let total_started = Instant::now();
-        let mut base = prepare_base(self.optics.as_deref(), frame, recipe, options)?;
-        let geometry = output_geometry(&base.image, base.source_orientation, recipe)?;
-        let memory = memory_estimate(&base, bit_depth.bytes_per_sample(), geometry)?;
-        let adjustments_started = Instant::now();
-        apply_adjustments(&mut base.image, recipe)?;
-        base.timings.adjustments = adjustments_started.elapsed();
-        let output_started = Instant::now();
-        let (image, output_gamut_diagnostics) = match bit_depth {
-            OutputBitDepth::Eight => {
-                let (image, diagnostics) =
-                    render_display_srgb8_dithered_with_geometry_and_diagnostics(
+        /// Render a cancellable full-resolution 8-bit display image for temporary
+        /// one-source-pixel inspection in the desktop viewport.
+        ///
+        /// Unlike the retained preview-base path, this mutates one full-resolution
+        /// linear buffer in place and releases it after output conversion. This
+        /// keeps source-scale inspection within the Phase 9 transient-memory
+        /// budget without making a 24 MP linear cache resident.
+        pub fn render_source_scale_preview_cancellable(
+            &self,
+            frame: &RawFrame,
+            recipe: &EditRecipe,
+            options: RenderOptions,
+            cancellation: &CancellationToken,
+        ) -> Result<RenderResult, PipelineError> {
+            let total_started = Instant::now();
+            let mut base = prepare_base_cancellable(
+                self.optics.as_deref(),
+                frame,
+                recipe,
+                options,
+                cancellation,
+            )?;
+            let geometry = output_geometry(&base.image, base.source_orientation, recipe)?;
+            let memory = memory_estimate(&base, size_of::<u8>(), geometry)?;
+            let adjustments_started = Instant::now();
+            apply_adjustments_cancellable(&mut base.image, recipe, cancellation)?;
+            base.timings.adjustments = adjustments_started.elapsed();
+            let output_started = Instant::now();
+            let (image, output_gamut_diagnostics) = render_display_srgb8_cancellable_with_geometry(
+                &base.image,
+                geometry,
+                options.output_policy,
+                cancellation,
+            )?;
+            let histogram = Histogram::from_display_rgb8(&image);
+            base.timings.output_conversion = output_started.elapsed();
+            base.timings.total = total_started.elapsed();
+            Ok(RenderResult {
+                image,
+                histogram,
+                timings: base.timings,
+                highlight_diagnostics: base.highlight_diagnostics,
+                output_gamut_diagnostics,
+                highlight_stats: base.highlight_stats(),
+                optics_provenance: base.optics_provenance.clone(),
+                memory,
+            })
+        }
+
+        /// Render full-resolution output samples for a subsequent file export.
+        pub fn render_export(
+            &self,
+            frame: &RawFrame,
+            recipe: &EditRecipe,
+            options: RenderOptions,
+            bit_depth: OutputBitDepth,
+            dithering: DitherMode,
+        ) -> Result<ExportRenderResult, PipelineError> {
+            let total_started = Instant::now();
+            let mut base = prepare_base(self.optics.as_deref(), frame, recipe, options)?;
+            let geometry = output_geometry(&base.image, base.source_orientation, recipe)?;
+            let memory = memory_estimate(&base, bit_depth.bytes_per_sample(), geometry)?;
+            let adjustments_started = Instant::now();
+            apply_adjustments(&mut base.image, recipe)?;
+            base.timings.adjustments = adjustments_started.elapsed();
+            let output_started = Instant::now();
+            let (image, output_gamut_diagnostics) = match bit_depth {
+                OutputBitDepth::Eight => {
+                    let (image, diagnostics) =
+                        render_display_srgb8_dithered_with_geometry_and_diagnostics(
+                            &base.image,
+                            geometry,
+                            options.output_policy,
+                            dithering,
+                        )?;
+                    (ExportImage::Rgb8(image), diagnostics)
+                }
+                OutputBitDepth::Sixteen => {
+                    let (image, diagnostics) = render_display_srgb16_with_geometry_and_diagnostics(
                         &base.image,
                         geometry,
                         options.output_policy,
                         dithering,
                     )?;
-                (ExportImage::Rgb8(image), diagnostics)
-            }
-            OutputBitDepth::Sixteen => {
-                let (image, diagnostics) = render_display_srgb16_with_geometry_and_diagnostics(
-                    &base.image,
-                    geometry,
-                    options.output_policy,
-                    dithering,
-                )?;
-                (ExportImage::Rgb16(image), diagnostics)
-            }
-        };
-        base.timings.output_conversion = output_started.elapsed();
-        base.timings.total = total_started.elapsed();
+                    (ExportImage::Rgb16(image), diagnostics)
+                }
+            };
+            base.timings.output_conversion = output_started.elapsed();
+            base.timings.total = total_started.elapsed();
 
-        Ok(ExportRenderResult {
-            image,
-            timings: base.timings,
-            highlight_diagnostics: base.highlight_diagnostics,
-            output_gamut_diagnostics,
-            highlight_stats: base.highlight_stats(),
-            optics_provenance: base.optics_provenance,
-            memory,
-        })
+            Ok(ExportRenderResult {
+                image,
+                timings: base.timings,
+                highlight_diagnostics: base.highlight_diagnostics,
+                output_gamut_diagnostics,
+                highlight_stats: base.highlight_stats(),
+                optics_provenance: base.optics_provenance,
+                memory,
+            })
+        }
     }
 }
 

@@ -1,3 +1,4 @@
+// The preview facade keeps the wgpu processor private to this crate.
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
@@ -568,7 +569,7 @@ impl GpuPreviewProcessor {
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("rohditor GPU preview shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("preview.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../preview.wgsl").into()),
         });
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("rohditor GPU downstream preview"),

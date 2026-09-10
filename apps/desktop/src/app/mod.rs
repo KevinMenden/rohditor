@@ -1,3 +1,4 @@
+// Top-level desktop composition; focused helpers live beside this module.
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -71,11 +72,10 @@ const LIBRARY_DECODE_BUDGET: usize = 8;
 /// Extra entries around the visible range kept warm for smooth scrolling.
 const LIBRARY_VISIBLE_MARGIN: usize = 24;
 
-#[path = "app/crop.rs"]
 pub(crate) mod crop;
-#[path = "app/events.rs"]
+#[path = "events.rs"]
 mod events;
-#[path = "app/gpu.rs"]
+#[path = "gpu.rs"]
 mod gpu;
 
 use crop::CropToolSession;
