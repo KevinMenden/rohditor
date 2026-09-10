@@ -170,7 +170,7 @@ enum Command {
         #[arg(long, allow_hyphen_values = true)]
         temperature: Option<f32>,
 
-        /// Absolute camera-calibrated green/magenta tint (-1 to +1); implies
+        /// Green/magenta tint offset from As Shot (-1 to +1); implies
         /// Temperature/Tint white balance.
         #[arg(long, default_value_t = TINT_RANGE.neutral, allow_hyphen_values = true)]
         tint: f32,
