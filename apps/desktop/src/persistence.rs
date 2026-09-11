@@ -189,6 +189,12 @@ mod tests {
         let mut expected = EditRecipe::default();
         expected.light.exposure_ev = 1.25;
         expected.color.saturation = 1.2;
+        expected.capture_sharpening = rohditor_edit::CaptureSharpening {
+            enabled: true,
+            amount: 0.7,
+            radius: 0.8,
+            noise_protection: 0.3,
+        };
 
         let path = save_recipe(&source, &expected).expect("save recipe");
         let text = fs::read_to_string(&path).expect("read sidecar");

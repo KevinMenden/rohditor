@@ -22,6 +22,7 @@ pub use rendering::{
     ROHDITOR_STANDARD_PROCESS_VERSION, RenderingAdjustments, RenderingProfileSelection,
 };
 
+use crate::CaptureSharpening;
 use color_adjustments::*;
 use color_settings::WhiteBalance;
 use light_settings::*;
@@ -37,7 +38,7 @@ pub struct EditError {
 }
 
 /// Schema version of the current non-destructive edit recipe.
-pub const EDIT_RECIPE_SCHEMA_VERSION: u32 = 10;
+pub const EDIT_RECIPE_SCHEMA_VERSION: u32 = 11;
 const LEGACY_EDIT_RECIPE_SCHEMA_VERSION: u32 = 1;
 const PREVIOUS_EDIT_RECIPE_SCHEMA_VERSION: u32 = 2;
 const PREVIOUS_RAW_EDIT_RECIPE_SCHEMA_VERSION: u32 = 3;
@@ -522,6 +523,7 @@ pub struct EditRecipe {
     #[serde(default)]
     pub optics: OpticsAdjustments,
     pub rendering: RenderingAdjustments,
+    pub capture_sharpening: CaptureSharpening,
     pub light: LightAdjustments,
     pub color: ColorAdjustments,
     pub geometry: GeometryAdjustments,
@@ -534,6 +536,7 @@ impl Default for EditRecipe {
             raw: RawAdjustments::default(),
             optics: OpticsAdjustments::default(),
             rendering: RenderingAdjustments::default(),
+            capture_sharpening: CaptureSharpening::default(),
             light: LightAdjustments::default(),
             color: ColorAdjustments::default(),
             geometry: GeometryAdjustments::default(),
@@ -553,6 +556,7 @@ impl EditRecipe {
             });
         }
         self.rendering.profile.validate()?;
+        self.capture_sharpening.validate()?;
         if let LensProfileSelection::Lensfun { profile_id } = &self.optics.profile {
             if profile_id.trim().is_empty() {
                 return Err(EditError {
@@ -682,6 +686,8 @@ struct RecipeFields {
     #[serde(default)]
     rendering: Option<RenderingAdjustments>,
     #[serde(default)]
+    capture_sharpening: CaptureSharpening,
+    #[serde(default)]
     light: LightAdjustments,
     #[serde(default)]
     color: ColorAdjustments,
@@ -718,6 +724,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
                 raw: legacy_raw_adjustments(),
                 optics: OpticsAdjustments::default(),
                 rendering: RenderingAdjustments::NEUTRAL,
+                capture_sharpening: CaptureSharpening::default(),
                 light,
                 color,
                 geometry: GeometryAdjustments {
@@ -734,6 +741,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
                 raw: legacy_raw_adjustments(),
                 optics: OpticsAdjustments::default(),
                 rendering: RenderingAdjustments::NEUTRAL,
+                capture_sharpening: CaptureSharpening::default(),
                 light: fields.light,
                 color: fields.color,
                 geometry: fields.geometry,
@@ -749,6 +757,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
                 raw: fields.raw,
                 optics: OpticsAdjustments::default(),
                 rendering: RenderingAdjustments::NEUTRAL,
+                capture_sharpening: CaptureSharpening::default(),
                 light: fields.light,
                 color: fields.color,
                 geometry: fields.geometry,
@@ -763,6 +772,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
                 raw: fields.raw,
                 optics: fields.optics,
                 rendering: RenderingAdjustments::NEUTRAL,
+                capture_sharpening: CaptureSharpening::default(),
                 light: fields.light,
                 color: fields.color,
                 geometry: fields.geometry,
@@ -781,16 +791,22 @@ impl<'de> Deserialize<'de> for EditRecipe {
                 raw: fields.raw,
                 optics: fields.optics,
                 rendering: fields.rendering.unwrap_or_default(),
+                capture_sharpening: CaptureSharpening::default(),
                 light: fields.light,
                 color: fields.color,
                 geometry: fields.geometry,
             }
         } else {
             Self {
-                schema_version: fields.schema_version,
+                schema_version: if fields.schema_version == 10 {
+                    EDIT_RECIPE_SCHEMA_VERSION
+                } else {
+                    fields.schema_version
+                },
                 raw: fields.raw,
                 optics: fields.optics,
                 rendering: fields.rendering.unwrap_or_default(),
+                capture_sharpening: fields.capture_sharpening,
                 light: fields.light,
                 color: fields.color,
                 geometry: fields.geometry,

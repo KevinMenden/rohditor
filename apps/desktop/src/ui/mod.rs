@@ -22,6 +22,7 @@ pub(crate) enum ViewMode {
 }
 
 pub(crate) mod adjustment_panel;
+mod capture_sharpening;
 pub(crate) mod catalog;
 pub(crate) mod crop;
 pub(crate) mod diagnostics;

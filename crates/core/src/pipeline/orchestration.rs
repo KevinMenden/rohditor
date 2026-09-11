@@ -104,6 +104,7 @@ pub struct StageTimings {
     /// pipeline. New code should use [`Self::highlight_processing`].
     pub highlight_clipping: Duration,
     pub demosaic: Duration,
+    pub capture_sharpening: Duration,
     pub optics: Duration,
     pub resampling: Duration,
     pub color_conversion: Duration,
@@ -118,6 +119,7 @@ pub struct MemoryEstimate {
     pub decoded_raw_bytes: usize,
     pub normalized_mosaic_bytes: usize,
     pub highlight_scratch_bytes: usize,
+    pub capture_sharpening_scratch_bytes: usize,
     pub optics_output_bytes: usize,
     pub optics_scratch_bytes: usize,
     pub resample_intermediate_bytes: usize,
@@ -141,6 +143,8 @@ pub struct ReconstructedPreview {
     highlight_adjustments: HighlightAdjustments,
     highlight_white_balance: WhiteBalance,
     highlight_diagnostics: HighlightDiagnostics,
+    capture_sharpening: Option<crate::CaptureSharpeningProvenance>,
+    capture_sharpening_scratch_bytes: usize,
     optics_provenance: Option<OpticsProvenance>,
     optics_output_bytes: usize,
     optics_scratch_bytes: usize,
@@ -211,6 +215,19 @@ impl ReconstructedPreview {
     }
 
     #[must_use]
+    pub const fn capture_sharpening(&self) -> Option<crate::CaptureSharpeningProvenance> {
+        self.capture_sharpening
+    }
+
+    pub const fn capture_sharpening_scratch_bytes(&self) -> usize {
+        self.capture_sharpening_scratch_bytes
+    }
+
+    pub fn matches_capture_recipe(&self, recipe: &EditRecipe) -> bool {
+        self.capture_sharpening
+            == crate::CaptureSharpeningProvenance::for_settings(recipe.capture_sharpening)
+    }
+
     pub const fn highlight_diagnostics(&self) -> HighlightDiagnostics {
         self.highlight_diagnostics
     }
@@ -301,6 +318,7 @@ pub struct RenderResult {
     pub histogram: Histogram,
     pub timings: StageTimings,
     pub highlight_diagnostics: HighlightDiagnostics,
+    pub capture_sharpening: Option<crate::CaptureSharpeningProvenance>,
     pub output_gamut_diagnostics: GamutMappingDiagnostics,
     /// Compatibility projection for Clip-only callers.
     pub highlight_stats: crate::ClipStats,
@@ -314,6 +332,7 @@ pub struct ExportRenderResult {
     pub image: ExportImage,
     pub timings: StageTimings,
     pub highlight_diagnostics: HighlightDiagnostics,
+    pub capture_sharpening: Option<crate::CaptureSharpeningProvenance>,
     pub output_gamut_diagnostics: GamutMappingDiagnostics,
     /// Compatibility projection for Clip-only callers.
     pub highlight_stats: crate::ClipStats,
@@ -337,6 +356,8 @@ pub struct DemosaicedBase {
     highlight_adjustments: HighlightAdjustments,
     highlight_white_balance: WhiteBalance,
     highlight_diagnostics: HighlightDiagnostics,
+    capture_sharpening: Option<crate::CaptureSharpeningProvenance>,
+    capture_sharpening_scratch_bytes: usize,
     optics_provenance: Option<OpticsProvenance>,
     optics_output_bytes: usize,
     optics_scratch_bytes: usize,
@@ -376,6 +397,19 @@ impl DemosaicedBase {
     }
 
     #[must_use]
+    pub const fn capture_sharpening(&self) -> Option<crate::CaptureSharpeningProvenance> {
+        self.capture_sharpening
+    }
+
+    pub const fn capture_sharpening_scratch_bytes(&self) -> usize {
+        self.capture_sharpening_scratch_bytes
+    }
+
+    pub fn matches_capture_recipe(&self, recipe: &EditRecipe) -> bool {
+        self.capture_sharpening
+            == crate::CaptureSharpeningProvenance::for_settings(recipe.capture_sharpening)
+    }
+
     pub const fn highlight_diagnostics(&self) -> HighlightDiagnostics {
         self.highlight_diagnostics
     }
@@ -583,6 +617,7 @@ pub(super) mod render {
             base.timings.highlight_processing = reconstructed.timings.highlight_processing;
             base.timings.highlight_clipping = reconstructed.timings.highlight_clipping;
             base.timings.demosaic = reconstructed.timings.demosaic;
+            base.timings.capture_sharpening = reconstructed.timings.capture_sharpening;
             base.timings.optics = reconstructed.timings.optics;
             base.timings.resampling = reconstructed.timings.resampling;
             base.timings.total += reconstructed.timings.total;
@@ -736,6 +771,7 @@ pub(super) mod render {
                 histogram,
                 timings,
                 highlight_diagnostics: base.highlight_diagnostics,
+                capture_sharpening: base.capture_sharpening,
                 output_gamut_diagnostics,
                 highlight_stats: base.highlight_stats(),
                 optics_provenance: base.optics_provenance.clone(),
@@ -800,6 +836,7 @@ pub(super) mod render {
                 histogram,
                 timings: base.timings,
                 highlight_diagnostics: base.highlight_diagnostics,
+                capture_sharpening: base.capture_sharpening,
                 output_gamut_diagnostics,
                 highlight_stats: base.highlight_stats(),
                 optics_provenance: base.optics_provenance.clone(),
@@ -852,6 +889,7 @@ pub(super) mod render {
                 image,
                 timings: base.timings,
                 highlight_diagnostics: base.highlight_diagnostics,
+                capture_sharpening: base.capture_sharpening,
                 output_gamut_diagnostics,
                 highlight_stats: base.highlight_stats(),
                 optics_provenance: base.optics_provenance,
@@ -870,6 +908,7 @@ fn prepare_reconstructed_preview(
 ) -> Result<ReconstructedPreview, PipelineError> {
     let total_started = Instant::now();
     cancellation.checkpoint()?;
+    super::capture::validate_working_set(frame, recipe)?;
     validate_preview_working_set(
         frame,
         options.max_long_edge,
@@ -932,7 +971,7 @@ fn prepare_reconstructed_preview(
     let mosaic = highlighted.mosaic;
 
     let demosaic_started = Instant::now();
-    let full_linear = demosaic_cancellable(
+    let mut full_linear = demosaic_cancellable(
         &mosaic,
         WhiteBalanceGains::identity(),
         options.render.demosaic,
@@ -940,6 +979,12 @@ fn prepare_reconstructed_preview(
     )?;
     let demosaic = demosaic_started.elapsed();
     drop(mosaic);
+    let capture = super::capture::apply(
+        &mut full_linear,
+        recipe,
+        resolved.white_balance_gains,
+        cancellation,
+    )?;
 
     let optics_started = Instant::now();
     let optics_result = crate::optics::apply_cancellable(
@@ -985,6 +1030,12 @@ fn prepare_reconstructed_preview(
         reduced_linear_bytes,
         unchanged_dimensions,
     })?;
+    let preparation_peak_bytes = preparation_peak_bytes.max(
+        decoded_raw_bytes
+            .checked_add(full_linear_bytes)
+            .and_then(|n| n.checked_add(capture.scratch_bytes))
+            .ok_or_else(|| dimension_overflow(source_width, source_height))?,
+    );
     validate_working_set(preparation_peak_bytes)?;
 
     let resampling_started = Instant::now();
@@ -996,6 +1047,7 @@ fn prepare_reconstructed_preview(
         highlight_processing,
         highlight_clipping: highlight_processing,
         demosaic,
+        capture_sharpening: capture.elapsed,
         optics: optics_timing,
         resampling,
         total: total_started.elapsed(),
@@ -1011,6 +1063,8 @@ fn prepare_reconstructed_preview(
         highlight_adjustments: recipe.raw.highlights,
         highlight_white_balance: recipe.color.white_balance,
         highlight_diagnostics,
+        capture_sharpening: capture.provenance,
+        capture_sharpening_scratch_bytes: capture.scratch_bytes,
         optics_provenance,
         optics_output_bytes,
         optics_scratch_bytes,
@@ -1039,6 +1093,12 @@ fn prepare_demosaiced_preview(
     );
     let metadata_guard = metadata_span.enter();
     recipe.validate()?;
+    if !reconstructed.matches_capture_recipe(recipe) {
+        return Err(PipelineError::InvalidRecipe {
+            field: "capture_sharpening",
+            reason: "capture sharpening does not match the prepared source".to_owned(),
+        });
+    }
     if !reconstructed.matches_highlight_recipe(recipe) {
         return Err(PipelineError::InvalidRecipe {
             field: "raw.highlights",
@@ -1086,6 +1146,8 @@ fn prepare_demosaiced_preview(
         highlight_adjustments: reconstructed.highlight_adjustments,
         highlight_white_balance: reconstructed.highlight_white_balance,
         highlight_diagnostics: reconstructed.highlight_diagnostics,
+        capture_sharpening: reconstructed.capture_sharpening,
+        capture_sharpening_scratch_bytes: reconstructed.capture_sharpening_scratch_bytes,
         optics_provenance: reconstructed.optics_provenance.clone(),
         optics_output_bytes: reconstructed.optics_output_bytes,
         optics_scratch_bytes: reconstructed.optics_scratch_bytes,
@@ -1116,6 +1178,7 @@ fn prepare_base_cancellable(
 ) -> Result<DemosaicedBase, PipelineError> {
     let total_started = Instant::now();
     cancellation.checkpoint()?;
+    super::capture::validate_working_set(frame, recipe)?;
     validate_base_working_set(
         frame,
         recipe.raw.highlights.method,
@@ -1169,7 +1232,7 @@ fn prepare_base_cancellable(
     let demosaic_started = Instant::now();
     let mut linear = demosaic_cancellable(
         &normalized,
-        if optics_enabled {
+        if optics_enabled || recipe.capture_sharpening.is_active() {
             WhiteBalanceGains::identity()
         } else {
             gains
@@ -1179,6 +1242,7 @@ fn prepare_base_cancellable(
     )?;
     let demosaic = demosaic_started.elapsed();
     drop(normalized);
+    let capture = super::capture::apply(&mut linear, recipe, gains, cancellation)?;
 
     let optics_started = Instant::now();
     let optics_result = crate::optics::apply_cancellable(
@@ -1195,7 +1259,7 @@ fn prepare_base_cancellable(
     let optics_timing = optics_started.elapsed();
 
     let color_started = Instant::now();
-    if optics_enabled {
+    if optics_enabled || recipe.capture_sharpening.is_active() {
         apply_white_balance_cancellable(&mut linear, gains, cancellation)?;
     }
     apply_camera_color_transform_cancellable(
@@ -1225,7 +1289,13 @@ fn prepare_base_cancellable(
         .and_then(|bytes| bytes.checked_add(optics_output_bytes))
         .and_then(|bytes| bytes.checked_add(optics_scratch_bytes))
         .ok_or_else(|| dimension_overflow(linear.width(), linear.height()))?
-        .max(highlight_peak_bytes);
+        .max(highlight_peak_bytes)
+        .max(
+            decoded_raw_bytes
+                .checked_add(linear_rgb_bytes)
+                .and_then(|n| n.checked_add(capture.scratch_bytes))
+                .ok_or_else(|| dimension_overflow(linear.width(), linear.height()))?,
+        );
 
     let mut timings = StageTimings {
         metadata,
@@ -1233,6 +1303,7 @@ fn prepare_base_cancellable(
         highlight_processing,
         highlight_clipping: highlight_processing,
         demosaic,
+        capture_sharpening: capture.elapsed,
         optics: optics_timing,
         color_conversion,
         ..StageTimings::default()
@@ -1247,6 +1318,8 @@ fn prepare_base_cancellable(
         highlight_adjustments: recipe.raw.highlights,
         highlight_white_balance: recipe.color.white_balance,
         highlight_diagnostics,
+        capture_sharpening: capture.provenance,
+        capture_sharpening_scratch_bytes: capture.scratch_bytes,
         optics_provenance,
         optics_output_bytes,
         optics_scratch_bytes,
@@ -1260,6 +1333,12 @@ fn prepare_base_cancellable(
 }
 
 fn validate_base_recipe(base: &DemosaicedBase, recipe: &EditRecipe) -> Result<(), PipelineError> {
+    if !base.matches_capture_recipe(recipe) {
+        return Err(PipelineError::InvalidRecipe {
+            field: "capture_sharpening",
+            reason: "capture sharpening does not match the prepared base".to_owned(),
+        });
+    }
     recipe.validate()?;
     if !highlight_adjustments_match(base.highlight_adjustments, recipe.raw.highlights) {
         Err(PipelineError::InvalidRecipe {
@@ -1367,6 +1446,7 @@ fn render_base(
     base.timings.total = base.timings.metadata
         + base.timings.normalization
         + base.timings.highlight_processing
+        + base.timings.capture_sharpening
         + base.timings.demosaic
         + base.timings.optics
         + base.timings.resampling
@@ -1379,6 +1459,7 @@ fn render_base(
         image,
         timings: base.timings,
         highlight_diagnostics: base.highlight_diagnostics,
+        capture_sharpening: base.capture_sharpening,
         output_gamut_diagnostics,
         highlight_stats: base.highlight_stats(),
         optics_provenance: base.optics_provenance.clone(),
@@ -1420,6 +1501,7 @@ fn memory_estimate(
         decoded_raw_bytes,
         normalized_mosaic_bytes,
         highlight_scratch_bytes: base.highlight_scratch_bytes,
+        capture_sharpening_scratch_bytes: base.capture_sharpening_scratch_bytes,
         optics_output_bytes: base.optics_output_bytes,
         optics_scratch_bytes: base.optics_scratch_bytes,
         resample_intermediate_bytes,
@@ -1632,7 +1714,7 @@ fn preview_preparation_peak(inputs: PreviewPreparationInputs) -> Result<usize, P
     Ok(peak)
 }
 
-fn validate_working_set(estimated_bytes: usize) -> Result<(), PipelineError> {
+pub(super) fn validate_working_set(estimated_bytes: usize) -> Result<(), PipelineError> {
     if estimated_bytes <= CPU_WORKING_SET_LIMIT_BYTES {
         Ok(())
     } else {
@@ -1657,7 +1739,7 @@ fn validate_optics_crop(
     }
 }
 
-fn dimension_overflow(width: usize, height: usize) -> PipelineError {
+pub(super) fn dimension_overflow(width: usize, height: usize) -> PipelineError {
     PipelineError::InvalidDimensions {
         width,
         height,
