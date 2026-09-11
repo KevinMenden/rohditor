@@ -7,6 +7,7 @@
 - HSL/three way grading always forces the entire pipeline on the CPU
 - Gamut compression seems off. It clearly changes the colors in the preview image --> is this expected? Double-check this feature as well
 - Verify that lens correction actually works as intented. 
+- The Sony 70-350 lens is not detected during lens correction
 
 ## Bigger Architectural Issues
 - GPU pipeline is to weak: we want to run as much as possible on the GPU. That is currently not the case. Needs to be addressed (e.g. demosaic on the GPU)
