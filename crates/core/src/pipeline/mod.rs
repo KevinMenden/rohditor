@@ -4,6 +4,7 @@
 //! contract. The implementation module is private while those responsibilities
 //! are split further.
 
+mod capture;
 mod memory;
 mod orchestration;
 mod prepare;

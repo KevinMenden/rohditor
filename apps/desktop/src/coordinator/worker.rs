@@ -81,6 +81,7 @@ pub(crate) struct WorkerPreviewDiagnostics {
     pub cache_hits: PreviewCacheHits,
     pub timings: StageTimings,
     pub highlight_diagnostics: HighlightDiagnostics,
+    pub capture_sharpening: Option<rohditor_core::CaptureSharpeningProvenance>,
     pub output_gamut_diagnostics: Option<GamutMappingDiagnostics>,
     pub memory: MemoryEstimate,
     pub cache_resident_bytes: usize,
@@ -928,6 +929,7 @@ fn process_source_scale_preview(
                 },
                 timings: result.timings,
                 highlight_diagnostics: result.highlight_diagnostics,
+                capture_sharpening: result.capture_sharpening,
                 output_gamut_diagnostics: Some(result.output_gamut_diagnostics),
                 memory: result.memory,
                 cache_resident_bytes: 0,
@@ -1095,6 +1097,7 @@ fn process_gpu_base(
         cache_hits,
         timings,
         highlight_diagnostics: reconstructed.highlight_diagnostics(),
+        capture_sharpening: reconstructed.capture_sharpening(),
         output_gamut_diagnostics: None,
         memory,
         cache_resident_bytes,
@@ -1154,6 +1157,9 @@ fn develop_preview(
                 cache_hits,
                 timings,
                 highlight_diagnostics,
+                capture_sharpening: preview_cache
+                    .demosaiced(keys)
+                    .and_then(|base| base.capture_sharpening()),
                 output_gamut_diagnostics: Some(cached.output_gamut_diagnostics),
                 memory,
                 cache_resident_bytes: preview_cache.resident_bytes(),
@@ -1206,6 +1212,7 @@ fn develop_preview(
         cache_hits,
         timings,
         highlight_diagnostics,
+        capture_sharpening: result.capture_sharpening,
         output_gamut_diagnostics: Some(result.output_gamut_diagnostics),
         memory,
         cache_resident_bytes: preview_cache.resident_bytes(),
@@ -1427,6 +1434,7 @@ fn add_stage_timings(target: &mut StageTimings, additional: StageTimings) {
     target.highlight_processing += additional.highlight_processing;
     target.highlight_clipping += additional.highlight_clipping;
     target.demosaic += additional.demosaic;
+    target.capture_sharpening += additional.capture_sharpening;
     target.optics += additional.optics;
     target.resampling += additional.resampling;
     target.color_conversion += additional.color_conversion;
@@ -1456,6 +1464,7 @@ fn gpu_base_memory(
         decoded_raw_bytes: frame.mosaic.len().saturating_mul(size_of::<u16>()),
         normalized_mosaic_bytes: reconstructed.normalized_mosaic_bytes(),
         highlight_scratch_bytes: reconstructed.highlight_scratch_bytes(),
+        capture_sharpening_scratch_bytes: reconstructed.capture_sharpening_scratch_bytes(),
         optics_output_bytes: reconstructed.optics_output_bytes(),
         optics_scratch_bytes: reconstructed.optics_scratch_bytes(),
         resample_intermediate_bytes: reconstructed.resample_intermediate_bytes(),
@@ -1486,6 +1495,8 @@ fn log_preview_diagnostics(
         metadata_us = diagnostics.timings.metadata.as_micros(),
         normalization_us = diagnostics.timings.normalization.as_micros(),
         demosaic_us = diagnostics.timings.demosaic.as_micros(),
+        capture_sharpening_us = diagnostics.timings.capture_sharpening.as_micros(),
+        capture_sharpening = ?diagnostics.capture_sharpening,
         optics_us = diagnostics.timings.optics.as_micros(),
         resampling_us = diagnostics.timings.resampling.as_micros(),
         color_us = diagnostics.timings.color_conversion.as_micros(),
@@ -1880,6 +1891,7 @@ mod tests {
         let mut cache = PreviewCache::default();
         let mut initial_recipe = EditRecipe::default();
         initial_recipe.raw.highlights.method = HighlightMethod::Off;
+        initial_recipe.capture_sharpening.enabled = true;
         let initial = PreviewJob {
             ticket: PreviewTicket {
                 document_id: 9,
@@ -1945,6 +1957,10 @@ mod tests {
         .expect("downstream edit should reuse its base");
 
         assert_ne!(first.0, second.0);
+        assert!(first.2.capture_sharpening.is_some());
+        assert!(first.2.timings.capture_sharpening > Duration::ZERO);
+        assert_eq!(first.2.capture_sharpening, second.2.capture_sharpening);
+        assert_eq!(second.2.timings.capture_sharpening, Duration::ZERO);
         assert_eq!(second.2.timings.normalization, Duration::ZERO);
         assert_eq!(second.2.timings.demosaic, Duration::ZERO);
         assert_eq!(second.2.timings.resampling, Duration::ZERO);
@@ -1977,6 +1993,7 @@ mod tests {
 
         let mut white_balance_recipe = EditRecipe::default();
         white_balance_recipe.raw.highlights.method = HighlightMethod::Off;
+        white_balance_recipe.capture_sharpening = adjusted.recipe.capture_sharpening;
         white_balance_recipe.color.white_balance = WhiteBalance::ManualMultipliers {
             red: 1.1,
             green: 1.0,
@@ -2012,6 +2029,11 @@ mod tests {
         )
         .expect("white balance should reuse reconstructed camera RGB");
         assert_eq!(white_balanced.2.timings.normalization, Duration::ZERO);
+        assert_eq!(white_balanced.2.timings.capture_sharpening, Duration::ZERO);
+        assert_eq!(
+            white_balanced.2.capture_sharpening,
+            first.2.capture_sharpening
+        );
         assert_eq!(white_balanced.2.timings.demosaic, Duration::ZERO);
         assert_eq!(white_balanced.2.timings.resampling, Duration::ZERO);
 

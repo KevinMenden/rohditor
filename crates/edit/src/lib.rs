@@ -5,6 +5,7 @@ mod light_settings;
 mod profile;
 mod raw;
 mod recipe;
+mod sharpening;
 mod validation;
 
 pub use color::*;
@@ -16,4 +17,5 @@ pub use recipe::{
     LightToneLut, NormalizedCropRect, OpticsAdjustments, ROHDITOR_STANDARD_PROCESS_VERSION,
     RenderingAdjustments, RenderingProfileSelection,
 };
+pub use sharpening::*;
 pub use validation::*;

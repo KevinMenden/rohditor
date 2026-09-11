@@ -67,7 +67,8 @@ Status: MVP implemented and validated on the current Sony ILCE-6400 corpus.
 - [x] **Histogram:** RGB/luminance display with clipped shadow/highlight counts.
 - [x] **Color:** white-balance picker.
 - [ ] **Presence:** texture, clarity, and dehaze.
-- [ ] **Detail:** capture/output sharpening, luminance and color noise reduction,
+- [x] **Detail:** opt-in capture sharpening (Detail panel; source-resolution masked RL).
+- [ ] **Detail:** output sharpening, luminance and color noise reduction,
       moiré removal, and defringe.
 - [ ] **Geometry:** user crop and aspect ratios, straighten, rotate/flip, and
       perspective/transform correction.

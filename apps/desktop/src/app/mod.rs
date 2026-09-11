@@ -1142,6 +1142,7 @@ impl RohditorApp {
                     cache_hits: PreviewCacheHits::default(),
                     timings: StageTimings::default(),
                     highlight_diagnostics: HighlightDiagnostics::Off,
+                    capture_sharpening: None,
                     output_gamut_diagnostics: None,
                     memory: MemoryEstimate::default(),
                     cache_resident_bytes: 0,
@@ -1724,6 +1725,11 @@ impl RohditorApp {
             if let Some(selection) = output.rendering_profile {
                 let mut next = document.edits.recipe().clone();
                 next.rendering.profile = selection;
+                changed |= document.edits.set_discrete(next);
+            }
+            if let Some(enabled) = output.capture_enabled {
+                let mut next = document.edits.recipe().clone();
+                next.capture_sharpening.enabled = enabled;
                 changed |= document.edits.set_discrete(next);
             }
             if let Some(method) = output.highlight_method {
@@ -2392,6 +2398,18 @@ impl RohditorApp {
                     backend: preview.worker.backend.label().to_owned(),
                     algorithm: preview.worker.algorithm.stable_name().to_owned(),
                     profile: camera_profile_diagnostic(document),
+                    capture_sharpening: preview.worker.capture_sharpening.map_or_else(
+                        || "Off".to_owned(),
+                        |p| {
+                            format!(
+                                "RL v{}, amount {:.2}, sigma {:.2} px, noise protection {:.2}",
+                                p.algorithm_version,
+                                p.settings.amount,
+                                p.settings.radius,
+                                p.settings.noise_protection
+                            )
+                        },
+                    ),
                     rendering: rendering_profile_diagnostic(
                         document.edits.recipe().rendering.profile,
                     ),
@@ -2425,6 +2443,7 @@ impl RohditorApp {
                         normalization: preview.worker.timings.normalization,
                         highlight_processing: preview.worker.timings.highlight_processing,
                         demosaic: preview.worker.timings.demosaic,
+                        capture_sharpening: preview.worker.timings.capture_sharpening,
                         optics: preview.worker.timings.optics,
                         resampling: preview.worker.timings.resampling,
                         color_conversion: preview.worker.timings.color_conversion,
@@ -2983,6 +3002,7 @@ fn document_panel_model(
         picker_mode,
         color_mixer_channel,
         optics: optics_panel_model(document),
+        capture_sharpening: document.edits.recipe().capture_sharpening,
     }
 }
 
@@ -3324,7 +3344,10 @@ fn apply_adjustment_interaction(
                 | AdjustmentTarget::GradingShadows(_)
                 | AdjustmentTarget::GradingMidtones(_)
                 | AdjustmentTarget::GradingHighlights(_)
-                | AdjustmentTarget::HighlightThreshold => {}
+                | AdjustmentTarget::HighlightThreshold
+                | AdjustmentTarget::CaptureAmount
+                | AdjustmentTarget::CaptureRadius
+                | AdjustmentTarget::CaptureNoise => {}
                 AdjustmentTarget::Exposure
                 | AdjustmentTarget::Contrast
                 | AdjustmentTarget::Highlights
@@ -3351,6 +3374,11 @@ fn apply_adjustment_interaction(
                 _ => unreachable!("temperature/tint branch only handles its controls"),
             }
             next.color.white_balance = WhiteBalance::TemperatureTint { temperature, tint };
+        }
+        AdjustmentTarget::CaptureAmount => next.capture_sharpening.amount = interaction.value,
+        AdjustmentTarget::CaptureRadius => next.capture_sharpening.radius = interaction.value,
+        AdjustmentTarget::CaptureNoise => {
+            next.capture_sharpening.noise_protection = interaction.value
         }
         AdjustmentTarget::Exposure => next.light.exposure_ev = interaction.value,
         AdjustmentTarget::Contrast => next.light.contrast = interaction.value,
@@ -3666,6 +3694,45 @@ mod tests {
         assert!(edits.undo());
         assert_eq!(edits.recipe().light.exposure_ev, EXPOSURE_EV_RANGE.neutral);
         assert!(!edits.undo());
+    }
+
+    #[test]
+    fn capture_slider_uses_undo_redo_and_reset() {
+        let mut edits = EditSession::default();
+        for (value, start, stop) in [(0.7, true, false), (0.9, false, false), (0.9, false, true)] {
+            apply_adjustment_interaction(
+                &mut edits,
+                AdjustmentInteraction {
+                    target: AdjustmentTarget::CaptureRadius,
+                    value,
+                    changed: !stop,
+                    drag_started: start,
+                    dragged: !stop,
+                    drag_stopped: stop,
+                    reset: false,
+                },
+                None,
+            );
+        }
+        assert_eq!(edits.recipe().capture_sharpening.radius, 0.9);
+        assert!(edits.undo());
+        assert_eq!(edits.recipe().capture_sharpening.radius, 0.6);
+        assert!(edits.redo());
+        assert_eq!(edits.recipe().capture_sharpening.radius, 0.9);
+        apply_adjustment_interaction(
+            &mut edits,
+            AdjustmentInteraction {
+                target: AdjustmentTarget::CaptureRadius,
+                value: 0.6,
+                changed: true,
+                drag_started: false,
+                dragged: false,
+                drag_stopped: false,
+                reset: true,
+            },
+            None,
+        );
+        assert_eq!(edits.recipe().capture_sharpening.radius, 0.6);
     }
 
     #[test]
