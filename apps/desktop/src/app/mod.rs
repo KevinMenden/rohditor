@@ -73,6 +73,7 @@ const LIBRARY_DECODE_BUDGET: usize = 8;
 /// Extra entries around the visible range kept warm for smooth scrolling.
 const LIBRARY_VISIBLE_MARGIN: usize = 24;
 
+mod autosave;
 pub(crate) mod crop;
 #[path = "events.rs"]
 mod events;
@@ -86,7 +87,6 @@ use gpu::{
     GpuDocumentPreview, GpuRuntime, PendingGpuHistogram, gpu_output_size, initialize_gpu_runtime,
     register_or_update_gpu_texture,
 };
-use lifecycle::PendingDocumentAction;
 
 #[derive(Debug, Clone, Copy)]
 struct DocumentPreviewDiagnostics {
@@ -126,6 +126,7 @@ struct SettingsDialog {
 }
 
 struct Document {
+    autosave: autosave::Autosave,
     id: u64,
     path: PathBuf,
     info: Option<RawFileInfo>,
@@ -170,6 +171,7 @@ impl Document {
     fn opening(id: u64, path: PathBuf, recipe: EditRecipe, warning: Option<String>) -> Self {
         Self {
             id,
+            autosave: autosave::Autosave::default(),
             path,
             info: None,
             frame: None,
@@ -268,6 +270,7 @@ impl ExportUiSettings {
 }
 
 pub(crate) struct RohditorApp {
+    recipe_saves: crate::persistence::SaveWorker,
     coordinator: RenderCoordinator,
     catalog_coordinator: CatalogCoordinator,
     catalog: CatalogState,
@@ -277,7 +280,9 @@ pub(crate) struct RohditorApp {
     export_settings: ExportUiSettings,
     settings: AppSettings,
     settings_warning: Option<String>,
-    pending_document_action: Option<PendingDocumentAction>,
+    recipe_save_status: Option<String>,
+    recipe_save_error: Option<String>,
+    queued_recipe_snapshots: HashMap<PathBuf, (u64, EditRecipe)>,
     camera_profiles: CameraProfileRegistry,
     settings_dialog: Option<SettingsDialog>,
     ui_renderer: &'static str,
@@ -455,6 +460,7 @@ impl RohditorApp {
             view_mode = ViewMode::Library;
         }
         let mut application = Self {
+            recipe_saves: crate::persistence::SaveWorker::new()?,
             coordinator,
             catalog_coordinator,
             catalog: CatalogState::default(),
@@ -464,7 +470,9 @@ impl RohditorApp {
             export_settings: ExportUiSettings::with_jpeg_quality(JPEG_QUALITY_DEFAULT),
             settings,
             settings_warning,
-            pending_document_action: None,
+            recipe_save_status: None,
+            recipe_save_error: None,
+            queued_recipe_snapshots: HashMap::new(),
             camera_profiles: CameraProfileRegistry::load(),
             settings_dialog: None,
             ui_renderer,
@@ -1708,13 +1716,6 @@ impl RohditorApp {
         let mut white_balance_exact = None;
         let mut white_balance_memory = self.white_balance_memory;
         if let Some(document) = self.document.as_mut() {
-            if output.dismiss_error {
-                document.error = None;
-            }
-            if output.dismiss_warning {
-                document.warning = None;
-            }
-
             let mut changed = false;
             let mut auto_tone_applied = false;
             if let Some(selection) = output.camera_profile {
@@ -2022,7 +2023,22 @@ impl RohditorApp {
         if let Some(note) = &self.processor_note {
             activities.push(note.clone());
         }
+        if let Some(status) = &self.recipe_save_status {
+            activities.push(status.clone());
+        }
+        if let Some(error) = &self.recipe_save_error {
+            activities.push(format!("Save failed: {error}"));
+        }
         if let Some(document) = &self.document {
+            if let Some(error) = &document.error {
+                activities.push(format!("Error: {error}"));
+            }
+            if let Some(warning) = &document.warning {
+                activities.push(format!("Warning: {warning}"));
+            }
+            if let Some(notice) = &document.notice {
+                activities.push(notice.clone());
+            }
             if let Some(status) = &document.open_status {
                 activities.push(status.clone());
                 busy = true;
@@ -2364,6 +2380,7 @@ impl RohditorApp {
             || self.catalog.scanning()
             || self.catalog.pending_count() > 0
             || self.library_decode_pending
+            || (!self.queued_recipe_snapshots.is_empty() && self.recipe_save_error.is_none())
     }
 
     fn show_developer_diagnostics(&mut self, context: &egui::Context) {
@@ -2991,12 +3008,6 @@ fn document_panel_model(
         },
         export_ready: document.frame.is_some(),
         export_in_progress: document.export_status.is_some(),
-        error: document.error.clone(),
-        warning: document
-            .warning
-            .clone()
-            .or_else(|| camera_profiles.warning().map(str::to_owned)),
-        notice: document.notice.clone(),
         histogram: document.histogram,
         auto_tone_available: document.histogram_revision == Some(document.edits.revision()),
         picker_mode,
@@ -3458,6 +3469,7 @@ fn apply_optics_action(edits: &mut EditSession, action: OpticsAction) -> bool {
 impl eframe::App for RohditorApp {
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
         self.process_worker_events(context);
+        self.process_recipe_save_events();
         self.update_catalog();
         self.library_frame = self.library_frame.wrapping_add(1);
         self.refresh_gpu_queue_completion(context);
@@ -3476,7 +3488,7 @@ impl eframe::App for RohditorApp {
         }
         self.show_developer_diagnostics(context);
         self.show_application_settings(context);
-        self.show_unsaved_changes_dialog(context);
+        self.update_autosave(context);
         self.update_window_title(context);
         // eframe normally wakes the event loop from the worker's
         // `request_repaint` callback. Keep a short polling repaint while work

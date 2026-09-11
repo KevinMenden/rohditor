@@ -68,8 +68,14 @@ impl EditSession {
         self.recipe != self.saved_recipe
     }
 
-    pub(crate) fn mark_saved(&mut self) {
-        self.saved_recipe = self.recipe.clone();
+    /// Mark a background save clean only when it wrote this exact revision.
+    /// A completion for an older snapshot must not hide newer edits.
+    pub(crate) fn mark_saved_if_current(&mut self, revision: u64, recipe: &EditRecipe) -> bool {
+        if self.revision != revision || self.recipe != *recipe {
+            return false;
+        }
+        self.saved_recipe = recipe.clone();
+        true
     }
 
     pub(crate) const fn gesture_active(&self) -> bool {
@@ -237,7 +243,24 @@ mod tests {
         next.light.exposure_ev = 1.0;
         assert!(edits.set_discrete(next));
         assert!(edits.is_dirty());
-        edits.mark_saved();
+        let revision = edits.revision();
+        let saved_recipe = edits.recipe().clone();
+        assert!(edits.mark_saved_if_current(revision, &saved_recipe));
+        assert!(!edits.is_dirty());
+    }
+
+    #[test]
+    fn an_older_background_save_cannot_clear_a_newer_revision() {
+        let mut edits = EditSession::default();
+        let first = exposed(0.5);
+        assert!(edits.set_discrete(first.clone()));
+        let first_revision = edits.revision();
+        let second = exposed(1.0);
+        assert!(edits.set_discrete(second.clone()));
+        assert!(!edits.mark_saved_if_current(first_revision, &first));
+        assert!(edits.is_dirty());
+        let second_revision = edits.revision();
+        assert!(edits.mark_saved_if_current(second_revision, &second));
         assert!(!edits.is_dirty());
     }
 

@@ -4,10 +4,14 @@
 //! bytes. The core recipe owns schema migration and validation; this module
 //! only owns the desktop sidecar format and atomic replacement.
 
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use rohditor_edit::{EditError, EditRecipe};
 use serde::{Deserialize, Serialize};
@@ -15,8 +19,9 @@ use thiserror::Error;
 
 use crate::storage;
 
-const SIDECAR_SUFFIX: &str = ".rohditor.json";
+const SIDECAR_SUFFIX: &str = ".rohdit";
 const PROJECT_FORMAT_VERSION: u32 = 1;
+const AUTOSAVE_DEBOUNCE: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -141,6 +146,160 @@ pub(crate) fn save_recipe(source: &Path, recipe: &EditRecipe) -> Result<PathBuf,
     Ok(path)
 }
 
+/// A complete, immutable recipe snapshot handed to the persistence thread.
+#[derive(Debug, Clone)]
+pub(crate) struct SaveJob {
+    pub(crate) document_id: u64,
+    pub(crate) revision: u64,
+    pub(crate) source: PathBuf,
+    pub(crate) recipe: EditRecipe,
+}
+
+#[derive(Debug)]
+pub(crate) struct SaveResult {
+    pub(crate) document_id: u64,
+    pub(crate) revision: u64,
+    pub(crate) source: PathBuf,
+    pub(crate) recipe: EditRecipe,
+    pub(crate) result: Result<PathBuf, String>,
+}
+
+enum SaveCommand {
+    Save { job: Box<SaveJob>, immediate: bool },
+    Shutdown,
+}
+
+struct PendingSave {
+    job: SaveJob,
+    due: Instant,
+}
+
+/// Debounced, newest-wins sidecar writer. It deliberately has no UI or image
+/// processing dependencies; the application polls completed writes each frame.
+pub(crate) struct SaveWorker {
+    requests: Option<Sender<SaveCommand>>,
+    results: Receiver<SaveResult>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl SaveWorker {
+    pub(crate) fn new() -> io::Result<Self> {
+        let (request_sender, request_receiver) = mpsc::channel();
+        let (result_sender, result_receiver) = mpsc::channel();
+        let worker = thread::Builder::new()
+            .name("rohditor-recipe-writer".to_owned())
+            .spawn(move || save_worker_loop(request_receiver, result_sender))?;
+        Ok(Self {
+            requests: Some(request_sender),
+            results: result_receiver,
+            worker: Some(worker),
+        })
+    }
+
+    pub(crate) fn enqueue(&self, job: SaveJob, immediate: bool) -> Result<(), String> {
+        self.requests
+            .as_ref()
+            .ok_or_else(|| "recipe save worker is stopped".to_owned())?
+            .send(SaveCommand::Save {
+                job: Box::new(job),
+                immediate,
+            })
+            .map_err(|_| "recipe save worker stopped unexpectedly".to_owned())
+    }
+
+    pub(crate) fn try_results(&self) -> impl Iterator<Item = SaveResult> + '_ {
+        self.results.try_iter()
+    }
+
+    pub(crate) fn shutdown(&mut self) {
+        if let Some(requests) = self.requests.take() {
+            drop(requests.send(SaveCommand::Shutdown));
+        }
+        if let Some(worker) = self.worker.take() {
+            drop(worker.join());
+        }
+    }
+}
+
+impl Drop for SaveWorker {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+fn save_worker_loop(receiver: Receiver<SaveCommand>, results: Sender<SaveResult>) {
+    let mut pending = HashMap::<PathBuf, PendingSave>::new();
+    loop {
+        if pending.is_empty() {
+            match receiver.recv() {
+                Ok(SaveCommand::Save { job, immediate }) => {
+                    queue_save(&mut pending, *job, immediate);
+                }
+                Ok(SaveCommand::Shutdown) | Err(_) => break,
+            }
+            continue;
+        }
+
+        let now = Instant::now();
+        let next_due = pending.values().map(|save| save.due).min().unwrap_or(now);
+        let timeout = next_due.saturating_duration_since(now);
+        match receiver.recv_timeout(timeout) {
+            Ok(SaveCommand::Save { job, immediate }) => {
+                queue_save(&mut pending, *job, immediate);
+            }
+            Ok(SaveCommand::Shutdown) | Err(RecvTimeoutError::Disconnected) => {
+                flush_pending(&mut pending, &results);
+                break;
+            }
+            Err(RecvTimeoutError::Timeout) => flush_due(&mut pending, &results),
+        }
+    }
+}
+
+fn queue_save(pending: &mut HashMap<PathBuf, PendingSave>, job: SaveJob, immediate: bool) {
+    let due = if immediate {
+        Instant::now()
+    } else {
+        Instant::now() + AUTOSAVE_DEBOUNCE
+    };
+    pending.insert(job.source.clone(), PendingSave { job, due });
+}
+
+fn flush_due(pending: &mut HashMap<PathBuf, PendingSave>, results: &Sender<SaveResult>) {
+    let now = Instant::now();
+    let due_paths = pending
+        .iter()
+        .filter(|(_, save)| save.due <= now)
+        .map(|(path, _)| path.clone())
+        .collect::<Vec<_>>();
+    for path in due_paths {
+        if let Some(save) = pending.remove(&path) {
+            write_save(save.job, results);
+        }
+    }
+}
+
+fn flush_pending(pending: &mut HashMap<PathBuf, PendingSave>, results: &Sender<SaveResult>) {
+    let saves = pending
+        .drain()
+        .map(|(_, save)| save.job)
+        .collect::<Vec<_>>();
+    for job in saves {
+        write_save(job, results);
+    }
+}
+
+fn write_save(job: SaveJob, results: &Sender<SaveResult>) {
+    let result = save_recipe(&job.source, &job.recipe).map_err(|error| error.to_string());
+    drop(results.send(SaveResult {
+        document_id: job.document_id,
+        revision: job.revision,
+        source: job.source,
+        recipe: job.recipe,
+        result,
+    }));
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -178,7 +337,7 @@ mod tests {
     #[test]
     fn sidecar_path_keeps_the_source_name_and_adds_a_known_suffix() {
         let path = sidecar_path(Path::new("/photos/holiday.ARW")).expect("sidecar path");
-        assert_eq!(path, PathBuf::from("/photos/holiday.ARW.rohditor.json"));
+        assert_eq!(path, PathBuf::from("/photos/holiday.ARW.rohdit"));
         assert!(sidecar_path(Path::new("/")).is_err());
     }
 
@@ -232,5 +391,43 @@ mod tests {
             load_recipe(&source),
             Err(PersistenceError::UnsupportedFormat { .. })
         ));
+    }
+
+    #[test]
+    fn background_writer_flushes_the_newest_snapshot_on_shutdown() {
+        let directory = TestDirectory::new();
+        let source = directory.source();
+        let mut first = EditRecipe::default();
+        first.light.exposure_ev = 0.5;
+        let mut second = first.clone();
+        second.light.exposure_ev = 1.0;
+        let mut worker = SaveWorker::new().expect("start save worker");
+        worker
+            .enqueue(
+                SaveJob {
+                    document_id: 1,
+                    revision: 1,
+                    source: source.clone(),
+                    recipe: first,
+                },
+                true,
+            )
+            .expect("queue first save");
+        worker
+            .enqueue(
+                SaveJob {
+                    document_id: 1,
+                    revision: 2,
+                    source: source.clone(),
+                    recipe: second.clone(),
+                },
+                true,
+            )
+            .expect("queue second save");
+        worker.shutdown();
+        assert_eq!(
+            load_recipe(&source).expect("load saved recipe"),
+            Some(second)
+        );
     }
 }
