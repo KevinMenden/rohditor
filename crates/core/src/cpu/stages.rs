@@ -247,6 +247,9 @@ pub(super) mod white_balance {
         validate_white_balance_selection(selection)?;
         let as_shot_gains = || {
             let [red, green, blue, _] = as_shot_white_balance;
+            if [red, green, blue].iter().all(Option::is_none) {
+                return Ok(None);
+            }
             let values = [red, green, blue]
                 .map(|value| value.filter(|number| number.is_finite() && *number > 0.0));
             let [Some(red), Some(green), Some(blue)] = values else {
@@ -255,17 +258,17 @@ pub(super) mod white_balance {
                     reason: "finite positive R, G, and B multipliers are required".to_owned(),
                 });
             };
-            Ok(WhiteBalanceGains {
+            Ok(Some(WhiteBalanceGains {
                 red: red / green,
                 green: 1.0,
                 blue: blue / green,
-            })
+            }))
         };
         let gains = match selection {
             WhiteBalance::TemperatureTint { temperature, tint } => {
                 // If metadata omits As Shot, identity is still a coherent zero
                 // point because the normalized camera transform maps it to D65.
-                let reference = as_shot_gains().unwrap_or_else(|_| WhiteBalanceGains::identity());
+                let reference = as_shot_gains()?.unwrap_or_else(WhiteBalanceGains::identity);
                 camera_gains_from_as_shot_coordinates(
                     camera_to_xyz_d65,
                     reference,
@@ -273,7 +276,7 @@ pub(super) mod white_balance {
                 )?
             }
             WhiteBalance::AsShot | WhiteBalance::ManualMultipliers { .. } => {
-                let mut gains = as_shot_gains()?;
+                let mut gains = as_shot_gains()?.unwrap_or_else(WhiteBalanceGains::identity);
                 if let WhiteBalance::ManualMultipliers { red, green, blue } = selection {
                     gains.red *= red;
                     gains.green *= green;
@@ -1635,6 +1638,47 @@ mod tests {
                 .into_iter()
                 .all(|value| value.is_finite() && value > 0.0)
         );
+    }
+
+    #[test]
+    fn all_white_balance_modes_have_a_d65_fallback_without_as_shot_metadata() {
+        for selection in [
+            WhiteBalance::AsShot,
+            WhiteBalance::ManualMultipliers {
+                red: 1.2,
+                green: 0.9,
+                blue: 0.8,
+            },
+        ] {
+            let gains = white_balance_gains_from_calibration(
+                [None; 4],
+                crate::Matrix3::identity(),
+                selection,
+            )
+            .expect("missing As Shot metadata should use the neutral basis");
+            assert!(
+                [gains.red, gains.green, gains.blue]
+                    .into_iter()
+                    .all(|value| value.is_finite() && value > 0.0)
+            );
+        }
+    }
+
+    #[test]
+    fn partial_as_shot_metadata_remains_an_error() {
+        let error = white_balance_gains_from_calibration(
+            [Some(2.0), None, Some(1.5), None],
+            crate::Matrix3::identity(),
+            WhiteBalance::AsShot,
+        )
+        .expect_err("partial metadata must not be treated as absent");
+        assert!(matches!(
+            error,
+            PipelineError::InvalidMetadata {
+                field: "as_shot_white_balance",
+                ..
+            }
+        ));
     }
 
     #[test]

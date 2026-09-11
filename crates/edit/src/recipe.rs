@@ -157,20 +157,21 @@ pub(super) mod color_settings {
     /// White-balance selection for a RAW recipe. Manual multipliers are relative
     /// to the decoder's As Shot gains. Temperature is camera-calibrated, while
     /// Tint is an offset around the As Shot locus position.
-    #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
     #[serde(tag = "mode", rename_all = "snake_case")]
     pub enum WhiteBalance {
-        #[default]
         AsShot,
-        ManualMultipliers {
-            red: f32,
-            green: f32,
-            blue: f32,
-        },
-        TemperatureTint {
-            temperature: f32,
-            tint: f32,
-        },
+        ManualMultipliers { red: f32, green: f32, blue: f32 },
+        TemperatureTint { temperature: f32, tint: f32 },
+    }
+
+    impl Default for WhiteBalance {
+        fn default() -> Self {
+            Self::TemperatureTint {
+                temperature: TEMPERATURE_RANGE.neutral,
+                tint: TINT_RANGE.neutral,
+            }
+        }
     }
 }
 
@@ -853,7 +854,7 @@ mod tests {
         CameraProfileSelection, EDIT_RECIPE_SCHEMA_VERSION, EditRecipe, HIGHLIGHT_THRESHOLD_RANGE,
         HighlightMethod, LensProfileSelection, NormalizedCropRect,
         ROHDITOR_STANDARD_PROCESS_VERSION, RenderingAdjustments, RenderingProfileSelection,
-        WhiteBalance,
+        TEMPERATURE_RANGE, TINT_RANGE, WhiteBalance,
     };
 
     #[test]
@@ -866,7 +867,13 @@ mod tests {
                 process_version: ROHDITOR_STANDARD_PROCESS_VERSION,
             }
         );
-        assert_eq!(recipe.color.white_balance, WhiteBalance::AsShot);
+        assert_eq!(
+            recipe.color.white_balance,
+            WhiteBalance::TemperatureTint {
+                temperature: TEMPERATURE_RANGE.neutral,
+                tint: TINT_RANGE.neutral,
+            }
+        );
         assert_eq!(recipe.light.exposure_ev, 0.0);
         assert_eq!(recipe.light.contrast, 0.0);
         assert_eq!(recipe.color.saturation, 1.0);
@@ -1028,7 +1035,7 @@ mod tests {
         }"#;
         let recipe = serde_json::from_str::<EditRecipe>(json).expect("current default fields");
         assert_eq!(recipe.raw.highlights.method, HighlightMethod::Clip);
-        assert_eq!(recipe.color.white_balance, WhiteBalance::AsShot);
+        assert_eq!(recipe.color.white_balance, WhiteBalance::default());
         assert_eq!(recipe.raw.highlights.clip.threshold, 1.0);
         assert_eq!(recipe.raw.highlights.local_ratios.detection_threshold, 1.0);
         assert_eq!(recipe.raw.highlights.opposed.detection_threshold, 1.0);

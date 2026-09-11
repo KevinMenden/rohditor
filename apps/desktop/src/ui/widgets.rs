@@ -129,17 +129,19 @@ fn adjustment_slider_with_track(
                 // Kelvin is reciprocal on a black-body locus. A mired slider
                 // gives the cool and warm ends comparable visual control while
                 // the recipe continues to store the user-facing Kelvin value.
-                let mut mired = mired_from_temperature(*value, spec);
+                // Negating the mired value keeps the nonlinear spacing while
+                // making higher Kelvin values move right toward the warm end.
+                let mut position_value = reciprocal_temperature_value(*value, spec);
                 let response = ui.add(
                     egui::Slider::new(
-                        &mut mired,
-                        mired_from_temperature(spec.maximum, spec)
-                            ..=mired_from_temperature(spec.minimum, spec),
+                        &mut position_value,
+                        reciprocal_temperature_value(spec.minimum, spec)
+                            ..=reciprocal_temperature_value(spec.maximum, spec),
                     )
                     .show_value(false),
                 );
                 if response.changed() {
-                    *value = temperature_from_mired(mired, spec);
+                    *value = temperature_from_reciprocal_value(position_value, spec);
                 }
                 response
             } else if matches!(track, SliderTrack::Tint) {
@@ -237,7 +239,7 @@ fn slider_track_color(
         }
         SliderTrack::Temperature => two_sided_ramp_color(
             position,
-            mired_slider_position(spec.neutral, spec),
+            temperature_slider_position(spec.neutral, spec),
             TEMPERATURE_COOL,
             TEMPERATURE_NEUTRAL,
             TEMPERATURE_WARM,
@@ -261,14 +263,18 @@ fn mired_from_temperature(value: f32, spec: AdjustmentSpec<'_>) -> f32 {
     1_000_000.0 / temperature
 }
 
-fn mired_slider_position(value: f32, spec: AdjustmentSpec<'_>) -> f32 {
-    let minimum = mired_from_temperature(spec.maximum, spec);
-    let maximum = mired_from_temperature(spec.minimum, spec);
-    ((mired_from_temperature(value, spec) - minimum) / (maximum - minimum)).clamp(0.0, 1.0)
+fn reciprocal_temperature_value(value: f32, spec: AdjustmentSpec<'_>) -> f32 {
+    -mired_from_temperature(value, spec)
 }
 
-fn temperature_from_mired(value: f32, spec: AdjustmentSpec<'_>) -> f32 {
-    (1_000_000.0 / value.max(f32::EPSILON)).clamp(spec.minimum, spec.maximum)
+fn temperature_slider_position(value: f32, spec: AdjustmentSpec<'_>) -> f32 {
+    let minimum = reciprocal_temperature_value(spec.minimum, spec);
+    let maximum = reciprocal_temperature_value(spec.maximum, spec);
+    ((reciprocal_temperature_value(value, spec) - minimum) / (maximum - minimum)).clamp(0.0, 1.0)
+}
+
+fn temperature_from_reciprocal_value(value: f32, spec: AdjustmentSpec<'_>) -> f32 {
+    (1_000_000.0 / (-value).max(f32::EPSILON)).clamp(spec.minimum, spec.maximum)
 }
 
 fn two_sided_ramp_color(
@@ -326,7 +332,7 @@ fn paint_neutral_marker(
         return;
     }
     let normalized = match track {
-        SliderTrack::Temperature => mired_slider_position(spec.neutral, spec),
+        SliderTrack::Temperature => temperature_slider_position(spec.neutral, spec),
         _ => ((spec.neutral - spec.minimum) / span).clamp(0.0, 1.0),
     };
     let marker_x = egui::lerp(rect.left()..=rect.right(), normalized);
@@ -613,7 +619,7 @@ mod tests {
     }
 
     #[test]
-    fn temperature_slider_uses_monotonic_mired_coordinates() {
+    fn temperature_slider_raises_kelvin_toward_the_warm_end() {
         let spec = AdjustmentSpec {
             label: "Temperature",
             minimum: 2_000.0,
@@ -624,18 +630,21 @@ mod tests {
             suffix: " K",
             scale: ValueScale::Raw,
         };
-        let cool = mired_slider_position(10_000.0, spec);
-        let warm = mired_slider_position(3_000.0, spec);
+        let cool = temperature_slider_position(3_000.0, spec);
+        let warm = temperature_slider_position(10_000.0, spec);
         assert!(cool < warm);
         assert!(
-            (temperature_from_mired(mired_from_temperature(5_200.0, spec), spec) - 5_200.0).abs()
+            (temperature_from_reciprocal_value(reciprocal_temperature_value(5_200.0, spec), spec,)
+                - 5_200.0)
+                .abs()
                 < 0.01
         );
         // A reciprocal scale should not place neutral at the linear Kelvin
         // position (the two scales intentionally differ).
         assert!(
-            (mired_slider_position(spec.neutral, spec) - normalized_value(spec.neutral, spec))
-                .abs()
+            (temperature_slider_position(spec.neutral, spec)
+                - normalized_value(spec.neutral, spec))
+            .abs()
                 > 0.01
         );
     }

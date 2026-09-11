@@ -130,8 +130,28 @@ impl EditSession {
         true
     }
 
-    pub(crate) fn reset(&mut self) -> bool {
-        self.set_discrete(EditRecipe::default())
+    pub(crate) fn reset_to(&mut self, recipe: EditRecipe) -> bool {
+        self.set_discrete(recipe)
+    }
+
+    /// Replace the untouched initial recipe after RAW metadata establishes
+    /// camera-specific defaults. This becomes the clean saved baseline and is
+    /// deliberately absent from undo history.
+    pub(crate) fn replace_clean_baseline(&mut self, recipe: EditRecipe) -> bool {
+        if recipe.validate().is_err() || self.is_dirty() {
+            return false;
+        }
+        if recipe == self.recipe {
+            self.saved_recipe = recipe;
+            return false;
+        }
+        self.recipe = recipe.clone();
+        self.saved_recipe = recipe;
+        self.undo.clear();
+        self.redo.clear();
+        self.gesture = None;
+        self.advance_revision();
+        true
     }
 
     pub(crate) fn can_undo(&self) -> bool {
@@ -193,7 +213,7 @@ mod tests {
         assert!(edits.set_discrete(exposed(1.0)));
         assert!(edits.is_dirty());
         assert_eq!(edits.revision(), 1);
-        assert!(edits.reset());
+        assert!(edits.reset_to(EditRecipe::default()));
         assert!(!edits.is_dirty());
         assert_eq!(edits.revision(), 2);
         assert!(edits.undo());
@@ -222,6 +242,20 @@ mod tests {
     }
 
     #[test]
+    fn metadata_can_replace_an_untouched_clean_baseline() {
+        let mut edits = EditSession::default();
+        let mut initialized = EditRecipe::default();
+        initialized.color.white_balance = rohditor_edit::WhiteBalance::TemperatureTint {
+            temperature: 5_200.0,
+            tint: -0.1,
+        };
+        assert!(edits.replace_clean_baseline(initialized.clone()));
+        assert_eq!(edits.recipe(), &initialized);
+        assert!(!edits.is_dirty());
+        assert!(!edits.can_undo());
+    }
+
+    #[test]
     fn rendering_profile_selection_is_one_undoable_edit_and_reset_uses_standard() {
         let mut edits = EditSession::default();
         let mut neutral = EditRecipe::default();
@@ -232,7 +266,7 @@ mod tests {
             edits.recipe().rendering.profile,
             rohditor_edit::RenderingProfileSelection::NEUTRAL
         );
-        assert!(edits.reset());
+        assert!(edits.reset_to(EditRecipe::default()));
         assert_eq!(
             edits.recipe().rendering.profile,
             rohditor_edit::RenderingProfileSelection::STANDARD
