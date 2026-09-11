@@ -43,6 +43,7 @@ pub struct GpuPreviewSource {
     source_orientation: Orientation,
     white_balance: WhiteBalance,
     highlight_adjustments: HighlightAdjustments,
+    capture_sharpening: Option<rohditor_core::CaptureSharpeningProvenance>,
     optics_provenance: Option<OpticsProvenance>,
     white_balance_dynamic: bool,
     white_balance_gains: WhiteBalanceGains,
@@ -113,6 +114,11 @@ impl GpuPreviewSource {
         recipe: &EditRecipe,
         allow_stale_clip_white_balance: bool,
     ) -> bool {
+        if self.capture_sharpening
+            != rohditor_core::CaptureSharpeningProvenance::for_settings(recipe.capture_sharpening)
+        {
+            return false;
+        }
         if !highlight_adjustments_match(self.highlight_adjustments, recipe.raw.highlights) {
             return false;
         }
@@ -192,6 +198,7 @@ pub struct GpuPreviewUpload {
     source_orientation: Orientation,
     white_balance: WhiteBalance,
     highlight_adjustments: HighlightAdjustments,
+    capture_sharpening: Option<rohditor_core::CaptureSharpeningProvenance>,
     optics_provenance: Option<OpticsProvenance>,
     white_balance_dynamic: bool,
     white_balance_gains: WhiteBalanceGains,
@@ -232,6 +239,7 @@ impl GpuPreviewUpload {
             source_orientation: base.source_orientation(),
             white_balance: base.white_balance(),
             highlight_adjustments: base.highlight_adjustments(),
+            capture_sharpening: base.capture_sharpening(),
             optics_provenance: base.optics_provenance().cloned(),
             white_balance_dynamic: false,
             white_balance_gains: WhiteBalanceGains::identity(),
@@ -249,6 +257,10 @@ impl GpuPreviewUpload {
     ) -> Result<Self, GpuPreviewError> {
         let mut recipe = EditRecipe::default();
         recipe.raw.highlights = reconstructed.highlight_adjustments();
+        recipe.capture_sharpening = reconstructed
+            .capture_sharpening()
+            .map(|p| p.settings)
+            .unwrap_or_default();
         recipe.color.camera_profile = reconstructed.profile_selection().clone();
         recipe.color.white_balance = white_balance;
         Self::from_reconstructed_preview_for_recipe(
@@ -266,6 +278,10 @@ impl GpuPreviewUpload {
     ) -> Result<Self, GpuPreviewError> {
         let mut recipe = EditRecipe::default();
         recipe.raw.highlights = reconstructed.highlight_adjustments();
+        recipe.capture_sharpening = reconstructed
+            .capture_sharpening()
+            .map(|p| p.settings)
+            .unwrap_or_default();
         recipe.color.camera_profile = reconstructed.profile_selection().clone();
         recipe.color.white_balance = white_balance;
         Self::from_reconstructed_preview_for_recipe(reconstructed, &recipe, cancellation)
@@ -283,6 +299,11 @@ impl GpuPreviewUpload {
         if image.space() != LinearRgbSpace::CameraNative {
             return Err(GpuPreviewError::InvalidInput {
                 reason: "the GPU camera source requires camera-native linear RGB".to_owned(),
+            });
+        }
+        if !reconstructed.matches_capture_recipe(recipe) {
+            return Err(GpuPreviewError::BaseMismatch {
+                reason: "capture sharpening does not match the prepared source".to_owned(),
             });
         }
         if !reconstructed.matches_highlight_recipe(recipe) {
@@ -324,6 +345,7 @@ impl GpuPreviewUpload {
             source_orientation: reconstructed.source_orientation(),
             white_balance,
             highlight_adjustments: reconstructed.highlight_adjustments(),
+            capture_sharpening: reconstructed.capture_sharpening(),
             optics_provenance: reconstructed.optics_provenance().cloned(),
             white_balance_dynamic,
             white_balance_gains: gains,
@@ -736,6 +758,7 @@ impl GpuPreviewProcessor {
             source_orientation: upload.source_orientation,
             white_balance: upload.white_balance,
             highlight_adjustments: upload.highlight_adjustments,
+            capture_sharpening: upload.capture_sharpening,
             optics_provenance: upload.optics_provenance,
             white_balance_dynamic: upload.white_balance_dynamic,
             white_balance_gains: upload.white_balance_gains,
@@ -1528,6 +1551,55 @@ mod tests {
 
     #[test]
     #[ignore = "requires a locally available Vulkan-capable GPU; run cargo test -p rohditor-gpu -- --ignored"]
+    fn gpu_capture_sharpened_source_matches_cpu_and_rejects_stale_settings() {
+        let _gpu_test_guard = gpu_test_guard();
+        let Some(processor) = gpu_test_processor_with_hardware_requirement(false) else {
+            return;
+        };
+        let frame = synthetic_frame(Orientation::Normal);
+        let mut recipe = EditRecipe::default();
+        recipe.capture_sharpening.enabled = true;
+        let options = PreviewOptions {
+            max_long_edge: 8,
+            ..PreviewOptions::default()
+        };
+        let reconstructed = CpuPipeline::default()
+            .prepare_preview_reconstruction(&frame, &recipe, options)
+            .expect("capture sharpening fixture should succeed");
+        let source = processor
+            .upload_prepared(
+                GpuPreviewUpload::from_reconstructed_preview_for_recipe(
+                    &reconstructed,
+                    &recipe,
+                    &CancellationToken::new(),
+                )
+                .expect("capture sharpening fixture should succeed"),
+            )
+            .expect("capture sharpening fixture should succeed");
+        let gpu = processor
+            .render(&source, &recipe, OutputPolicy::ClipToSrgb, None)
+            .expect("capture sharpening fixture should succeed");
+        assert_gpu_reconstructed_frame_matches_cpu(&processor, &frame, options, &recipe, &gpu);
+        recipe.capture_sharpening.radius = 0.8;
+        assert!(!source.matches_recipe(&recipe));
+        assert!(!source.supports_white_balance_draft(&recipe));
+        assert!(
+            processor
+                .render(&source, &recipe, OutputPolicy::ClipToSrgb, None)
+                .is_err()
+        );
+        assert!(
+            GpuPreviewUpload::from_reconstructed_preview_for_recipe(
+                &reconstructed,
+                &recipe,
+                &CancellationToken::new()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a locally available Vulkan-capable GPU"]
     fn gpu_preview_matches_cpu_reference_for_every_exif_orientation() {
         let _gpu_test_guard = gpu_test_guard();
         let Some(processor) = gpu_test_processor() else {

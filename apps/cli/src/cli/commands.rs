@@ -157,6 +157,19 @@ enum Command {
         #[arg(long, value_name = "PROFILE.dcp")]
         camera_profile: Option<PathBuf>,
 
+        /// Enable source-resolution capture sharpening (eight RL iterations).
+        #[arg(long)]
+        capture_sharpening: bool,
+        /// Capture sharpening blend (0 to 1).
+        #[arg(long, default_value_t = 0.5)]
+        capture_amount: f32,
+        /// Capture Gaussian sigma in source pixels (0.3 to 1.2).
+        #[arg(long, default_value_t = 0.6)]
+        capture_radius: f32,
+        /// Suppress sharpening in low-contrast/noisy areas (0 to 1).
+        #[arg(long, default_value_t = 0.5)]
+        capture_noise_protection: f32,
+
         /// Base rendering: Standard tone rendering or Neutral identity rendering.
         #[arg(long, value_enum, default_value_t = CliRenderingProfile::Standard)]
         rendering_profile: CliRenderingProfile,
@@ -512,6 +525,10 @@ pub(crate) fn run() -> Result<()> {
             white_balance,
             camera_profile,
             rendering_profile,
+            capture_sharpening,
+            capture_amount,
+            capture_radius,
+            capture_noise_protection,
             output_gamut,
             temperature,
             tint,
@@ -549,6 +566,10 @@ pub(crate) fn run() -> Result<()> {
                 white_balance,
                 camera_profile,
                 rendering_profile,
+                capture_sharpening,
+                capture_amount,
+                capture_radius,
+                capture_noise_protection,
                 output_gamut,
                 temperature,
                 tint,
@@ -634,6 +655,7 @@ struct QualityTimingReport {
     normalization: f64,
     highlight_processing: f64,
     demosaic: f64,
+    capture_sharpening: f64,
     optics: f64,
     resampling: f64,
     color_conversion: f64,
@@ -649,6 +671,7 @@ impl From<StageTimings> for QualityTimingReport {
             normalization: milliseconds(value.normalization),
             highlight_processing: milliseconds(value.highlight_processing),
             demosaic: milliseconds(value.demosaic),
+            capture_sharpening: milliseconds(value.capture_sharpening),
             optics: milliseconds(value.optics),
             resampling: milliseconds(value.resampling),
             color_conversion: milliseconds(value.color_conversion),
@@ -721,6 +744,10 @@ struct DevelopArguments {
     white_balance: Option<RgbMultipliers>,
     camera_profile: Option<PathBuf>,
     rendering_profile: CliRenderingProfile,
+    capture_sharpening: bool,
+    capture_amount: f32,
+    capture_radius: f32,
+    capture_noise_protection: f32,
     output_gamut: CliOutputGamut,
     temperature: Option<f32>,
     tint: f32,
@@ -897,6 +924,12 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
     if let Some(profile) = camera_profile {
         recipe.color.camera_profile = CameraProfileSelection::Matrix(profile);
     }
+    recipe.capture_sharpening = rohditor_edit::CaptureSharpening {
+        enabled: arguments.capture_sharpening,
+        amount: arguments.capture_amount,
+        radius: arguments.capture_radius,
+        noise_protection: arguments.capture_noise_protection,
+    };
     recipe.rendering.profile = arguments.rendering_profile.into();
     recipe.light.exposure_ev = arguments.exposure;
     recipe.light.contrast = arguments.contrast;
@@ -1013,7 +1046,13 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
             stats.suspected_by_channel[2],
         ),
     };
-    let optics_report = format_optics_report(&recipe.optics, result.optics_provenance.as_ref());
+    let optics_report = format!(
+        "{}\nCapture sharpening: {:?} (algorithm v{}, {} iterations)",
+        format_optics_report(&recipe.optics, result.optics_provenance.as_ref()),
+        recipe.capture_sharpening,
+        rohditor_core::CAPTURE_SHARPENING_ALGORITHM_VERSION,
+        rohditor_core::CAPTURE_SHARPENING_ITERATIONS
+    );
     write_stdout(&format!(
         "Developed {}x{} {}-bit sRGB {}{} with {} demosaic to {} ({} bytes, {})\nRendering profile: {}{}\nOutput gamut policy: {}{}\nOutput gamut pixels: {} in gamut, {} compressed, {} limited, {} clipped fallback, {} invalid\n{}\n{}\n{}\nEstimated CPU buffer peak: {} MiB",
         report.width,
@@ -1678,12 +1717,13 @@ fn format_quality(format: ExportFormat) -> String {
 
 fn format_stage_timings(decode: Duration, timings: StageTimings, encode: Duration) -> String {
     format!(
-        "CPU stages: decode {:.1} ms, metadata {:.1} ms, normalize {:.1} ms, highlight processing {:.1} ms, demosaic {:.1} ms, optics {:.1} ms, area resize {:.1} ms, color {:.1} ms, adjustments {:.1} ms, output {:.1} ms, pipeline total {:.1} ms, export encode/commit {:.1} ms",
+        "CPU stages: decode {:.1} ms, metadata {:.1} ms, normalize {:.1} ms, highlight processing {:.1} ms, demosaic {:.1} ms, capture sharpening {:.1} ms, optics {:.1} ms, area resize {:.1} ms, color {:.1} ms, adjustments {:.1} ms, output {:.1} ms, pipeline total {:.1} ms, export encode/commit {:.1} ms",
         decode.as_secs_f64() * 1_000.0,
         timings.metadata.as_secs_f64() * 1_000.0,
         timings.normalization.as_secs_f64() * 1_000.0,
         timings.highlight_processing.as_secs_f64() * 1_000.0,
         timings.demosaic.as_secs_f64() * 1_000.0,
+        timings.capture_sharpening.as_secs_f64() * 1_000.0,
         timings.optics.as_secs_f64() * 1_000.0,
         timings.resampling.as_secs_f64() * 1_000.0,
         timings.color_conversion.as_secs_f64() * 1_000.0,
@@ -1940,6 +1980,10 @@ mod tests {
             white_balance: None,
             camera_profile: None,
             rendering_profile: CliRenderingProfile::Standard,
+            capture_sharpening: false,
+            capture_amount: 0.5,
+            capture_radius: 0.6,
+            capture_noise_protection: 0.5,
             output_gamut: CliOutputGamut::Clip,
             temperature: None,
             tint: 0.0,
@@ -2071,6 +2115,48 @@ mod tests {
             panic!("expected develop command");
         };
         assert_eq!(camera_profile, Some(PathBuf::from("studio.dcp")));
+    }
+
+    #[test]
+    fn develop_parses_capture_controls_and_defaults_off() {
+        let defaults = Cli::try_parse_from(["rohditor-cli", "develop", "photo.ARW", "out.png"])
+            .expect("default CLI");
+        let Command::Develop {
+            capture_sharpening, ..
+        } = defaults.command
+        else {
+            panic!("develop command");
+        };
+        assert!(!capture_sharpening);
+        let parsed = Cli::try_parse_from([
+            "rohditor-cli",
+            "develop",
+            "photo.ARW",
+            "out.png",
+            "--capture-sharpening",
+            "--capture-amount",
+            "0.7",
+            "--capture-radius",
+            "0.8",
+            "--capture-noise-protection",
+            "0.3",
+        ])
+        .expect("capture CLI");
+        let Command::Develop {
+            capture_sharpening,
+            capture_amount,
+            capture_radius,
+            capture_noise_protection,
+            ..
+        } = parsed.command
+        else {
+            panic!("develop command");
+        };
+        assert!(capture_sharpening);
+        assert_eq!(
+            (capture_amount, capture_radius, capture_noise_protection),
+            (0.7, 0.8, 0.3)
+        );
     }
 
     #[test]
