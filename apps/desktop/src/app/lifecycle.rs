@@ -32,24 +32,24 @@ impl RohditorApp {
 
     fn open_path_now(&mut self, context: &egui::Context, path: PathBuf) {
         self.close_document_now(context);
-        let (recipe, warning) = match persistence::load_recipe(&path) {
-            Ok(recipe) => (recipe.unwrap_or_default(), None),
-            Err(error) => (
-                EditRecipe::default(),
-                Some(format!(
-                    "Could not load saved edits for {}: {error}; using the default recipe.",
-                    path.display()
-                )),
-            ),
-        };
+        let (recipe, warning, initialize_white_balance_from_metadata) =
+            match persistence::load_recipe(&path) {
+                Ok(Some(recipe)) => (recipe, None, false),
+                Ok(None) => (EditRecipe::default(), None, true),
+                Err(error) => (
+                    EditRecipe::default(),
+                    Some(format!(
+                        "Could not load saved edits for {}: {error}; using the default recipe.",
+                        path.display()
+                    )),
+                    true,
+                ),
+            };
         let document_id = self.next_document_id;
         self.next_document_id = self.next_document_id.saturating_add(1);
-        self.document = Some(Document::opening(
-            document_id,
-            path.clone(),
-            recipe,
-            warning,
-        ));
+        let mut document = Document::opening(document_id, path.clone(), recipe, warning);
+        document.initialize_white_balance_from_metadata = initialize_white_balance_from_metadata;
+        self.document = Some(document);
         if self.gpu_required_but_unavailable() {
             if let Some(document) = self.document.as_mut() {
                 document.open_status = None;

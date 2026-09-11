@@ -9,8 +9,8 @@ use crate::coordinator::{JobKind, PreviewResolution, WorkerEvent};
 use crate::ui::viewport::PreviewSource;
 
 use super::{
-    DocumentPreviewDiagnostics, RohditorApp, document_as_shot_colour, install_texture,
-    white_balance_from_camera_sample,
+    DocumentPreviewDiagnostics, RohditorApp, default_recipe_for_document, document_as_shot_colour,
+    install_texture, white_balance_from_camera_sample,
 };
 
 impl RohditorApp {
@@ -57,6 +57,13 @@ impl RohditorApp {
             WorkerEvent::MetadataReady { document_id, info } => {
                 if let Some(document) = self.document.as_mut().filter(|doc| doc.id == document_id) {
                     document.info = Some(*info);
+                    if document.initialize_white_balance_from_metadata {
+                        document.initialize_white_balance_from_metadata = false;
+                        if !document.edits.is_dirty() {
+                            let recipe = default_recipe_for_document(document);
+                            document.edits.replace_clean_baseline(recipe);
+                        }
+                    }
                 }
             }
             WorkerEvent::OpticsMatchReady {

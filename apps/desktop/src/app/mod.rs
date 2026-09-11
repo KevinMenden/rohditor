@@ -156,6 +156,7 @@ struct Document {
     warning: Option<String>,
     error: Option<String>,
     notice: Option<String>,
+    initialize_white_balance_from_metadata: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -198,6 +199,7 @@ impl Document {
             warning,
             error: None,
             notice: None,
+            initialize_white_balance_from_metadata: false,
         }
     }
 
@@ -1626,7 +1628,8 @@ impl RohditorApp {
                 changed |= document.edits.redo();
             }
             if actions.reset {
-                changed |= document.edits.reset();
+                let recipe = default_recipe_for_document(document);
+                changed |= document.edits.reset_to(recipe);
             }
             if changed {
                 document.notice = None;
@@ -1775,7 +1778,9 @@ impl RohditorApp {
                 }
             }
             if output.reset_all {
-                changed |= document.edits.reset();
+                changed |= document
+                    .edits
+                    .reset_to(default_recipe_with_white_balance(as_shot_coordinates));
                 // Hidden values are UI state, but reset-all should reset them
                 // too; otherwise switching away from As-shot after a reset
                 // would unexpectedly resurrect an older manual WB choice.
@@ -2819,7 +2824,7 @@ fn document_panel_model(
         sensor_dimensions: document.info.as_ref().map(|info| (info.width, info.height)),
         revision: document.edits.revision(),
         dirty: document.is_dirty(),
-        has_adjustments: document.edits.recipe() != &EditRecipe::default(),
+        has_adjustments: document.edits.recipe() != &default_recipe_for_document(document),
         camera_profile,
         camera_profile_choices,
         rendering_profile: document.edits.recipe().rendering.profile,
@@ -3187,6 +3192,21 @@ fn set_white_balance_mode(
     let mut next = edits.recipe().clone();
     next.color.white_balance = memory.select(next.color.white_balance, mode, as_shot);
     edits.set_discrete(next)
+}
+
+fn default_recipe_for_document(document: &Document) -> EditRecipe {
+    default_recipe_with_white_balance(document_as_shot_coordinates(document))
+}
+
+fn default_recipe_with_white_balance(coordinates: Option<WhiteBalanceCoordinates>) -> EditRecipe {
+    let mut recipe = EditRecipe::default();
+    if let Some(coordinates) = coordinates {
+        recipe.color.white_balance = WhiteBalance::TemperatureTint {
+            temperature: coordinates.temperature,
+            tint: coordinates.tint,
+        };
+    }
+    recipe
 }
 
 fn set_highlight_method(edits: &mut EditSession, method: HighlightMethod) -> bool {
@@ -3833,7 +3853,9 @@ mod tests {
 
     #[test]
     fn selecting_temperature_tint_starts_at_the_document_as_shot_coordinates() {
-        let mut edits = EditSession::default();
+        let mut recipe = EditRecipe::default();
+        recipe.color.white_balance = WhiteBalance::AsShot;
+        let mut edits = EditSession::from_saved(recipe);
         let mut memory = WhiteBalanceModeMemory::default();
         assert!(set_white_balance_mode(
             &mut edits,
@@ -3855,7 +3877,9 @@ mod tests {
 
     #[test]
     fn temperature_edit_starts_from_as_shot_balance() {
-        let mut edits = EditSession::default();
+        let mut recipe = EditRecipe::default();
+        recipe.color.white_balance = WhiteBalance::AsShot;
+        let mut edits = EditSession::from_saved(recipe);
 
         assert!(apply_adjustment_interaction(
             &mut edits,
@@ -3884,7 +3908,9 @@ mod tests {
 
     #[test]
     fn tint_edit_starts_from_as_shot_balance() {
-        let mut edits = EditSession::default();
+        let mut recipe = EditRecipe::default();
+        recipe.color.white_balance = WhiteBalance::AsShot;
+        let mut edits = EditSession::from_saved(recipe);
 
         assert!(apply_adjustment_interaction(
             &mut edits,
