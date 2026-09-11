@@ -128,9 +128,6 @@ pub(crate) struct DocumentPanelModel {
     pub ranges: AdjustmentRanges,
     pub export_ready: bool,
     pub export_in_progress: bool,
-    pub error: Option<String>,
-    pub warning: Option<String>,
-    pub notice: Option<String>,
     pub histogram: Option<Histogram>,
     pub auto_tone_available: bool,
     pub picker_mode: Option<PickerMode>,
@@ -166,8 +163,6 @@ pub(crate) struct AdjustmentPanelOutput {
     pub auto_tone: bool,
     pub reset_all: bool,
     pub export: bool,
-    pub dismiss_error: bool,
-    pub dismiss_warning: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -237,7 +232,6 @@ pub(crate) fn show(
                     };
 
                     document_summary(ui, &document);
-                    show_messages(ui, &document, &mut output);
                     histogram_panel(ui, document.histogram.as_ref());
 
                     widgets::adjustment_section(ui, "Light", |ui| {
@@ -1295,27 +1289,6 @@ fn show_export_settings(ui: &mut egui::Ui, settings: &mut ExportUiSettings) {
     ui.checkbox(&mut settings.safe_metadata, "Include safe EXIF metadata");
     ui.checkbox(&mut settings.overwrite, "Allow replacing an existing file");
     ui.add_space(4.0);
-}
-
-fn show_messages(
-    ui: &mut egui::Ui,
-    document: &DocumentPanelModel,
-    output: &mut AdjustmentPanelOutput,
-) {
-    if document.error.is_some() || document.warning.is_some() || document.notice.is_some() {
-        widgets::section_header(ui, "Messages");
-    }
-    if let Some(message) = &document.error {
-        output.dismiss_error =
-            widgets::message_card(ui, message, colors::ERROR, Some("Dismiss error"));
-    }
-    if let Some(message) = &document.warning {
-        output.dismiss_warning =
-            widgets::message_card(ui, message, colors::WARNING, Some("Dismiss warning"));
-    }
-    if let Some(message) = &document.notice {
-        let _ = widgets::message_card(ui, message, colors::SUCCESS, None);
-    }
 }
 
 #[cfg(test)]

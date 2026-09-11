@@ -528,22 +528,6 @@ pub(crate) fn dropdown(
         .show_ui(ui, add_contents);
 }
 
-pub(crate) fn message_card(
-    ui: &mut egui::Ui,
-    message: &str,
-    color: egui::Color32,
-    dismiss_label: Option<&str>,
-) -> bool {
-    let mut dismissed = false;
-    theme::card_frame().show(ui, |ui| {
-        ui.colored_label(color, message);
-        if let Some(label) = dismiss_label {
-            dismissed = ui.small_button(label).clicked();
-        }
-    });
-    dismissed
-}
-
 fn approximately_equal(left: f32, right: f32) -> bool {
     (left - right).abs() <= f32::EPSILON * 4.0
 }
