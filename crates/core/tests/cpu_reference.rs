@@ -101,6 +101,121 @@ fn user_crop_is_late_and_consistent_for_render_source_scale_and_export()
 }
 
 #[test]
+fn capture_sharpening_is_shared_by_source_scale_preview_and_export() -> Result<(), Box<dyn Error>> {
+    let frame = synthetic_rggb_frame();
+    let pipeline = CpuPipeline::default();
+    let options = PreviewOptions {
+        max_long_edge: usize::MAX,
+        ..PreviewOptions::default()
+    };
+    for method in [
+        HighlightMethod::Off,
+        HighlightMethod::Clip,
+        HighlightMethod::Opposed,
+    ] {
+        let mut recipe = EditRecipe::default();
+        recipe.raw.highlights.method = method;
+        recipe.capture_sharpening.enabled = true;
+        recipe.capture_sharpening.noise_protection = 0.0;
+        let reconstruction = pipeline.prepare_preview_reconstruction(&frame, &recipe, options)?;
+        assert!(reconstruction.capture_sharpening().is_some());
+        let reduced = pipeline.prepare_preview_reconstruction(
+            &frame,
+            &recipe,
+            PreviewOptions {
+                max_long_edge: 3,
+                ..options
+            },
+        )?;
+        for y in 0..2 {
+            for x in 0..3 {
+                for c in 0..3 {
+                    let full = reconstruction.image();
+                    let expected = (0..2)
+                        .flat_map(|dy| {
+                            (0..2).map(move |dx| {
+                                full.data()[(2 * y + dy) * full.row_stride() + (2 * x + dx) * 3 + c]
+                            })
+                        })
+                        .sum::<f32>()
+                        / 4.0;
+                    assert!(
+                        (reduced.image().data()[y * reduced.image().row_stride() + x * 3 + c]
+                            - expected)
+                            .abs()
+                            < 1e-6
+                    );
+                }
+            }
+        }
+        let base = pipeline.prepare_preview_base_from_reconstruction(&reconstruction, &recipe)?;
+        let full = pipeline.render(&frame, &recipe, options.render)?;
+        let preview = pipeline.render_preview(&frame, &recipe, options)?;
+        assert_eq!(full.image.data(), preview.image.data());
+        let source_scale = pipeline.render_source_scale_preview_cancellable(
+            &frame,
+            &recipe,
+            options.render,
+            &CancellationToken::new(),
+        )?;
+        assert_eq!(full.image.data(), source_scale.image.data());
+        assert_eq!(
+            source_scale.capture_sharpening,
+            reconstruction.capture_sharpening()
+        );
+        let cached =
+            pipeline.render_preview_from_base(&base, &recipe, options.render.output_policy)?;
+        assert_eq!(
+            cached.capture_sharpening,
+            reconstruction.capture_sharpening()
+        );
+        assert_eq!(cached.timings.capture_sharpening, Duration::ZERO);
+        assert!(full.memory.capture_sharpening_scratch_bytes > 0);
+        assert!(full.timings.capture_sharpening > Duration::ZERO);
+        let export = pipeline.render_export(
+            &frame,
+            &recipe,
+            options.render,
+            OutputBitDepth::Eight,
+            DitherMode::None,
+        )?;
+        let ExportImage::Rgb8(export_image) = export.image else {
+            panic!("expected 8-bit export")
+        };
+        assert_eq!(full.image.data(), export_image.data());
+        let export16 = pipeline.render_export(
+            &frame,
+            &recipe,
+            options.render,
+            OutputBitDepth::Sixteen,
+            DitherMode::None,
+        )?;
+        let ExportImage::Rgb16(export16_image) = export16.image else {
+            panic!("expected 16-bit export")
+        };
+        assert!(
+            full.image
+                .data()
+                .iter()
+                .zip(export16_image.data())
+                .all(|(a, b)| (i32::from(*a) * 257 - i32::from(*b)).abs() <= 129)
+        );
+        recipe.capture_sharpening.radius = 0.8;
+        assert!(
+            pipeline
+                .prepare_preview_base_from_reconstruction(&reconstruction, &recipe)
+                .is_err()
+        );
+        assert!(
+            pipeline
+                .render_preview_from_base(&base, &recipe, options.render.output_policy)
+                .is_err()
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn preview_pipeline_reconstructs_full_crop_before_area_reduction() -> Result<(), Box<dyn Error>> {
     let frame = synthetic_rggb_frame();
     let result = CpuPipeline::default().render_preview(
@@ -476,6 +591,7 @@ fn enabled_optics_rejects_active_area_crop_policy() {
     let frame = synthetic_rggb_frame();
     let mut recipe = EditRecipe::default();
     recipe.optics.profile = rohditor_edit::LensProfileSelection::Automatic;
+    recipe.capture_sharpening.enabled = true;
     let error = CpuPipeline::default()
         .render(
             &frame,
@@ -513,6 +629,7 @@ fn bundled_optics_plan_is_shared_by_preview_and_export() -> Result<(), Box<dyn E
     let mut recipe = EditRecipe::default();
     recipe.optics.profile = rohditor_edit::LensProfileSelection::Automatic;
     let pipeline = CpuPipeline::new(Arc::new(OpticsService::load_bundled()?));
+    recipe.capture_sharpening.enabled = true;
 
     let preview = pipeline.render(&frame, &recipe, RenderOptions::default())?;
     let provenance = preview
@@ -522,6 +639,15 @@ fn bundled_optics_plan_is_shared_by_preview_and_export() -> Result<(), Box<dyn E
     assert!(provenance.applied.any());
     assert!(preview.memory.optics_output_bytes > 0);
     assert!(preview.timings.optics > Duration::ZERO);
+    let fit_full = pipeline.render_preview(
+        &frame,
+        &recipe,
+        PreviewOptions {
+            max_long_edge: usize::MAX,
+            ..PreviewOptions::default()
+        },
+    )?;
+    assert_eq!(preview.image.data(), fit_full.image.data());
 
     let export = pipeline.render_export(
         &frame,

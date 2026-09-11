@@ -27,6 +27,9 @@ pub(crate) enum AdjustmentTarget {
     Whites,
     Blacks,
     HighlightThreshold,
+    CaptureAmount,
+    CaptureRadius,
+    CaptureNoise,
     ToneCurveShadows,
     ToneCurveDarks,
     ToneCurveLights,
@@ -133,6 +136,7 @@ pub(crate) struct DocumentPanelModel {
     pub picker_mode: Option<PickerMode>,
     pub color_mixer_channel: usize,
     pub optics: OpticsPanelModel,
+    pub capture_sharpening: rohditor_edit::CaptureSharpening,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -153,6 +157,7 @@ pub(crate) struct AdjustmentPanelOutput {
     pub import_camera_profile: bool,
     pub white_balance_mode: Option<WhiteBalanceMode>,
     pub highlight_method: Option<HighlightMethod>,
+    pub capture_enabled: Option<bool>,
     pub picker_mode: Option<Option<PickerMode>>,
     pub color_mixer_channel: Option<usize>,
     pub optics_action: Option<OpticsAction>,
@@ -238,6 +243,9 @@ pub(crate) fn show(
                     widgets::adjustment_section(ui, "Light", |ui| {
                         show_light_controls(ui, &mut document, &mut output);
                         show_tone_curve_controls(ui, &mut document, &mut output);
+                    });
+                    widgets::adjustment_section(ui, "Detail", |ui| {
+                        super::capture_sharpening::show(ui, &mut document, &mut output);
                     });
                     widgets::adjustment_section(ui, "Color", |ui| {
                         show_color_controls(ui, &mut document, &mut output);
@@ -1192,7 +1200,7 @@ fn show_color_grading_controls(
         });
 }
 
-fn record_slider(
+pub(super) fn record_slider(
     ui: &mut egui::Ui,
     interactions: &mut Vec<AdjustmentInteraction>,
     target: AdjustmentTarget,

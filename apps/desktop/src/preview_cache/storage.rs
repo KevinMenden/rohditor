@@ -90,7 +90,15 @@ impl PreviewCacheKeys {
             // Bump when the retained source representation changes. The GPU
             // boundary now consumes camera-native samples rather than a
             // camera-converted base.
-            reconstruction_version: 7,
+            reconstruction_version: 8,
+            capture_sharpening: recipe.capture_sharpening.is_active().then_some((
+                [
+                    recipe.capture_sharpening.amount.to_bits(),
+                    recipe.capture_sharpening.radius.to_bits(),
+                    recipe.capture_sharpening.noise_protection.to_bits(),
+                ],
+                rohditor_core::CAPTURE_SHARPENING_ALGORITHM_VERSION,
+            )),
         };
         let demosaiced = DemosaicedBaseKey {
             reconstructed: reconstructed.clone(),
@@ -173,6 +181,7 @@ struct ReconstructedCameraRgbKey {
     highlight: HighlightKey,
     optics: OpticsKey,
     reconstruction_version: u8,
+    capture_sharpening: Option<([u32; 3], u16)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -618,6 +627,38 @@ mod tests {
     use rohditor_raw::{
         CaptureMetadata, CfaPattern, LevelPattern, PhotometricInterpretation, RawFileInfo,
     };
+
+    #[test]
+    fn capture_settings_invalidate_reconstruction_and_downstream_but_retain_raw() {
+        let frame = frame();
+        let options = PreviewOptions::default();
+        let mut recipe = EditRecipe::default();
+        let off = PreviewCacheKeys::new(1, &frame, &recipe, options);
+        recipe.capture_sharpening.radius = 0.8;
+        assert_eq!(off, PreviewCacheKeys::new(1, &frame, &recipe, options));
+        recipe.capture_sharpening.enabled = true;
+        let on = PreviewCacheKeys::new(1, &frame, &recipe, options);
+        assert_eq!(off.decoded, on.decoded);
+        assert_ne!(off.reconstructed, on.reconstructed);
+        for field in 0..3 {
+            let mut changed = recipe.clone();
+            match field {
+                0 => changed.capture_sharpening.amount = 0.7,
+                1 => changed.capture_sharpening.radius = 0.9,
+                _ => changed.capture_sharpening.noise_protection = 0.8,
+            }
+            let keys = PreviewCacheKeys::new(1, &frame, &changed, options);
+            assert_eq!(keys.decoded, on.decoded);
+            assert_ne!(keys.reconstructed, on.reconstructed);
+            assert_ne!(keys.demosaiced, on.demosaiced);
+            assert_ne!(keys.adjusted, on.adjusted);
+        }
+        recipe.light.exposure_ev = 1.0;
+        let creative = PreviewCacheKeys::new(1, &frame, &recipe, options);
+        assert_eq!(creative.reconstructed, on.reconstructed);
+        assert_eq!(creative.demosaiced, on.demosaiced);
+        assert_ne!(creative.adjusted, on.adjusted);
+    }
 
     fn frame() -> RawFrame {
         RawFrame {
