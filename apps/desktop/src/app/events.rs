@@ -235,9 +235,11 @@ impl RohditorApp {
                             .as_ref()
                             .map(|info| info.as_shot_white_balance)
                     });
-                let Some(balance) =
-                    white_balance_from_camera_sample(sample, resolved.camera_to_xyz_d65, as_shot)
-                else {
+                let Some(balance) = white_balance_from_camera_sample(
+                    sample,
+                    resolved.unbalanced_camera_to_xyz,
+                    as_shot,
+                ) else {
                     document.error = Some(
                         "That sample could not be represented by the available white-balance range"
                             .to_owned(),
