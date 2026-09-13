@@ -3159,7 +3159,7 @@ fn sample_rgb_patch(
 
 fn white_balance_from_camera_sample(
     sample: [f32; 3],
-    camera_to_xyz_d65: rohditor_core::Matrix3,
+    unbalanced_camera_to_xyz: rohditor_core::Matrix3,
     as_shot_white_balance: Option<[Option<f32>; 4]>,
 ) -> Option<WhiteBalance> {
     if sample
@@ -3186,9 +3186,11 @@ fn white_balance_from_camera_sample(
         green: as_shot_relative[1],
         blue: as_shot_relative[2],
     };
-    if let Ok(coordinates) =
-        coordinates_from_camera_gains_relative_to_as_shot(camera_to_xyz_d65, as_shot_gains, gains)
-    {
+    if let Ok(coordinates) = coordinates_from_camera_gains_relative_to_as_shot(
+        unbalanced_camera_to_xyz,
+        as_shot_gains,
+        gains,
+    ) {
         return Some(WhiteBalance::TemperatureTint {
             temperature: coordinates.temperature,
             tint: coordinates.tint,

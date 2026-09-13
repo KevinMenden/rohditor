@@ -24,6 +24,9 @@ use crate::{OutputPolicy, PipelineError};
 #[derive(Debug, Clone, PartialEq)]
 pub struct CameraColorTransform {
     pub source_illuminant: String,
+    /// Original calibration inverse for unbalanced sensor values. Never use
+    /// the normalized rendering transform to infer an illuminant from gains.
+    pub unbalanced_camera_to_xyz: Matrix3,
     pub camera_to_xyz_d65: Matrix3,
     pub camera_to_linear_rec2020: Matrix3,
 }
@@ -111,6 +114,7 @@ impl std::fmt::Display for CameraProfileProvenance {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedCameraColour {
     pub source_illuminant: String,
+    pub unbalanced_camera_to_xyz: Matrix3,
     pub camera_to_xyz_d65: Matrix3,
     pub camera_to_linear_rec2020: Matrix3,
     pub white_balance_gains: WhiteBalanceGains,
@@ -126,6 +130,7 @@ impl ResolvedCameraColour {
     pub fn camera_color_transform(&self) -> CameraColorTransform {
         CameraColorTransform {
             source_illuminant: self.source_illuminant.clone(),
+            unbalanced_camera_to_xyz: self.unbalanced_camera_to_xyz,
             camera_to_xyz_d65: self.camera_to_xyz_d65,
             camera_to_linear_rec2020: self.camera_to_linear_rec2020,
         }
@@ -274,21 +279,26 @@ pub fn resolve_camera_colour(
     };
     let white_balance_gains = crate::cpu::white_balance_gains_from_calibration(
         calibration.as_shot_white_balance,
-        transform.camera_to_xyz_d65,
+        transform.unbalanced_camera_to_xyz,
         white_balance,
     )?;
     let as_shot_gains = crate::cpu::white_balance_gains_from_calibration(
         calibration.as_shot_white_balance,
-        transform.camera_to_xyz_d65,
+        transform.unbalanced_camera_to_xyz,
         WhiteBalance::AsShot,
     )
     .ok();
     let as_shot_coordinates = as_shot_gains.and_then(|gains| {
-        coordinates_from_camera_gains_relative_to_as_shot(transform.camera_to_xyz_d65, gains, gains)
-            .ok()
+        coordinates_from_camera_gains_relative_to_as_shot(
+            transform.unbalanced_camera_to_xyz,
+            gains,
+            gains,
+        )
+        .ok()
     });
     let resolved = ResolvedCameraColour {
         source_illuminant: transform.source_illuminant.clone(),
+        unbalanced_camera_to_xyz: transform.unbalanced_camera_to_xyz,
         camera_to_xyz_d65: transform.camera_to_xyz_d65,
         camera_to_linear_rec2020: transform.camera_to_linear_rec2020,
         white_balance_gains,
@@ -506,6 +516,7 @@ fn profile_camera_color(
     };
     Ok(CameraColorTransform {
         source_illuminant: format!("{source_name} ({})", calibration.illuminant),
+        unbalanced_camera_to_xyz: Matrix3::new(calibration.xyz_to_camera).inverse()?,
         camera_to_linear_rec2020: camera_to_xyz_d65.then(XYZ_D65_TO_LINEAR_REC2020),
         camera_to_xyz_d65,
     })
@@ -519,6 +530,7 @@ fn matrix_camera_color(
     let camera_to_xyz_d65 = matrix_camera_to_xyz_d65(xyz_to_camera, source_white)?;
     Ok(CameraColorTransform {
         source_illuminant: source_name,
+        unbalanced_camera_to_xyz: xyz_to_camera.inverse()?,
         camera_to_linear_rec2020: camera_to_xyz_d65.then(XYZ_D65_TO_LINEAR_REC2020),
         camera_to_xyz_d65,
     })
@@ -673,7 +685,7 @@ mod tests {
     }
 
     #[test]
-    fn as_shot_and_manual_gains_do_not_depend_on_profile_choice() {
+    fn white_balance_gains_do_not_depend_on_the_profile_forward_matrix() {
         let first = CameraProfileSelection::Matrix(profile(None));
         let second = CameraProfileSelection::Matrix(profile(Some([
             [1.0, 0.1, 0.0],
@@ -710,9 +722,13 @@ mod tests {
             .expect("first TT profile");
         let temperature_second = resolve_camera_colour(&calibration, &second, temperature_tint)
             .expect("second TT profile");
-        assert_ne!(
+        assert_eq!(
             temperature_first.white_balance_gains,
             temperature_second.white_balance_gains
+        );
+        assert_ne!(
+            temperature_first.camera_to_xyz_d65,
+            temperature_second.camera_to_xyz_d65
         );
     }
 
@@ -747,13 +763,75 @@ mod tests {
         assert!((coordinates.temperature - 5_200.0).abs() < 500.0);
         assert!(coordinates.tint.abs() < 1.0e-6);
         let reconstructed = crate::camera_gains_from_as_shot_coordinates(
-            resolved.camera_to_xyz_d65,
+            resolved.unbalanced_camera_to_xyz,
             resolved.white_balance_gains,
             coordinates,
         )
         .expect("the displayed As Shot coordinates should preserve the source balance");
         assert!((reconstructed.red - resolved.white_balance_gains.red).abs() < 2.0e-3);
         assert!((reconstructed.blue - resolved.white_balance_gains.blue).abs() < 2.0e-3);
+
+        // Sensitivity around a real, asymmetric Sony As Shot anchor. This
+        // catches use of the row-normalized rendering matrix and an overly
+        // broad tint scale, even when forward/inverse round trips still pass.
+        for (temperature, tint, red_bounds, blue_bounds) in [
+            (
+                coordinates.temperature + 100.0,
+                0.0,
+                1.005..1.025,
+                0.975..0.995,
+            ),
+            (coordinates.temperature, 0.1, 1.015..1.04, 1.01..1.035),
+            (coordinates.temperature, -0.1, 0.96..0.985, 0.965..0.99),
+        ] {
+            let edited = resolve_camera_colour(
+                &calibration,
+                &CameraProfileSelection::Automatic,
+                WhiteBalance::TemperatureTint { temperature, tint },
+            )
+            .expect("small correction")
+            .white_balance_gains;
+            assert!(
+                red_bounds.contains(&(edited.red / reconstructed.red)),
+                "red: {edited:?}"
+            );
+            assert!(
+                blue_bounds.contains(&(edited.blue / reconstructed.blue)),
+                "blue: {edited:?}"
+            );
+        }
+
+        // An independently specified D65 illuminant must recover daylight
+        // temperature from sensor gains, regardless of sensor channel scaling.
+        let sensor_white = resolved
+            .unbalanced_camera_to_xyz
+            .inverse()
+            .expect("invertible Sony calibration")
+            .transform(rohditor_color::D65_WHITE);
+        let daylight_calibration = CameraCalibration {
+            as_shot_white_balance: [
+                Some(sensor_white[1] / sensor_white[0]),
+                Some(1.0),
+                Some(sensor_white[1] / sensor_white[2]),
+                None,
+            ],
+            ..calibration
+        };
+        let daylight = resolve_camera_colour(
+            &daylight_calibration,
+            &CameraProfileSelection::Automatic,
+            WhiteBalance::AsShot,
+        )
+        .expect("D65 camera balance");
+        assert!(
+            (daylight
+                .as_shot_coordinates
+                .expect("D65 coordinates")
+                .temperature
+                - 6504.0)
+                .abs()
+                < 30.0
+        );
     }
 
     #[test]

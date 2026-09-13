@@ -220,8 +220,9 @@ pub(super) mod white_balance {
         info: &RawFileInfo,
         selection: WhiteBalance,
     ) -> Result<WhiteBalanceGains, PipelineError> {
-        let camera_to_xyz_d65 = if matches!(selection, WhiteBalance::TemperatureTint { .. }) {
-            camera_color_transform(info)?.camera_to_xyz_d65
+        let unbalanced_camera_to_xyz = if matches!(selection, WhiteBalance::TemperatureTint { .. })
+        {
+            camera_color_transform(info)?.unbalanced_camera_to_xyz
         } else {
             // As-shot and manual relative multipliers do not require a camera
             // matrix. Keep this public helper useful for demosaic-only callers;
@@ -230,7 +231,7 @@ pub(super) mod white_balance {
         };
         white_balance_gains_from_calibration(
             info.as_shot_white_balance,
-            camera_to_xyz_d65,
+            unbalanced_camera_to_xyz,
             selection,
         )
     }
@@ -241,7 +242,7 @@ pub(super) mod white_balance {
     /// metadata or rebuilding image pixels.
     pub fn white_balance_gains_from_calibration(
         as_shot_white_balance: [Option<f32>; 4],
-        camera_to_xyz_d65: crate::Matrix3,
+        unbalanced_camera_to_xyz: crate::Matrix3,
         selection: WhiteBalance,
     ) -> Result<WhiteBalanceGains, PipelineError> {
         validate_white_balance_selection(selection)?;
@@ -266,11 +267,11 @@ pub(super) mod white_balance {
         };
         let gains = match selection {
             WhiteBalance::TemperatureTint { temperature, tint } => {
-                // If metadata omits As Shot, identity is still a coherent zero
-                // point because the normalized camera transform maps it to D65.
+                // Without As Shot metadata, retain the same identity-gain
+                // anchor as As Shot/Manual and project it through calibration.
                 let reference = as_shot_gains()?.unwrap_or_else(WhiteBalanceGains::identity);
                 camera_gains_from_as_shot_coordinates(
-                    camera_to_xyz_d65,
+                    unbalanced_camera_to_xyz,
                     reference,
                     crate::WhiteBalanceCoordinates { temperature, tint },
                 )?
