@@ -31,6 +31,9 @@ use crate::preview_cache::{PreviewCache, PreviewCacheHits, PreviewCacheKeys};
 use super::scheduler::should_replace_preview;
 use super::scheduler::{PreviewCompletion, PreviewMailbox};
 
+#[path = "export_worker.rs"]
+mod export_worker;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum JobKind {
     Open,
@@ -245,6 +248,7 @@ pub(crate) struct ExportJob {
     recipe: EditRecipe,
     settings: ExportSettings,
     render_options: RenderOptions,
+    prefer_gpu: bool,
 }
 
 #[derive(Debug)]
@@ -440,6 +444,7 @@ impl RenderCoordinator {
         recipe: EditRecipe,
         settings: ExportSettings,
         render_options: RenderOptions,
+        prefer_gpu: bool,
     ) -> Result<(), String> {
         self.send(WorkerRequest::Export(Box::new(ExportJob {
             document_id,
@@ -450,6 +455,7 @@ impl RenderCoordinator {
             recipe,
             settings,
             render_options,
+            prefer_gpu,
         })))
     }
 
@@ -511,6 +517,7 @@ fn worker_loop(
             CpuPipeline::default()
         }
     };
+    let exports = export_worker::start(pipeline.clone(), sender.clone(), context.clone());
 
     while let Ok(request) = receiver.recv() {
         if request_belongs_to_abandoned_document(&request, &abandoned) {
@@ -579,8 +586,18 @@ fn worker_loop(
                 }
             }
             WorkerRequest::Export(job) => {
-                if !abandoned.contains(&job.document_id) {
-                    process_export(*job, &sender, &context, &pipeline);
+                if !abandoned.contains(&job.document_id)
+                    && let Err(job) = export_worker::submit(&exports, job)
+                {
+                    send_failure(
+                        &sender,
+                        &context,
+                        job.document_id,
+                        JobKind::Export,
+                        Some(job.recipe_revision),
+                        Some(job.export_id),
+                        "Export worker is unavailable or its queue is full".to_owned(),
+                    );
                 }
             }
             WorkerRequest::AbandonDocument(document_id) => {
@@ -1516,100 +1533,6 @@ fn cache_invariant(reason: &str) -> PipelineError {
     }
 }
 
-fn process_export(
-    job: ExportJob,
-    sender: &mpsc::Sender<WorkerEvent>,
-    context: &egui::Context,
-    pipeline: &CpuPipeline,
-) {
-    let file_name = display_file_name(&job.destination);
-    let span = info_span!(
-        "desktop.export",
-        document_id = job.document_id,
-        export_id = job.export_id,
-        revision = job.recipe_revision,
-        file = %file_name
-    );
-    let _guard = span.enter();
-    let started = Instant::now();
-    send_progress(
-        sender,
-        context,
-        job.document_id,
-        JobKind::Export,
-        Some(job.recipe_revision),
-        Some(job.export_id),
-        "Developing full-resolution export on CPU",
-    );
-    let rendered = match pipeline.render_export(
-        &job.frame,
-        &job.recipe,
-        job.render_options,
-        job.settings.format.bit_depth(),
-        job.settings.dithering,
-    ) {
-        Ok(rendered) => rendered,
-        Err(error) => {
-            send_failure(
-                sender,
-                context,
-                job.document_id,
-                JobKind::Export,
-                Some(job.recipe_revision),
-                Some(job.export_id),
-                format!("Full-resolution CPU development failed: {error}"),
-            );
-            return;
-        }
-    };
-
-    send_progress(
-        sender,
-        context,
-        job.document_id,
-        JobKind::Export,
-        Some(job.recipe_revision),
-        Some(job.export_id),
-        "Encoding and committing output",
-    );
-    match export_image(
-        &job.destination,
-        &rendered.image,
-        &job.frame.info,
-        job.settings,
-    ) {
-        Ok(report) => {
-            let elapsed = started.elapsed();
-            info!(
-                elapsed_ms = elapsed.as_millis(),
-                bytes = report.bytes_written,
-                "export complete"
-            );
-            send_event(
-                sender,
-                context,
-                WorkerEvent::ExportReady {
-                    document_id: job.document_id,
-                    export_id: job.export_id,
-                    recipe_revision: job.recipe_revision,
-                    destination: job.destination,
-                    report,
-                    elapsed,
-                },
-            );
-        }
-        Err(error) => send_failure(
-            sender,
-            context,
-            job.document_id,
-            JobKind::Export,
-            Some(job.recipe_revision),
-            Some(job.export_id),
-            format!("Could not write {file_name}: {error}"),
-        ),
-    }
-}
-
 fn decode_placeholder(bytes: &[u8], orientation: Orientation) -> Result<WorkerImage, String> {
     let decoded = image::load_from_memory(bytes)
         .map_err(|error| format!("JPEG decoding failed: {error}"))?
@@ -2440,6 +2363,7 @@ mod tests {
                     ..ExportSettings::default()
                 },
                 RenderOptions::default(),
+                false,
             )
             .map_err(std::io::Error::other)?;
 

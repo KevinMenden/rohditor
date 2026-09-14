@@ -1162,7 +1162,9 @@ fn development_geometry(
     Ok((pattern, crop))
 }
 
-pub(crate) fn raw_crop_dimensions(
+/// Validated sensor-development dimensions before user crop and orientation.
+/// Backends can preflight resource limits without allocating a normalized image.
+pub fn raw_crop_dimensions(
     info: &RawFileInfo,
     policy: RawCropPolicy,
 ) -> Result<(usize, usize), PipelineError> {

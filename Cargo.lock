@@ -2850,6 +2850,7 @@ dependencies = [
  "rohditor-core",
  "rohditor-demosaic",
  "rohditor-edit",
+ "rohditor-gpu",
  "rohditor-image",
  "rohditor-raw",
  "serde",

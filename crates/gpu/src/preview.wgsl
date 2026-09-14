@@ -39,12 +39,6 @@ struct PreviewParameters {
 @group(0) @binding(0)
 var source_base: texture_2d<f32>;
 
-@group(0) @binding(1)
-var working_linear: texture_storage_2d<rgba16float, write>;
-
-@group(0) @binding(2)
-var display_srgb: texture_storage_2d<rgba8unorm, write>;
-
 @group(0) @binding(3)
 var<uniform> parameters: PreviewParameters;
 
@@ -112,7 +106,13 @@ fn sanitize_and_clip(value: f32) -> f32 {
 }
 
 fn signed_cbrt(value: f32) -> f32 {
-    return sign(value) * pow(abs(value), 1.0 / 3.0);
+    if value == 0.0 { return value; }
+    let magnitude = abs(value);
+    let estimate = pow(magnitude, 1.0 / 3.0);
+    // WGSL has no cbrt intrinsic. Refine the power estimate before OKLab's
+    // gamut-boundary search, where a few ulps can change a 16-bit output code.
+    let refined = estimate - (estimate - magnitude / (estimate * estimate)) / 3.0;
+    return sign(value) * refined;
 }
 
 fn linear_srgb_to_oklab(rgb: vec3<f32>) -> vec3<f32> {
@@ -286,14 +286,7 @@ fn color_saturation(pixel: vec3<f32>, luminance: f32) -> f32 {
     return clamp(chroma / max(abs(luminance), 0.000001), 0.0, 1.0);
 }
 
-@compute @workgroup_size(16, 16, 1)
-fn develop_preview(@builtin(global_invocation_id) invocation: vec3<u32>) {
-    let output = invocation.xy;
-    if output.x >= parameters.output_width || output.y >= parameters.output_height {
-        return;
-    }
-
-    let source = source_coordinate(output);
+fn develop_color(source: vec2<u32>) -> vec3<f32> {
     let camera_native = textureLoad(source_base, vec2<i32>(source), 0).rgb;
     let balanced = camera_native * parameters.white_balance.xyz;
     let base = vec3<f32>(
@@ -308,13 +301,10 @@ fn develop_preview(@builtin(global_invocation_id) invocation: vec3<u32>) {
     let saturation = parameters.saturation
         * (1.0 + parameters.vibrance * (1.0 - color_saturation(toned, luminance)));
     let saturated = vec3<f32>(luminance) + saturation * (toned - vec3<f32>(luminance));
-    let adjusted = apply_color_grading(apply_hsl_adjustments(saturated));
+    return apply_color_grading(apply_hsl_adjustments(saturated));
+}
 
-    // Retain the linear working result for future GPU stages while producing
-    // the display texture in the same dispatch. This avoids an extra full-frame
-    // pass for the current fixed pipeline.
-    textureStore(working_linear, vec2<i32>(source), vec4<f32>(adjusted, 1.0));
-
+fn encode_output(adjusted: vec3<f32>) -> vec3<f32> {
     let linear_srgb = vec3<f32>(
         dot(parameters.rec2020_to_srgb_row0.xyz, adjusted),
         dot(parameters.rec2020_to_srgb_row1.xyz, adjusted),
@@ -329,5 +319,5 @@ fn develop_preview(@builtin(global_invocation_id) invocation: vec3<u32>) {
         linear_srgb_to_srgb(mapped_linear_srgb.g),
         linear_srgb_to_srgb(mapped_linear_srgb.b),
     );
-    textureStore(display_srgb, vec2<i32>(output), vec4<f32>(encoded, 1.0));
+    return encoded;
 }

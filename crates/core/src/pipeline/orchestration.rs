@@ -304,6 +304,12 @@ impl ReconstructedPreview {
         self.preparation_peak_bytes
     }
 
+    /// Immutable sensor buffer retained by the caller during processing.
+    #[must_use]
+    pub const fn decoded_raw_bytes(&self) -> usize {
+        self.decoded_raw_bytes
+    }
+
     /// Bytes held by the reduced camera-RGB buffer itself.
     #[must_use]
     pub fn buffer_bytes(&self) -> usize {
@@ -845,6 +851,27 @@ pub(super) mod render {
         }
 
         /// Render full-resolution output samples for a subsequent file export.
+        /// Prepare full-resolution camera RGB before white balance and color
+        /// conversion. This preserves the preview RAW, sharpening, and optics
+        /// contracts without reducing the image for display.
+        pub fn prepare_export_source(
+            &self,
+            frame: &RawFrame,
+            recipe: &EditRecipe,
+            options: RenderOptions,
+            cancellation: &CancellationToken,
+        ) -> Result<ReconstructedPreview, PipelineError> {
+            self.prepare_preview_reconstruction_cancellable(
+                frame,
+                recipe,
+                PreviewOptions {
+                    render: options,
+                    max_long_edge: frame.info.width.max(frame.info.height),
+                },
+                cancellation,
+            )
+        }
+
         pub fn render_export(
             &self,
             frame: &RawFrame,

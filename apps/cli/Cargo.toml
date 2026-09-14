@@ -10,6 +10,7 @@ anyhow.workspace = true
 clap.workspace = true
 rohditor-camera-profile = { path = "../../crates/camera-profile" }
 rohditor-core = { path = "../../crates/core" }
+rohditor-gpu = { path = "../../crates/gpu" }
 rohditor-demosaic = { path = "../../crates/demosaic" }
 rohditor-edit = { path = "../../crates/edit" }
 rohditor-image = { path = "../../crates/image" }

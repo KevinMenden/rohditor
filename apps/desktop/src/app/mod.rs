@@ -1539,7 +1539,7 @@ impl RohditorApp {
             document.export_status = Some(ExportActivity {
                 id: export_id,
                 recipe_revision,
-                detail: "Queued full-resolution CPU export".to_owned(),
+                detail: "Queued full-resolution export".to_owned(),
             });
             document.error = None;
             document.notice = None;
@@ -1553,6 +1553,7 @@ impl RohditorApp {
             recipe,
             settings,
             self.settings.render_options(),
+            self.processor_preference != ProcessorPreference::Cpu,
         ) && let Some(document) = self.document.as_mut()
         {
             document.export_status = None;
