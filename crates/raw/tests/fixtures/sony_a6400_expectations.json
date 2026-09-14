@@ -81,7 +81,7 @@
       "aperture": { "numerator": 63, "denominator": 10 },
       "focal_length": { "numerator": 3500, "denominator": 10 },
       "lens_make": null,
-      "lens_model": null
+      "lens_model": "E 70-350mm F4.5-6.3 G OSS"
     },
     {
       "file_name": "DSC03687.ARW",
@@ -93,7 +93,7 @@
       "aperture": { "numerator": 63, "denominator": 10 },
       "focal_length": { "numerator": 3500, "denominator": 10 },
       "lens_make": null,
-      "lens_model": null
+      "lens_model": "E 70-350mm F4.5-6.3 G OSS"
     },
     {
       "file_name": "DSC03821.ARW",
@@ -105,7 +105,7 @@
       "aperture": { "numerator": 63, "denominator": 10 },
       "focal_length": { "numerator": 3500, "denominator": 10 },
       "lens_make": null,
-      "lens_model": null
+      "lens_model": "E 70-350mm F4.5-6.3 G OSS"
     }
   ]
 }

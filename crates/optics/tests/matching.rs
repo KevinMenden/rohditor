@@ -67,6 +67,27 @@ fn bundled_database_resolves_localized_camera_and_lens_names() {
 }
 
 #[test]
+fn bundled_database_resolves_sony_aps_c_70_350_by_preserved_model() {
+    let service = OpticsService::load_bundled().expect("bundled Lensfun data should load");
+    let query = OpticsQuery {
+        camera_make: "Sony".to_owned(),
+        camera_model: "ILCE-6400".to_owned(),
+        camera_clean_make: "Sony".to_owned(),
+        camera_clean_model: "Alpha 6400".to_owned(),
+        lens_make: None,
+        lens_model: Some("E 70-350mm F4.5-6.3 G OSS".to_owned()),
+        focal_length_mm: Some(350.0),
+        aperture_f_number: Some(6.3),
+        focus_distance_m: None,
+    };
+
+    let ProfileMatch::Unique(summary) = service.profile_match(&query) else {
+        panic!("Sony A6400 and 70-350 should resolve uniquely");
+    };
+    assert!(summary.lens.contains("70-350mm"));
+}
+
+#[test]
 fn matching_accepts_common_maker_prefixes_without_fuzzy_auto_selection() {
     let service = OpticsService::from_xml(FIXTURE_XML).expect("fixture database should load");
     let mut query = fixture_query("Body One");

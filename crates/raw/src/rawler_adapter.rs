@@ -96,6 +96,12 @@ impl RawlerSession {
             .raw_metadata(&self.source, &self.params)
             .map_err(|error| map_rawler_error(&self.path, error))?;
         let format_hint = self.decoder.format_hint();
+        let source_lens = if metadata.exif.lens_make.is_none() || metadata.exif.lens_model.is_none()
+        {
+            source_lens_metadata(&self.source)
+        } else {
+            None
+        };
         let encoding = source_encoding(&self.source, format_hint, &self.path)?;
         let preview = match self.preview_impl() {
             Ok(preview) => preview.map(|preview| EmbeddedPreviewInfo {
@@ -116,6 +122,7 @@ impl RawlerSession {
             preview,
             encoding,
             format_hint,
+            source_lens.as_ref(),
         );
         self.info = Some(info.clone());
         Ok(info)
@@ -552,6 +559,7 @@ fn map_file_info(
     embedded_preview: Option<EmbeddedPreviewInfo>,
     encoding: SourceEncoding,
     format_hint: FormatHint,
+    source_lens: Option<&SourceLensMetadata>,
 ) -> RawFileInfo {
     let mut color_matrices = image
         .color_matrix
@@ -600,7 +608,7 @@ fn map_file_info(
             .orientation
             .map(RawlerOrientation::from_u16)
             .map_or_else(|| map_orientation(image.orientation), map_orientation),
-        capture: map_capture_metadata(metadata),
+        capture: map_capture_metadata(metadata, source_lens),
         embedded_preview,
     }
 }
@@ -642,7 +650,45 @@ fn map_orientation(value: RawlerOrientation) -> Orientation {
     }
 }
 
-fn map_capture_metadata(metadata: &RawMetadata) -> CaptureMetadata {
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct SourceLensMetadata {
+    lens_make: Option<String>,
+    lens_model: Option<String>,
+}
+
+/// Recover standard TIFF lens tags when Rawler could not resolve its internal
+/// lens database entry. Rawler's EXIF mapper currently ignores these tags,
+/// even though they are present in some Sony ARW files.
+fn source_lens_metadata(source: &RawSource) -> Option<SourceLensMetadata> {
+    if !(source.buf().starts_with(b"II") || source.buf().starts_with(b"MM")) {
+        return None;
+    }
+    let tiff = GenericTiffReader::new_with_buffer(source.buf(), 0, 0, None).ok()?;
+    let lens_make = tiff_ascii_tag(&tiff, ExifTag::LensMake);
+    let lens_model = tiff_ascii_tag(&tiff, ExifTag::LensModel);
+    (lens_make.is_some() || lens_model.is_some()).then_some(SourceLensMetadata {
+        lens_make,
+        lens_model,
+    })
+}
+
+fn tiff_ascii_tag(tiff: &GenericTiffReader, tag: ExifTag) -> Option<String> {
+    tiff.find_ifds_with_tag(tag)
+        .into_iter()
+        .filter_map(|ifd| ifd.get_entry(tag))
+        .find_map(|entry| {
+            entry
+                .value
+                .as_string()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+        })
+}
+
+fn map_capture_metadata(
+    metadata: &RawMetadata,
+    source_lens: Option<&SourceLensMetadata>,
+) -> CaptureMetadata {
     let exif = &metadata.exif;
     CaptureMetadata {
         iso: exif
@@ -657,8 +703,14 @@ fn map_capture_metadata(metadata: &RawMetadata) -> CaptureMetadata {
             .date_time_original
             .clone()
             .or_else(|| exif.create_date.clone()),
-        lens_make: exif.lens_make.clone(),
-        lens_model: exif.lens_model.clone(),
+        lens_make: exif
+            .lens_make
+            .clone()
+            .or_else(|| source_lens.and_then(|lens| lens.lens_make.clone())),
+        lens_model: exif
+            .lens_model
+            .clone()
+            .or_else(|| source_lens.and_then(|lens| lens.lens_model.clone())),
     }
 }
 
@@ -713,7 +765,7 @@ fn file_name(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::map_positive_rational;
+    use super::{SourceLensMetadata, map_capture_metadata, map_positive_rational};
     use crate::RationalValue;
 
     #[test]
@@ -738,5 +790,26 @@ mod tests {
             map_positive_rational(rawler::formats::tiff::Rational { n: 1, d: 0 }),
             None
         );
+    }
+
+    #[test]
+    fn source_lens_metadata_fills_missing_values_without_overriding_resolved_values() {
+        let mut metadata = rawler::decoders::RawMetadata::default();
+        metadata.exif.lens_make = Some("Resolved make".to_owned());
+        metadata.exif.lens_model = Some("Resolved model".to_owned());
+
+        let source_lens = SourceLensMetadata {
+            lens_make: Some("Source make".to_owned()),
+            lens_model: Some("Source model".to_owned()),
+        };
+        let capture = map_capture_metadata(&metadata, Some(&source_lens));
+        assert_eq!(capture.lens_make.as_deref(), Some("Resolved make"));
+        assert_eq!(capture.lens_model.as_deref(), Some("Resolved model"));
+
+        metadata.exif.lens_make = None;
+        metadata.exif.lens_model = None;
+        let capture = map_capture_metadata(&metadata, Some(&source_lens));
+        assert_eq!(capture.lens_make.as_deref(), Some("Source make"));
+        assert_eq!(capture.lens_model.as_deref(), Some("Source model"));
     }
 }
