@@ -20,7 +20,8 @@ assert_no_dependencies rohditor-raw 'rohditor-(core|demosaic|edit|gpu|cli|deskto
 assert_no_dependencies rohditor-color 'rohditor-(core|gpu|cli|desktop)'
 assert_no_dependencies rohditor-core 'rohditor-(gpu|cli|desktop)'
 assert_no_dependencies rohditor-gpu 'rohditor-(cli|desktop)'
-assert_no_dependencies rohditor-cli 'rohditor-(gpu|desktop)'
+# Headless GPU export is an application-level dependency; core stays GPU-free.
+assert_no_dependencies rohditor-cli 'rohditor-desktop'
 
 if grep -Eq 'pub use rohditor_(demosaic|edit|image)' \
     crates/core/src/lib.rs crates/raw/src/lib.rs; then

@@ -1,7 +1,9 @@
-//! GPU preview processing built on the application's existing `wgpu` device.
+//! Shared GPU color processing for native preview and headless export.
 //!
-//! This crate owns only interactive preview work. RAW decoding, normalization,
-//! demosaicing, and calibration remain in `rohditor-core`'s CPU reference path.
+//! RAW decoding, normalization, demosaicing, sharpening, and optics remain in
+//! `rohditor-core`'s CPU preparation path. Preview and export share f32 color
+//! kernels; export quantizes directly to 8/16-bit integers in bounded bands and
+//! returns codec-independent pixels for CPU encoding and transactional writes.
 //! The desktop path uploads one camera-native
 //! [`rohditor_core::ReconstructedPreview`] without source float quantization and
 //! applies white balance, the camera transform, exposure, contrast, saturation,
@@ -14,6 +16,8 @@
 mod capabilities;
 mod preview;
 
+pub use preview::{GpuExportProcessor, GpuExportResult};
+
 pub use capabilities::GpuCapabilities;
 pub use preview::{
     GpuDisplayReadback, GpuDisplayReadbackPending, GpuPreviewFrame, GpuPreviewProcessor,
@@ -22,19 +26,19 @@ pub use preview::{
 
 use thiserror::Error;
 
-/// Failure while creating, uploading, or rendering a GPU preview.
+/// Failure while creating, uploading, or executing GPU color processing.
 #[derive(Debug, Error)]
 pub enum GpuPreviewError {
     /// CPU-side preparation was superseded before an upload was submitted.
-    #[error("GPU preview preparation was cancelled by a newer preview")]
+    #[error("GPU processing was cancelled")]
     Cancelled,
 
     /// The eframe-created device cannot perform the required texture operations.
-    #[error("the selected wgpu device cannot support GPU previews: {reason}")]
+    #[error("the selected wgpu device cannot support GPU processing: {reason}")]
     Unsupported { reason: String },
 
     /// A preview dimension cannot be represented by the selected device.
-    #[error("GPU preview dimensions {width}x{height} are not supported: {reason}")]
+    #[error("GPU image dimensions {width}x{height} are not supported: {reason}")]
     InvalidDimensions {
         width: usize,
         height: usize,
@@ -43,22 +47,22 @@ pub enum GpuPreviewError {
 
     /// The caller attempted to apply a recipe to a base made with a different
     /// white-balance selection.
-    #[error("GPU preview base does not match the recipe: {reason}")]
+    #[error("GPU source does not match the recipe: {reason}")]
     BaseMismatch { reason: String },
 
     /// The recipe contains stages that this GPU backend does not implement.
-    #[error("GPU preview does not support these edits: {reason}")]
+    #[error("GPU processing does not support these edits: {reason}")]
     UnsupportedEdits { reason: String },
 
     /// Waiting for already-submitted GPU work failed.
-    #[error("GPU preview queue synchronization failed: {reason}")]
+    #[error("GPU queue synchronization failed: {reason}")]
     Synchronization { reason: String },
 
     /// The core recipe or image state is invalid for the GPU boundary.
-    #[error("GPU preview input is invalid: {reason}")]
+    #[error("GPU processing input is invalid: {reason}")]
     InvalidInput { reason: String },
 
     /// A test-only or diagnostics-only readback operation failed.
-    #[error("GPU preview readback failed: {reason}")]
+    #[error("GPU readback failed: {reason}")]
     Readback { reason: String },
 }

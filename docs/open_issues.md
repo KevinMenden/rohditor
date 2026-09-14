@@ -3,11 +3,8 @@
 
 ## Bugs/Issues
 - Capture sharpening needs real image test: currently the setup is not really doing any sharpening when tested with real images
-- White balance still behaves weirdly: changing the slider leads to changes that are too drastic. This needs to be checked
-- HSL/three way grading always forces the entire pipeline on the CPU
-- Gamut compression seems off. It clearly changes the colors in the preview image --> is this expected? Double-check this feature as well
-- Verify that lens correction actually works as intented. 
-- The Sony 70-350 lens is not detected during lens correction
+- When dragging another slider while the recipe is saving, nothing happens. That is confusing to the user.
+- Highlight reconstruction: everything besides "Clip" doesn't seem to work properly. Needs some debugging again (tested already, didn't work)
 
 ## Bigger Architectural Issues
 - GPU pipeline is to weak: we want to run as much as possible on the GPU. That is currently not the case. Needs to be addressed (e.g. demosaic on the GPU)

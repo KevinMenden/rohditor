@@ -21,6 +21,12 @@ use rohditor_image::{LinearRgbSpace, Orientation};
 
 use crate::{GpuCapabilities, GpuPreviewError};
 
+// Export reuses private source provenance, uniform preparation, and LUT owners.
+// Its public facade is independent of presentation and accepts any wgpu device.
+#[path = "../export/mod.rs"]
+mod export;
+pub use export::{GpuExportProcessor, GpuExportResult};
+
 const WORKGROUP_EDGE: u32 = 16;
 // Keep this in sync with PreviewParameters in preview.wgsl. The vec2 crop
 // origin begins after 17 scalar words and is therefore aligned to word 18.
@@ -187,7 +193,7 @@ impl GpuPreviewSource {
     }
 }
 
-/// CPU-packed half-float upload payload for one immutable linear preview source.
+/// CPU-packed f32 upload payload for one immutable linear source.
 ///
 /// Creating this payload performs no `wgpu` work, so the desktop worker can do
 /// the conversion before handing it to the UI thread for the single GPU upload.
@@ -623,7 +629,9 @@ impl GpuPreviewProcessor {
                 concat!(
                     include_str!("../preview.wgsl"),
                     "\n",
-                    include_str!("../color_adjustments.wgsl")
+                    include_str!("../color_adjustments.wgsl"),
+                    "\n",
+                    include_str!("../preview_output.wgsl")
                 )
                 .into(),
             ),

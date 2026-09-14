@@ -1,6 +1,7 @@
 # GPU processing strategy
 
-Status: proposed roadmap; 2026-09-14. No implementation is claimed by this plan.
+Status: active roadmap; 2026-09-14. Milestone 1 is implemented; milestone 2
+is implemented with software validation, with hardware qualification still open.
 
 ## Destination
 
@@ -50,8 +51,9 @@ As inspected on 2026-09-14:
   see its implementation record for qualification and precision changes.
 - Desktop presentation shares the eframe wgpu device and registers the output
   texture directly. Ordinary presentation does not require a CPU readback.
-- Export processing is CPU-based. Encoding already accepts a codec-independent
-  `ExportImage` through `crates/core/src/export.rs`.
+- Export can use the shared GPU color kernels after full-resolution CPU source
+  preparation. Encoding accepts a codec-independent `ExportImage` through
+  `crates/core/src/export.rs`; see the milestone 2 record below.
 
 ## Architectural rules
 
@@ -106,7 +108,7 @@ boundaries. GPU residency does not make upstream dependencies disappear.
 | Order | Deliverable | Completion evidence |
 | --- | --- | --- |
 | 1 | Complete GPU HSL and three-way grading | Implemented with hardware/corpus parity; desktop latency and skin-tone review remain open. See [implementation record](gpu-hsl-and-grading.md). |
-| 2 | Share the existing GPU color pipeline with export | Headless execution, same color kernels, full-quality processing, explicit 8/16-bit output precision, CPU encoding, and preview/export agreement at matched resolution. Start with CPU-prepared camera RGB; define device-limit and memory fallback before enabling. |
+| 2 | Share the existing GPU color pipeline with export | Implemented: headless execution, shared color kernels, full-resolution CPU camera RGB, direct 8/16-bit quantization, CPU encoding, bounded readback, and resource fallback. Software parity passed; RX 9070 XT parity, visual review, and interaction measurements remain open. |
 | 3 | Move existing capture sharpening to GPU | Correct full-resolution camera RGB boundary before optics/reduction, reusable spatial scratch, CPU parity, source-pixel radius semantics, bounded memory and scheduling. |
 | 4 | Move optics and preview resampling to GPU | Retain an earlier camera RGB source; optics edits reuse it; TCA, distortion, boundaries, and downsampling quality match the intended contract. |
 | 5 | Move sensor development to GPU | Progress through normalization and reconstruction, then a bounded first demosaic method such as MHC, followed by measured higher-quality methods. Preserve CFA phase, sensor coordinates, highlight dependencies, signed/HDR data, and CPU fallback for unsupported methods. |
@@ -122,6 +124,78 @@ the extra full-resolution upload and memory cost as well as saved CPU work.
 Tiling is required wherever supported workloads exceed resource budgets; it is
 not a universal shader wrapper. Qualify tiled output against untiled output,
 including seams, global coordinates, and iterative neighborhood dependencies.
+
+## Milestone 2 implementation and qualification
+
+`CpuPipeline::prepare_export_source` shares the preview RAW, capture-sharpening,
+and optics preparation with no resolution reduction. Exact Clip/WB, camera
+profile, sharpening, and optics provenance remain mandatory. CPU reference
+export is retained. `GpuExportProcessor` accepts a supplied wgpu device or creates
+a headless hardware Vulkan device; there is no egui or core-to-GPU dependency.
+The CLI-to-GPU prohibition in `scripts/check.sh` now permits this application
+dependency while retaining the core and desktop dependency restrictions.
+
+Preview and export call the same WGSL color and output-conversion functions and
+use the same Rust uniform/LUT preparation. Source pixels and fused color work
+remain f32. Export never passes through the RGBA16F working texture or RGBA8
+display texture. Its final stage quantizes directly to 8/16-bit sRGB, including
+the CPU ordered 8x8 dither and rounding contract. Crop, EXIF orientation, and
+dither coordinates are global across the 64-row output bands. Each band has one
+submission/readback in flight; readback currently uses u32 per RGB sample before
+CPU packing into `ExportImage`. CPU encoding and transactional writes are shared.
+
+Per-export GPU allocations are conservatively limited to 768 MiB, including
+the full RGBA32F source, upload staging, output/readback bands, and LUTs. CPU
+source/packing/staging/output buffers also respect the existing 2 GiB working-set
+limit. These are buffer estimates, not measured RSS or driver heap peaks. Source
+dimensions, storage-buffer sizes, and dispatch counts are checked against device
+limits before upload. Oversized sources fall back to CPU; source tiling is not
+implemented. GPU allocation, validation, synchronization, and readback errors
+return before encoding. Cancellation is checked during preparation/packing and
+between bounded submissions/readbacks.
+
+CLI `develop --processor auto|cpu|gpu` defaults to auto; auto reports GPU failure
+and uses CPU, while gpu reports failure without encoding a replacement result.
+Desktop auto/gpu preferences attempt GPU export and report CPU recovery; cpu
+forces CPU. A separate serial export worker retains its headless processor and
+allows one active plus one queued snapshot, so export preparation/encoding no
+longer occupy the preview worker. Export events retain document/export/revision
+identities. Preview and export devices remain separate in this slice; combined
+hardware memory use and scheduling responsiveness still need qualification.
+GPU output-gamut pixel counters are explicitly unavailable, not reported as zero.
+
+Software validation on 2026-09-14 used llvmpipe, LLVM 23.1.0, Mesa 26.2.2; this
+environment had no `/dev/dri`. The asymmetric 38x142 fixture covers all eight
+orientations, a nontrivial crop, both integer depths, both dither modes, existing
+color controls, matched-resolution preview output, cancellation, and limit
+rejection. Export comparisons allow at most 2 codes at 8-bit and 16 codes at
+16-bit; corpus mean-error limits are 0.1 and 1 code respectively. Expanded 8-bit
+values cannot satisfy the explicit 16-bit precision check.
+
+The full-resolution software fixture uses DSC00851.ARW at 6000x4000, combined
+Light/WB/HSL/grading controls, both gamut policies, and ordered dithering. It
+observed maximum differences of 1 code for 8-bit and 16-bit clipping, and 11 codes
+for 16-bit chroma compression. An initial 18-code chroma-compression discrepancy
+was reduced by refining WGSL's cube-root approximation before OKLab conversion;
+the tolerance was not widened. CPU gamut semantics and algorithm version remain
+unchanged. One source upload is 384,000,000 bytes; output reads 288,000,000 bytes
+in 63 bands; the conservative GPU allocation estimate is 777,281,536 bytes.
+Software timings are structural evidence only, not RX 9070 XT performance.
+
+- [x] Headless execution, full-quality preparation, shared color kernels, direct
+  8/16-bit output, deterministic geometry/dither, and CPU encoding are connected.
+- [x] Software asymmetric and full-resolution RAW comparisons pass.
+- [x] `./scripts/check.sh`, the ignored release workspace suite, and the ignored
+  release GPU suite complete successfully. Hardware-only tests skip on this
+  software adapter. The private desktop snapshot-export test also passes after
+  worker separation. CLI auto fallback produces a byte-identical 16-bit PNG to
+  explicit CPU export; required-GPU failure creates no output file.
+- [ ] RX 9070 XT hardware/corpus parity at both bit depths, including visual
+  review of skin, saturated colors, shadows, and reconstructed highlights.
+- [ ] Cold/warm device and source costs, hardware export throughput, actual peak
+  memory, concurrent preview latency, and rapid-edit/stale-result review.
+- [ ] Hardware failure/recovery and source-budget fallback qualification under
+  device pressure. Source tiling remains a later workload-expansion requirement.
 
 ## Qualification and completion
 

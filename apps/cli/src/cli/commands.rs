@@ -178,6 +178,10 @@ enum Command {
         #[arg(long, value_enum, default_value_t = CliOutputGamut::Clip)]
         output_gamut: CliOutputGamut,
 
+        /// Color execution backend for full-resolution export.
+        #[arg(long, value_enum, default_value_t = ExportProcessor::Auto)]
+        processor: ExportProcessor,
+
         /// Absolute camera-calibrated white-balance temperature in Kelvin
         /// (2000 to 25000). If omitted, the source's As Shot estimate is used.
         #[arg(long, allow_hyphen_values = true)]
@@ -530,6 +534,7 @@ pub(crate) fn run() -> Result<()> {
             capture_radius,
             capture_noise_protection,
             output_gamut,
+            processor,
             temperature,
             tint,
             crop,
@@ -571,6 +576,7 @@ pub(crate) fn run() -> Result<()> {
                 capture_radius,
                 capture_noise_protection,
                 output_gamut,
+                processor,
                 temperature,
                 tint,
                 crop,
@@ -724,8 +730,16 @@ struct LibRawMismatch {
     libraw: u16,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum ExportProcessor {
+    Auto,
+    Cpu,
+    Gpu,
+}
+
 #[derive(Debug, Clone)]
 struct DevelopArguments {
+    processor: ExportProcessor,
     exposure: f32,
     contrast: f32,
     highlights: f32,
@@ -992,6 +1006,60 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
     recipe
         .validate()
         .context("could not validate the development recipe")?;
+    if arguments.processor != ExportProcessor::Cpu {
+        let gpu_result = rohditor_gpu::GpuExportProcessor::headless().and_then(|mut gpu| {
+            let capabilities = gpu.capabilities().clone();
+            gpu.render(
+                &pipeline,
+                &frame,
+                &recipe,
+                RenderOptions {
+                    raw_crop_policy: arguments.crop.into(),
+                    demosaic: arguments.demosaic.into(),
+                    output_policy: arguments.output_gamut.into(),
+                },
+                export_settings.format.bit_depth(),
+                export_settings.dithering,
+                &rohditor_core::CancellationToken::new(),
+            )
+            .map(|result| (result, capabilities))
+        });
+        match gpu_result {
+            Ok((result, capabilities)) => {
+                let encode_started = Instant::now();
+                let report = export_image(output, &result.image, &frame.info, export_settings)
+                    .with_context(|| {
+                        format!("could not export developed image to {}", output.display())
+                    })?;
+                return write_stdout(&format!(
+                    "Developed {}x{} {}-bit sRGB {} to {} ({} bytes)\nColor processor: GPU, {} ({}, {} {})\nFull-quality CPU preparation: {:?}; GPU upload: {:?}; color and readback: {:?}; encoding: {:?}\nGPU allocation estimate: {} MiB; CPU buffer estimate: {} MiB; uploaded {} bytes; read back {} bytes in {} bands\nOutput gamut pixel counts: unavailable on GPU",
+                    report.width,
+                    report.height,
+                    report.bit_depth.bits(),
+                    export_settings.format.description(),
+                    output.display(),
+                    report.bytes_written,
+                    capabilities.adapter_name,
+                    capabilities.backend,
+                    capabilities.driver,
+                    capabilities.driver_info,
+                    result.preparation.total,
+                    result.upload_time,
+                    result.color_and_readback_time,
+                    encode_started.elapsed(),
+                    result.estimated_gpu_bytes / (1024 * 1024),
+                    result.estimated_cpu_bytes / (1024 * 1024),
+                    result.uploaded_bytes,
+                    result.readback_bytes,
+                    result.submissions,
+                ));
+            }
+            Err(error) if arguments.processor == ExportProcessor::Gpu => {
+                return Err(error).context("GPU export was required");
+            }
+            Err(error) => eprintln!("GPU export unavailable; using CPU: {error}"),
+        }
+    }
     let result = pipeline
         .render_export(
             &frame,
@@ -1962,6 +2030,7 @@ mod tests {
     #[test]
     fn develop_selects_export_format_and_parses_three_relative_wb_values() {
         let base = DevelopArguments {
+            processor: super::ExportProcessor::Cpu,
             exposure: 0.0,
             contrast: 0.0,
             highlights: 0.0,

@@ -37,12 +37,12 @@ enum RendererPreference {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 pub(crate) enum ProcessorPreference {
-    /// Prefer GPU previews with automatic CPU fallback if they are unavailable.
+    /// Prefer GPU previews and export color processing with CPU fallback.
     #[default]
     Auto,
-    /// Require the shared wgpu device for interactive preview processing.
+    /// Require GPU previews; prefer GPU export with recovery to CPU if needed.
     Gpu,
-    /// Use only the deterministic CPU preview processor.
+    /// Use the CPU reference for previews and exports.
     Cpu,
 }
 

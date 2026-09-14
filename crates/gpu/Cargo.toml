@@ -11,6 +11,7 @@ workspace = true
 [dependencies]
 bytemuck.workspace = true
 half.workspace = true
+pollster.workspace = true
 rohditor-color = { path = "../color" }
 rohditor-core = { path = "../core" }
 rohditor-demosaic = { path = "../demosaic" }
@@ -19,6 +20,3 @@ rohditor-image = { path = "../image" }
 rohditor-raw = { path = "../raw" }
 thiserror.workspace = true
 wgpu.workspace = true
-
-[dev-dependencies]
-pollster.workspace = true
