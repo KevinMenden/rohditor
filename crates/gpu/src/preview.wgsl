@@ -28,6 +28,12 @@ struct PreviewParameters {
     rec2020_to_srgb_row0: vec4<f32>,
     rec2020_to_srgb_row1: vec4<f32>,
     rec2020_to_srgb_row2: vec4<f32>,
+    hsl: array<vec4<f32>, 8>,
+    grading_shadows: vec4<f32>,
+    grading_midtones: vec4<f32>,
+    grading_highlights: vec4<f32>,
+    // HSL active, grading active, shared hue shift, f32 epsilon.
+    color_options: vec4<f32>,
 };
 
 @group(0) @binding(0)
@@ -301,7 +307,8 @@ fn develop_preview(@builtin(global_invocation_id) invocation: vec3<u32>) {
     let luminance = dot(toned, vec3<f32>(0.2627, 0.6780, 0.0593));
     let saturation = parameters.saturation
         * (1.0 + parameters.vibrance * (1.0 - color_saturation(toned, luminance)));
-    let adjusted = vec3<f32>(luminance) + saturation * (toned - vec3<f32>(luminance));
+    let saturated = vec3<f32>(luminance) + saturation * (toned - vec3<f32>(luminance));
+    let adjusted = apply_color_grading(apply_hsl_adjustments(saturated));
 
     // Retain the linear working result for future GPU stages while producing
     // the display texture in the same dispatch. This avoids an extra full-frame

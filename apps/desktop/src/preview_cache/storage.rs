@@ -629,6 +629,35 @@ mod tests {
     };
 
     #[test]
+    fn hsl_and_grading_invalidate_only_adjusted_output() {
+        let frame = frame();
+        let recipe = EditRecipe::default();
+        let options = PreviewOptions::default();
+        let original = PreviewCacheKeys::new(1, &frame, &recipe, options);
+        for index in 0..33 {
+            let mut changed = recipe.clone();
+            match index {
+                0..24 => {
+                    let band = &mut changed.color.hsl.channels[index / 3];
+                    match index % 3 {
+                        0 => band.hue = 0.5,
+                        1 => band.saturation = 0.5,
+                        _ => band.luminance = 0.5,
+                    }
+                }
+                24..27 => changed.color.grading.shadows[index - 24] = 0.5,
+                27..30 => changed.color.grading.midtones[index - 27] = 0.5,
+                _ => changed.color.grading.highlights[index - 30] = 0.5,
+            }
+            let keys = PreviewCacheKeys::new(1, &frame, &changed, options);
+            assert_eq!(keys.decoded, original.decoded);
+            assert_eq!(keys.reconstructed, original.reconstructed);
+            assert_eq!(keys.demosaiced, original.demosaiced);
+            assert_ne!(keys.adjusted, original.adjusted);
+        }
+    }
+
+    #[test]
     fn capture_settings_invalidate_reconstruction_and_downstream_but_retain_raw() {
         let frame = frame();
         let options = PreviewOptions::default();
