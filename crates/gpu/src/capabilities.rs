@@ -21,8 +21,8 @@ pub struct GpuCapabilities {
     pub max_texture_dimension_2d: u32,
     /// Maximum compute-workgroup count along one dimension.
     pub max_compute_workgroups_per_dimension: u32,
-    /// Whether the shared device permits the `Rgba16Float` source upload.
-    pub rgba16float_sampled: bool,
+    /// Whether the shared device permits the unfiltered `Rgba32Float` source.
+    pub rgba32float_sampled: bool,
     /// Whether the shared device permits the `Rgba16Float` working target.
     pub rgba16float_storage: bool,
     /// Whether the shared device permits the egui-compatible `Rgba8Unorm`
@@ -43,9 +43,10 @@ impl GpuCapabilities {
     ) -> Self {
         let info = adapter.get_info();
         let rgba16float = adapter.get_texture_format_features(wgpu::TextureFormat::Rgba16Float);
+        let rgba32float = adapter.get_texture_format_features(wgpu::TextureFormat::Rgba32Float);
         let rgba8unorm = adapter.get_texture_format_features(wgpu::TextureFormat::Rgba8Unorm);
         let limits = device.limits();
-        let rgba16float_sampled = rgba16float
+        let rgba32float_sampled = rgba32float
             .allowed_usages
             .contains(wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING);
         let rgba16float_storage = rgba16float
@@ -66,7 +67,7 @@ impl GpuCapabilities {
             target_format: format!("{target_format:?}"),
             max_texture_dimension_2d: limits.max_texture_dimension_2d,
             max_compute_workgroups_per_dimension: limits.max_compute_workgroups_per_dimension,
-            rgba16float_sampled,
+            rgba32float_sampled,
             rgba16float_storage,
             rgba8unorm_storage,
             timestamp_queries: device.features().contains(wgpu::Features::TIMESTAMP_QUERY),
@@ -86,8 +87,8 @@ impl GpuCapabilities {
     /// resources.
     pub fn validate_preview_support(&self) -> Result<(), GpuPreviewError> {
         let mut missing = Vec::new();
-        if !self.rgba16float_sampled {
-            missing.push("Rgba16Float upload/sample support");
+        if !self.rgba32float_sampled {
+            missing.push("Rgba32Float upload/sample support");
         }
         if !self.rgba16float_storage {
             missing.push("Rgba16Float storage-texture support");

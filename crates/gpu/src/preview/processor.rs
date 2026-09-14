@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
 use half::f16;
 use rohditor_color::{CHROMA_COMPRESS_EPSILON, CHROMA_COMPRESS_SEARCH_ITERATIONS};
 use rohditor_core::{
@@ -25,9 +26,9 @@ const WORKGROUP_EDGE: u32 = 16;
 // origin begins after 17 scalar words and is therefore aligned to word 18.
 // Output policy/version occupy words 20 and 21. Words 22 and 23 carry the
 // shared chroma-compression search contract; vec4 values begin at word 24.
-// That makes the uniform 208 bytes, including the padding required by WGSL
-// uniform layout rules.
-const PARAMETER_WORDS: usize = 52;
+// Words 52..84 hold eight HSL vec4s (controls + shared hue center), 84..96
+// hold grading vec4s, and 96..100 hold flags and shared numerical constants.
+const PARAMETER_WORDS: usize = 100;
 
 /// One uploaded, immutable camera-native preview source. White balance and the
 /// camera transform are applied by the downstream shader when the retained
@@ -177,12 +178,12 @@ impl GpuPreviewSource {
         }
     }
 
-    /// Estimated bytes occupied by the retained RGBA16Float source texture.
+    /// Estimated bytes occupied by the retained RGBA32Float source texture.
     #[must_use]
     pub fn estimated_bytes(&self) -> usize {
         (self.width as usize)
             .saturating_mul(self.height as usize)
-            .saturating_mul(8)
+            .saturating_mul(16)
     }
 }
 
@@ -192,7 +193,7 @@ impl GpuPreviewSource {
 /// the conversion before handing it to the UI thread for the single GPU upload.
 #[derive(Debug)]
 pub struct GpuPreviewUpload {
-    texels: Vec<u16>,
+    texels: Vec<f32>,
     width: u32,
     height: u32,
     source_orientation: Orientation,
@@ -208,7 +209,7 @@ pub struct GpuPreviewUpload {
 }
 
 impl GpuPreviewUpload {
-    /// Pack a typed, camera-converted linear Rec.2020 base as RGBA16Float texels.
+    /// Pack a typed, camera-converted linear Rec.2020 base as RGBA32Float texels.
     pub fn from_demosaiced_base(base: &DemosaicedBase) -> Result<Self, GpuPreviewError> {
         Self::from_demosaiced_base_cancellable(base, &CancellationToken::new())
     }
@@ -225,7 +226,7 @@ impl GpuPreviewUpload {
             });
         }
         let (width, height) = upload_dimensions(image.width(), image.height())?;
-        let texels = pack_rgba16f(
+        let texels = pack_rgba32f(
             image.data(),
             image.width(),
             image.height(),
@@ -331,7 +332,7 @@ impl GpuPreviewUpload {
             });
         }
         let (width, height) = upload_dimensions(image.width(), image.height())?;
-        let texels = pack_rgba16f(
+        let texels = pack_rgba32f(
             image.data(),
             image.width(),
             image.height(),
@@ -618,7 +619,14 @@ impl GpuPreviewProcessor {
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("rohditor GPU preview shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../preview.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                concat!(
+                    include_str!("../preview.wgsl"),
+                    "\n",
+                    include_str!("../color_adjustments.wgsl")
+                )
+                .into(),
+            ),
         });
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("rohditor GPU downstream preview"),
@@ -671,15 +679,11 @@ impl GpuPreviewProcessor {
     }
 
     /// Whether the current shader implements every adjustment in a recipe.
-    /// HSL and three-way grading remain CPU stages until their GPU formulas
-    /// have a defined parity contract.
+    /// All current downstream adjustments are implemented. Source provenance
+    /// and device capabilities are checked separately when rendering.
     #[must_use]
-    pub fn supports_recipe(recipe: &EditRecipe) -> bool {
-        recipe.color.hsl.channels.iter().all(|channel| {
-            channel.hue == 0.0 && channel.saturation == 0.0 && channel.luminance == 0.0
-        }) && recipe.color.grading.shadows == [0.0; 3]
-            && recipe.color.grading.midtones == [0.0; 3]
-            && recipe.color.grading.highlights == [0.0; 3]
+    pub fn supports_recipe(_recipe: &EditRecipe) -> bool {
+        true
     }
 
     /// Poll callbacks for non-blocking GPU work, including asynchronous
@@ -718,11 +722,11 @@ impl GpuPreviewProcessor {
             .validate_dimensions(source_width, source_height)?;
         let bytes_per_row =
             width
-                .checked_mul(8)
+                .checked_mul(16)
                 .ok_or_else(|| GpuPreviewError::InvalidDimensions {
                     width: source_width,
                     height: source_height,
-                    reason: "RGBA16Float row byte count overflowed".to_owned(),
+                    reason: "RGBA32Float row byte count overflowed".to_owned(),
                 })?;
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("rohditor camera-native preview source"),
@@ -730,7 +734,7 @@ impl GpuPreviewProcessor {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba16Float,
+            format: wgpu::TextureFormat::Rgba32Float,
             usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
@@ -807,11 +811,6 @@ impl GpuPreviewProcessor {
             .map_err(|error| GpuPreviewError::InvalidInput {
                 reason: error.to_string(),
             })?;
-        if !Self::supports_recipe(recipe) {
-            return Err(GpuPreviewError::UnsupportedEdits {
-                reason: "HSL and three-way color grading are CPU-only".to_owned(),
-            });
-        }
         if !highlight_adjustments_match(source.highlight_adjustments(), recipe.raw.highlights) {
             return Err(GpuPreviewError::BaseMismatch {
                 reason: "the GPU source was prepared with different RAW highlight settings"
@@ -1073,7 +1072,13 @@ impl GpuPreviewProcessor {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba16Float,
-            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | if cfg!(test) {
+                    wgpu::TextureUsages::COPY_SRC
+                } else {
+                    wgpu::TextureUsages::empty()
+                },
             view_formats: &[],
         });
         let display_texture = self.device.create_texture(&wgpu::TextureDescriptor {
@@ -1167,12 +1172,12 @@ fn upload_dimensions(
     let width = u32::try_from(source_width).map_err(|_| GpuPreviewError::InvalidDimensions {
         width: source_width,
         height: source_height,
-        reason: "width does not fit into the RGBA16Float upload extent".to_owned(),
+        reason: "width does not fit into the RGBA32Float upload extent".to_owned(),
     })?;
     let height = u32::try_from(source_height).map_err(|_| GpuPreviewError::InvalidDimensions {
         width: source_width,
         height: source_height,
-        reason: "height does not fit into the RGBA16Float upload extent".to_owned(),
+        reason: "height does not fit into the RGBA32Float upload extent".to_owned(),
     })?;
     if width == 0 || height == 0 {
         return Err(GpuPreviewError::InvalidDimensions {
@@ -1184,13 +1189,13 @@ fn upload_dimensions(
     Ok((width, height))
 }
 
-fn pack_rgba16f(
+fn pack_rgba32f(
     data: &[f32],
     width: usize,
     height: usize,
     row_stride: usize,
     cancellation: &CancellationToken,
-) -> Result<Vec<u16>, GpuPreviewError> {
+) -> Result<Vec<f32>, GpuPreviewError> {
     let width_samples = width
         .checked_mul(3)
         .ok_or_else(|| GpuPreviewError::InvalidDimensions {
@@ -1204,7 +1209,15 @@ fn pack_rgba16f(
         .ok_or_else(|| GpuPreviewError::InvalidDimensions {
             width,
             height,
-            reason: "RGBA16Float upload allocation overflowed".to_owned(),
+            reason: "RGBA32Float upload allocation overflowed".to_owned(),
+        })?;
+    texels
+        .checked_mul(size_of::<f32>())
+        .filter(|bytes| *bytes <= isize::MAX as usize)
+        .ok_or_else(|| GpuPreviewError::InvalidDimensions {
+            width,
+            height,
+            reason: "RGBA32Float upload byte size overflowed".to_owned(),
         })?;
     let mut packed = Vec::with_capacity(texels);
     for row in data.chunks(row_stride).take(height) {
@@ -1217,23 +1230,17 @@ fn pack_rgba16f(
             });
         }
         for pixel in row[..width_samples].as_chunks::<3>().0 {
-            let mut encoded = [0_u16; 4];
+            let mut encoded = [0.0_f32; 4];
             for (channel, value) in pixel.iter().copied().enumerate() {
                 if !value.is_finite() {
                     return Err(GpuPreviewError::InvalidInput {
                         reason: "linear base contains non-finite camera-native samples".to_owned(),
                     });
                 }
-                let converted = f16::from_f32(value);
-                if !converted.is_finite() {
-                    return Err(GpuPreviewError::InvalidInput {
-                        reason: "linear base contains samples outside the RGBA16Float range"
-                            .to_owned(),
-                    });
-                }
-                encoded[channel] = converted.to_bits();
+                // Half-float rounding can erase near-neutral hue before HSL.
+                encoded[channel] = value;
             }
-            encoded[3] = f16::ONE.to_bits();
+            encoded[3] = 1.0;
             packed.extend(encoded);
         }
     }
@@ -1290,6 +1297,46 @@ fn build_parameters(
     words[26] = white_balance_gains.blue.to_bits();
     write_matrix_rows(&mut words[28..40], camera_to_linear_rec2020);
     write_matrix_rows(&mut words[40..52], rec2020_to_srgb);
+    for (index, channel) in recipe.color.hsl.channels.iter().enumerate() {
+        let offset = 52 + index * 4;
+        words[offset..offset + 4].copy_from_slice(
+            &[
+                channel.hue,
+                channel.saturation,
+                channel.luminance,
+                rohditor_core::HSL_CHANNEL_CENTERS[index],
+            ]
+            .map(f32::to_bits),
+        );
+    }
+    let grading = &recipe.color.grading;
+    for (index, channels) in [grading.shadows, grading.midtones, grading.highlights]
+        .into_iter()
+        .enumerate()
+    {
+        let offset = 84 + index * 4;
+        words[offset..offset + 3].copy_from_slice(&channels.map(f32::to_bits));
+    }
+    words[96] =
+        if recipe.color.hsl.channels.iter().any(|channel| {
+            channel.hue != 0.0 || channel.saturation != 0.0 || channel.luminance != 0.0
+        }) {
+            1.0_f32
+        } else {
+            0.0_f32
+        }
+        .to_bits();
+    words[97] = if grading.shadows != [0.0; 3]
+        || grading.midtones != [0.0; 3]
+        || grading.highlights != [0.0; 3]
+    {
+        1.0_f32
+    } else {
+        0.0_f32
+    }
+    .to_bits();
+    words[98] = rohditor_core::HSL_HUE_SHIFT_PER_FULL_VALUE.to_bits();
+    words[99] = f32::EPSILON.to_bits();
     words
 }
 
@@ -1329,6 +1376,10 @@ fn orientation_code(orientation: Orientation) -> u32 {
         Orientation::Rotate270 => 7,
     }
 }
+
+#[cfg(test)]
+#[path = "color_tests.rs"]
+mod color_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1381,7 +1432,7 @@ mod tests {
         );
         assert_eq!(parameters[22], CHROMA_COMPRESS_SEARCH_ITERATIONS);
         assert_eq!(f32::from_bits(parameters[23]), CHROMA_COMPRESS_EPSILON);
-        assert_eq!(parameters.len(), 52);
+        assert_eq!(parameters.len(), PARAMETER_WORDS);
         assert_eq!(parameters[18..20], [0, 0]);
         assert_eq!(f32::from_bits(parameters[24]), 1.0);
         assert_eq!(f32::from_bits(parameters[25]), 1.0);
@@ -1428,34 +1479,36 @@ mod tests {
             99.0, 99.0,
         ];
         let packed =
-            pack_rgba16f(&data, 2, 2, 9, &CancellationToken::new()).expect("valid padded rows");
+            pack_rgba32f(&data, 2, 2, 9, &CancellationToken::new()).expect("valid padded rows");
         assert_eq!(packed.len(), 16);
-        assert_eq!(f16::from_bits(packed[0]).to_f32(), 0.0);
-        assert_eq!(f16::from_bits(packed[4]).to_f32(), 0.25);
-        assert!((f16::from_bits(packed[8]).to_f32() - 0.1).abs() < 0.001);
-        assert_eq!(f16::from_bits(packed[15]), f16::ONE);
+        assert_eq!(packed[0], 0.0);
+        assert_eq!(packed[4], 0.25);
+        assert_eq!(packed[8], 0.1);
+        assert_eq!(packed[15], 1.0);
     }
 
     #[test]
-    fn rejects_source_values_that_cannot_be_represented_by_rgba16float() {
+    fn source_upload_rejects_non_finite_values_and_preserves_near_neutral_hue() {
         let non_finite = [f32::NAN, 0.5, 0.5];
-        assert!(pack_rgba16f(&non_finite, 1, 1, 3, &CancellationToken::new()).is_err());
-
-        let out_of_range = [f32::MAX, 0.5, 0.5];
-        assert!(pack_rgba16f(&out_of_range, 1, 1, 3, &CancellationToken::new()).is_err());
+        assert!(pack_rgba32f(&non_finite, 1, 1, 3, &CancellationToken::new()).is_err());
+        let near_neutral = [0.5001, 0.5, 0.5];
+        let packed = pack_rgba32f(&near_neutral, 1, 1, 3, &CancellationToken::new())
+            .expect("finite source should pack without quantization");
+        assert_eq!(&packed[..3], &near_neutral);
+        assert_ne!(packed[0], packed[1]);
     }
 
     #[test]
-    fn gpu_capability_predicate_rejects_edits_the_shader_does_not_implement() {
+    fn gpu_capability_predicate_supports_hsl_and_grading() {
         let mut recipe = EditRecipe::default();
         assert!(GpuPreviewProcessor::supports_recipe(&recipe));
 
         recipe.color.hsl.channels[0].hue = 0.1;
-        assert!(!GpuPreviewProcessor::supports_recipe(&recipe));
+        assert!(GpuPreviewProcessor::supports_recipe(&recipe));
 
         recipe = EditRecipe::default();
         recipe.color.grading.highlights[2] = 0.1;
-        assert!(!GpuPreviewProcessor::supports_recipe(&recipe));
+        assert!(GpuPreviewProcessor::supports_recipe(&recipe));
     }
 
     #[test]
@@ -1699,9 +1752,10 @@ mod tests {
                 .expect("synthetic reconstruction should develop");
             let source = processor
                 .upload_prepared(
-                    GpuPreviewUpload::from_reconstructed_preview(
+                    GpuPreviewUpload::from_reconstructed_preview_for_recipe(
                         &reconstructed,
-                        WhiteBalance::AsShot,
+                        &base_recipe,
+                        &CancellationToken::new(),
                     )
                     .expect("camera-native source upload should work"),
                 )
@@ -2192,7 +2246,7 @@ mod tests {
     /// The reference RADV stack is reliable for these tests one device at a
     /// time, but concurrent device creation can destabilize the driver. Keep
     /// this guard local to opt-in hardware tests; production preview work is
-    fn gpu_test_guard() -> MutexGuard<'static, ()> {
+    pub(super) fn gpu_test_guard() -> MutexGuard<'static, ()> {
         static GPU_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         GPU_TEST_LOCK
             .get_or_init(|| Mutex::new(()))
@@ -2200,7 +2254,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn gpu_test_processor() -> Option<GpuPreviewProcessor> {
+    pub(super) fn gpu_test_processor() -> Option<GpuPreviewProcessor> {
         gpu_test_processor_with_hardware_requirement(true)
     }
 
@@ -2379,7 +2433,7 @@ mod tests {
         stats
     }
 
-    fn gpu_control_matrix() -> Vec<(&'static str, EditRecipe)> {
+    pub(super) fn gpu_control_matrix() -> Vec<(&'static str, EditRecipe)> {
         let mut controls = vec![
             ("standard", standard_dynamic_recipe()),
             ("neutral", neutral_recipe()),
@@ -2460,11 +2514,27 @@ mod tests {
             green: 1.0,
             blue: 1.16,
         };
+        recipe.color.hsl.channels[0].hue = 0.3;
+        recipe.color.hsl.channels[3].saturation = -0.4;
+        recipe.color.hsl.channels[5].luminance = 0.2;
+        recipe.color.grading.shadows = [0.3, -0.2, 0.1];
+        recipe.color.grading.midtones = [-0.2, 0.1, 0.3];
+        recipe.color.grading.highlights = [0.2, 0.1, -0.3];
         controls.push(("combined_supported", recipe));
+        let mut recipe = neutral_recipe();
+        recipe.color.hsl.channels[0].hue = -0.4;
+        recipe.color.hsl.channels[3].saturation = 0.5;
+        recipe.color.hsl.channels[5].luminance = -0.3;
+        controls.push(("hsl", recipe));
+        let mut recipe = neutral_recipe();
+        recipe.color.grading.shadows = [0.5, -0.5, 0.25];
+        recipe.color.grading.midtones = [-0.4, 0.3, 0.2];
+        recipe.color.grading.highlights = [0.2, -0.3, 0.4];
+        controls.push(("grading", recipe));
         controls
     }
 
-    fn neutral_recipe() -> EditRecipe {
+    pub(super) fn neutral_recipe() -> EditRecipe {
         let mut recipe = standard_dynamic_recipe();
         recipe.rendering.profile = RenderingProfileSelection::NEUTRAL;
         recipe
@@ -2563,7 +2633,7 @@ mod tests {
         }
     }
 
-    fn synthetic_frame(orientation: Orientation) -> RawFrame {
+    pub(super) fn synthetic_frame(orientation: Orientation) -> RawFrame {
         let width = 8;
         let height = 6;
         let mosaic = (0..width * height)

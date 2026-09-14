@@ -3,8 +3,9 @@
 //! This crate owns only interactive preview work. RAW decoding, normalization,
 //! demosaicing, and calibration remain in `rohditor-core`'s CPU reference path.
 //! The desktop path uploads one camera-native
-//! [`rohditor_core::ReconstructedPreview`] and applies white balance, the
-//! camera transform, exposure, contrast, saturation, orientation, and the
+//! [`rohditor_core::ReconstructedPreview`] without source float quantization and
+//! applies white balance, the camera transform, exposure, contrast, saturation,
+//! HSL, three-way grading, orientation, and the
 //! explicit sRGB output transform as GPU parameters. A legacy converted
 //! [`rohditor_core::DemosaicedBase`] upload remains available for lower-level
 //! callers. Normal interaction never reads the display result back to CPU

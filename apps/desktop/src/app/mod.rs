@@ -695,16 +695,13 @@ impl RohditorApp {
             }
             return;
         }
-        // Keep the last GPU frame installed while the first CPU-only color
+        // Keep the last GPU frame installed while a CPU fallback
         // preview is rendered. Releasing it here leaves the viewport without
         // a texture for one or more frames and produces a visible black flash.
         // The worker-event handoff releases it immediately before installing
         // the completed CPU texture in the same UI update.
         if let Some(document) = self.document.as_mut() {
-            document.preview_status = Some((
-                ticket.revision,
-                "Queued CPU preview for the selected color tools".to_owned(),
-            ));
+            document.preview_status = Some((ticket.revision, "Queued CPU preview".to_owned()));
         }
         match self.coordinator.preview(ticket, frame, recipe, options) {
             Ok(()) => {
@@ -3711,6 +3708,60 @@ mod tests {
     }
 
     #[test]
+    fn hsl_and_grading_interactions_remain_gpu_supported_through_undo_and_reset() {
+        for target in [
+            AdjustmentTarget::HslHue(0),
+            AdjustmentTarget::HslSaturation(3),
+            AdjustmentTarget::HslLuminance(7),
+            AdjustmentTarget::GradingShadows(0),
+            AdjustmentTarget::GradingMidtones(1),
+            AdjustmentTarget::GradingHighlights(2),
+        ] {
+            let mut edits = EditSession::default();
+            let original = edits.recipe().clone();
+            for (value, start, stop) in
+                [(0.3, true, false), (0.6, false, false), (0.6, false, true)]
+            {
+                apply_adjustment_interaction(
+                    &mut edits,
+                    AdjustmentInteraction {
+                        target,
+                        value,
+                        changed: !stop,
+                        drag_started: start,
+                        dragged: !stop,
+                        drag_stopped: stop,
+                        reset: false,
+                    },
+                    None,
+                );
+                assert!(gpu_supports_recipe(edits.recipe()));
+            }
+            assert_ne!(edits.recipe(), &original);
+            assert!(edits.undo());
+            assert_eq!(edits.recipe(), &original);
+            assert!(gpu_supports_recipe(edits.recipe()));
+            assert!(edits.redo());
+            assert!(gpu_supports_recipe(edits.recipe()));
+            apply_adjustment_interaction(
+                &mut edits,
+                AdjustmentInteraction {
+                    target,
+                    value: 0.0,
+                    changed: true,
+                    drag_started: false,
+                    dragged: false,
+                    drag_stopped: false,
+                    reset: true,
+                },
+                None,
+            );
+            assert_eq!(edits.recipe(), &original);
+            assert!(gpu_supports_recipe(edits.recipe()));
+        }
+    }
+
+    #[test]
     fn capture_slider_uses_undo_redo_and_reset() {
         let mut edits = EditSession::default();
         for (value, start, stop) in [(0.7, true, false), (0.9, false, false), (0.9, false, true)] {
@@ -4069,7 +4120,7 @@ mod tests {
         recipe.color.hsl.channels[0].saturation = 0.2;
         assert!(document.edits.set_discrete(recipe));
         assert!(!gpu_upload_matches_document(&document, ticket));
-        assert!(!gpu_upload_matches_document(&document, document.ticket()));
+        assert!(gpu_upload_matches_document(&document, document.ticket()));
 
         let current = document.ticket();
         let mut recipe = document.edits.recipe().clone();
