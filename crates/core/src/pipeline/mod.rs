@@ -10,6 +10,7 @@ mod orchestration;
 mod prepare;
 mod render;
 mod types;
+pub use orchestration::{CapturedCameraSource, DemosaicedCameraSource};
 
 pub use memory::{CPU_WORKING_SET_LIMIT_BYTES, MemoryEstimate};
 pub use prepare::{CpuPreviewWorkspace, DemosaicedBase, ReconstructedPreview};

@@ -85,6 +85,7 @@ pub(crate) struct WorkerPreviewDiagnostics {
     pub timings: StageTimings,
     pub highlight_diagnostics: HighlightDiagnostics,
     pub capture_sharpening: Option<rohditor_core::CaptureSharpeningProvenance>,
+    pub capture_cpu_recovery: bool,
     pub output_gamut_diagnostics: Option<GamutMappingDiagnostics>,
     pub memory: MemoryEstimate,
     pub cache_resident_bytes: usize,
@@ -262,7 +263,14 @@ pub(crate) struct WhiteBalanceSampleJob {
 
 #[derive(Debug)]
 pub(crate) enum WorkerRequest {
-    Open { document_id: u64, path: PathBuf },
+    CaptureDevice {
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+    },
+    Open {
+        document_id: u64,
+        path: PathBuf,
+    },
     PreviewAvailable,
     SampleWhiteBalance(Box<WhiteBalanceSampleJob>),
     Export(Box<ExportJob>),
@@ -278,6 +286,13 @@ pub(crate) struct RenderCoordinator {
 }
 
 impl RenderCoordinator {
+    pub(crate) fn configure_capture_device(
+        &self,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+    ) -> Result<(), String> {
+        self.send(WorkerRequest::CaptureDevice { device, queue })
+    }
     pub(crate) fn new(context: egui::Context) -> Result<Self, String> {
         Self::new_with_decoder(context, Arc::new(RawlerDecoder::default()))
     }
@@ -356,6 +371,7 @@ impl RenderCoordinator {
         frame: Arc<RawFrame>,
         recipe: EditRecipe,
         options: PreviewOptions,
+        prefer_gpu: bool,
     ) -> Result<(), String> {
         self.previews.queue(
             PreviewJob {
@@ -363,7 +379,11 @@ impl RenderCoordinator {
                 frame,
                 recipe,
                 options,
-                backend: PreviewBackend::Cpu,
+                backend: if prefer_gpu {
+                    PreviewBackend::GpuBase
+                } else {
+                    PreviewBackend::Cpu
+                },
                 resolution: PreviewResolution::SourceScale,
             },
             &self.requests,
@@ -525,6 +545,9 @@ fn worker_loop(
         }
 
         match request {
+            WorkerRequest::CaptureDevice { device, queue } => {
+                preview_cache.configure_capture_device(device, queue)
+            }
             WorkerRequest::Open { document_id, path } => {
                 abandoned.remove(&document_id);
                 process_open(
@@ -627,7 +650,7 @@ impl WorkerRequest {
             }
             Self::Export(job) => Some(job.document_id),
             Self::SampleWhiteBalance(job) => Some(job.ticket.document_id),
-            Self::PreviewAvailable | Self::Shutdown => None,
+            Self::PreviewAvailable | Self::Shutdown | Self::CaptureDevice { .. } => None,
         }
     }
 }
@@ -920,19 +943,27 @@ fn process_source_scale_preview(
         revision = job.ticket.revision
     );
     let _guard = span.enter();
-    preview_cache.clear_document(job.ticket.document_id);
+    if job.backend != PreviewBackend::GpuBase {
+        preview_cache.clear_document(job.ticket.document_id);
+    }
     send_preview_progress(
         sender,
         context,
         job.ticket,
         "Developing full-resolution 1:1 inspection",
     );
-    match pipeline.render_source_scale_preview_cancellable(
-        &job.frame,
-        &job.recipe,
-        options,
-        cancellation,
-    ) {
+    let result =
+        if job.backend == PreviewBackend::GpuBase && job.recipe.capture_sharpening.is_active() {
+            render_gpu_capture_source_scale(&job, pipeline, preview_cache, cancellation)
+        } else {
+            pipeline.render_source_scale_preview_cancellable(
+                &job.frame,
+                &job.recipe,
+                options,
+                cancellation,
+            )
+        };
+    match result {
         Ok(result) => {
             let (optics_applied, optics_fallback, optics_scale) =
                 optics_metrics(result.optics_provenance.as_ref());
@@ -946,10 +977,11 @@ fn process_source_scale_preview(
                 },
                 timings: result.timings,
                 highlight_diagnostics: result.highlight_diagnostics,
+                capture_cpu_recovery: preview_cache.capture_recovery().is_some(),
                 capture_sharpening: result.capture_sharpening,
                 output_gamut_diagnostics: Some(result.output_gamut_diagnostics),
                 memory: result.memory,
-                cache_resident_bytes: 0,
+                cache_resident_bytes: preview_cache.resident_bytes(),
                 workspace_reused: false,
                 optics_applied,
                 optics_used_infinity_distance_fallback: optics_fallback,
@@ -1002,6 +1034,57 @@ fn process_source_scale_preview(
             PreviewCompletion::Failed
         }
     }
+}
+
+fn render_gpu_capture_source_scale(
+    job: &PreviewJob,
+    pipeline: &CpuPipeline,
+    preview_cache: &mut PreviewCache,
+    cancellation: &CancellationToken,
+) -> Result<rohditor_core::RenderResult, PipelineError> {
+    let options = PreviewOptions {
+        max_long_edge: job.frame.info.width.max(job.frame.info.height),
+        ..job.options
+    };
+    let keys = PreviewCacheKeys::new_for_pipeline(
+        job.ticket.document_id,
+        &job.frame,
+        &job.recipe,
+        options,
+        pipeline,
+    );
+    preview_cache.prepare(&keys, &job.frame);
+    let reconstructed = preview_cache.prepare_spatial(
+        pipeline,
+        &job.frame,
+        &job.recipe,
+        options,
+        &keys,
+        true,
+        cancellation,
+    )?;
+    let preparation = reconstructed.timings();
+    let base = pipeline.prepare_preview_base_from_reconstruction_cancellable(
+        &reconstructed,
+        &job.recipe,
+        cancellation,
+    )?;
+    drop(reconstructed);
+    let mut result = pipeline.render_preview_from_base_reusing_cancellable(
+        &base,
+        &job.recipe,
+        options.render.output_policy,
+        &mut rohditor_core::CpuPreviewWorkspace::default(),
+        cancellation,
+    )?;
+    result.timings.normalization = preparation.normalization;
+    result.timings.highlight_processing = preparation.highlight_processing;
+    result.timings.highlight_clipping = preparation.highlight_clipping;
+    result.timings.demosaic = preparation.demosaic;
+    result.timings.capture_sharpening = preparation.capture_sharpening;
+    result.timings.optics = preparation.optics;
+    result.timings.total += preparation.total;
+    Ok(result)
 }
 
 fn process_gpu_base(
@@ -1114,6 +1197,7 @@ fn process_gpu_base(
         cache_hits,
         timings,
         highlight_diagnostics: reconstructed.highlight_diagnostics(),
+        capture_cpu_recovery: preview_cache.capture_recovery().is_some(),
         capture_sharpening: reconstructed.capture_sharpening(),
         output_gamut_diagnostics: None,
         memory,
@@ -1174,6 +1258,7 @@ fn develop_preview(
                 cache_hits,
                 timings,
                 highlight_diagnostics,
+                capture_cpu_recovery: false,
                 capture_sharpening: preview_cache
                     .demosaiced(keys)
                     .and_then(|base| base.capture_sharpening()),
@@ -1229,6 +1314,7 @@ fn develop_preview(
         cache_hits,
         timings,
         highlight_diagnostics,
+        capture_cpu_recovery: false,
         capture_sharpening: result.capture_sharpening,
         output_gamut_diagnostics: Some(result.output_gamut_diagnostics),
         memory,
@@ -1286,10 +1372,13 @@ fn ensure_preview_reconstruction(
 ) -> Result<StageTimings, PipelineError> {
     let mut timings = StageTimings::default();
     if !cache_hits.reconstructed {
-        let reconstructed = pipeline.prepare_preview_reconstruction_cancellable(
+        let reconstructed = preview_cache.prepare_spatial(
+            pipeline,
             &job.frame,
             &job.recipe,
             options,
+            keys,
+            job.backend == PreviewBackend::GpuBase,
             cancellation,
         )?;
         add_stage_timings(&mut timings, reconstructed.timings());

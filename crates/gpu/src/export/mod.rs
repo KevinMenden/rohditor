@@ -20,6 +20,8 @@ const MEMORY_BUDGET: u64 = 768 * 1024 * 1024;
 
 /// Completed export pixels and separately measured preparation/GPU costs.
 pub struct GpuExportResult {
+    pub combined_gpu_reservations: crate::GpuMemoryReservations,
+    pub capture: crate::CaptureMetrics,
     pub image: ExportImage,
     pub preparation: rohditor_core::StageTimings,
     pub upload_time: Duration,
@@ -36,6 +38,7 @@ pub struct GpuExportResult {
 /// A presentation-independent export processor. Use a dedicated instance per
 /// worker; mutable rendering prevents concurrent writes to shared uniforms.
 pub struct GpuExportProcessor {
+    capture: Option<crate::GpuCaptureProcessor>,
     processor: GpuPreviewProcessor,
     pipeline: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
@@ -73,6 +76,7 @@ impl GpuExportProcessor {
         });
         let layout = pipeline.get_bind_group_layout(0);
         Ok(Self {
+            capture: None,
             processor,
             pipeline,
             layout,
@@ -110,6 +114,38 @@ impl GpuExportProcessor {
         self.processor.capabilities()
     }
 
+    /// Shared spatial executor on this worker's supplied device. Scratch is
+    /// released before returning; no color source is allocated here.
+    pub fn capture_source(
+        &mut self,
+        source: rohditor_core::DemosaicedCameraSource,
+        cancellation: &CancellationToken,
+    ) -> Result<(rohditor_core::CapturedCameraSource, crate::CaptureMetrics), GpuPreviewError> {
+        if !source
+            .capture_contract()
+            .map_err(input_error)?
+            .settings()
+            .is_active()
+        {
+            return Ok((
+                source.capture_cpu(cancellation).map_err(input_error)?,
+                crate::CaptureMetrics::default(),
+            ));
+        }
+        if self.capture.is_none() {
+            self.capture = Some(crate::GpuCaptureProcessor::new(
+                &self.processor.device,
+                &self.processor.queue,
+            )?);
+        }
+        let processor = self
+            .capture
+            .as_mut()
+            .expect("capture processor initialized");
+        processor.set_remaining_budget(MEMORY_BUDGET - 64 * 1024);
+        processor.capture_source(source, cancellation)
+    }
+
     /// CPU RAW preparation remains full resolution and observes cancellation.
     #[allow(clippy::too_many_arguments)]
     pub fn render(
@@ -128,23 +164,49 @@ impl GpuExportProcessor {
             rohditor_core::raw_crop_dimensions(&frame.info, options.raw_crop_policy)
                 .map_err(input_error)?;
         self.validate_memory(width, height)?;
-        let prepared = cpu
-            .prepare_export_source(frame, recipe, options, cancellation)
-            .map_err(|error| {
-                if cancellation.is_cancelled() {
-                    GpuPreviewError::Cancelled
-                } else {
-                    input_error(error)
-                }
-            })?;
-        self.render_prepared(
+        let (prepared, capture) = if recipe.capture_sharpening.is_active() {
+            let source = cpu
+                .prepare_camera_source(
+                    frame,
+                    recipe,
+                    rohditor_core::PreviewOptions {
+                        render: options,
+                        max_long_edge: frame.info.width.max(frame.info.height),
+                    },
+                    cancellation,
+                )
+                .map_err(pipeline_error)?;
+            let (captured, metrics) = self.capture_source(source, cancellation)?;
+            (
+                cpu.complete_camera_source(captured, cancellation)
+                    .map_err(pipeline_error)?,
+                metrics,
+            )
+        } else {
+            let prepared = cpu
+                .prepare_export_source(frame, recipe, options, cancellation)
+                .map_err(|error| {
+                    if cancellation.is_cancelled() {
+                        GpuPreviewError::Cancelled
+                    } else {
+                        input_error(error)
+                    }
+                })?;
+            (prepared, crate::CaptureMetrics::default())
+        };
+        let mut result = self.render_prepared(
             &prepared,
             recipe,
             options.output_policy,
             bit_depth,
             dithering,
             cancellation,
-        )
+        )?;
+        result.estimated_gpu_bytes = result
+            .estimated_gpu_bytes
+            .max(capture.estimated_gpu_bytes + 64 * 1024);
+        result.capture = capture;
+        Ok(result)
     }
 
     /// Export an already prepared camera source, including matched-resolution
@@ -223,6 +285,9 @@ impl GpuExportProcessor {
         // source RGB, both packed upload and staging, full integer output, and
         // a mapped band, even though their lifetimes do not all overlap.
         let pixels = prepared.image().width() as u64 * prepared.image().height() as u64;
+        // Source/upload and processor constants have their own reservations.
+        let _reservation =
+            crate::memory::Reservation::new(estimated_gpu_bytes - pixels * 32 - 64 * 1024);
         let estimated_cpu_bytes = (prepared.decoded_raw_bytes() as u64
             + pixels * (12 + 32 + 3 * u64::from(depth.bits() / 8))
             + prepared.image().width().max(prepared.image().height()) as u64
@@ -344,6 +409,8 @@ impl GpuExportProcessor {
             &bindings,
         )?;
         Ok(GpuExportResult {
+            combined_gpu_reservations: crate::gpu_memory_reservations(),
+            capture: crate::CaptureMetrics::default(),
             image,
             preparation: prepared.timings(),
             upload_time,
@@ -360,6 +427,14 @@ impl GpuExportProcessor {
 fn input_error(error: impl std::fmt::Display) -> GpuPreviewError {
     GpuPreviewError::InvalidInput {
         reason: error.to_string(),
+    }
+}
+
+fn pipeline_error(error: rohditor_core::PipelineError) -> GpuPreviewError {
+    if matches!(error, rohditor_core::PipelineError::Cancelled) {
+        GpuPreviewError::Cancelled
+    } else {
+        input_error(error)
     }
 }
 

@@ -41,6 +41,8 @@ const PARAMETER_WORDS: usize = 100;
 /// source's RAW-stage semantics allow it; clipped sources pin white balance to
 /// the selection used to derive their channel ceilings.
 pub struct GpuPreviewSource {
+    // Conservatively retain the upload staging reservation with the source.
+    _memory: crate::memory::Reservation,
     // A texture view does not make the source's ownership explicit. Keep the
     // texture alongside it so the source remains valid for every later edit.
     _texture: wgpu::Texture,
@@ -390,6 +392,7 @@ impl GpuPreviewUpload {
 
 /// GPU textures produced by one downstream preview dispatch.
 pub struct GpuPreviewFrame {
+    _memory: crate::memory::Reservation,
     // Keep the linear texture alive for future stages even though the current
     // fused dispatch does not read it back in a second pass.
     _working_texture: wgpu::Texture,
@@ -529,6 +532,7 @@ impl GpuDisplayReadbackPending {
 /// Downstream GPU preview processor using the device and queue created by
 /// eframe. It intentionally never creates a second adapter or device.
 pub struct GpuPreviewProcessor {
+    _memory: crate::memory::Reservation,
     device: wgpu::Device,
     queue: wgpu::Queue,
     capabilities: GpuCapabilities,
@@ -670,6 +674,7 @@ impl GpuPreviewProcessor {
 
         Ok(Self {
             device: device.clone(),
+            _memory: crate::memory::Reservation::new(64 * 1024),
             queue: queue.clone(),
             capabilities,
             pipeline,
@@ -763,6 +768,7 @@ impl GpuPreviewProcessor {
         );
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         Ok(GpuPreviewSource {
+            _memory: crate::memory::Reservation::new(u64::from(width) * u64::from(height) * 32),
             _texture: texture,
             view,
             width,
@@ -1104,6 +1110,10 @@ impl GpuPreviewProcessor {
         let working_view = working_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let display_view = display_texture.create_view(&wgpu::TextureViewDescriptor::default());
         GpuPreviewFrame {
+            _memory: crate::memory::Reservation::new(
+                u64::from(source_dimensions.0) * u64::from(source_dimensions.1) * 8
+                    + u64::from(output_dimensions.0) * u64::from(output_dimensions.1) * 4,
+            ),
             _working_texture: working_texture,
             working_view,
             display_texture,

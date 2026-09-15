@@ -449,6 +449,14 @@ impl RohditorApp {
         );
         let coordinator =
             RenderCoordinator::new(context.egui_ctx.clone()).map_err(std::io::Error::other)?;
+        if let Some(runtime) = &gpu {
+            coordinator
+                .configure_capture_device(
+                    runtime.render_state.device.clone(),
+                    runtime.render_state.queue.clone(),
+                )
+                .map_err(std::io::Error::other)?;
+        }
         let catalog_coordinator =
             CatalogCoordinator::new(context.egui_ctx.clone()).map_err(std::io::Error::other)?;
         // Restore the last browsed folder when the app was not given a file.
@@ -654,10 +662,13 @@ impl RohditorApp {
                     "Queued full-resolution 1:1 inspection".to_owned(),
                 ));
             }
-            if let Err(error) = self
-                .coordinator
-                .source_scale_preview(ticket, frame, recipe, options)
-                && let Some(document) = self.document.as_mut()
+            if let Err(error) = self.coordinator.source_scale_preview(
+                ticket,
+                frame,
+                recipe,
+                options,
+                self.gpu.is_some(),
+            ) && let Some(document) = self.document.as_mut()
             {
                 document.preview_status = None;
                 document.error = Some(error);
@@ -1147,6 +1158,7 @@ impl RohditorApp {
                     cache_hits: PreviewCacheHits::default(),
                     timings: StageTimings::default(),
                     highlight_diagnostics: HighlightDiagnostics::Off,
+                    capture_cpu_recovery: false,
                     capture_sharpening: None,
                     output_gamut_diagnostics: None,
                     memory: MemoryEstimate::default(),
@@ -1453,6 +1465,14 @@ impl RohditorApp {
         if let Some(runtime) = &self.gpu {
             let capabilities = runtime.processor.capabilities();
             let hardware = format!("{} · {}", capabilities.adapter_name, capabilities.backend);
+            if self
+                .document
+                .as_ref()
+                .and_then(|document| document.preview_diagnostics)
+                .is_some_and(|diagnostics| diagnostics.worker.capture_cpu_recovery)
+            {
+                return format!("CPU capture recovery · GPU available · {hardware}");
+            }
             match self
                 .document
                 .as_ref()

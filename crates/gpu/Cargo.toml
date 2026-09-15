@@ -20,3 +20,7 @@ rohditor-image = { path = "../image" }
 rohditor-raw = { path = "../raw" }
 thiserror.workspace = true
 wgpu.workspace = true
+
+[dev-dependencies]
+image.workspace = true
+serde_json.workspace = true

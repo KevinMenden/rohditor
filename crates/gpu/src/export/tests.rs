@@ -29,6 +29,95 @@ fn processor(hardware: bool) -> Option<GpuExportProcessor> {
 }
 
 #[test]
+#[ignore = "requires Vulkan; software results do not qualify hardware"]
+fn capture_bridge_precedes_reduction_and_matches_export() {
+    let _guard = gpu_test_guard();
+    let mut gpu = processor(false).expect("capture integration device");
+    let cpu = CpuPipeline::default();
+    let frame = synthetic_frame(Orientation::Rotate90);
+    let token = CancellationToken::new();
+    for method in [
+        rohditor_edit::HighlightMethod::Off,
+        rohditor_edit::HighlightMethod::Clip,
+        rohditor_edit::HighlightMethod::LocalRatios,
+        rohditor_edit::HighlightMethod::Opposed,
+    ] {
+        let mut recipe = neutral_recipe();
+        recipe.raw.highlights.method = method;
+        recipe.capture_sharpening.enabled = true;
+        recipe.capture_sharpening.radius = 1.2;
+        recipe.capture_sharpening.noise_protection = 0.0;
+        recipe.color.white_balance = WhiteBalance::ManualMultipliers {
+            red: 1.7,
+            green: 1.0,
+            blue: 1.3,
+        };
+        for edge in [7, usize::MAX] {
+            let options = rohditor_core::PreviewOptions {
+                max_long_edge: edge,
+                ..Default::default()
+            };
+            let source = cpu
+                .prepare_camera_source(&frame, &recipe, options, &token)
+                .expect("camera boundary");
+            assert_eq!(source.image().width(), frame.info.width);
+            let reference = cpu
+                .complete_camera_source(
+                    source.clone().capture_cpu(&token).expect("CPU capture"),
+                    &token,
+                )
+                .expect("CPU completion");
+            let (captured, metrics) = gpu.capture_source(source, &token).expect("GPU capture");
+            assert!(metrics.tiles > 0);
+            let actual = cpu
+                .complete_camera_source(captured, &token)
+                .expect("GPU completion");
+            for (a, b) in reference.image().data().iter().zip(actual.image().data()) {
+                assert!(
+                    (a - b).abs() <= 2e-5 + 2e-5 * a.abs(),
+                    "{method:?}: {a} vs {b}"
+                );
+            }
+            assert!(actual.matches_highlight_recipe(&recipe));
+            assert!(actual.matches_capture_recipe(&recipe));
+        }
+        recipe.geometry.crop = Some(rohditor_edit::NormalizedCropRect {
+            left: 0.1,
+            top: 0.2,
+            right: 0.9,
+            bottom: 0.85,
+        });
+        for output_policy in [OutputPolicy::ClipToSrgb, OutputPolicy::ChromaCompressToSrgb] {
+            let options = RenderOptions {
+                output_policy,
+                ..Default::default()
+            };
+            for depth in [OutputBitDepth::Eight, OutputBitDepth::Sixteen] {
+                for dither in [DitherMode::None, DitherMode::Ordered8x8] {
+                    let reference = cpu
+                        .render_export(&frame, &recipe, options, depth, dither)
+                        .expect("CPU export");
+                    let actual = gpu
+                        .render(&cpu, &frame, &recipe, options, depth, dither, &token)
+                        .expect("GPU export");
+                    assert!(actual.capture.tiles > 0);
+                    let (max, mean) = difference(&actual.image, &reference.image);
+                    let (max_limit, mean_limit) = if depth == OutputBitDepth::Eight {
+                        (2, 0.1)
+                    } else {
+                        (16, 1.0)
+                    };
+                    assert!(
+                        max <= max_limit && mean <= mean_limit,
+                        "{method:?} {depth:?} {output_policy:?} {dither:?}: max={max} mean={mean}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 #[ignore = "requires a Vulkan adapter; software execution validates structure only"]
 fn export_bands_precision_geometry_and_cancellation() {
     let _guard = gpu_test_guard();
@@ -187,16 +276,22 @@ fn difference(a: &ExportImage, b: &ExportImage) -> (u32, f64) {
 #[test]
 #[ignore = "requires private RAW corpus and hardware Vulkan GPU"]
 fn private_full_resolution_export_parity() {
-    private_export_parity(true);
+    private_export_parity(true, false);
 }
 
 #[test]
 #[ignore = "private full-resolution software Vulkan check; not hardware qualification"]
 fn private_full_resolution_export_software_structure() {
-    private_export_parity(false);
+    private_export_parity(false, false);
 }
 
-fn private_export_parity(hardware: bool) {
+#[test]
+#[ignore = "private full-resolution capture plus color export; software is not hardware qualification"]
+fn private_full_resolution_capture_export_software_structure() {
+    private_export_parity(false, true);
+}
+
+fn private_export_parity(hardware: bool, capture: bool) {
     let _guard = gpu_test_guard();
     let Some(mut gpu) = processor(hardware) else {
         return;
@@ -217,10 +312,11 @@ fn private_export_parity(hardware: bool) {
             .join("../../testdata/private")
             .join(name);
         let frame = RawlerDecoder::default().decode(&path).expect("private RAW");
-        let (_, recipe) = gpu_control_matrix()
+        let (_, mut recipe) = gpu_control_matrix()
             .into_iter()
             .find(|(label, _)| *label == "combined_supported")
             .expect("export qualification fixture");
+        recipe.capture_sharpening.enabled = capture;
         let prepared = cpu
             .prepare_export_source(
                 &frame,
@@ -229,6 +325,29 @@ fn private_export_parity(hardware: bool) {
                 &CancellationToken::new(),
             )
             .expect("export qualification fixture");
+        let gpu_prepared = if capture {
+            let token = CancellationToken::new();
+            let source = cpu
+                .prepare_camera_source(
+                    &frame,
+                    &recipe,
+                    rohditor_core::PreviewOptions {
+                        max_long_edge: usize::MAX,
+                        ..Default::default()
+                    },
+                    &token,
+                )
+                .expect("GPU capture camera source");
+            let (captured, _) = gpu
+                .capture_source(source, &token)
+                .expect("full-resolution GPU capture");
+            Some(
+                cpu.complete_camera_source(captured, &token)
+                    .expect("GPU capture completion"),
+            )
+        } else {
+            None
+        };
         for policy in [OutputPolicy::ClipToSrgb, OutputPolicy::ChromaCompressToSrgb] {
             let base = cpu
                 .prepare_preview_base_from_reconstruction(&prepared, &recipe)
@@ -239,7 +358,7 @@ fn private_export_parity(hardware: bool) {
             for depth in [OutputBitDepth::Eight, OutputBitDepth::Sixteen] {
                 let actual = gpu
                     .render_prepared(
-                        &prepared,
+                        gpu_prepared.as_ref().unwrap_or(&prepared),
                         &recipe,
                         policy,
                         depth,

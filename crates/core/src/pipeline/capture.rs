@@ -8,6 +8,7 @@ use rohditor_raw::RawFrame;
 
 use crate::{CancellationToken, CaptureSharpeningProvenance, PipelineError, sharpening};
 
+#[derive(Debug, Clone)]
 pub(super) struct CaptureStage {
     pub provenance: Option<CaptureSharpeningProvenance>,
     pub scratch_bytes: usize,
@@ -58,7 +59,18 @@ pub(super) fn apply(
         });
     }
     let started = Instant::now();
-    let levels = match recipe.raw.highlights.method {
+    let levels = ceilings(recipe, gains);
+    let scratch_bytes = sharpening::scratch_bytes(image.width(), image.height())?;
+    sharpening::apply_cancellable(image, recipe.capture_sharpening, levels, cancellation)?;
+    Ok(CaptureStage {
+        provenance,
+        scratch_bytes,
+        elapsed: started.elapsed(),
+    })
+}
+
+pub(super) fn ceilings(recipe: &EditRecipe, gains: WhiteBalanceGains) -> [f32; 3] {
+    match recipe.raw.highlights.method {
         HighlightMethod::Clip => {
             let ceiling =
                 recipe.raw.highlights.clip.threshold * gains.red.min(gains.green).min(gains.blue);
@@ -71,12 +83,5 @@ pub(super) fn apply(
         HighlightMethod::LocalRatios => [recipe.raw.highlights.local_ratios.detection_threshold; 3],
         HighlightMethod::Opposed => [recipe.raw.highlights.opposed.detection_threshold; 3],
         HighlightMethod::Off => [1.0; 3],
-    };
-    let scratch_bytes = sharpening::scratch_bytes(image.width(), image.height())?;
-    sharpening::apply_cancellable(image, recipe.capture_sharpening, levels, cancellation)?;
-    Ok(CaptureStage {
-        provenance,
-        scratch_bytes,
-        elapsed: started.elapsed(),
-    })
+    }
 }

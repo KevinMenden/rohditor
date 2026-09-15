@@ -2940,6 +2940,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "half",
+ "image",
  "pollster",
  "rohditor-color",
  "rohditor-core",
@@ -2947,6 +2948,7 @@ dependencies = [
  "rohditor-edit",
  "rohditor-image",
  "rohditor-raw",
+ "serde_json",
  "thiserror 2.0.20",
  "wgpu",
 ]
