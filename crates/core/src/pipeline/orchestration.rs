@@ -926,186 +926,22 @@ pub(super) mod render {
     }
 }
 
-fn prepare_reconstructed_preview(
-    optics: Option<&OpticsService>,
-    frame: &RawFrame,
-    recipe: &EditRecipe,
-    options: PreviewOptions,
-    cancellation: &CancellationToken,
-) -> Result<ReconstructedPreview, PipelineError> {
-    let total_started = Instant::now();
-    cancellation.checkpoint()?;
-    super::capture::validate_working_set(frame, recipe)?;
-    validate_preview_working_set(
-        frame,
-        options.max_long_edge,
-        recipe.raw.highlights.method,
-        crate::optics::optics_enabled(&recipe.optics),
-    )?;
-
-    let metadata_started = Instant::now();
-    let metadata_span = tracing::info_span!(
-        "cpu.metadata",
-        width = frame.info.width,
-        height = frame.info.height,
-        purpose = "preview reconstruction"
-    );
-    let metadata_guard = metadata_span.enter();
-    recipe.validate()?;
-    validate_optics_crop(options.render.raw_crop_policy, recipe)?;
-    let calibration = CameraCalibration::from_raw_info(&frame.info);
-    let resolved = resolve_camera_colour(
-        &calibration,
-        &recipe.color.camera_profile,
-        recipe.color.white_balance,
-    )?;
-    let highlight_gains = (recipe.raw.highlights.method == HighlightMethod::Clip)
-        .then_some(resolved.white_balance_gains);
-    let metadata = metadata_started.elapsed();
-    drop(metadata_guard);
-
-    let normalization_started = Instant::now();
-    let mosaic = normalize_raw_cancellable(frame, options.render.raw_crop_policy, cancellation)?;
-    let normalization = normalization_started.elapsed();
-    let decoded_raw_bytes = frame
-        .mosaic
-        .len()
-        .checked_mul(size_of::<u16>())
-        .ok_or_else(|| dimension_overflow(frame.info.width, frame.info.height))?;
-    let source_width = mosaic.width();
-    let source_height = mosaic.height();
-    let normalized_mosaic_bytes = mosaic
-        .data()
-        .len()
-        .checked_mul(size_of::<f32>())
-        .ok_or_else(|| dimension_overflow(source_width, source_height))?;
-
-    let highlight_started = Instant::now();
-    let highlighted = apply_highlight_cancellable(
-        mosaic,
-        recipe.raw.highlights,
-        highlight_gains.unwrap_or(WhiteBalanceGains::identity()),
-        cancellation,
-    )?;
-    let highlight_processing = highlight_started.elapsed();
-    let highlight_diagnostics = highlighted.diagnostics;
-    let highlight_scratch_bytes = estimated_highlight_scratch_bytes(
-        recipe.raw.highlights.method,
-        highlight_diagnostics,
-        source_width,
-        source_height,
-    )?;
-    let mosaic = highlighted.mosaic;
-
-    let demosaic_started = Instant::now();
-    let mut full_linear = demosaic_cancellable(
-        &mosaic,
-        WhiteBalanceGains::identity(),
-        options.render.demosaic,
-        cancellation,
-    )?;
-    let demosaic = demosaic_started.elapsed();
-    drop(mosaic);
-    let capture = super::capture::apply(
-        &mut full_linear,
-        recipe,
-        resolved.white_balance_gains,
-        cancellation,
-    )?;
-
-    let optics_started = Instant::now();
-    let optics_result = crate::optics::apply_cancellable(
-        optics,
-        &frame.info,
-        &recipe.optics,
-        full_linear,
-        cancellation,
-    )?;
-    let optics = optics_result.image;
-    let optics_provenance = optics_result.provenance;
-    let optics_output_bytes = optics_result.output_bytes;
-    let optics_scratch_bytes = optics_result.scratch_bytes;
-    let optics_timing = optics_started.elapsed();
-
-    let (target_width, target_height) =
-        preview_dimensions(source_width, source_height, options.max_long_edge)?;
-    let unchanged_dimensions = source_width == target_width && source_height == target_height;
-    let resample_intermediate_bytes = if unchanged_dimensions {
-        0
-    } else {
-        target_width
-            .checked_mul(source_height)
-            .and_then(|pixels| pixels.checked_mul(3 * size_of::<f32>()))
-            .ok_or_else(|| dimension_overflow(target_width, source_height))?
-    };
-    let reduced_linear_bytes = target_width
-        .checked_mul(target_height)
-        .and_then(|pixels| pixels.checked_mul(3 * size_of::<f32>()))
-        .ok_or_else(|| dimension_overflow(target_width, target_height))?;
-    let full_linear_bytes = source_width
-        .checked_mul(source_height)
-        .and_then(|pixels| pixels.checked_mul(3 * size_of::<f32>()))
-        .ok_or_else(|| dimension_overflow(source_width, source_height))?;
-    let preparation_peak_bytes = preview_preparation_peak(PreviewPreparationInputs {
-        decoded_raw_bytes,
-        normalized_mosaic_bytes,
-        full_linear_bytes,
-        highlight_scratch_bytes,
-        optics_output_bytes,
-        optics_scratch_bytes,
-        resample_intermediate_bytes,
-        reduced_linear_bytes,
-        unchanged_dimensions,
-    })?;
-    let preparation_peak_bytes = preparation_peak_bytes.max(
-        decoded_raw_bytes
-            .checked_add(full_linear_bytes)
-            .and_then(|n| n.checked_add(capture.scratch_bytes))
-            .ok_or_else(|| dimension_overflow(source_width, source_height))?,
-    );
-    validate_working_set(preparation_peak_bytes)?;
-
-    let resampling_started = Instant::now();
-    let image = resize_area_cancellable(optics, target_width, target_height, cancellation)?;
-    let resampling = resampling_started.elapsed();
-    let timings = StageTimings {
-        metadata,
-        normalization,
-        highlight_processing,
-        highlight_clipping: highlight_processing,
-        demosaic,
-        capture_sharpening: capture.elapsed,
-        optics: optics_timing,
-        resampling,
-        total: total_started.elapsed(),
-        ..StageTimings::default()
-    };
-
-    Ok(ReconstructedPreview {
-        image,
-        calibration,
-        source_orientation: frame.info.orientation,
-        profile_selection: recipe.color.camera_profile.clone(),
-        camera_profile: camera_profile_key(&recipe.color.camera_profile),
-        highlight_adjustments: recipe.raw.highlights,
-        highlight_white_balance: recipe.color.white_balance,
-        highlight_diagnostics,
-        capture_sharpening: capture.provenance,
-        capture_sharpening_scratch_bytes: capture.scratch_bytes,
-        optics_provenance,
-        optics_output_bytes,
-        optics_scratch_bytes,
-        timings,
-        decoded_raw_bytes,
-        normalized_mosaic_bytes,
-        highlight_scratch_bytes,
-        resample_intermediate_bytes,
-        preparation_peak_bytes,
-    })
-}
+#[path = "camera_source.rs"]
+mod camera_source;
+use camera_source::prepare_reconstructed_preview;
+pub use camera_source::{CapturedCameraSource, DemosaicedCameraSource};
 
 fn prepare_demosaiced_preview(
     reconstructed: &ReconstructedPreview,
+    recipe: &EditRecipe,
+    cancellation: &CancellationToken,
+) -> Result<DemosaicedBase, PipelineError> {
+    cancellation.checkpoint()?;
+    prepare_demosaiced_preview_owned(reconstructed.clone(), recipe, cancellation)
+}
+
+fn prepare_demosaiced_preview_owned(
+    reconstructed: ReconstructedPreview,
     recipe: &EditRecipe,
     cancellation: &CancellationToken,
 ) -> Result<DemosaicedBase, PipelineError> {
@@ -1149,7 +985,7 @@ fn prepare_demosaiced_preview(
     drop(metadata_guard);
 
     let color_started = Instant::now();
-    let mut image = reconstructed.image.clone();
+    let mut image = reconstructed.image;
     apply_white_balance_cancellable(&mut image, resolved.white_balance_gains, cancellation)?;
     apply_camera_color_transform_cancellable(
         &mut image,
@@ -1203,6 +1039,15 @@ fn prepare_base_cancellable(
     options: RenderOptions,
     cancellation: &CancellationToken,
 ) -> Result<DemosaicedBase, PipelineError> {
+    if recipe.capture_sharpening.is_active() {
+        return camera_source::prepare_full_capture_base(
+            optics,
+            frame,
+            recipe,
+            options,
+            cancellation,
+        );
+    }
     let total_started = Instant::now();
     cancellation.checkpoint()?;
     super::capture::validate_working_set(frame, recipe)?;

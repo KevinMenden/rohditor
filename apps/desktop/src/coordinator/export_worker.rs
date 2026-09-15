@@ -91,6 +91,8 @@ fn process_export(
                     upload_ms = result.upload_time.as_millis(),
                     color_readback_ms = result.color_and_readback_time.as_millis(),
                     gpu_bytes = result.estimated_gpu_bytes,
+                    combined_gpu_reserved_bytes = result.combined_gpu_reservations.current_bytes,
+                    combined_gpu_peak_reserved_bytes = result.combined_gpu_reservations.peak_bytes,
                     bands = result.submissions,
                     "GPU export color processing complete"
                 );

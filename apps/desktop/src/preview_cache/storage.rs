@@ -18,6 +18,9 @@ use rohditor_edit::{
 use rohditor_image::{DisplayRgbImage, Orientation};
 use rohditor_raw::{RawFrame, SourceIdentity};
 
+#[path = "spatial.rs"]
+mod spatial;
+
 /// Explicit keys for the four preview cache levels defined in the roadmap.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PreviewCacheKeys {
@@ -443,6 +446,7 @@ pub(crate) struct AdjustedPreviewEntry {
 /// Each conceptual level retains at most one value.
 #[derive(Debug, Default)]
 pub(crate) struct PreviewCache {
+    spatial: spatial::SpatialCache,
     decoded: Option<DecodedEntry>,
     reconstructed: Option<ReconstructedEntry>,
     demosaiced: Option<DemosaicedEntry>,
@@ -451,6 +455,12 @@ pub(crate) struct PreviewCache {
 }
 
 impl PreviewCache {
+    pub(crate) fn configure_capture_device(&mut self, device: wgpu::Device, queue: wgpu::Queue) {
+        self.spatial.configure(device, queue);
+    }
+    pub(crate) fn capture_recovery(&self) -> Option<&str> {
+        self.spatial.recovery.as_deref()
+    }
     /// Install the current decoded source key and evict every downstream level
     /// whose explicit key no longer matches.
     pub(crate) fn prepare(
@@ -463,6 +473,7 @@ impl PreviewCache {
             .as_ref()
             .is_some_and(|entry| entry.key == keys.decoded);
         if !decoded {
+            self.spatial.clear_images();
             self.decoded = Some(DecodedEntry {
                 key: keys.decoded.clone(),
                 frame: Arc::clone(frame),
@@ -512,6 +523,33 @@ impl PreviewCache {
             .as_ref()
             .filter(|entry| entry.key == keys.reconstructed)
             .map(|entry| &entry.preview)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prepare_spatial(
+        &mut self,
+        pipeline: &CpuPipeline,
+        frame: &RawFrame,
+        recipe: &EditRecipe,
+        options: PreviewOptions,
+        keys: &PreviewCacheKeys,
+        prefer_gpu: bool,
+        cancellation: &rohditor_core::CancellationToken,
+    ) -> Result<ReconstructedPreview, rohditor_core::PipelineError> {
+        self.workspace = CpuPreviewWorkspace::default();
+        let retained = self
+            .resident_bytes()
+            .saturating_sub(self.spatial.resident_bytes());
+        self.spatial.prepare(
+            pipeline,
+            frame,
+            recipe,
+            options,
+            keys,
+            prefer_gpu,
+            retained,
+            cancellation,
+        )
     }
 
     pub(crate) fn insert_reconstructed(
@@ -589,7 +627,12 @@ impl PreviewCache {
             .as_ref()
             .is_some_and(|entry| entry.key.document_id == document_id)
         {
-            *self = Self::default();
+            let mut spatial = std::mem::take(&mut self.spatial);
+            spatial.clear_images();
+            *self = Self {
+                spatial,
+                ..Self::default()
+            };
         }
     }
 
@@ -612,6 +655,7 @@ impl PreviewCache {
             .as_ref()
             .map_or(0, |entry| entry.image.data().len());
         decoded
+            .saturating_add(self.spatial.resident_bytes())
             .saturating_add(reconstructed)
             .saturating_add(demosaiced)
             .saturating_add(adjusted)
@@ -627,6 +671,71 @@ mod tests {
     use rohditor_raw::{
         CaptureMetadata, CfaPattern, LevelPattern, PhotometricInterpretation, RawFileInfo,
     };
+
+    #[test]
+    fn spatial_cache_reuses_demosaic_capture_and_recomputes_after_eviction() {
+        let mut frame = frame();
+        frame.info.color_matrices = vec![rohditor_raw::CameraColorMatrix {
+            illuminant: "D65".into(),
+            values: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            origin: rohditor_raw::CameraMatrixOrigin::DecoderDatabase,
+        }];
+        let frame = Arc::new(frame);
+        let pipeline = CpuPipeline::default();
+        let token = rohditor_core::CancellationToken::new();
+        let mut recipe = EditRecipe::default();
+        recipe.capture_sharpening.enabled = true;
+        let mut options = PreviewOptions::default();
+        let mut cache = PreviewCache::default();
+        let keys = PreviewCacheKeys::new(1, &frame, &recipe, options);
+        cache.prepare(&keys, &frame);
+        let first = cache
+            .prepare_spatial(&pipeline, &frame, &recipe, options, &keys, false, &token)
+            .expect("initial spatial source");
+        assert!(!first.timings().demosaic.is_zero());
+        recipe.capture_sharpening.amount = 0.8;
+        let keys = PreviewCacheKeys::new(1, &frame, &recipe, options);
+        cache.prepare(&keys, &frame);
+        let changed = cache
+            .prepare_spatial(&pipeline, &frame, &recipe, options, &keys, false, &token)
+            .expect("capture edit");
+        assert!(changed.timings().demosaic.is_zero());
+        assert!(!changed.timings().capture_sharpening.is_zero());
+        options.max_long_edge = 3;
+        let keys = PreviewCacheKeys::new(1, &frame, &recipe, options);
+        cache.prepare(&keys, &frame);
+        let reduced = cache
+            .prepare_spatial(&pipeline, &frame, &recipe, options, &keys, false, &token)
+            .expect("reduction edit");
+        assert!(reduced.timings().demosaic.is_zero());
+        assert!(reduced.timings().capture_sharpening.is_zero());
+        cache.clear_document(1);
+        cache.prepare(&keys, &frame);
+        let rebuilt = cache
+            .prepare_spatial(&pipeline, &frame, &recipe, options, &keys, false, &token)
+            .expect("evicted source");
+        assert!(!rebuilt.timings().demosaic.is_zero());
+        assert_eq!(rebuilt.image().data(), reduced.image().data());
+        recipe.color.white_balance = WhiteBalance::ManualMultipliers {
+            red: 1.6,
+            green: 1.0,
+            blue: 1.3,
+        };
+        let keys = PreviewCacheKeys::new(1, &frame, &recipe, options);
+        cache.prepare(&keys, &frame);
+        let changed = cache
+            .prepare_spatial(&pipeline, &frame, &recipe, options, &keys, false, &token)
+            .expect("Clip WB change");
+        assert!(!changed.timings().demosaic.is_zero());
+        assert!(changed.matches_highlight_recipe(&recipe));
+        let keys = PreviewCacheKeys::new(2, &frame, &recipe, options);
+        cache.prepare(&keys, &frame);
+        token.cancel();
+        assert!(matches!(
+            cache.prepare_spatial(&pipeline, &frame, &recipe, options, &keys, false, &token),
+            Err(rohditor_core::PipelineError::Cancelled)
+        ));
+    }
 
     #[test]
     fn hsl_and_grading_invalidate_only_adjusted_output() {

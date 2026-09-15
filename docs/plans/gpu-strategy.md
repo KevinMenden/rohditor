@@ -2,6 +2,8 @@
 
 Status: active roadmap; 2026-09-14. Milestone 1 is implemented; milestone 2
 is implemented with software validation, with hardware qualification still open.
+Milestone 3 now has the typed capture boundary, bounded GPU capture bridge, and
+software parity validation; its hardware/performance qualification remains open.
 
 ## Destination
 
@@ -109,13 +111,16 @@ boundaries. GPU residency does not make upstream dependencies disappear.
 | --- | --- | --- |
 | 1 | Complete GPU HSL and three-way grading | Implemented with hardware/corpus parity; desktop latency and skin-tone review remain open. See [implementation record](gpu-hsl-and-grading.md). |
 | 2 | Share the existing GPU color pipeline with export | Implemented: headless execution, shared color kernels, full-resolution CPU camera RGB, direct 8/16-bit quantization, CPU encoding, bounded readback, and resource fallback. Software parity passed; RX 9070 XT parity, visual review, and interaction measurements remain open. |
-| 3 | Move existing capture sharpening to GPU | Correct full-resolution camera RGB boundary before optics/reduction, reusable spatial scratch, CPU parity, source-pixel radius semantics, bounded memory and scheduling. |
+| 3 | Move existing capture sharpening to GPU | Implemented with a typed full-resolution camera boundary, bounded f32 tiles, CPU optics/reduction readback, preview/Source 1:1/export integration, and software corpus parity. RX 9070 XT performance, physical memory, interaction, and hardware recovery qualification remain open; see the [implementation record](gpu-capture-sharpening.md). |
 | 4 | Move optics and preview resampling to GPU | Retain an earlier camera RGB source; optics edits reuse it; TCA, distortion, boundaries, and downsampling quality match the intended contract. |
 | 5 | Move sensor development to GPU | Progress through normalization and reconstruction, then a bounded first demosaic method such as MHC, followed by measured higher-quality methods. Preserve CFA phase, sensor coordinates, highlight dependencies, signed/HDR data, and CPU fallback for unsupported methods. |
 
 Milestone 3 changes the upload boundary to support full-resolution spatial work;
 do not sharpen an already reduced preview as a substitute. Its algorithm remains
 owned by [capture sharpening](capture-sharpening.md).
+The [milestone 3 implementation plan](gpu-capture-sharpening.md) covers the typed
+source boundary, GPU passes, bounded spatial tiles, temporary CPU optics bridge,
+and qualification gates.
 
 Milestone 4 may combine warping and reduction only with suitable antialiasing.
 A single bilinear sample is not sufficient for substantial downsampling. Measure

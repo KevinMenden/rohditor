@@ -1,7 +1,9 @@
 //! Shared GPU color processing for native preview and headless export.
 //!
-//! RAW decoding, normalization, demosaicing, sharpening, and optics remain in
-//! `rohditor-core`'s CPU preparation path. Preview and export share f32 color
+//! RAW decoding, normalization, demosaicing, and optics remain in
+//! `rohditor-core`'s CPU preparation path. Optional capture sharpening runs on
+//! bounded f32 GPU tiles before a temporary readback for CPU optics/reduction.
+//! Preview and export share f32 color
 //! kernels; export quantizes directly to 8/16-bit integers in bounded bands and
 //! returns codec-independent pixels for CPU encoding and transactional writes.
 //! The desktop path uploads one camera-native
@@ -14,6 +16,10 @@
 //! memory.
 
 mod capabilities;
+mod memory;
+pub use memory::{GpuMemoryReservations, gpu_memory_reservations};
+mod capture;
+pub use capture::{CaptureMetrics, GpuCaptureProcessor, GpuCaptureResult};
 mod preview;
 
 pub use preview::{GpuExportProcessor, GpuExportResult};

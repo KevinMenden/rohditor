@@ -10,7 +10,62 @@ use crate::{CancellationToken, PipelineError};
 
 pub const CAPTURE_SHARPENING_ALGORITHM_VERSION: u16 = 1;
 pub const CAPTURE_SHARPENING_ITERATIONS: usize = 8;
-const FLOOR: f32 = 1.0e-6;
+pub const CAPTURE_SHARPENING_FLOOR: f32 = 1.0e-6;
+const FLOOR: f32 = CAPTURE_SHARPENING_FLOOR;
+
+/// CPU-authoritative parameters shared with independent capture executors.
+#[derive(Debug, Clone)]
+pub struct CaptureSharpeningContract {
+    settings: CaptureSharpening,
+    ceilings: [f32; 3],
+    weights: Vec<f32>,
+}
+
+impl CaptureSharpeningContract {
+    pub fn new(settings: CaptureSharpening, ceilings: [f32; 3]) -> Result<Self, PipelineError> {
+        settings.validate()?;
+        if ceilings.iter().any(|v| !v.is_finite() || *v <= 0.0) {
+            return Err(PipelineError::InvalidRecipe {
+                field: "capture_sharpening",
+                reason: "capture ceilings must be finite and positive".into(),
+            });
+        }
+        Ok(Self {
+            settings,
+            ceilings,
+            weights: if settings.is_active() {
+                gaussian(settings.radius)
+            } else {
+                Vec::new()
+            },
+        })
+    }
+
+    pub fn settings(&self) -> CaptureSharpening {
+        self.settings
+    }
+    pub fn ceilings(&self) -> [f32; 3] {
+        self.ceilings
+    }
+    pub fn weights(&self) -> &[f32] {
+        &self.weights
+    }
+
+    /// Each RL iteration has two radius-r convolutions. Pointwise operations
+    /// add no dependencies, so eight iterations require 16r source pixels.
+    /// Highlight and contrast masks each require only r.
+    pub fn halo(&self) -> usize {
+        2 * CAPTURE_SHARPENING_ITERATIONS * (self.weights.len() / 2)
+    }
+
+    pub fn apply_cpu(
+        &self,
+        image: &mut LinearRgbImage<f32>,
+        cancellation: &CancellationToken,
+    ) -> Result<(), PipelineError> {
+        apply_cancellable(image, self.settings, self.ceilings, cancellation)
+    }
+}
 
 /// Settings and implementation identity of an already processed base.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -56,10 +111,95 @@ pub(crate) fn apply_cancellable(
     if !settings.is_active() {
         return Ok(());
     }
+    let width = image.width();
+    let stride = image.row_stride();
+    let CaptureReferencePlanes {
+        guide,
+        mask,
+        estimate,
+    } = solve(image, settings, clip_levels, cancellation, |_, _, _| {})?;
+    image
+        .data_mut()
+        .par_chunks_mut(stride)
+        .enumerate()
+        .try_for_each(|(y, row)| {
+            cancellation.checkpoint()?;
+            for (x, rgb) in row[..width * 3].chunks_exact_mut(3).enumerate() {
+                let i = y * width + x;
+                let gain = 1.0 + settings.amount * mask[i] * (estimate[i] / guide[i] - 1.0);
+                if gain != 1.0 && rgb.iter().all(|v| (v * gain).is_finite()) {
+                    for channel in rgb {
+                        *channel *= gain;
+                    }
+                }
+            }
+            Ok(())
+        })
+}
+
+/// Diagnostic snapshots from the CPU reference, used to qualify other executors.
+#[derive(Debug, Clone)]
+pub struct CaptureReferencePlanes {
+    pub guide: Vec<f32>,
+    pub mask: Vec<f32>,
+    pub estimate: Vec<f32>,
+}
+
+impl CaptureSharpeningContract {
+    /// Initialization, completed mask, and each of the eight RL iterations.
+    /// This explicitly allocates snapshots; normal capture never retains them.
+    pub fn reference_stages(
+        &self,
+        image: &LinearRgbImage<f32>,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<CaptureReferencePlanes>, PipelineError> {
+        cancellation.checkpoint()?;
+        if !self.settings.is_active() {
+            return Ok(Vec::new());
+        }
+        // Ten snapshots plus the input and six solver planes. Diagnostics
+        // must obey the same host bound as normal processing.
+        let estimated_bytes = std::mem::size_of_val(image.data()).checked_mul(13).ok_or(
+            PipelineError::Allocation {
+                elements: image.data().len(),
+            },
+        )?;
+        if estimated_bytes > crate::CPU_WORKING_SET_LIMIT_BYTES {
+            return Err(PipelineError::WorkingSetLimit {
+                estimated_bytes,
+                max_bytes: crate::CPU_WORKING_SET_LIMIT_BYTES,
+            });
+        }
+        let mut stages = Vec::new();
+        solve(
+            image,
+            self.settings,
+            self.ceilings,
+            cancellation,
+            |guide, mask, estimate| {
+                stages.push(CaptureReferencePlanes {
+                    guide: guide.to_vec(),
+                    mask: mask.to_vec(),
+                    estimate: estimate.to_vec(),
+                });
+            },
+        )?;
+        Ok(stages)
+    }
+}
+
+fn solve(
+    image: &LinearRgbImage<f32>,
+    settings: CaptureSharpening,
+    clip_levels: [f32; 3],
+    cancellation: &CancellationToken,
+    mut observe: impl FnMut(&[f32], &[f32], &[f32]),
+) -> Result<CaptureReferencePlanes, PipelineError> {
     let (width, height, stride) = (image.width(), image.height(), image.row_stride());
     scratch_bytes(width, height)?;
     let n = width * height;
-    let kernel = gaussian(settings.radius);
+    let contract = CaptureSharpeningContract::new(settings, clip_levels)?;
+    let kernel = contract.weights;
     let mut guide = vec![0.0; n];
     let mut mask = vec![0.0; n];
     guide
@@ -88,6 +228,7 @@ pub(crate) fn apply_cancellable(
             Ok(())
         })?;
     let mut estimate = guide.clone();
+    observe(&guide, &mask, &estimate);
     let mut temporary = vec![0.0; n];
     let mut blurred = vec![0.0; n];
     let mut ratio = vec![0.0; n];
@@ -131,6 +272,8 @@ pub(crate) fn apply_cancellable(
             Ok::<_, PipelineError>(())
         })?;
 
+    observe(&guide, &mask, &estimate);
+
     // For a symmetric Gaussian and half-sample mirrored borders, the blur is
     // self-adjoint. Each iteration uses the same source observation, not its mask.
     for _ in 0..CAPTURE_SHARPENING_ITERATIONS {
@@ -168,24 +311,13 @@ pub(crate) fn apply_cancellable(
                 }
                 Ok::<_, PipelineError>(())
             })?;
+        observe(&guide, &mask, &estimate);
     }
-    image
-        .data_mut()
-        .par_chunks_mut(stride)
-        .enumerate()
-        .try_for_each(|(y, row)| {
-            cancellation.checkpoint()?;
-            for (x, rgb) in row[..width * 3].chunks_exact_mut(3).enumerate() {
-                let i = y * width + x;
-                let gain = 1.0 + settings.amount * mask[i] * (estimate[i] / guide[i] - 1.0);
-                if gain != 1.0 && rgb.iter().all(|v| (v * gain).is_finite()) {
-                    for channel in rgb {
-                        *channel *= gain;
-                    }
-                }
-            }
-            Ok(())
-        })
+    Ok(CaptureReferencePlanes {
+        guide,
+        mask,
+        estimate,
+    })
 }
 
 fn smoothstep(low: f32, high: f32, value: f32) -> f32 {
