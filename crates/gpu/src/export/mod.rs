@@ -39,9 +39,11 @@ pub struct GpuExportResult {
 /// worker; mutable rendering prevents concurrent writes to shared uniforms.
 pub struct GpuExportProcessor {
     capture: Option<crate::GpuCaptureProcessor>,
+    spatial: crate::GpuSpatialProcessor,
     processor: GpuPreviewProcessor,
     pipeline: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
+    spatial_pipeline: wgpu::ComputePipeline,
 }
 
 impl GpuExportProcessor {
@@ -75,11 +77,37 @@ impl GpuExportProcessor {
             cache: None,
         });
         let layout = pipeline.get_bind_group_layout(0);
+        let spatial_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("rohditor direct spatial export shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                concat!(
+                    include_str!("../preview.wgsl"),
+                    "\n",
+                    include_str!("../color_adjustments.wgsl"),
+                    "\n",
+                    include_str!("../spatial/spatial.wgsl"),
+                    "\n",
+                    include_str!("spatial_output.wgsl")
+                )
+                .into(),
+            ),
+        });
+        let spatial_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("rohditor direct resident GPU export"),
+            layout: None,
+            module: &spatial_shader,
+            entry_point: Some("develop_spatial_export"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let spatial = crate::GpuSpatialProcessor::new(device, queue)?;
         Ok(Self {
             capture: None,
+            spatial,
             processor,
             pipeline,
             layout,
+            spatial_pipeline,
         })
     }
 
@@ -158,55 +186,42 @@ impl GpuExportProcessor {
         dithering: DitherMode,
         cancellation: &CancellationToken,
     ) -> Result<GpuExportResult, GpuPreviewError> {
-        // Reject oversized sources before allocating full-resolution CPU RGB.
         check_cancel(cancellation)?;
         let (width, height) =
             rohditor_core::raw_crop_dimensions(&frame.info, options.raw_crop_policy)
                 .map_err(input_error)?;
-        self.validate_memory(width, height)?;
-        let (prepared, capture) = if recipe.capture_sharpening.is_active() {
-            let source = cpu
-                .prepare_camera_source(
-                    frame,
-                    recipe,
-                    rohditor_core::PreviewOptions {
-                        render: options,
-                        max_long_edge: frame.info.width.max(frame.info.height),
-                    },
-                    cancellation,
-                )
-                .map_err(pipeline_error)?;
-            let (captured, metrics) = self.capture_source(source, cancellation)?;
-            (
-                cpu.complete_camera_source(captured, cancellation)
-                    .map_err(pipeline_error)?,
-                metrics,
+        self.processor
+            .capabilities
+            .validate_dimensions(width, height)?;
+        let source = cpu
+            .prepare_camera_source(
+                frame,
+                recipe,
+                rohditor_core::PreviewOptions {
+                    render: options,
+                    max_long_edge: frame.info.width.max(frame.info.height),
+                },
+                cancellation,
             )
-        } else {
-            let prepared = cpu
-                .prepare_export_source(frame, recipe, options, cancellation)
-                .map_err(|error| {
-                    if cancellation.is_cancelled() {
-                        GpuPreviewError::Cancelled
-                    } else {
-                        input_error(error)
-                    }
-                })?;
-            (prepared, crate::CaptureMetrics::default())
-        };
-        let mut result = self.render_prepared(
-            &prepared,
+            .map_err(pipeline_error)?;
+        let description = cpu
+            .describe_spatial_completion(&source, cancellation)
+            .map_err(pipeline_error)?;
+        let (resident, metrics) =
+            self.spatial
+                .upload_captured_source(cpu, &source, cancellation)?;
+        let full = self
+            .spatial
+            .full_resolution_source(&resident, description)?;
+        self.render_spatial_source(
+            &full,
             recipe,
             options.output_policy,
             bit_depth,
             dithering,
             cancellation,
-        )?;
-        result.estimated_gpu_bytes = result
-            .estimated_gpu_bytes
-            .max(capture.estimated_gpu_bytes + 64 * 1024);
-        result.capture = capture;
-        Ok(result)
+            metrics,
+        )
     }
 
     /// Export an already prepared camera source, including matched-resolution
@@ -244,6 +259,275 @@ impl GpuExportProcessor {
             return Err(input_error(error));
         }
         result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_spatial_source(
+        &self,
+        source: &crate::GpuSpatialFullSource,
+        recipe: &EditRecipe,
+        policy: OutputPolicy,
+        depth: OutputBitDepth,
+        dithering: DitherMode,
+        cancellation: &CancellationToken,
+        spatial_metrics: crate::SpatialMetrics,
+    ) -> Result<GpuExportResult, GpuPreviewError> {
+        check_cancel(cancellation)?;
+        recipe.validate().map_err(input_error)?;
+        let device = &self.processor.device;
+        device.push_error_scope(wgpu::ErrorFilter::Internal);
+        device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let result = self.render_spatial_inner(
+            source,
+            recipe,
+            policy,
+            depth,
+            dithering,
+            cancellation,
+            spatial_metrics,
+        );
+        let validation = pollster::block_on(device.pop_error_scope());
+        let allocation = pollster::block_on(device.pop_error_scope());
+        let internal = pollster::block_on(device.pop_error_scope());
+        if let Some(error) = validation.or(allocation).or(internal) {
+            return Err(input_error(error));
+        }
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_spatial_inner(
+        &self,
+        source: &crate::GpuSpatialFullSource,
+        recipe: &EditRecipe,
+        policy: OutputPolicy,
+        depth: OutputBitDepth,
+        dithering: DitherMode,
+        cancellation: &CancellationToken,
+        spatial_metrics: crate::SpatialMetrics,
+    ) -> Result<GpuExportResult, GpuPreviewError> {
+        let description = &source.description;
+        if description.capture_sharpening()
+            != rohditor_core::CaptureSharpeningProvenance::for_settings(recipe.capture_sharpening)
+            || !highlight_adjustments_match(
+                description.highlight_adjustments(),
+                recipe.raw.highlights,
+            )
+            || !source.optics_matches_recipe(&recipe.optics)
+            || description.camera_profile_key() != &camera_profile_key(&recipe.color.camera_profile)
+            || (description.highlight_adjustments().method == rohditor_edit::HighlightMethod::Clip
+                && description.highlight_white_balance() != recipe.color.white_balance)
+        {
+            return Err(GpuPreviewError::BaseMismatch {
+                reason: "resident export source provenance does not match the recipe".into(),
+            });
+        }
+        let resolved = resolve_camera_colour(
+            description.calibration(),
+            &recipe.color.camera_profile,
+            recipe.color.white_balance,
+        )
+        .map_err(input_error)?;
+        let orientation = recipe
+            .geometry
+            .orientation_override
+            .unwrap_or(description.source_orientation());
+        let source_dimensions = description.source_dimensions();
+        let geometry = OutputGeometry::new(
+            source_dimensions.0,
+            source_dimensions.1,
+            orientation,
+            recipe.geometry.crop,
+        )
+        .map_err(input_error)?;
+        let (width, height) = geometry.output_dimensions();
+        let (source_width, source_height) = (
+            u32::try_from(source_dimensions.0).map_err(input_error)?,
+            u32::try_from(source_dimensions.1).map_err(input_error)?,
+        );
+        self.processor
+            .capabilities
+            .validate_dimensions(width, height)?;
+        let parameters = build_parameters(
+            (source_width, source_height),
+            orientation,
+            geometry,
+            recipe,
+            policy,
+            resolved.white_balance_gains,
+            resolved.camera_to_linear_rec2020,
+        );
+        let queue = &self.processor.queue;
+        queue.write_buffer(
+            &self.processor.parameters,
+            0,
+            bytemuck::cast_slice(&parameters),
+        );
+        queue.write_buffer(
+            &self.processor.light_tone_lut,
+            0,
+            bytemuck::cast_slice(LightToneLut::new(&recipe.light).values()),
+        );
+
+        let band_bytes = width as u64 * u64::from(BAND_ROWS) * 12;
+        let output_peak = source
+            .estimated_bytes()
+            .saturating_add(band_bytes.saturating_mul(2))
+            .saturating_add(64 * 1024);
+        let estimated_gpu_bytes = output_peak
+            .max(spatial_metrics.estimated_gpu_bytes)
+            .max(spatial_metrics.capture.estimated_gpu_bytes);
+        if estimated_gpu_bytes > MEMORY_BUDGET {
+            return Err(GpuPreviewError::Unsupported {
+                reason: format!(
+                    "resident export needs an estimated {estimated_gpu_bytes} GPU bytes; budget is {MEMORY_BUDGET}"
+                ),
+            });
+        }
+        let output_pixels = width as u64 * height as u64;
+        let source_pixels = source_dimensions.0 as u64 * source_dimensions.1 as u64;
+        let estimated_cpu_bytes = description.decoded_raw_bytes() as u64
+            + description.normalized_mosaic_bytes() as u64
+            + description.highlight_scratch_bytes() as u64
+            + source_pixels * 12
+            + output_pixels * 3 * u64::from(depth.bits() / 8)
+            + band_bytes;
+        if estimated_cpu_bytes > rohditor_core::CPU_WORKING_SET_LIMIT_BYTES as u64 {
+            return Err(GpuPreviewError::Unsupported {
+                reason: format!(
+                    "export CPU buffers need {estimated_cpu_bytes} bytes, exceeding the CPU working-set budget"
+                ),
+            });
+        }
+        let _reservation =
+            crate::memory::Reservation::new(band_bytes.saturating_mul(2).saturating_add(64 * 1024));
+        let device = &self.processor.device;
+        let output = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("resident spatial export integer band"),
+            size: band_bytes,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("resident spatial export band readback"),
+            size: band_bytes,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let band_parameters = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("resident spatial export band parameters"),
+            contents: &[0; 16],
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let optics = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("resident export optics parameters"),
+            contents: bytemuck::cast_slice(&crate::spatial::reduction::pack_optics_parameters(
+                &source.planes.layout,
+                description.optics().execution(),
+            )),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let failure = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("resident export spatial failure"),
+            contents: &[0; 4],
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        });
+        let failure_staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("resident export spatial failure readback"),
+            size: 4,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let colour_bindings = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("resident export colour bindings"),
+            layout: &self.spatial_pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.processor.parameters.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: self.processor.light_tone_lut.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: self.processor.base_rendering_lut.as_entire_binding(),
+                },
+            ],
+        });
+        let output_bindings = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("resident export output bindings"),
+            layout: &self.spatial_pipeline.get_bind_group_layout(1),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: output.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: band_parameters.as_entire_binding(),
+                },
+            ],
+        });
+        let plane_entries = source.planes.sampled_entries();
+        let spatial_bindings = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("resident export camera bindings"),
+            layout: &self.spatial_pipeline.get_bind_group_layout(2),
+            entries: &[
+                plane_entries[0].clone(),
+                plane_entries[1].clone(),
+                plane_entries[2].clone(),
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: optics.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: failure.as_entire_binding(),
+                },
+            ],
+        });
+        let started = Instant::now();
+        let image = self.read_bands_with_pipeline(
+            width,
+            height,
+            depth,
+            dithering,
+            cancellation,
+            &output,
+            &staging,
+            &band_parameters,
+            &self.spatial_pipeline,
+            &[
+                (0, &colour_bindings),
+                (1, &output_bindings),
+                (2, &spatial_bindings),
+            ],
+        )?;
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("resident export failure readback"),
+        });
+        encoder.copy_buffer_to_buffer(&failure, 0, &failure_staging, 0, 4);
+        queue.submit([encoder.finish()]);
+        crate::spatial::reduction::read_failure(device, &failure_staging, cancellation)?;
+        let mut preparation = description.preparation_timings();
+        preparation.capture_sharpening = spatial_metrics.capture.total;
+        preparation.total += spatial_metrics.capture.total + spatial_metrics.upload;
+        Ok(GpuExportResult {
+            combined_gpu_reservations: crate::gpu_memory_reservations(),
+            capture: spatial_metrics.capture,
+            image,
+            preparation,
+            upload_time: spatial_metrics.upload,
+            color_and_readback_time: started.elapsed(),
+            estimated_gpu_bytes,
+            estimated_cpu_bytes,
+            uploaded_bytes: spatial_metrics.uploaded_bytes,
+            readback_bytes: output_pixels * 12 + 4,
+            submissions: (height as u32).div_ceil(BAND_ROWS) + 1,
+        })
     }
 
     fn validate_memory(&self, width: usize, height: usize) -> Result<u64, GpuPreviewError> {

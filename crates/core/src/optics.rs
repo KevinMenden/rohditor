@@ -1,8 +1,8 @@
 use rohditor_edit::{LensProfileSelection, OpticsAdjustments};
 use rohditor_image::LinearRgbImage;
 use rohditor_optics::{
-    Cancellation, CorrectionComponents, OpticsError, OpticsProvenance, OpticsQuery, OpticsService,
-    ProfileRequest,
+    Cancellation, CorrectionComponents, OpticsError, OpticsExecution, OpticsProvenance,
+    OpticsQuery, OpticsService, ProfileRequest,
 };
 use rohditor_raw::RawFileInfo;
 
@@ -95,13 +95,19 @@ pub(crate) fn apply_cancellable(
     image: LinearRgbImage<f32>,
     cancellation: &CancellationToken,
 ) -> Result<OpticsApplication, PipelineError> {
+    let execution = resolve_execution(service, info, adjustments, image.width(), image.height())?;
+    apply_execution_cancellable(execution.as_ref(), image, cancellation)
+}
+
+pub(crate) fn resolve_execution(
+    service: Option<&OpticsService>,
+    info: &RawFileInfo,
+    adjustments: &OpticsAdjustments,
+    width: usize,
+    height: usize,
+) -> Result<Option<OpticsExecution>, PipelineError> {
     if matches!(adjustments.profile, LensProfileSelection::Off) {
-        return Ok(OpticsApplication {
-            image,
-            provenance: None,
-            output_bytes: 0,
-            scratch_bytes: 0,
-        });
+        return Ok(None);
     }
     let service = service.ok_or_else(|| PipelineError::Optics {
         reason: "the Lensfun database is unavailable; optics must be disabled".to_owned(),
@@ -113,16 +119,32 @@ pub(crate) fn apply_cancellable(
         },
         LensProfileSelection::Off => unreachable!("handled above"),
     };
-    let plan = service
+    service
         .resolve_plan(
             &optics_query_from_info(info),
             request,
             requested_components(adjustments),
-            image.width(),
-            image.height(),
+            width,
+            height,
         )
-        .map_err(map_error)?;
-    let result = plan
+        .map(|plan| Some(plan.execution()))
+        .map_err(map_error)
+}
+
+pub(crate) fn apply_execution_cancellable(
+    execution: Option<&OpticsExecution>,
+    image: LinearRgbImage<f32>,
+    cancellation: &CancellationToken,
+) -> Result<OpticsApplication, PipelineError> {
+    let Some(execution) = execution else {
+        return Ok(OpticsApplication {
+            image,
+            provenance: None,
+            output_bytes: 0,
+            scratch_bytes: 0,
+        });
+    };
+    let result = execution
         .apply_cancellable(image, cancellation)
         .map_err(map_error)?;
     Ok(OpticsApplication {

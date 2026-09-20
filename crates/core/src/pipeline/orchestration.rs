@@ -8,7 +8,7 @@ use rohditor_edit::{
     CameraProfileSelection, EditRecipe, HighlightAdjustments, HighlightMethod, WhiteBalance,
 };
 use rohditor_image::{DisplayRgbImage, LinearRgbImage, Orientation};
-use rohditor_optics::{OpticsProvenance, OpticsService};
+use rohditor_optics::{OpticsExecution, OpticsProvenance, OpticsService};
 use rohditor_raw::RawFrame;
 
 use crate::analysis::Histogram;
@@ -24,7 +24,7 @@ use crate::cpu::{
 };
 use crate::demosaic::demosaic_cancellable;
 use crate::highlight::{HighlightDiagnostics, apply_cancellable as apply_highlight_cancellable};
-use crate::resample::resize_area_cancellable;
+use crate::resample::resize_area_with_plan_cancellable;
 use crate::{
     CancellationToken, DitherMode, ExportImage, GamutMappingDiagnostics, OutputBitDepth,
     OutputGeometry, PipelineError, apply_adjustments,
@@ -111,6 +111,151 @@ pub struct StageTimings {
     pub adjustments: Duration,
     pub output_conversion: Duration,
     pub total: Duration,
+}
+
+/// Resolved optics state at the backend-neutral spatial boundary.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SpatialOptics {
+    Off,
+    Enabled(Box<OpticsExecution>),
+}
+
+impl SpatialOptics {
+    #[must_use]
+    pub fn execution(&self) -> Option<&OpticsExecution> {
+        match self {
+            Self::Off => None,
+            Self::Enabled(execution) => Some(execution.as_ref()),
+        }
+    }
+
+    #[must_use]
+    pub fn provenance(&self) -> Option<&OpticsProvenance> {
+        self.execution().map(OpticsExecution::provenance)
+    }
+}
+
+/// In-process identity retained by recipe variants, without retaining pixels.
+#[derive(Debug, Clone, Default)]
+struct CameraSourceIdentity(Arc<()>);
+
+impl PartialEq for CameraSourceIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+/// Pixel-storage-independent description of capture completion, optics, and
+/// exact preview reduction. It contains no GPU handles and is also consumed by
+/// the CPU reference path.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpatialCompletionDescription {
+    source_identity: CameraSourceIdentity,
+    source_dimensions: (usize, usize),
+    target_dimensions: (usize, usize),
+    optics: SpatialOptics,
+    area_reduction: crate::AreaReductionPlan,
+    calibration: CameraCalibration,
+    source_orientation: Orientation,
+    profile_selection: CameraProfileSelection,
+    camera_profile: CameraProfileKey,
+    highlight_adjustments: HighlightAdjustments,
+    highlight_white_balance: WhiteBalance,
+    highlight_diagnostics: HighlightDiagnostics,
+    capture_sharpening: Option<crate::CaptureSharpeningProvenance>,
+    preparation_timings: StageTimings,
+    decoded_raw_bytes: usize,
+    normalized_mosaic_bytes: usize,
+    highlight_scratch_bytes: usize,
+}
+
+impl SpatialCompletionDescription {
+    /// Whether these descriptions originate from the same immutable camera
+    /// source. Matching dimensions and calibration alone cannot establish this.
+    #[must_use]
+    pub fn shares_camera_source(&self, other: &Self) -> bool {
+        self.source_identity == other.source_identity
+    }
+
+    #[must_use]
+    pub const fn source_dimensions(&self) -> (usize, usize) {
+        self.source_dimensions
+    }
+
+    #[must_use]
+    pub const fn target_dimensions(&self) -> (usize, usize) {
+        self.target_dimensions
+    }
+
+    #[must_use]
+    pub const fn optics(&self) -> &SpatialOptics {
+        &self.optics
+    }
+
+    #[must_use]
+    pub const fn area_reduction(&self) -> &crate::AreaReductionPlan {
+        &self.area_reduction
+    }
+
+    #[must_use]
+    pub const fn calibration(&self) -> &CameraCalibration {
+        &self.calibration
+    }
+
+    #[must_use]
+    pub const fn source_orientation(&self) -> Orientation {
+        self.source_orientation
+    }
+
+    #[must_use]
+    pub const fn profile_selection(&self) -> &CameraProfileSelection {
+        &self.profile_selection
+    }
+
+    #[must_use]
+    pub fn camera_profile_key(&self) -> &CameraProfileKey {
+        &self.camera_profile
+    }
+
+    #[must_use]
+    pub const fn highlight_adjustments(&self) -> HighlightAdjustments {
+        self.highlight_adjustments
+    }
+
+    #[must_use]
+    pub const fn highlight_white_balance(&self) -> WhiteBalance {
+        self.highlight_white_balance
+    }
+
+    #[must_use]
+    pub const fn highlight_diagnostics(&self) -> HighlightDiagnostics {
+        self.highlight_diagnostics
+    }
+
+    #[must_use]
+    pub const fn capture_sharpening(&self) -> Option<crate::CaptureSharpeningProvenance> {
+        self.capture_sharpening
+    }
+
+    #[must_use]
+    pub const fn preparation_timings(&self) -> StageTimings {
+        self.preparation_timings
+    }
+
+    #[must_use]
+    pub const fn decoded_raw_bytes(&self) -> usize {
+        self.decoded_raw_bytes
+    }
+
+    #[must_use]
+    pub const fn normalized_mosaic_bytes(&self) -> usize {
+        self.normalized_mosaic_bytes
+    }
+
+    #[must_use]
+    pub const fn highlight_scratch_bytes(&self) -> usize {
+        self.highlight_scratch_bytes
+    }
 }
 
 /// Deterministic buffer-size estimate; this is not an operating-system RSS reading.

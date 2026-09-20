@@ -19,6 +19,32 @@ impl TilePlan {
         limits: &wgpu::Limits,
         maximum: usize,
     ) -> Result<Self, GpuPreviewError> {
+        Self::new_with_cost(width, height, halo, budget, limits, maximum, 60, 24)
+    }
+
+    pub(crate) fn new_resident(
+        width: usize,
+        height: usize,
+        halo: usize,
+        budget: u64,
+        limits: &wgpu::Limits,
+        maximum: usize,
+    ) -> Result<Self, GpuPreviewError> {
+        // RGB input/output, six working planes, and the queue's upload staging.
+        Self::new_with_cost(width, height, halo, budget, limits, maximum, 48, 12)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_cost(
+        width: usize,
+        height: usize,
+        halo: usize,
+        budget: u64,
+        limits: &wgpu::Limits,
+        maximum: usize,
+        gpu_bytes_per_pixel: u64,
+        host_bytes_per_pixel: usize,
+    ) -> Result<Self, GpuPreviewError> {
         if width == 0
             || height == 0
             || width > i32::MAX as usize / 2
@@ -35,7 +61,7 @@ impl TilePlan {
                 .ok_or_else(|| error("capture tile size overflow"))?;
             // Six planes, RGB input/output, upload staging, readback staging.
             let gpu_bytes = (pixels as u64)
-                .checked_mul(60)
+                .checked_mul(gpu_bytes_per_pixel)
                 .and_then(|n| n.checked_add(OVERHEAD))
                 .ok_or_else(|| error("capture allocation overflow"))?;
             let binding = pixels as u64 * 24;
@@ -57,7 +83,7 @@ impl TilePlan {
                     edge,
                     pixels,
                     gpu_bytes,
-                    host_bytes: pixels * 24,
+                    host_bytes: pixels * host_bytes_per_pixel,
                 });
             }
             edge /= 2;
@@ -70,7 +96,7 @@ pub(super) struct Resources {
     pub rgb: wgpu::Buffer,
     pub planes: wgpu::Buffer,
     pub weights: wgpu::Buffer,
-    pub staging: wgpu::Buffer,
+    pub staging: Option<wgpu::Buffer>,
 }
 
 impl Resources {
@@ -79,6 +105,25 @@ impl Resources {
         queue: &wgpu::Queue,
         pixels: usize,
         contract: &CaptureSharpeningContract,
+    ) -> Self {
+        Self::with_readback(device, queue, pixels, contract, true)
+    }
+
+    pub(crate) fn new_resident(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pixels: usize,
+        contract: &CaptureSharpeningContract,
+    ) -> Self {
+        Self::with_readback(device, queue, pixels, contract, false)
+    }
+
+    fn with_readback(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pixels: usize,
+        contract: &CaptureSharpeningContract,
+        readback: bool,
     ) -> Self {
         let buffer = |label, size, usage| {
             device.create_buffer(&wgpu::BufferDescriptor {
@@ -108,11 +153,13 @@ impl Resources {
                 wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             ),
             weights,
-            staging: buffer(
-                "capture readback",
-                pixels as u64 * 12,
-                wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            ),
+            staging: readback.then(|| {
+                buffer(
+                    "capture readback",
+                    pixels as u64 * 12,
+                    wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                )
+            }),
         }
     }
 }

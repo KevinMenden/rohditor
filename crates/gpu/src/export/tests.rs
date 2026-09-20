@@ -2,6 +2,7 @@ use super::super::tests::{gpu_control_matrix, gpu_test_guard, neutral_recipe, sy
 use super::*;
 use rohditor_core::{apply_adjustments, render_display_srgb8_dithered, render_display_srgb16};
 use rohditor_raw::{RawDecoder, RawlerDecoder};
+use std::sync::Arc;
 
 fn processor(hardware: bool) -> Option<GpuExportProcessor> {
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
@@ -26,6 +27,88 @@ fn processor(hardware: bool) -> Option<GpuExportProcessor> {
     }))
     .expect("export device");
     Some(GpuExportProcessor::new(&adapter, &device, &queue).expect("export pipeline"))
+}
+
+#[test]
+#[ignore = "requires Vulkan; software validates the resident export path only"]
+fn optics_export_reads_back_only_final_integer_bands() {
+    let _guard = gpu_test_guard();
+    let mut gpu = processor(false).expect("export qualification device");
+    let mut frame = synthetic_frame(Orientation::Normal);
+    frame.info.make = "Sony".into();
+    frame.info.model = "ILCE-6400".into();
+    frame.info.clean_make = "Sony".into();
+    frame.info.clean_model = "Alpha 6400".into();
+    frame.info.capture = rohditor_raw::CaptureMetadata {
+        focal_length: Some(rohditor_raw::RationalValue {
+            numerator: 35,
+            denominator: 1,
+        }),
+        aperture: Some(rohditor_raw::RationalValue {
+            numerator: 28,
+            denominator: 10,
+        }),
+        focus_distance: Some(rohditor_raw::RationalValue {
+            numerator: 10,
+            denominator: 1,
+        }),
+        lens_make: Some("Tamron".into()),
+        lens_model: Some("Tamron 17-70mm F/2.8 Di III-A VC RXD".into()),
+        ..Default::default()
+    };
+    let cpu = CpuPipeline::new(Arc::new(
+        rohditor_core::OpticsService::load_bundled().expect("bundled optics"),
+    ));
+    let mut recipe = neutral_recipe();
+    recipe.optics.profile = LensProfileSelection::Automatic;
+    recipe.geometry.crop = Some(rohditor_edit::NormalizedCropRect {
+        left: 0.1,
+        top: 0.15,
+        right: 0.9,
+        bottom: 0.85,
+    });
+    let token = CancellationToken::new();
+    for depth in [OutputBitDepth::Eight, OutputBitDepth::Sixteen] {
+        let expected = cpu
+            .render_export(
+                &frame,
+                &recipe,
+                RenderOptions::default(),
+                depth,
+                DitherMode::Ordered8x8,
+            )
+            .expect("CPU optics export");
+        let actual = gpu
+            .render(
+                &cpu,
+                &frame,
+                &recipe,
+                RenderOptions::default(),
+                depth,
+                DitherMode::Ordered8x8,
+                &token,
+            )
+            .expect("resident GPU optics export");
+        assert_eq!(actual.capture.readback_bytes, 0);
+        assert_eq!(
+            actual.uploaded_bytes,
+            (frame.info.width * frame.info.height * 12) as u64
+        );
+        assert_eq!(
+            actual.readback_bytes,
+            (actual.image.width() * actual.image.height() * 12 + 4) as u64
+        );
+        let (maximum, mean) = difference(&actual.image, &expected.image);
+        let (max_limit, mean_limit) = if depth == OutputBitDepth::Eight {
+            (2, 0.1)
+        } else {
+            (16, 1.0)
+        };
+        assert!(
+            maximum <= max_limit && mean <= mean_limit,
+            "{depth:?}: max={maximum}, mean={mean}"
+        );
+    }
 }
 
 #[test]

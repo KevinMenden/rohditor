@@ -11,12 +11,14 @@ pub(super) struct Autosave {
 }
 
 impl Autosave {
-    pub(super) fn observe(&mut self, revision: u64, dragging: bool, now: Instant) {
-        if revision != self.revision || (self.dragging && !dragging) {
+    pub(super) fn observe(&mut self, revision: u64, dragging: bool, now: Instant) -> bool {
+        let changed = revision != self.revision || (self.dragging && !dragging);
+        if changed {
             self.revision = revision;
             self.due = Some(now + SAVE_DELAY);
         }
         self.dragging = dragging;
+        changed
     }
 
     pub(super) fn take_due(&mut self, now: Instant) -> bool {

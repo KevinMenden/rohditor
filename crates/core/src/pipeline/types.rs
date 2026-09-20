@@ -2,5 +2,5 @@
 
 pub use super::orchestration::{
     ExportRenderResult, OutputPolicy, PreviewOptions, RawCropPolicy, RenderOptions, RenderResult,
-    StageTimings,
+    SpatialCompletionDescription, SpatialOptics, StageTimings,
 };

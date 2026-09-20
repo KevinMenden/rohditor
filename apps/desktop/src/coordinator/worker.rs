@@ -2,7 +2,6 @@
 use std::any::Any;
 use std::collections::HashSet;
 use std::fmt;
-use std::mem::size_of;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
@@ -19,7 +18,7 @@ use rohditor_core::{
 };
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_edit::EditRecipe;
-use rohditor_gpu::{GpuPreviewError, GpuPreviewUpload};
+use rohditor_gpu::{GpuPreviewError, GpuSpatialFullSource, GpuSpatialPreview};
 use rohditor_image::{DisplayRgbImage, Orientation, OrientationMap};
 use rohditor_raw::{RawDecoder, RawFileInfo, RawFrame, RawSession, RawlerDecoder};
 use tracing::{info, info_span};
@@ -53,6 +52,35 @@ pub(crate) enum PreviewResolution {
     Fit,
     CropToolFullFrame,
     SourceScale,
+}
+
+#[derive(Debug)]
+pub(crate) enum PreparedGpuSource {
+    Reduced(GpuSpatialPreview),
+    Full(GpuSpatialFullSource),
+}
+
+impl PreparedGpuSource {
+    fn dimensions(&self) -> (usize, usize) {
+        match self {
+            Self::Reduced(source) => source.dimensions(),
+            Self::Full(source) => source.dimensions(),
+        }
+    }
+
+    fn description(&self) -> &rohditor_core::SpatialCompletionDescription {
+        match self {
+            Self::Reduced(source) => source.description(),
+            Self::Full(source) => source.description(),
+        }
+    }
+
+    fn optics_provenance(&self) -> Option<&OpticsProvenance> {
+        match self {
+            Self::Reduced(source) => source.optics_provenance(),
+            Self::Full(source) => source.optics_provenance(),
+        }
+    }
 }
 
 impl PreviewBackend {
@@ -193,9 +221,13 @@ pub(crate) enum WorkerEvent {
     },
     GpuUploadReady {
         ticket: PreviewTicket,
-        upload: Box<GpuPreviewUpload>,
+        source: Box<PreparedGpuSource>,
         diagnostics: WorkerPreviewDiagnostics,
         upload_preparation: Duration,
+    },
+    GpuSpatialFailed {
+        ticket: PreviewTicket,
+        message: String,
     },
     WhiteBalanceSampleReady {
         ticket: PreviewTicket,
@@ -567,14 +599,24 @@ fn worker_loop(
                 let completion = if abandoned.contains(&ticket.document_id) {
                     PreviewCompletion::Cancelled
                 } else if scheduled.job.resolution == PreviewResolution::SourceScale {
-                    process_source_scale_preview(
-                        scheduled.job,
-                        &sender,
-                        &context,
-                        &scheduled.cancellation,
-                        &pipeline,
-                        &mut preview_cache,
-                    )
+                    match scheduled.job.backend {
+                        PreviewBackend::Cpu => process_source_scale_preview(
+                            scheduled.job,
+                            &sender,
+                            &context,
+                            &scheduled.cancellation,
+                            &pipeline,
+                            &mut preview_cache,
+                        ),
+                        PreviewBackend::GpuBase => process_gpu_base(
+                            scheduled.job,
+                            &sender,
+                            &context,
+                            &scheduled.cancellation,
+                            &pipeline,
+                            &mut preview_cache,
+                        ),
+                    }
                 } else {
                     match scheduled.job.backend {
                         PreviewBackend::Cpu => process_preview(
@@ -1095,7 +1137,14 @@ fn process_gpu_base(
     pipeline: &CpuPipeline,
     preview_cache: &mut PreviewCache,
 ) -> PreviewCompletion {
-    let options = job.options;
+    let options = if job.resolution == PreviewResolution::SourceScale {
+        PreviewOptions {
+            max_long_edge: job.frame.info.width.max(job.frame.info.height),
+            ..job.options
+        }
+    } else {
+        job.options
+    };
     let span = info_span!(
         "desktop.gpu_base",
         document_id = job.ticket.document_id,
@@ -1109,96 +1158,91 @@ fn process_gpu_base(
         options,
         pipeline,
     );
-    let cache_hits = preview_cache.prepare(&keys, &job.frame);
+    let mut cache_hits = preview_cache.prepare(&keys, &job.frame);
     send_preview_progress(
         sender,
         context,
         job.ticket,
-        if cache_hits.reconstructed {
-            "Packing cached camera-native source for GPU preview"
-        } else {
-            "Preparing camera-native 2560 px GPU preview source"
-        },
+        "Preparing resident camera source, optics, and exact GPU preview reduction",
     );
-    let timings = match ensure_preview_reconstruction(
-        &job,
-        options,
-        &keys,
-        cache_hits,
-        cancellation,
-        pipeline,
-        preview_cache,
-    ) {
-        Ok(timings) => timings,
-        Err(PipelineError::Cancelled) => {
-            info!("GPU preview base cancelled after being superseded");
-            return PreviewCompletion::Cancelled;
-        }
-        Err(error) => {
-            send_failure(
-                sender,
-                context,
-                job.ticket.document_id,
-                JobKind::Preview,
-                Some(job.ticket.revision),
-                None,
-                format!("GPU preview base development failed: {error}"),
-            );
-            return PreviewCompletion::Failed;
-        }
+    let prepared = if job.resolution == PreviewResolution::SourceScale {
+        preview_cache
+            .prepare_gpu_full(
+                pipeline,
+                &job.frame,
+                &job.recipe,
+                options,
+                &keys,
+                cancellation,
+            )
+            .map(|(source, metrics)| (PreparedGpuSource::Full(source), metrics))
+    } else {
+        preview_cache
+            .prepare_gpu_spatial(
+                pipeline,
+                &job.frame,
+                &job.recipe,
+                options,
+                &keys,
+                cancellation,
+            )
+            .map(|(source, metrics)| (PreparedGpuSource::Reduced(source), metrics))
     };
-    let Some(reconstructed) = preview_cache.reconstructed(&keys) else {
-        send_failure(
-            sender,
-            context,
-            job.ticket.document_id,
-            JobKind::Preview,
-            Some(job.ticket.revision),
-            None,
-            "GPU preview cache lost its reconstructed source unexpectedly".to_owned(),
-        );
-        return PreviewCompletion::Failed;
-    };
-    let width = reconstructed.image().width();
-    let height = reconstructed.image().height();
-    let upload_started = Instant::now();
-    let upload = match GpuPreviewUpload::from_reconstructed_preview_for_recipe(
-        reconstructed,
-        &job.recipe,
-        cancellation,
-    ) {
-        Ok(upload) => upload,
+    let (spatial, metrics) = match prepared {
+        Ok(result) => result,
         Err(GpuPreviewError::Cancelled) => {
-            info!("GPU upload packing cancelled after being superseded");
+            info!("GPU spatial preview cancelled after being superseded");
             return PreviewCompletion::Cancelled;
         }
         Err(error) => {
-            send_failure(
+            send_event(
                 sender,
                 context,
-                job.ticket.document_id,
-                JobKind::Preview,
-                Some(job.ticket.revision),
-                None,
-                format!("Could not prepare the GPU preview upload: {error}"),
+                WorkerEvent::GpuSpatialFailed {
+                    ticket: job.ticket,
+                    message: error.to_string(),
+                },
             );
             return PreviewCompletion::Failed;
         }
     };
-    let upload_preparation = upload_started.elapsed();
+    cache_hits.reconstructed = metrics.uploaded_bytes == 0;
+    let description = spatial.description();
+    let (width, height) = spatial.dimensions();
+    let mut timings = description.preparation_timings();
+    timings.capture_sharpening = metrics.capture.total;
+    timings.resampling = metrics.spatial;
+    timings.total += metrics.capture.total + metrics.upload + metrics.spatial;
+    let upload_preparation = metrics.capture.total + metrics.upload + metrics.spatial;
     let (optics_applied, optics_fallback, optics_scale) =
-        optics_metrics(reconstructed.optics_provenance());
+        optics_metrics(spatial.optics_provenance());
     let cache_resident_bytes = preview_cache.resident_bytes();
-    let memory = gpu_base_memory(&job.frame, reconstructed, cache_resident_bytes);
+    let source_pixels = description.source_dimensions().0 * description.source_dimensions().1;
+    let target_pixels = width * height;
+    let memory = MemoryEstimate {
+        decoded_raw_bytes: description.decoded_raw_bytes(),
+        normalized_mosaic_bytes: description.normalized_mosaic_bytes(),
+        highlight_scratch_bytes: description.highlight_scratch_bytes(),
+        capture_sharpening_scratch_bytes: metrics.capture.estimated_host_bytes,
+        optics_output_bytes: 0,
+        optics_scratch_bytes: 0,
+        resample_intermediate_bytes: 0,
+        linear_rgb_bytes: target_pixels.saturating_mul(12),
+        display_rgb_bytes: target_pixels.saturating_mul(3),
+        estimated_peak_bytes: description
+            .decoded_raw_bytes()
+            .saturating_add(source_pixels.saturating_mul(12))
+            .saturating_add(cache_resident_bytes),
+    };
     let diagnostics = WorkerPreviewDiagnostics {
         backend: PreviewBackend::GpuBase,
         resolution: job.resolution,
         algorithm: options.render.demosaic,
         cache_hits,
         timings,
-        highlight_diagnostics: reconstructed.highlight_diagnostics(),
+        highlight_diagnostics: description.highlight_diagnostics(),
         capture_cpu_recovery: preview_cache.capture_recovery().is_some(),
-        capture_sharpening: reconstructed.capture_sharpening(),
+        capture_sharpening: description.capture_sharpening(),
         output_gamut_diagnostics: None,
         memory,
         cache_resident_bytes,
@@ -1213,7 +1257,7 @@ fn process_gpu_base(
         context,
         WorkerEvent::GpuUploadReady {
             ticket: job.ticket,
-            upload: Box::new(upload),
+            source: Box::new(spatial),
             diagnostics,
             upload_preparation,
         },
@@ -1559,25 +1603,6 @@ fn optics_metrics(
             Some(value.scale),
         )
     })
-}
-
-fn gpu_base_memory(
-    frame: &RawFrame,
-    reconstructed: &rohditor_core::ReconstructedPreview,
-    cache_resident_bytes: usize,
-) -> MemoryEstimate {
-    MemoryEstimate {
-        decoded_raw_bytes: frame.mosaic.len().saturating_mul(size_of::<u16>()),
-        normalized_mosaic_bytes: reconstructed.normalized_mosaic_bytes(),
-        highlight_scratch_bytes: reconstructed.highlight_scratch_bytes(),
-        capture_sharpening_scratch_bytes: reconstructed.capture_sharpening_scratch_bytes(),
-        optics_output_bytes: reconstructed.optics_output_bytes(),
-        optics_scratch_bytes: reconstructed.optics_scratch_bytes(),
-        resample_intermediate_bytes: reconstructed.resample_intermediate_bytes(),
-        linear_rgb_bytes: reconstructed.buffer_bytes(),
-        display_rgb_bytes: 0,
-        estimated_peak_bytes: cache_resident_bytes.max(reconstructed.preparation_peak_bytes()),
-    }
 }
 
 fn log_preview_diagnostics(
@@ -2070,7 +2095,8 @@ mod tests {
     }
 
     #[test]
-    fn gpu_preview_request_hands_a_prepared_upload_to_the_ui_without_cpu_display_conversion() {
+    #[ignore = "requires Vulkan; spatial GPU source remains native on the shared device"]
+    fn gpu_preview_request_hands_a_resident_source_to_the_ui_without_cpu_display_conversion() {
         let (sender, receiver) = mpsc::channel();
         let options = PreviewOptions {
             render: RenderOptions {
@@ -2093,20 +2119,32 @@ mod tests {
         };
         let pipeline = CpuPipeline::default();
 
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::VULKAN,
+            ..Default::default()
+        });
+        let adapter =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+                .expect("Vulkan adapter");
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
+                .expect("Vulkan device");
+        let mut cache = PreviewCache::default();
+        cache.configure_capture_device(device, queue);
         let completion = process_gpu_base(
             job,
             &sender,
             &egui::Context::default(),
             &CancellationToken::new(),
             &pipeline,
-            &mut PreviewCache::default(),
+            &mut cache,
         );
         assert_eq!(completion, PreviewCompletion::Completed);
         let events = receiver.try_iter().collect::<Vec<_>>();
         let upload = events.iter().find_map(|event| match event {
             WorkerEvent::GpuUploadReady {
                 ticket,
-                upload,
+                source,
                 diagnostics,
                 ..
             } if *ticket
@@ -2116,14 +2154,55 @@ mod tests {
                     sequence: 3,
                 } =>
             {
-                Some((upload, diagnostics))
+                Some((source, diagnostics))
             }
             _ => None,
         });
-        let (upload, diagnostics) =
-            upload.expect("GPU preview request should return a prepared upload");
-        assert_eq!(upload.source_dimensions(), (4, 4));
+        let (source, diagnostics) =
+            upload.expect("GPU preview request should return a resident source");
+        assert_eq!(source.dimensions(), (4, 4));
         assert_eq!(diagnostics.algorithm, DemosaicAlgorithm::Rcd);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, WorkerEvent::PreviewReady { .. }))
+        );
+
+        let source_ticket = PreviewTicket {
+            document_id: 12,
+            revision: 4,
+            sequence: 4,
+        };
+        let completion = process_gpu_base(
+            PreviewJob {
+                ticket: source_ticket,
+                frame: Arc::new(fake_frame()),
+                recipe: EditRecipe::default(),
+                options,
+                backend: PreviewBackend::GpuBase,
+                resolution: PreviewResolution::SourceScale,
+            },
+            &sender,
+            &egui::Context::default(),
+            &CancellationToken::new(),
+            &pipeline,
+            &mut cache,
+        );
+        assert_eq!(completion, PreviewCompletion::Completed);
+        let events = receiver.try_iter().collect::<Vec<_>>();
+        let source = events.iter().find_map(|event| match event {
+            WorkerEvent::GpuUploadReady {
+                ticket,
+                source,
+                diagnostics,
+                ..
+            } if *ticket == source_ticket => Some((source, diagnostics)),
+            _ => None,
+        });
+        let (source, diagnostics) = source.expect("GPU Source 1:1 should remain resident");
+        assert!(matches!(source.as_ref(), PreparedGpuSource::Full(_)));
+        assert_eq!(source.dimensions(), (4, 4));
+        assert_eq!(diagnostics.resolution, PreviewResolution::SourceScale);
         assert!(
             !events
                 .iter()

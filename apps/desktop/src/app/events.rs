@@ -185,11 +185,20 @@ impl RohditorApp {
             }
             WorkerEvent::GpuUploadReady {
                 ticket,
-                upload,
+                source,
                 diagnostics,
                 upload_preparation,
             } => {
-                self.install_gpu_upload(context, ticket, *upload, diagnostics, upload_preparation);
+                self.install_gpu_upload(context, ticket, *source, diagnostics, upload_preparation);
+            }
+            WorkerEvent::GpuSpatialFailed { ticket, message } => {
+                if self
+                    .document
+                    .as_ref()
+                    .is_some_and(|document| document.ticket() == ticket)
+                {
+                    self.handle_gpu_failure(context, ticket.document_id, message);
+                }
             }
             WorkerEvent::WhiteBalanceSampleReady { ticket, sample } => {
                 if self.pending_white_balance_pick != Some(ticket) {

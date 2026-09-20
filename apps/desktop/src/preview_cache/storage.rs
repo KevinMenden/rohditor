@@ -3,11 +3,11 @@ use std::mem::size_of;
 use std::sync::Arc;
 
 use rohditor_core::{
-    CameraProfileKey, CorrectionComponents, CpuPipeline, CpuPreviewWorkspace, DemosaicedBase,
-    GamutMappingDiagnostics, LOCAL_RATIOS_ALGORITHM_VERSION, MemoryEstimate,
-    OPPOSED_ALGORITHM_VERSION, OPTICS_ALGORITHM_VERSION, OpticsProvenance, OutputPolicy,
-    PreviewOptions, RawCropPolicy, ReconstructedPreview, WHITE_BALANCE_ALGORITHM_VERSION,
-    camera_profile_key,
+    AREA_REDUCTION_ALGORITHM_VERSION, CameraProfileKey, CorrectionComponents, CpuPipeline,
+    CpuPreviewWorkspace, DemosaicedBase, GamutMappingDiagnostics, LOCAL_RATIOS_ALGORITHM_VERSION,
+    MemoryEstimate, OPPOSED_ALGORITHM_VERSION, OPTICS_ALGORITHM_VERSION, OpticsProvenance,
+    OutputPolicy, PreviewOptions, RawCropPolicy, ReconstructedPreview,
+    WHITE_BALANCE_ALGORITHM_VERSION, camera_profile_key,
 };
 #[cfg(test)]
 use rohditor_core::{DatabaseProvenance, LensProfileSummary};
@@ -94,6 +94,7 @@ impl PreviewCacheKeys {
             // boundary now consumes camera-native samples rather than a
             // camera-converted base.
             reconstruction_version: 8,
+            resampling_version: AREA_REDUCTION_ALGORITHM_VERSION,
             capture_sharpening: recipe.capture_sharpening.is_active().then_some((
                 [
                     recipe.capture_sharpening.amount.to_bits(),
@@ -184,6 +185,7 @@ struct ReconstructedCameraRgbKey {
     highlight: HighlightKey,
     optics: OpticsKey,
     reconstruction_version: u8,
+    resampling_version: u16,
     capture_sharpening: Option<([u32; 3], u16)>,
 }
 
@@ -550,6 +552,46 @@ impl PreviewCache {
             retained,
             cancellation,
         )
+    }
+
+    pub(crate) fn prepare_gpu_spatial(
+        &mut self,
+        pipeline: &CpuPipeline,
+        frame: &RawFrame,
+        recipe: &EditRecipe,
+        options: PreviewOptions,
+        keys: &PreviewCacheKeys,
+        cancellation: &rohditor_core::CancellationToken,
+    ) -> Result<
+        (
+            rohditor_gpu::GpuSpatialPreview,
+            rohditor_gpu::SpatialMetrics,
+        ),
+        rohditor_gpu::GpuPreviewError,
+    > {
+        self.workspace = CpuPreviewWorkspace::default();
+        self.spatial
+            .prepare_gpu(pipeline, frame, recipe, options, keys, cancellation)
+    }
+
+    pub(crate) fn prepare_gpu_full(
+        &mut self,
+        pipeline: &CpuPipeline,
+        frame: &RawFrame,
+        recipe: &EditRecipe,
+        options: PreviewOptions,
+        keys: &PreviewCacheKeys,
+        cancellation: &rohditor_core::CancellationToken,
+    ) -> Result<
+        (
+            rohditor_gpu::GpuSpatialFullSource,
+            rohditor_gpu::SpatialMetrics,
+        ),
+        rohditor_gpu::GpuPreviewError,
+    > {
+        self.workspace = CpuPreviewWorkspace::default();
+        self.spatial
+            .prepare_gpu_full(pipeline, frame, recipe, options, keys, cancellation)
     }
 
     pub(crate) fn insert_reconstructed(

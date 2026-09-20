@@ -7,18 +7,61 @@ use eframe::egui;
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_gpu::{
     GpuCapabilities, GpuDisplayReadbackPending, GpuPreviewFrame, GpuPreviewProcessor,
-    GpuPreviewSource,
+    GpuPreviewSource, GpuSpatialFullSource,
 };
 use std::time::Instant;
 use tracing::info;
 
 use crate::ProcessorPreference;
+use crate::coordinator::PreviewResolution;
 use crate::document::PreviewTicket;
+
+pub(super) enum GpuDocumentSource {
+    Reduced(Box<GpuPreviewSource>),
+    Full(Box<GpuSpatialFullSource>),
+}
+
+impl GpuDocumentSource {
+    pub(super) fn estimated_bytes(&self) -> usize {
+        match self {
+            Self::Reduced(source) => source.estimated_bytes(),
+            Self::Full(source) => usize::try_from(source.estimated_bytes()).unwrap_or(usize::MAX),
+        }
+    }
+
+    pub(super) fn supports_white_balance_draft(&self, recipe: &rohditor_edit::EditRecipe) -> bool {
+        match self {
+            Self::Reduced(source) => source.supports_white_balance_draft(recipe),
+            // Source 1:1 is an inspection mode. Rebuild exact clipped pixels
+            // after WB edits instead of presenting a knowingly stale draft.
+            Self::Full(_) => false,
+        }
+    }
+
+    pub(super) fn matches_recipe(&self, recipe: &rohditor_edit::EditRecipe) -> bool {
+        match self {
+            Self::Reduced(source) => source.matches_recipe(recipe),
+            // Returning to fit view deliberately rebuilds the reduced source.
+            Self::Full(_) => false,
+        }
+    }
+
+    pub(super) fn optics_matches_recipe(
+        &self,
+        adjustments: &rohditor_edit::OpticsAdjustments,
+    ) -> bool {
+        match self {
+            Self::Reduced(source) => source.optics_matches_recipe(adjustments),
+            Self::Full(source) => source.optics_matches_recipe(adjustments),
+        }
+    }
+}
 
 pub(super) struct GpuDocumentPreview {
     pub(super) ticket: PreviewTicket,
     pub(super) algorithm: DemosaicAlgorithm,
-    pub(super) source: GpuPreviewSource,
+    pub(super) resolution: PreviewResolution,
+    pub(super) source: GpuDocumentSource,
     pub(super) frame: GpuPreviewFrame,
     pub(super) texture_id: egui::TextureId,
 }

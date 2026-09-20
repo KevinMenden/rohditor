@@ -9,6 +9,7 @@ use std::error::Error;
 #[test]
 #[ignore = "private Sony RAWs and Vulkan; optional ROHDITOR_GPU_CAPTURE_ARTIFACTS directory"]
 fn private_capture_camera_parity_and_visual_crops() -> Result<(), Box<dyn Error>> {
+    let _guard = crate::preview::processor::tests::gpu_test_guard();
     let mut gpu = super::tests::processor();
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata");
     let manifest: serde_json::Value =

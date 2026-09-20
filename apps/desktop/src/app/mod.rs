@@ -35,7 +35,8 @@ use crate::ProcessorPreference;
 use crate::camera_profiles::CameraProfileRegistry;
 use crate::catalog::{CatalogCoordinator, CatalogState, ThumbnailSlot};
 use crate::coordinator::{
-    PreviewBackend, PreviewResolution, RenderCoordinator, WorkerImage, WorkerPreviewDiagnostics,
+    PreparedGpuSource, PreviewBackend, PreviewResolution, RenderCoordinator, WorkerImage,
+    WorkerPreviewDiagnostics,
 };
 use crate::document::{EditSession, PreviewIntent, PreviewTicket};
 use crate::preview_cache::PreviewCacheHits;
@@ -60,9 +61,9 @@ use crate::ui::theme;
 use crate::ui::toolbar::{self, FilePanelModel, StatusBarModel, ToolbarModel};
 use crate::ui::viewport::{self, PreviewSource, PreviewTexture, ViewState, ViewportModel};
 use crate::ui::{PickerMode, ViewMode};
-use rohditor_gpu::GpuPreviewUpload;
 
 const GPU_HISTOGRAM_DEBOUNCE: Duration = Duration::from_millis(75);
+const RECIPE_SAVE_NOTICE_DURATION: Duration = Duration::from_secs(3);
 const AUTO_TONE_EXPOSURE_EPSILON_EV: f32 = 0.01;
 /// Longest grid texture edge; thumbnails decode down to this size.
 const LIBRARY_TEXTURE_LONG_EDGE: u32 = 256;
@@ -84,8 +85,8 @@ mod lifecycle;
 
 use crop::CropToolSession;
 use gpu::{
-    GpuDocumentPreview, GpuRuntime, PendingGpuHistogram, gpu_output_size, initialize_gpu_runtime,
-    register_or_update_gpu_texture,
+    GpuDocumentPreview, GpuDocumentSource, GpuRuntime, PendingGpuHistogram, gpu_output_size,
+    initialize_gpu_runtime, register_or_update_gpu_texture,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -118,6 +119,33 @@ struct ExportActivity {
     id: u64,
     recipe_revision: u64,
     detail: String,
+}
+
+#[derive(Debug)]
+enum RecipeSaveStatus {
+    Pending(String),
+    Notice { message: String, until: Instant },
+    Error(String),
+}
+
+impl RecipeSaveStatus {
+    fn message(&self) -> &str {
+        match self {
+            Self::Pending(message) | Self::Error(message) => message,
+            Self::Notice { message, .. } => message,
+        }
+    }
+
+    fn is_pending(&self) -> bool {
+        matches!(self, Self::Pending(_))
+    }
+
+    fn notice_deadline(&self) -> Option<Instant> {
+        match self {
+            Self::Notice { until, .. } => Some(*until),
+            Self::Pending(_) | Self::Error(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -280,7 +308,7 @@ pub(crate) struct RohditorApp {
     export_settings: ExportUiSettings,
     settings: AppSettings,
     settings_warning: Option<String>,
-    recipe_save_status: Option<String>,
+    recipe_save_status: Option<RecipeSaveStatus>,
     recipe_save_error: Option<String>,
     queued_recipe_snapshots: HashMap<PathBuf, (u64, EditRecipe)>,
     camera_profiles: CameraProfileRegistry,
@@ -946,7 +974,7 @@ impl RohditorApp {
         &mut self,
         context: &egui::Context,
         ticket: PreviewTicket,
-        upload: GpuPreviewUpload,
+        prepared: PreparedGpuSource,
         diagnostics: WorkerPreviewDiagnostics,
         upload_preparation: Duration,
     ) {
@@ -974,19 +1002,27 @@ impl RohditorApp {
                     .to_owned()
             })
             .and_then(|runtime| {
-                let source = runtime
-                    .processor
-                    .upload_prepared(upload)
-                    .map_err(|error| error.to_string())?;
-                let frame = runtime
-                    .processor
-                    .render(
-                        &source,
-                        &recipe,
-                        self.settings.render_options().output_policy,
-                        reusable_frame,
-                    )
-                    .map_err(|error| error.to_string())?;
+                let output_policy = self.settings.render_options().output_policy;
+                let (source, frame) = match prepared {
+                    PreparedGpuSource::Reduced(prepared) => {
+                        let source = runtime
+                            .processor
+                            .adopt_spatial_preview(prepared, &recipe)
+                            .map_err(|error| error.to_string())?;
+                        let frame = runtime
+                            .processor
+                            .render(&source, &recipe, output_policy, reusable_frame)
+                            .map_err(|error| error.to_string())?;
+                        (GpuDocumentSource::Reduced(Box::new(source)), frame)
+                    }
+                    PreparedGpuSource::Full(source) => {
+                        let frame = runtime
+                            .processor
+                            .render_spatial_full(&source, &recipe, output_policy, reusable_frame)
+                            .map_err(|error| error.to_string())?;
+                        (GpuDocumentSource::Full(Box::new(source)), frame)
+                    }
+                };
                 let texture_id =
                     register_or_update_gpu_texture(runtime, previous_texture_id, &frame);
                 Ok::<_, String>((source, frame, texture_id))
@@ -1025,19 +1061,28 @@ impl RohditorApp {
                     document.gpu_preview = Some(GpuDocumentPreview {
                         ticket,
                         algorithm: diagnostics.algorithm,
+                        resolution: diagnostics.resolution,
                         source,
                         frame,
                         texture_id,
                     });
-                    document.gpu_histogram_due =
-                        Some((ticket, Instant::now() + GPU_HISTOGRAM_DEBOUNCE));
+                    document.gpu_histogram_due = (diagnostics.resolution == PreviewResolution::Fit)
+                        .then_some((ticket, Instant::now() + GPU_HISTOGRAM_DEBOUNCE));
                     document.texture = Some(PreviewTexture::Gpu {
                         id: texture_id,
                         size: output_size,
                     });
                     document.preview_pixels = None;
-                    document.preview_source =
-                        Some(PreviewSource::developed(diagnostics.algorithm, true));
+                    document.preview_source = Some(
+                        if diagnostics.resolution == PreviewResolution::SourceScale {
+                            PreviewSource::OneToOneGpu
+                        } else {
+                            PreviewSource::developed(diagnostics.algorithm, true)
+                        },
+                    );
+                    if diagnostics.resolution == PreviewResolution::SourceScale {
+                        document.view.actual_size(context.input(|input| input.time));
+                    }
                     document.preview_status = None;
                     document.last_preview_time = Some(elapsed);
                     document.preview_diagnostics = Some(preview_diagnostics);
@@ -1126,20 +1171,26 @@ impl RohditorApp {
             .ok_or_else(|| "the GPU processor is no longer active while applying edits".to_owned())
             .and_then(|runtime| {
                 let output_policy = self.settings.render_options().output_policy;
-                let frame = match render {
-                    ResidentGpuRender::Exact => runtime.processor.render(
-                        &preview.source,
-                        &recipe,
-                        output_policy,
-                        Some(preview.frame),
-                    ),
-                    ResidentGpuRender::WhiteBalanceDraft => {
+                let frame = match (&preview.source, render) {
+                    (GpuDocumentSource::Reduced(source), ResidentGpuRender::Exact) => runtime
+                        .processor
+                        .render(source, &recipe, output_policy, Some(preview.frame)),
+                    (GpuDocumentSource::Reduced(source), ResidentGpuRender::WhiteBalanceDraft) => {
                         runtime.processor.render_white_balance_draft(
-                            &preview.source,
+                            source,
                             &recipe,
                             output_policy,
                             Some(preview.frame),
                         )
+                    }
+                    (GpuDocumentSource::Full(source), ResidentGpuRender::Exact) => runtime
+                        .processor
+                        .render_spatial_full(source, &recipe, output_policy, Some(preview.frame)),
+                    (GpuDocumentSource::Full(_), ResidentGpuRender::WhiteBalanceDraft) => {
+                        return Err(
+                            "full-resolution GPU inspection requires an exact white-balance rebuild"
+                                .to_owned(),
+                        );
                     }
                 }
                 .map_err(|error| error.to_string())?;
@@ -1204,24 +1255,32 @@ impl RohditorApp {
                 );
                 if let Some(document) = self.document.as_mut().filter(|document| {
                     document.ticket() == current_ticket
-                        && document.preview_intent == PreviewIntent::CommittedFit
+                        && preview_intent_matches_resolution(
+                            document.preview_intent,
+                            preview.resolution,
+                        )
                 }) {
                     document.gpu_preview = Some(GpuDocumentPreview {
                         ticket: current_ticket,
                         algorithm: preview.algorithm,
+                        resolution: preview.resolution,
                         source: preview.source,
                         frame,
                         texture_id,
                     });
-                    document.gpu_histogram_due =
-                        Some((current_ticket, Instant::now() + GPU_HISTOGRAM_DEBOUNCE));
+                    document.gpu_histogram_due = (preview.resolution == PreviewResolution::Fit)
+                        .then_some((current_ticket, Instant::now() + GPU_HISTOGRAM_DEBOUNCE));
                     document.texture = Some(PreviewTexture::Gpu {
                         id: texture_id,
                         size: output_size,
                     });
                     document.preview_pixels = None;
                     document.preview_source =
-                        Some(PreviewSource::developed(worker.algorithm, true));
+                        Some(if preview.resolution == PreviewResolution::SourceScale {
+                            PreviewSource::OneToOneGpu
+                        } else {
+                            PreviewSource::developed(worker.algorithm, true)
+                        });
                     document.preview_status = None;
                     document.last_preview_time = Some(submission);
                     document.preview_diagnostics = Some(preview_diagnostics);
@@ -2035,17 +2094,28 @@ impl RohditorApp {
         )
     }
 
+    fn refresh_recipe_save_status(&mut self, context: &egui::Context) {
+        let now = Instant::now();
+        let Some(deadline) = self
+            .recipe_save_status
+            .as_ref()
+            .and_then(RecipeSaveStatus::notice_deadline)
+        else {
+            return;
+        };
+        if now >= deadline {
+            self.recipe_save_status = None;
+        } else {
+            context.request_repaint_after(deadline.saturating_duration_since(now));
+        }
+    }
+
     fn show_status_bar(&mut self, context: &egui::Context) {
+        self.refresh_recipe_save_status(context);
         let mut activities = Vec::new();
         let mut busy = false;
         if let Some(note) = &self.processor_note {
             activities.push(note.clone());
-        }
-        if let Some(status) = &self.recipe_save_status {
-            activities.push(status.clone());
-        }
-        if let Some(error) = &self.recipe_save_error {
-            activities.push(format!("Save failed: {error}"));
         }
         if let Some(document) = &self.document {
             if let Some(error) = &document.error {
@@ -2072,14 +2142,33 @@ impl RohditorApp {
                 busy = true;
             }
         }
+        let activity_busy = busy;
         busy |= self.catalog.pending_count() > 0;
+        let save_pending = self
+            .recipe_save_status
+            .as_ref()
+            .is_some_and(RecipeSaveStatus::is_pending)
+            && self.recipe_save_error.is_none();
+        busy |= save_pending;
+        let save_status = self
+            .recipe_save_error
+            .as_ref()
+            .map(|error| format!("Save failed: {error}"))
+            .or_else(|| {
+                self.recipe_save_status
+                    .as_ref()
+                    .map(|status| status.message().to_owned())
+            });
         toolbar::show_status(
             context,
             &StatusBarModel {
                 processor: self.processor_description(),
                 ui_renderer: format!("{} UI", self.ui_renderer),
                 activity: (!activities.is_empty()).then(|| activities.join("  ·  ")),
+                activity_busy,
                 busy,
+                save_status,
+                save_pending,
                 preview_dimensions: self
                     .document
                     .as_ref()
@@ -3332,9 +3421,26 @@ fn gpu_base_highlights_match(
 fn gpu_upload_matches_document(document: &Document, ticket: PreviewTicket) -> bool {
     document.id == ticket.document_id
         && document.ticket() == ticket
-        && document.preview_intent == PreviewIntent::CommittedFit
-        && !document.source_scale_requested
+        && preview_intent_matches_resolution(
+            document.preview_intent,
+            if document.source_scale_requested {
+                PreviewResolution::SourceScale
+            } else {
+                PreviewResolution::Fit
+            },
+        )
         && gpu_supports_recipe(document.edits.recipe())
+}
+
+const fn preview_intent_matches_resolution(
+    intent: PreviewIntent,
+    resolution: PreviewResolution,
+) -> bool {
+    matches!(
+        (intent, resolution),
+        (PreviewIntent::CommittedFit, PreviewResolution::Fit)
+            | (PreviewIntent::SourceScale, PreviewResolution::SourceScale)
+    )
 }
 
 fn apply_adjustment_interaction(

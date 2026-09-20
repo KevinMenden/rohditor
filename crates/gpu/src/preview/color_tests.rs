@@ -231,7 +231,10 @@ fn read_working(processor: &GpuPreviewProcessor, frame: &GpuPreviewFrame) -> Vec
     let mut encoder = processor.device.create_command_encoder(&Default::default());
     encoder.copy_texture_to_buffer(
         wgpu::TexelCopyTextureInfo {
-            texture: &frame._working_texture,
+            texture: frame
+                ._working_texture
+                .as_ref()
+                .expect("ordinary preview frames retain a working texture"),
             mip_level: 0,
             origin: wgpu::Origin3d::ZERO,
             aspect: wgpu::TextureAspect::All,

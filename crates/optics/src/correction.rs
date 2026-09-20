@@ -1,7 +1,7 @@
 use rayon::prelude::*;
 use rohditor_image::{LinearRgbImage, LinearRgbSpace, allocate_zeroed_f32};
 
-use crate::plan::map_coordinates;
+use crate::plan::map_coordinates_execution;
 use crate::resample::cubic_sample;
 use crate::{CorrectionComponents, LensCorrectionPlan, OpticsError, OpticsProvenance};
 
@@ -36,6 +36,17 @@ impl LensCorrectionPlan {
     /// Apply a plan with per-row cooperative cancellation.
     pub fn apply_cancellable(
         self,
+        image: LinearRgbImage<f32>,
+        cancellation: &dyn Cancellation,
+    ) -> Result<CorrectionResult, OpticsError> {
+        self.execution().apply_cancellable(image, cancellation)
+    }
+}
+
+impl crate::OpticsExecution {
+    /// Execute a previously resolved Lensfun-free correction contract.
+    pub fn apply_cancellable(
+        &self,
         mut image: LinearRgbImage<f32>,
         cancellation: &dyn Cancellation,
     ) -> Result<CorrectionResult, OpticsError> {
@@ -49,10 +60,10 @@ impl LensCorrectionPlan {
             return Err(OpticsError::Cancelled);
         }
 
-        if self.applied.vignetting {
-            apply_vignetting(&mut image, &self, cancellation)?;
+        if self.provenance.applied.vignetting {
+            apply_vignetting(&mut image, self, cancellation)?;
         }
-        if self.applied.distortion || self.applied.chromatic_aberration {
+        if self.provenance.applied.distortion || self.provenance.applied.chromatic_aberration {
             let elements = self
                 .width
                 .checked_mul(self.height)
@@ -83,7 +94,7 @@ impl LensCorrectionPlan {
                         return Err(OpticsError::Cancelled);
                     }
                     for x in 0..self.width {
-                        let coordinates = map_coordinates(&self, x, y)?;
+                        let coordinates = map_coordinates_execution(self, x, y)?;
                         for channel in 0..3 {
                             row[x * 3 + channel] = cubic_sample(
                                 input,
@@ -101,25 +112,27 @@ impl LensCorrectionPlan {
             image = output;
         }
 
-        let output_bytes = if self.applied.distortion || self.applied.chromatic_aberration {
-            image
-                .data()
-                .len()
-                .saturating_mul(std::mem::size_of::<f32>())
-        } else {
-            0
-        };
-        let scratch_bytes = if self.applied.distortion || self.applied.chromatic_aberration {
-            self.width
-                .checked_mul(6)
-                .and_then(|elements| elements.checked_mul(std::mem::size_of::<f32>()))
-                .unwrap_or(usize::MAX)
-        } else {
-            0
-        };
+        let output_bytes =
+            if self.provenance.applied.distortion || self.provenance.applied.chromatic_aberration {
+                image
+                    .data()
+                    .len()
+                    .saturating_mul(std::mem::size_of::<f32>())
+            } else {
+                0
+            };
+        let scratch_bytes =
+            if self.provenance.applied.distortion || self.provenance.applied.chromatic_aberration {
+                self.width
+                    .checked_mul(6)
+                    .and_then(|elements| elements.checked_mul(std::mem::size_of::<f32>()))
+                    .unwrap_or(usize::MAX)
+            } else {
+                0
+            };
         Ok(CorrectionResult {
             image,
-            provenance: self.provenance(),
+            provenance: self.provenance.clone(),
             output_bytes,
             scratch_bytes,
         })
@@ -128,7 +141,7 @@ impl LensCorrectionPlan {
 
 fn apply_vignetting(
     image: &mut LinearRgbImage<f32>,
-    plan: &LensCorrectionPlan,
+    plan: &crate::OpticsExecution,
     cancellation: &dyn Cancellation,
 ) -> Result<(), OpticsError> {
     let Some(crate::plan::VignettingModel::Pa { k1, k2, k3 }) = plan.vignetting else {
