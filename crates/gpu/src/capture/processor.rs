@@ -11,7 +11,10 @@ impl GpuCaptureProcessor {
         cancellation: &CancellationToken,
     ) -> Result<CaptureMetrics, GpuPreviewError> {
         let started = Instant::now();
-        let _reservation = crate::memory::Reservation::new(plan.gpu_bytes);
+        let _reservation = crate::memory::Reservation::try_new(
+            plan.gpu_bytes,
+            crate::spatial::resources::DEFAULT_BUDGET,
+        )?;
         let resources = Resources::new_resident(&self.device, &self.queue, plan.pixels, contract);
         let mut packed = Vec::<f32>::new();
         packed.try_reserve_exact(plan.pixels * 3).map_err(error)?;
@@ -141,7 +144,10 @@ impl GpuCaptureProcessor {
         cancellation: &CancellationToken,
     ) -> Result<GpuCaptureResult, GpuPreviewError> {
         let started = Instant::now();
-        let _reservation = crate::memory::Reservation::new(plan.gpu_bytes);
+        let _reservation = crate::memory::Reservation::try_new(
+            plan.gpu_bytes,
+            crate::spatial::resources::DEFAULT_BUDGET,
+        )?;
         let mut data = Vec::new();
         data.try_reserve_exact(image.data().len()).map_err(error)?;
         data.extend_from_slice(image.data());

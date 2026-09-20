@@ -6,6 +6,8 @@ use rohditor_core::{CancellationToken, CpuPipeline, DemosaicedCameraSource};
 
 use crate::GpuPreviewError;
 
+#[cfg(test)]
+mod qualification;
 pub(crate) mod reduction;
 pub(crate) mod resources;
 pub(crate) mod source;
@@ -146,7 +148,7 @@ impl GpuSpatialProcessor {
         let started = Instant::now();
         let operation = (|| {
             let planes =
-                std::sync::Arc::new(source::ResidentCameraPlanes::new(&self.device, layout));
+                std::sync::Arc::new(source::ResidentCameraPlanes::new(&self.device, layout)?);
             let (uploaded_bytes, capture, upload) = if contract.settings().is_active() {
                 let remaining = self
                     .budget

@@ -480,8 +480,10 @@ impl RohditorApp {
         if let Some(runtime) = &gpu {
             coordinator
                 .configure_capture_device(
+                    runtime.render_state.adapter.clone(),
                     runtime.render_state.device.clone(),
                     runtime.render_state.queue.clone(),
+                    runtime.render_state.target_format,
                 )
                 .map_err(std::io::Error::other)?;
         }
@@ -681,9 +683,9 @@ impl RohditorApp {
             document.preview_diagnostics = None;
         }
         if source_scale_requested {
-            if self.gpu.is_some() {
-                self.release_document_gpu_preview(document_id);
-            }
+            // Keep the last complete Source 1:1 frame visible while the
+            // worker prepares its replacement. The shared reservation budget
+            // accounts for both frames and forces a safe CPU recovery first.
             if let Some(document) = self.document.as_mut() {
                 document.preview_status = Some((
                     ticket.revision,
@@ -1015,12 +1017,12 @@ impl RohditorApp {
                             .map_err(|error| error.to_string())?;
                         (GpuDocumentSource::Reduced(Box::new(source)), frame)
                     }
-                    PreparedGpuSource::Full(source) => {
-                        let frame = runtime
-                            .processor
-                            .render_spatial_full(&source, &recipe, output_policy, reusable_frame)
-                            .map_err(|error| error.to_string())?;
-                        (GpuDocumentSource::Full(Box::new(source)), frame)
+                    PreparedGpuSource::Full { source, frame } => {
+                        // Source 1:1 development completed on the worker in
+                        // cancellable row bands; the UI only adopts its result.
+                        let _ = output_policy;
+                        let _ = reusable_frame;
+                        (GpuDocumentSource::Full(Box::new(source)), *frame)
                     }
                 };
                 let texture_id =
@@ -1101,6 +1103,20 @@ impl RohditorApp {
     }
 
     fn render_gpu_preview(&mut self, context: &egui::Context, document_id: u64) {
+        let source_scale = self.document.as_ref().is_some_and(|document| {
+            document.id == document_id
+                && document
+                    .gpu_preview
+                    .as_ref()
+                    .is_some_and(|preview| matches!(preview.source, GpuDocumentSource::Full(_)))
+        });
+        if source_scale {
+            // Source 1:1 must remain worker-owned even for a downstream-only
+            // edit. Keep the current display installed until that ticket
+            // returns; never make the UI thread submit a full image dispatch.
+            self.queue_preview(context, document_id);
+            return;
+        }
         let _ = self.render_resident_gpu_preview(context, document_id, ResidentGpuRender::Exact);
     }
 
@@ -1183,9 +1199,12 @@ impl RohditorApp {
                             Some(preview.frame),
                         )
                     }
-                    (GpuDocumentSource::Full(source), ResidentGpuRender::Exact) => runtime
-                        .processor
-                        .render_spatial_full(source, &recipe, output_policy, Some(preview.frame)),
+                    (GpuDocumentSource::Full(_), ResidentGpuRender::Exact) => {
+                        return Err(
+                            "full-resolution GPU inspection must be rebuilt by the worker"
+                                .to_owned(),
+                        );
+                    }
                     (GpuDocumentSource::Full(_), ResidentGpuRender::WhiteBalanceDraft) => {
                         return Err(
                             "full-resolution GPU inspection requires an exact white-balance rebuild"

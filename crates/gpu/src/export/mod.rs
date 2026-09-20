@@ -400,8 +400,10 @@ impl GpuExportProcessor {
                 ),
             });
         }
-        let _reservation =
-            crate::memory::Reservation::new(band_bytes.saturating_mul(2).saturating_add(64 * 1024));
+        let _reservation = crate::memory::Reservation::try_new(
+            band_bytes.saturating_mul(2).saturating_add(64 * 1024),
+            MEMORY_BUDGET,
+        )?;
         let device = &self.processor.device;
         let output = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("resident spatial export integer band"),
@@ -570,8 +572,10 @@ impl GpuExportProcessor {
         // a mapped band, even though their lifetimes do not all overlap.
         let pixels = prepared.image().width() as u64 * prepared.image().height() as u64;
         // Source/upload and processor constants have their own reservations.
-        let _reservation =
-            crate::memory::Reservation::new(estimated_gpu_bytes - pixels * 32 - 64 * 1024);
+        let _reservation = crate::memory::Reservation::try_new(
+            estimated_gpu_bytes - pixels * 32 - 64 * 1024,
+            MEMORY_BUDGET,
+        )?;
         let estimated_cpu_bytes = (prepared.decoded_raw_bytes() as u64
             + pixels * (12 + 32 + 3 * u64::from(depth.bits() / 8))
             + prepared.image().width().max(prepared.image().height()) as u64

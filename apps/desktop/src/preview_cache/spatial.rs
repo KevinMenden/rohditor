@@ -1,11 +1,11 @@
 //! Budgeted camera-source and capture caches, before optics and reduction.
 use super::*;
 use rohditor_core::{
-    CancellationToken, CapturedCameraSource, DemosaicedCameraSource, PipelineError,
+    CancellationToken, CapturedCameraSource, DemosaicedCameraSource, OutputPolicy, PipelineError,
 };
 use rohditor_gpu::{
-    GpuCapturedSource, GpuPreviewError, GpuSpatialFullSource, GpuSpatialPreview,
-    GpuSpatialProcessor, SpatialMetrics,
+    GpuCapturedSource, GpuPreviewError, GpuPreviewFrame, GpuPreviewProcessor, GpuSpatialFullSource,
+    GpuSpatialPreview, GpuSpatialProcessor, SpatialMetrics,
 };
 
 const CACHE_BUDGET: usize = 768 * 1024 * 1024;
@@ -35,7 +35,9 @@ pub(super) struct SpatialCache {
     captured: Option<(CaptureKey, CapturedCameraSource)>,
     gpu_captured: Option<(CaptureKey, GpuCapturedSource)>,
     gpu: Option<GpuSpatialProcessor>,
+    gpu_display: Option<GpuPreviewProcessor>,
     device: Option<(wgpu::Device, wgpu::Queue)>,
+    display: Option<(wgpu::Adapter, wgpu::TextureFormat)>,
 }
 
 impl std::fmt::Debug for SpatialCache {
@@ -47,9 +49,17 @@ impl std::fmt::Debug for SpatialCache {
 }
 
 impl SpatialCache {
-    pub fn configure(&mut self, device: wgpu::Device, queue: wgpu::Queue) {
+    pub fn configure(
+        &mut self,
+        adapter: wgpu::Adapter,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        target_format: wgpu::TextureFormat,
+    ) {
         self.gpu = None;
+        self.gpu_display = None;
         self.device = Some((device, queue));
+        self.display = Some((adapter, target_format));
         self.clear_images();
     }
 
@@ -176,6 +186,43 @@ impl SpatialCache {
             PreparedSpatial::Full(source) => (source, metrics),
             PreparedSpatial::Preview(_) => unreachable!("full preparation returned a preview"),
         })
+    }
+
+    pub fn render_gpu_full(
+        &mut self,
+        source: &GpuSpatialFullSource,
+        recipe: &EditRecipe,
+        output_policy: OutputPolicy,
+        cancellation: &CancellationToken,
+    ) -> Result<GpuPreviewFrame, GpuPreviewError> {
+        let result = (|| {
+            if self.gpu_display.is_none() {
+                let (adapter, target_format) =
+                    self.display
+                        .as_ref()
+                        .ok_or_else(|| GpuPreviewError::Unsupported {
+                            reason: "preview display device is unavailable".into(),
+                        })?;
+                let (device, queue) =
+                    self.device
+                        .as_ref()
+                        .ok_or_else(|| GpuPreviewError::Unsupported {
+                            reason: "preview display device is unavailable".into(),
+                        })?;
+                self.gpu_display = Some(GpuPreviewProcessor::new(
+                    adapter,
+                    device,
+                    queue,
+                    *target_format,
+                )?);
+            }
+            self.gpu_display
+                .as_ref()
+                .expect("display processor initialized")
+                .render_spatial_full_cancellable(source, recipe, output_policy, None, cancellation)
+        })();
+        self.record_gpu_result(&result);
+        result
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -312,6 +359,7 @@ impl SpatialCache {
             self.recovery = Some(error.to_string());
             self.gpu_captured = None;
             self.gpu = None;
+            self.gpu_display = None;
         }
     }
 }
@@ -328,5 +376,28 @@ fn gpu_error(error: PipelineError) -> GpuPreviewError {
         GpuPreviewError::InvalidInput {
             reason: error.to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gpu_failures_schedule_cpu_recovery_but_cancellation_does_not_evict() {
+        let mut cache = SpatialCache::default();
+        cache.record_gpu_result::<()>(&Err(GpuPreviewError::Cancelled));
+        assert!(cache.recovery.is_none());
+
+        cache.record_gpu_result::<()>(&Err(GpuPreviewError::Unsupported {
+            reason: "simulated device loss".into(),
+        }));
+        assert_eq!(
+            cache.recovery.as_deref(),
+            Some("the selected wgpu device cannot support GPU processing: simulated device loss")
+        );
+        assert!(cache.gpu.is_none());
+        assert!(cache.gpu_display.is_none());
+        assert!(cache.gpu_captured.is_none());
     }
 }

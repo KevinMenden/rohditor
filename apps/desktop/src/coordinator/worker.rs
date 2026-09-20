@@ -18,7 +18,7 @@ use rohditor_core::{
 };
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_edit::EditRecipe;
-use rohditor_gpu::{GpuPreviewError, GpuSpatialFullSource, GpuSpatialPreview};
+use rohditor_gpu::{GpuPreviewError, GpuPreviewFrame, GpuSpatialFullSource, GpuSpatialPreview};
 use rohditor_image::{DisplayRgbImage, Orientation, OrientationMap};
 use rohditor_raw::{RawDecoder, RawFileInfo, RawFrame, RawSession, RawlerDecoder};
 use tracing::{info, info_span};
@@ -57,28 +57,31 @@ pub(crate) enum PreviewResolution {
 #[derive(Debug)]
 pub(crate) enum PreparedGpuSource {
     Reduced(GpuSpatialPreview),
-    Full(GpuSpatialFullSource),
+    Full {
+        source: GpuSpatialFullSource,
+        frame: Box<GpuPreviewFrame>,
+    },
 }
 
 impl PreparedGpuSource {
     fn dimensions(&self) -> (usize, usize) {
         match self {
             Self::Reduced(source) => source.dimensions(),
-            Self::Full(source) => source.dimensions(),
+            Self::Full { source, .. } => source.dimensions(),
         }
     }
 
     fn description(&self) -> &rohditor_core::SpatialCompletionDescription {
         match self {
             Self::Reduced(source) => source.description(),
-            Self::Full(source) => source.description(),
+            Self::Full { source, .. } => source.description(),
         }
     }
 
     fn optics_provenance(&self) -> Option<&OpticsProvenance> {
         match self {
             Self::Reduced(source) => source.optics_provenance(),
-            Self::Full(source) => source.optics_provenance(),
+            Self::Full { source, .. } => source.optics_provenance(),
         }
     }
 }
@@ -296,8 +299,10 @@ pub(crate) struct WhiteBalanceSampleJob {
 #[derive(Debug)]
 pub(crate) enum WorkerRequest {
     CaptureDevice {
+        adapter: wgpu::Adapter,
         device: wgpu::Device,
         queue: wgpu::Queue,
+        target_format: wgpu::TextureFormat,
     },
     Open {
         document_id: u64,
@@ -320,10 +325,17 @@ pub(crate) struct RenderCoordinator {
 impl RenderCoordinator {
     pub(crate) fn configure_capture_device(
         &self,
+        adapter: wgpu::Adapter,
         device: wgpu::Device,
         queue: wgpu::Queue,
+        target_format: wgpu::TextureFormat,
     ) -> Result<(), String> {
-        self.send(WorkerRequest::CaptureDevice { device, queue })
+        self.send(WorkerRequest::CaptureDevice {
+            adapter,
+            device,
+            queue,
+            target_format,
+        })
     }
     pub(crate) fn new(context: egui::Context) -> Result<Self, String> {
         Self::new_with_decoder(context, Arc::new(RawlerDecoder::default()))
@@ -577,9 +589,12 @@ fn worker_loop(
         }
 
         match request {
-            WorkerRequest::CaptureDevice { device, queue } => {
-                preview_cache.configure_capture_device(device, queue)
-            }
+            WorkerRequest::CaptureDevice {
+                adapter,
+                device,
+                queue,
+                target_format,
+            } => preview_cache.configure_capture_device(adapter, device, queue, target_format),
             WorkerRequest::Open { document_id, path } => {
                 abandoned.remove(&document_id);
                 process_open(
@@ -1175,7 +1190,21 @@ fn process_gpu_base(
                 &keys,
                 cancellation,
             )
-            .map(|(source, metrics)| (PreparedGpuSource::Full(source), metrics))
+            .and_then(|(source, metrics)| {
+                let frame = preview_cache.render_gpu_full(
+                    &source,
+                    &job.recipe,
+                    job.options.render.output_policy,
+                    cancellation,
+                )?;
+                Ok((
+                    PreparedGpuSource::Full {
+                        source,
+                        frame: Box::new(frame),
+                    },
+                    metrics,
+                ))
+            })
     } else {
         preview_cache
             .prepare_gpu_spatial(
@@ -2130,7 +2159,7 @@ mod tests {
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
                 .expect("Vulkan device");
         let mut cache = PreviewCache::default();
-        cache.configure_capture_device(device, queue);
+        cache.configure_capture_device(adapter, device, queue, wgpu::TextureFormat::Rgba8Unorm);
         let completion = process_gpu_base(
             job,
             &sender,
@@ -2200,7 +2229,7 @@ mod tests {
             _ => None,
         });
         let (source, diagnostics) = source.expect("GPU Source 1:1 should remain resident");
-        assert!(matches!(source.as_ref(), PreparedGpuSource::Full(_)));
+        assert!(matches!(source.as_ref(), PreparedGpuSource::Full { .. }));
         assert_eq!(source.dimensions(), (4, 4));
         assert_eq!(diagnostics.resolution, PreviewResolution::SourceScale);
         assert!(
