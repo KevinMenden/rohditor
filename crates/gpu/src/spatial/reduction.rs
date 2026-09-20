@@ -48,6 +48,8 @@ impl super::GpuSpatialProcessor {
             self.device.push_error_scope(wgpu::ErrorFilter::Internal);
             self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
             self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let transient =
+                Reservation::try_new(estimated_bytes.saturating_sub(output_bytes), self.budget)?;
             let result = self.materialize_preview_inner(
                 source,
                 description,
@@ -58,6 +60,7 @@ impl super::GpuSpatialProcessor {
             let validation = pollster::block_on(self.device.pop_error_scope());
             let allocation = pollster::block_on(self.device.pop_error_scope());
             let internal = pollster::block_on(self.device.pop_error_scope());
+            drop(transient);
             if let Some(error) = validation.or(allocation).or(internal) {
                 return Err(invalid(&error.to_string()));
             }
@@ -105,6 +108,8 @@ impl super::GpuSpatialProcessor {
         self.device.push_error_scope(wgpu::ErrorFilter::Internal);
         self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
         self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let transient =
+            Reservation::try_new(estimated_bytes.saturating_sub(output_bytes), self.budget)?;
         let result = self.reduce_preview_inner(
             source,
             description,
@@ -116,6 +121,7 @@ impl super::GpuSpatialProcessor {
         let validation = pollster::block_on(self.device.pop_error_scope());
         let allocation = pollster::block_on(self.device.pop_error_scope());
         let internal = pollster::block_on(self.device.pop_error_scope());
+        drop(transient);
         if let Some(error) = validation.or(allocation).or(internal) {
             return Err(invalid(&error.to_string()));
         }
@@ -134,6 +140,7 @@ impl super::GpuSpatialProcessor {
     ) -> Result<(GpuSpatialPreview, super::SpatialMetrics), GpuPreviewError> {
         check_cancel(cancellation)?;
         let (width, height) = description.target_dimensions();
+        let memory = Reservation::try_new(output_bytes, self.budget)?;
         let output = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("spatial camera source without area reduction"),
             size: wgpu::Extent3d {
@@ -227,7 +234,7 @@ impl super::GpuSpatialProcessor {
         read_failure(&self.device, &failure_staging, cancellation)?;
         Ok((
             GpuSpatialPreview {
-                _memory: Reservation::new(output_bytes),
+                _memory: memory,
                 texture: output,
                 view: output_view,
                 description,
@@ -253,6 +260,7 @@ impl super::GpuSpatialProcessor {
         estimated_bytes: u64,
     ) -> Result<(GpuSpatialPreview, super::SpatialMetrics), GpuPreviewError> {
         let (target_width, target_height) = description.target_dimensions();
+        let memory = Reservation::try_new(output_bytes, self.budget)?;
         let output = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("spatially reduced camera source"),
             size: wgpu::Extent3d {
@@ -477,7 +485,7 @@ impl super::GpuSpatialProcessor {
         };
         Ok((
             GpuSpatialPreview {
-                _memory: Reservation::new(output_bytes),
+                _memory: memory,
                 texture: output,
                 view: output_view,
                 description,

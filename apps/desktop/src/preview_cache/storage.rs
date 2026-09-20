@@ -457,8 +457,15 @@ pub(crate) struct PreviewCache {
 }
 
 impl PreviewCache {
-    pub(crate) fn configure_capture_device(&mut self, device: wgpu::Device, queue: wgpu::Queue) {
-        self.spatial.configure(device, queue);
+    pub(crate) fn configure_capture_device(
+        &mut self,
+        adapter: wgpu::Adapter,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        target_format: wgpu::TextureFormat,
+    ) {
+        self.spatial
+            .configure(adapter, device, queue, target_format);
     }
     pub(crate) fn capture_recovery(&self) -> Option<&str> {
         self.spatial.recovery.as_deref()
@@ -592,6 +599,17 @@ impl PreviewCache {
         self.workspace = CpuPreviewWorkspace::default();
         self.spatial
             .prepare_gpu_full(pipeline, frame, recipe, options, keys, cancellation)
+    }
+
+    pub(crate) fn render_gpu_full(
+        &mut self,
+        source: &rohditor_gpu::GpuSpatialFullSource,
+        recipe: &EditRecipe,
+        output_policy: rohditor_core::OutputPolicy,
+        cancellation: &rohditor_core::CancellationToken,
+    ) -> Result<rohditor_gpu::GpuPreviewFrame, rohditor_gpu::GpuPreviewError> {
+        self.spatial
+            .render_gpu_full(source, recipe, output_policy, cancellation)
     }
 
     pub(crate) fn insert_reconstructed(
@@ -751,6 +769,14 @@ mod tests {
             .expect("reduction edit");
         assert!(reduced.timings().demosaic.is_zero());
         assert!(reduced.timings().capture_sharpening.is_zero());
+        recipe.optics.distortion = !recipe.optics.distortion;
+        let keys = PreviewCacheKeys::new(1, &frame, &recipe, options);
+        cache.prepare(&keys, &frame);
+        let optics_only = cache
+            .prepare_spatial(&pipeline, &frame, &recipe, options, &keys, false, &token)
+            .expect("optics-only edit");
+        assert!(optics_only.timings().demosaic.is_zero());
+        assert!(optics_only.timings().capture_sharpening.is_zero());
         cache.clear_document(1);
         cache.prepare(&keys, &frame);
         let rebuilt = cache

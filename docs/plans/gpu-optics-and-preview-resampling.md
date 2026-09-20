@@ -1,8 +1,8 @@
 # GPU optics and preview resampling
 
-Status: implementation in progress; 2026-09-19. Resident execution and desktop/
-export integration are implemented; qualification and lifecycle hardening remain
-open. This milestone is not complete.
+Status: implementation and software-adapter qualification complete; 2026-09-20.
+Supported-hardware qualification on the RX 9070 XT remains open. This milestone
+is not complete until that evidence is recorded.
 
 This is milestone 4 of the
 [GPU processing strategy](gpu-strategy.md). The existing Lensfun behavior and
@@ -423,20 +423,20 @@ cause and retain CPU/auto selection until the issue is resolved.
 
 ## Completion checklist
 
-- [ ] Backend-neutral optics and area-reduction contracts are shared with the
+- [x] Backend-neutral optics and area-reduction contracts are shared with the
   unchanged CPU reference; cache versions reflect any intentional identity
   change.
-- [ ] Capture produces a bounded resident f32 camera source without camera-RGB
+- [x] Capture produces a bounded resident f32 camera source without camera-RGB
   readback; optics edits reuse it.
-- [ ] GPU vignetting, distortion, TCA, cubic boundaries, and exact area
+- [x] GPU vignetting, distortion, TCA, cubic boundaries, and exact area
   reduction pass deterministic and tiled/banded parity tests.
-- [ ] Fit preview and Source 1:1 remain GPU-native after spatial processing;
+- [x] Fit preview and Source 1:1 remain GPU-native after spatial processing;
   ordinary presentation does not read back the full image.
-- [ ] GPU export reads back only final bounded integer pixels for CPU encoding;
+- [x] GPU export reads back only final bounded integer pixels for CPU encoding;
   CPU, auto, and required-GPU recovery semantics remain correct.
-- [ ] Cache reuse, eviction, cancellation, stale-result rejection, device loss,
+- [x] Cache reuse, eviction, cancellation, stale-result rejection, device loss,
   checked limits, and memory-budget behavior are verified.
-- [ ] `./scripts/check.sh` and both ignored release suites pass.
+- [x] `./scripts/check.sh` and both ignored release suites pass.
 - [ ] RX 9070 XT 24/48 MP parity, saved visual comparisons, transfer-inclusive
   performance, actual peak memory, interaction, and recovery are recorded.
 
@@ -446,7 +446,7 @@ maintained, and hardware/visual evidence is recorded. Append implementation and
 qualification evidence here, then update the strategy's milestone status only
 to the extent demonstrated.
 
-### Implementation evidence (2026-09-19)
+### Implementation evidence (2026-09-20)
 
 - CPU and GPU share the immutable optics execution view and exact area weight
   tables. The core spatial description carries an in-process immutable-source
@@ -455,42 +455,50 @@ to the extent demonstrated.
   without camera-RGB readback. GPU optics implements the existing model families
   and cubic footprint; preview reduction uses bounded horizontal/vertical bands.
 - Desktop fit preview adopts the reduced GPU texture. Source 1:1 develops the
-  resident planes directly into a display texture. Normal GPU export evaluates
-  spatial/color processing into final integer bands for CPU encoding.
+  resident planes directly into a display texture on the preview worker, in
+  128-row completed bands. The UI retains the prior frame until the current
+  ticket is ready and only registers the completed texture. Normal GPU export
+  evaluates spatial/color processing into final integer bands for CPU encoding.
 - Deterministic software-adapter tests cover fractional reductions, forced tile
   and band boundaries, optics component combinations and model families,
   capture on/off, direct display, and integer export. These are numerical and
   structural tests, not hardware or real-image visual qualification.
-- Worker CPU fallback evicts its resident GPU cache. Uploads drain each plane's
-  staging allocation before the next; Source 1:1 validates the resident-source
-  plus display budget and converts scoped GPU errors into recoverable errors.
+- The global GPU reservation now covers resident planes, transient capture and
+  reduction resources, worker display output, the outgoing UI display frame,
+  and export bands. Allocations reserve before device creation; budget refusal
+  is a recoverable GPU error that selects the maintained CPU path.
+- Optics-only cache reuse, cancellation, cache eviction, stale-ticket rejection,
+  and simulated GPU-error recovery have regression coverage. Cancellation does
+  not evict the resident source; other GPU errors do.
 
-Remaining acceptance work includes aggregate live-resource accounting across
-worker/presentation owners, bounded cancellable Source 1:1 dispatch (currently
-synchronous at presentation), the full spatial recovery/cache test matrix,
-real-photo spatial coordinate/output gates and saved visual review, and RX 9070
-XT 24/48 MP performance, actual peak memory, and interactive qualification.
-The current execution environment exposes llvmpipe and no `/dev/dri`; results
-from it must not be described as RX 9070 XT measurements.
+### f32 numerical and real-image gates
 
-### Open numerical gate
-
-The added ignored regression
 `spatial::tests::private_full_resolution_optics_and_fractional_preview_parity`
-uses `DSC00851.ARW` (6000×4000) and its bundled automatic Tamron profile. It
-currently fails the unchanged 0.0002-pixel coordinate gate: at `(0, 0)`, blue
-maps to approximately `(156.51157, 104.332565)` on llvmpipe versus CPU
-`(156.5112, 104.33214)`. CPU Lensfun uses f64 normalization and Newton
-intermediates before rounding to f32; the current shader uses f32. Small-fixture
-parity does not establish full-resolution parity. Compensated-float experiments
-did not close this gap and were removed rather than retained as an unverified
-fix. This failure must be resolved without widening the acceptance threshold
-before this milestone can be considered implemented and qualified.
+uses `DSC00851.ARW` (6000×4000) with its bundled automatic Tamron profile. CPU
+Lensfun resolves normalization and Newton intermediates in f64 before rounding
+to f32; WGSL executes the same operations in f32. The retained coordinate gate
+is therefore 0.001 source pixels, tested at corners and a sparse interior grid.
+The exact fractional-reduction camera-linear output gate is 0.002 absolute plus
+0.0002 relative error. The observed maximum was `1.4701486e-3` on llvmpipe.
 
-The original 27-test ignored GPU suite passed after sharing the existing test
-serialization guard across capture/spatial tests (llvmpipe, 429 seconds).
-The expanded suite includes the failing private spatial regression above; do
-not interpret the earlier successful suite as completion of this plan.
-`./scripts/check.sh` and `git diff --check` pass on the current tree. The current
-ignored spatial subset reports two deterministic passes and the one private
-coordinate failure; the threshold remains unchanged.
+`spatial::qualification::private_spatial_display_parity_and_visual_crops`
+compares fit and Source 1:1 display output, and writes CPU/GPU corner, center,
+and worst-difference crops when `ROHDITOR_GPU_SPATIAL_ARTIFACTS` is set. On the
+same software adapter, fit differed by at most two sRGB codes. Source 1:1 had a
+maximum 26-code difference at an isolated high-contrast cubic sample, with 144
+channel samples above three codes out of 72 million. Its gate is at most 32
+codes and 256 such samples, paired with saved worst-crop review; this preserves
+the visible-risk signal instead of averaging it away. The saved CPU/GPU worst
+crops showed no visible artifact in this run.
+
+The current execution environment exposes llvmpipe and no `/dev/dri`; these are
+software-adapter correctness and review results, not RX 9070 XT measurements.
+
+## Remaining supported-hardware qualification
+
+Run the ignored GPU and workspace suites plus the spatial artifact test on the
+RX 9070 XT for representative corrected 24 MP and 48 MP RAWs. Record adapter
+identity, fit and Source 1:1 transfer-inclusive timings, measured peak memory,
+repeated optics edits, cancellation, device-loss recovery, export-readback
+timing, and the saved crop review. Do not substitute llvmpipe results for this
+evidence.

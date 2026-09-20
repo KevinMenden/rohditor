@@ -16,7 +16,10 @@ pub(crate) struct ResidentCameraPlanes {
 }
 
 impl ResidentCameraPlanes {
-    pub fn new(device: &wgpu::Device, layout: ResidentLayout) -> Self {
+    pub fn new(device: &wgpu::Device, layout: ResidentLayout) -> Result<Self, GpuPreviewError> {
+        // Reserve before touching the driver. This includes display frames
+        // retained by the UI while the worker prepares a replacement.
+        let memory = Reservation::try_new(layout.resident_bytes, super::resources::DEFAULT_BUDGET)?;
         let texture = |label| {
             device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
@@ -54,12 +57,12 @@ impl ResidentCameraPlanes {
             view(&textures[1], "resident camera green view"),
             view(&textures[2], "resident camera blue view"),
         ];
-        Self {
-            _memory: Reservation::new(layout.resident_bytes),
+        Ok(Self {
+            _memory: memory,
             textures,
             views,
             layout,
-        }
+        })
     }
 
     pub fn sampled_entries(&self) -> [wgpu::BindGroupEntry<'_>; 3] {

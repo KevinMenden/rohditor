@@ -29,6 +29,10 @@ mod export;
 pub use export::{GpuExportProcessor, GpuExportResult};
 
 const WORKGROUP_EDGE: u32 = 16;
+/// A completed Source 1:1 band is the cancellation boundary. It is intentionally
+/// small enough to keep the UI's shared queue responsive without adding a
+/// full-resolution intermediate texture.
+const FULL_OUTPUT_BAND_ROWS: u32 = 128;
 // Keep this in sync with PreviewParameters in preview.wgsl. The vec2 crop
 // origin begins after 17 scalar words and is therefore aligned to word 18.
 // Output policy/version occupy words 20 and 21. Words 22 and 23 carry the
@@ -407,6 +411,18 @@ pub struct GpuPreviewFrame {
     textures_reused: bool,
 }
 
+impl std::fmt::Debug for GpuPreviewFrame {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GpuPreviewFrame")
+            .field("source_dimensions", &self.source_dimensions)
+            .field("output_dimensions", &self.output_dimensions)
+            .field("estimated_bytes", &self.estimated_bytes())
+            .field("textures_reused", &self.textures_reused)
+            .finish_non_exhaustive()
+    }
+}
+
 impl GpuPreviewFrame {
     /// The egui-compatible display texture view. Register this view with
     /// `egui_wgpu::Renderer`; it is never read back for normal display.
@@ -707,7 +723,10 @@ impl GpuPreviewProcessor {
 
         Ok(Self {
             device: device.clone(),
-            _memory: crate::memory::Reservation::new(64 * 1024),
+            _memory: crate::memory::Reservation::try_new(
+                64 * 1024,
+                crate::spatial::resources::DEFAULT_BUDGET,
+            )?,
             queue: queue.clone(),
             capabilities,
             pipeline,
@@ -775,6 +794,10 @@ impl GpuPreviewProcessor {
                     height: source_height,
                     reason: "RGBA32Float row byte count overflowed".to_owned(),
                 })?;
+        let memory = crate::memory::Reservation::try_new(
+            u64::from(width) * u64::from(height) * 32,
+            crate::spatial::resources::DEFAULT_BUDGET,
+        )?;
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("rohditor camera-native preview source"),
             size: extent((width, height)),
@@ -802,7 +825,7 @@ impl GpuPreviewProcessor {
         );
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         Ok(GpuPreviewSource {
-            _memory: crate::memory::Reservation::new(u64::from(width) * u64::from(height) * 32),
+            _memory: memory,
             _texture: texture,
             view,
             width,
@@ -907,10 +930,34 @@ impl GpuPreviewProcessor {
         output_policy: OutputPolicy,
         reusable: Option<GpuPreviewFrame>,
     ) -> Result<GpuPreviewFrame, GpuPreviewError> {
+        self.render_spatial_full_cancellable(
+            source,
+            recipe,
+            output_policy,
+            reusable,
+            &CancellationToken::new(),
+        )
+    }
+
+    /// Render Source 1:1 in completed row bands. The caller owns the
+    /// cancellation token; a cancelled render never returns a partial frame
+    /// for publication.
+    pub fn render_spatial_full_cancellable(
+        &self,
+        source: &crate::GpuSpatialFullSource,
+        recipe: &EditRecipe,
+        output_policy: OutputPolicy,
+        reusable: Option<GpuPreviewFrame>,
+        cancellation: &CancellationToken,
+    ) -> Result<GpuPreviewFrame, GpuPreviewError> {
+        if cancellation.is_cancelled() {
+            return Err(GpuPreviewError::Cancelled);
+        }
         self.device.push_error_scope(wgpu::ErrorFilter::Internal);
         self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
         self.device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let result = self.render_spatial_full_inner(source, recipe, output_policy, reusable);
+        let result =
+            self.render_spatial_full_inner(source, recipe, output_policy, reusable, cancellation);
         let validation = pollster::block_on(self.device.pop_error_scope());
         let allocation = pollster::block_on(self.device.pop_error_scope());
         let internal = pollster::block_on(self.device.pop_error_scope());
@@ -928,6 +975,7 @@ impl GpuPreviewProcessor {
         recipe: &EditRecipe,
         output_policy: OutputPolicy,
         reusable: Option<GpuPreviewFrame>,
+        cancellation: &CancellationToken,
     ) -> Result<GpuPreviewFrame, GpuPreviewError> {
         recipe
             .validate()
@@ -977,12 +1025,10 @@ impl GpuPreviewProcessor {
             output_geometry.output_dimensions().0,
             output_geometry.output_dimensions().1,
         )?;
-        let workgroups = (
-            output_dimensions.0.div_ceil(WORKGROUP_EDGE),
-            output_dimensions.1.div_ceil(WORKGROUP_EDGE),
-        );
-        if workgroups.0 > self.capabilities.max_compute_workgroups_per_dimension
-            || workgroups.1 > self.capabilities.max_compute_workgroups_per_dimension
+        let workgroups_x = output_dimensions.0.div_ceil(WORKGROUP_EDGE);
+        let band_workgroups_y = FULL_OUTPUT_BAND_ROWS.div_ceil(WORKGROUP_EDGE);
+        if workgroups_x > self.capabilities.max_compute_workgroups_per_dimension
+            || band_workgroups_y > self.capabilities.max_compute_workgroups_per_dimension
         {
             return Err(GpuPreviewError::InvalidDimensions {
                 width: output_dimensions.0 as usize,
@@ -1008,7 +1054,7 @@ impl GpuPreviewProcessor {
         let (mut frame, textures_reused) = match reusable {
             Some(frame) if frame.can_reuse_display_only(output_dimensions) => (frame, true),
             _ => (
-                self.create_display_frame(source_dimensions, output_dimensions),
+                self.create_display_frame(source_dimensions, output_dimensions)?,
                 false,
             ),
         };
@@ -1054,6 +1100,12 @@ impl GpuPreviewProcessor {
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let band = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("full-resolution GPU display band"),
+            size: 8,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let colour_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("full-resolution GPU colour bindings"),
             layout: &self.spatial_pipeline.get_bind_group_layout(0),
@@ -1075,10 +1127,16 @@ impl GpuPreviewProcessor {
         let output_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("full-resolution GPU display binding"),
             layout: &self.spatial_pipeline.get_bind_group_layout(1),
-            entries: &[wgpu::BindGroupEntry {
-                binding: 7,
-                resource: wgpu::BindingResource::TextureView(&frame.display_view),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::TextureView(&frame.display_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: band.as_entire_binding(),
+                },
+            ],
         });
         let plane_entries = source.planes.sampled_entries();
         let spatial_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1099,29 +1157,33 @@ impl GpuPreviewProcessor {
             ],
         });
         let submitted = Instant::now();
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("full-resolution GPU display commands"),
-            });
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("full-resolution optics and display"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.spatial_pipeline);
-            pass.set_bind_group(0, &colour_bind_group, &[]);
-            pass.set_bind_group(1, &output_bind_group, &[]);
-            pass.set_bind_group(2, &spatial_bind_group, &[]);
-            pass.dispatch_workgroups(workgroups.0, workgroups.1, 1);
+        for first_row in (0..output_dimensions.1).step_by(FULL_OUTPUT_BAND_ROWS as usize) {
+            if cancellation.is_cancelled() {
+                return Err(GpuPreviewError::Cancelled);
+            }
+            let row_count = (output_dimensions.1 - first_row).min(FULL_OUTPUT_BAND_ROWS);
+            self.queue
+                .write_buffer(&band, 0, bytemuck::cast_slice(&[first_row, row_count]));
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("full-resolution GPU display band"),
+                });
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("full-resolution optics and display band"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&self.spatial_pipeline);
+                pass.set_bind_group(0, &colour_bind_group, &[]);
+                pass.set_bind_group(1, &output_bind_group, &[]);
+                pass.set_bind_group(2, &spatial_bind_group, &[]);
+                pass.dispatch_workgroups(workgroups_x, row_count.div_ceil(WORKGROUP_EDGE), 1);
+            }
+            encoder.copy_buffer_to_buffer(&failure, 0, &failure_staging, 0, 4);
+            self.queue.submit([encoder.finish()]);
+            crate::spatial::reduction::read_failure(&self.device, &failure_staging, cancellation)?;
         }
-        encoder.copy_buffer_to_buffer(&failure, 0, &failure_staging, 0, 4);
-        self.queue.submit([encoder.finish()]);
-        crate::spatial::reduction::read_failure(
-            &self.device,
-            &failure_staging,
-            &CancellationToken::new(),
-        )?;
         frame.submission_time = submitted.elapsed();
         let completion = Arc::new(AtomicU64::new(0));
         completion.store(
@@ -1203,7 +1265,7 @@ impl GpuPreviewProcessor {
         let (mut frame, textures_reused) = match reusable {
             Some(frame) if frame.can_reuse(source_dimensions, output_dimensions) => (frame, true),
             _ => (
-                self.create_frame(source_dimensions, output_dimensions),
+                self.create_frame(source_dimensions, output_dimensions)?,
                 false,
             ),
         };
@@ -1403,7 +1465,12 @@ impl GpuPreviewProcessor {
         &self,
         source_dimensions: (u32, u32),
         output_dimensions: (u32, u32),
-    ) -> GpuPreviewFrame {
+    ) -> Result<GpuPreviewFrame, GpuPreviewError> {
+        let memory = crate::memory::Reservation::try_new(
+            u64::from(source_dimensions.0) * u64::from(source_dimensions.1) * 8
+                + u64::from(output_dimensions.0) * u64::from(output_dimensions.1) * 4,
+            crate::spatial::resources::DEFAULT_BUDGET,
+        )?;
         let working_texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("rohditor GPU linear working preview"),
             size: extent(source_dimensions),
@@ -1434,11 +1501,8 @@ impl GpuPreviewProcessor {
         });
         let working_view = working_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let display_view = display_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        GpuPreviewFrame {
-            _memory: crate::memory::Reservation::new(
-                u64::from(source_dimensions.0) * u64::from(source_dimensions.1) * 8
-                    + u64::from(output_dimensions.0) * u64::from(output_dimensions.1) * 4,
-            ),
+        Ok(GpuPreviewFrame {
+            _memory: memory,
             _working_texture: Some(working_texture),
             working_view: Some(working_view),
             display_texture,
@@ -1448,14 +1512,18 @@ impl GpuPreviewProcessor {
             submission_time: Duration::ZERO,
             queue_completion_nanos: Arc::new(AtomicU64::new(0)),
             textures_reused: false,
-        }
+        })
     }
 
     fn create_display_frame(
         &self,
         source_dimensions: (u32, u32),
         output_dimensions: (u32, u32),
-    ) -> GpuPreviewFrame {
+    ) -> Result<GpuPreviewFrame, GpuPreviewError> {
+        let memory = crate::memory::Reservation::try_new(
+            u64::from(output_dimensions.0) * u64::from(output_dimensions.1) * 4,
+            crate::spatial::resources::DEFAULT_BUDGET,
+        )?;
         let display_texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("rohditor direct full-resolution GPU display"),
             size: extent(output_dimensions),
@@ -1469,10 +1537,8 @@ impl GpuPreviewProcessor {
             view_formats: &[],
         });
         let display_view = display_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        GpuPreviewFrame {
-            _memory: crate::memory::Reservation::new(
-                u64::from(output_dimensions.0) * u64::from(output_dimensions.1) * 4,
-            ),
+        Ok(GpuPreviewFrame {
+            _memory: memory,
             _working_texture: None,
             working_view: None,
             display_texture,
@@ -1482,7 +1548,7 @@ impl GpuPreviewProcessor {
             submission_time: Duration::ZERO,
             queue_completion_nanos: Arc::new(AtomicU64::new(0)),
             textures_reused: false,
-        }
+        })
     }
 }
 
