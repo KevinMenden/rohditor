@@ -1,6 +1,138 @@
 use super::*;
 
 impl GpuCaptureProcessor {
+    pub(super) fn process_resident_inner(
+        &self,
+        image: &LinearRgbImage<f32>,
+        contract: &CaptureSharpeningContract,
+        plan: &TilePlan,
+        resident: &crate::spatial::source::ResidentCameraPlanes,
+        scatter: &crate::spatial::CaptureScatter,
+        cancellation: &CancellationToken,
+    ) -> Result<CaptureMetrics, GpuPreviewError> {
+        let started = Instant::now();
+        let _reservation = crate::memory::Reservation::new(plan.gpu_bytes);
+        let resources = Resources::new_resident(&self.device, &self.queue, plan.pixels, contract);
+        let mut packed = Vec::<f32>::new();
+        packed.try_reserve_exact(plan.pixels * 3).map_err(error)?;
+        let halo = contract.halo();
+        let mut metrics = CaptureMetrics {
+            tile_edge: plan.edge,
+            halo,
+            estimated_gpu_bytes: plan.gpu_bytes + resident.layout.resident_bytes,
+            estimated_host_bytes: plan.host_bytes,
+            ..Default::default()
+        };
+        for top in (0..image.height()).step_by(plan.edge) {
+            for left in (0..image.width()).step_by(plan.edge) {
+                check_cancel(cancellation)?;
+                let x0 = left.saturating_sub(halo);
+                let y0 = top.saturating_sub(halo);
+                let right = (left + plan.edge).min(image.width());
+                let bottom = (top + plan.edge).min(image.height());
+                let x1 = (right + halo).min(image.width());
+                let y1 = (bottom + halo).min(image.height());
+                let (width, height) = (x1 - x0, y1 - y0);
+                let upload_started = Instant::now();
+                packed.clear();
+                for y in y0..y1 {
+                    check_cancel(cancellation)?;
+                    let row = &image.data()[y * image.row_stride() + x0 * 3..][..width * 3];
+                    if row.iter().any(|value| !value.is_finite()) {
+                        return Err(error(format!("non-finite capture input in row {y}")));
+                    }
+                    packed.extend_from_slice(row);
+                }
+                self.queue
+                    .write_buffer(&resources.rgb, 0, bytemuck::cast_slice(&packed));
+                metrics.uploaded_bytes += packed.len() as u64 * 4;
+                metrics.upload += upload_started.elapsed();
+
+                let compute_started = Instant::now();
+                let mut encoder = self.encoder();
+                self.pass(
+                    &mut encoder,
+                    &resources,
+                    contract,
+                    width,
+                    height,
+                    [0, 0, 0, 0],
+                );
+                self.blur(&mut encoder, &resources, contract, width, height, 1);
+                self.pass(
+                    &mut encoder,
+                    &resources,
+                    contract,
+                    width,
+                    height,
+                    [2, 0, 0, 0],
+                );
+                self.blur(&mut encoder, &resources, contract, width, height, 0);
+                self.pass(
+                    &mut encoder,
+                    &resources,
+                    contract,
+                    width,
+                    height,
+                    [3, 0, 0, 0],
+                );
+                self.submit(encoder, cancellation)?;
+                for _ in 0..CAPTURE_SHARPENING_ITERATIONS {
+                    check_cancel(cancellation)?;
+                    let mut encoder = self.encoder();
+                    self.blur(&mut encoder, &resources, contract, width, height, 2);
+                    self.pass(
+                        &mut encoder,
+                        &resources,
+                        contract,
+                        width,
+                        height,
+                        [4, 0, 0, 0],
+                    );
+                    self.blur(&mut encoder, &resources, contract, width, height, 5);
+                    self.pass(
+                        &mut encoder,
+                        &resources,
+                        contract,
+                        width,
+                        height,
+                        [5, 0, 0, 0],
+                    );
+                    self.submit(encoder, cancellation)?;
+                }
+                let mut encoder = self.encoder();
+                self.pass(
+                    &mut encoder,
+                    &resources,
+                    contract,
+                    width,
+                    height,
+                    [6, 0, 0, 0],
+                );
+                scatter.encode(
+                    &self.device,
+                    &mut encoder,
+                    &resources.rgb,
+                    resident,
+                    width,
+                    x0,
+                    y0,
+                    left,
+                    top,
+                    right - left,
+                    bottom - top,
+                )?;
+                self.submit(encoder, cancellation)?;
+                metrics.compute_and_wait += compute_started.elapsed();
+                metrics.tiles += 1;
+            }
+        }
+        check_cancel(cancellation)?;
+        metrics.total = started.elapsed();
+        metrics.combined_gpu_reservations = crate::gpu_memory_reservations();
+        Ok(metrics)
+    }
+
     pub(super) fn process_inner(
         &self,
         image: &LinearRgbImage<f32>,
@@ -121,23 +253,26 @@ impl GpuCaptureProcessor {
                     height,
                     [6, 0, 0, 0],
                 );
-                encoder.copy_buffer_to_buffer(&resources.rgb, 0, &resources.staging, 0, bytes);
+                let staging = resources
+                    .staging
+                    .as_ref()
+                    .expect("legacy capture allocates readback staging");
+                encoder.copy_buffer_to_buffer(&resources.rgb, 0, staging, 0, bytes);
                 self.submit(encoder, cancellation)?;
                 metrics.compute_and_wait += compute_started.elapsed();
                 let readback_started = Instant::now();
                 let (sender, receiver) = mpsc::sync_channel(1);
-                resources
-                    .staging
+                staging
                     .slice(..bytes)
                     .map_async(wgpu::MapMode::Read, move |r| {
                         let _ = sender.send(r);
                     });
                 if let Err(e) = self.wait(&receiver, cancellation) {
-                    resources.staging.unmap();
+                    staging.unmap();
                     return Err(e);
                 }
                 let assembly = (|| {
-                    let mapped = resources.staging.slice(..bytes).get_mapped_range();
+                    let mapped = staging.slice(..bytes).get_mapped_range();
                     let samples: &[f32] = bytemuck::cast_slice(&mapped);
                     for y in top..bottom {
                         check_cancel(cancellation)?;
@@ -151,7 +286,7 @@ impl GpuCaptureProcessor {
                     }
                     Ok(())
                 })();
-                resources.staging.unmap();
+                staging.unmap();
                 assembly?;
                 metrics.readback += readback_started.elapsed();
                 metrics.readback_bytes += bytes;

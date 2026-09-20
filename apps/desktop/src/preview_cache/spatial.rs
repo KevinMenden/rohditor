@@ -3,7 +3,10 @@ use super::*;
 use rohditor_core::{
     CancellationToken, CapturedCameraSource, DemosaicedCameraSource, PipelineError,
 };
-use rohditor_gpu::{GpuCaptureProcessor, GpuPreviewError};
+use rohditor_gpu::{
+    GpuCapturedSource, GpuPreviewError, GpuSpatialFullSource, GpuSpatialPreview,
+    GpuSpatialProcessor, SpatialMetrics,
+};
 
 const CACHE_BUDGET: usize = 768 * 1024 * 1024;
 
@@ -30,7 +33,8 @@ pub(super) struct SpatialCache {
     pub recovery: Option<String>,
     source: Option<(PreCaptureKey, DemosaicedCameraSource)>,
     captured: Option<(CaptureKey, CapturedCameraSource)>,
-    gpu: Option<GpuCaptureProcessor>,
+    gpu_captured: Option<(CaptureKey, GpuCapturedSource)>,
+    gpu: Option<GpuSpatialProcessor>,
     device: Option<(wgpu::Device, wgpu::Queue)>,
 }
 
@@ -52,6 +56,7 @@ impl SpatialCache {
     pub fn clear_images(&mut self) {
         self.source = None;
         self.captured = None;
+        self.gpu_captured = None;
         self.recovery = None;
     }
     pub fn resident_bytes(&self) -> usize {
@@ -67,11 +72,15 @@ impl SpatialCache {
         recipe: &EditRecipe,
         options: PreviewOptions,
         keys: &PreviewCacheKeys,
-        prefer_gpu: bool,
+        _prefer_gpu: bool,
         retained_bytes: usize,
         cancellation: &CancellationToken,
     ) -> Result<ReconstructedPreview, PipelineError> {
         cancellation.checkpoint()?;
+        // CPU selection and automatic recovery must release worker-owned GPU
+        // images even when the upstream camera-source key is unchanged.
+        self.gpu_captured = None;
+        self.gpu = None;
         let key = PreCaptureKey {
             decoded: keys.decoded.clone(),
             crop: options.render.raw_crop_policy,
@@ -83,6 +92,7 @@ impl SpatialCache {
         if self.source.as_ref().is_some_and(|(k, _)| k != &key) {
             self.source = None;
             self.captured = None;
+            self.gpu_captured = None;
         }
         let source = if let Some((_, source)) = &self.source {
             source.clone().with_recipe(recipe, options)?
@@ -94,7 +104,7 @@ impl SpatialCache {
             source: key.clone(),
             settings: keys.reconstructed.capture_sharpening,
             ceilings: contract.ceilings().map(f32::to_bits),
-            gpu: prefer_gpu && contract.settings().is_active(),
+            gpu: false,
         };
         if self
             .captured
@@ -124,61 +134,199 @@ impl SpatialCache {
         if retain {
             self.source = Some((key, source.clone()));
         }
-        let captured = if capture_key.gpu {
-            let result = (|| {
-                if self.gpu.is_none() {
-                    let (device, queue) =
-                        self.device
-                            .as_ref()
-                            .ok_or_else(|| GpuPreviewError::Unsupported {
-                                reason: "preview capture device is unavailable".into(),
-                            })?;
-                    let mut gpu = GpuCaptureProcessor::new(device, queue)?;
-                    // Fit color source, display targets, and UI resources share
-                    // this device. Reserve only 64 MiB of the existing budget
-                    // for capture; the maximum 512-core tile needs under 24 MiB.
-                    gpu.set_remaining_budget(64 * 1024 * 1024);
-                    self.gpu = Some(gpu);
-                }
-                let gpu = self.gpu.as_mut().expect("capture device initialized");
-                gpu.capture_source(source.clone(), cancellation)
-            })();
-            match result {
-                Ok((captured, metrics)) => {
-                    tracing::info!(
-                        capture_ms = metrics.total.as_millis(),
-                        gpu_bytes = metrics.estimated_gpu_bytes,
-                        combined_gpu_reserved_bytes =
-                            metrics.combined_gpu_reservations.current_bytes,
-                        combined_gpu_peak_reserved_bytes =
-                            metrics.combined_gpu_reservations.peak_bytes,
-                        upload_bytes = metrics.uploaded_bytes,
-                        readback_bytes = metrics.readback_bytes,
-                        tile = metrics.tile_edge,
-                        halo = metrics.halo,
-                        "GPU capture bridge complete"
-                    );
-                    captured
-                }
-                Err(GpuPreviewError::Cancelled) => return Err(PipelineError::Cancelled),
-                Err(error) => {
-                    self.recovery = Some(error.to_string());
-                    self.gpu = None;
-                    self.captured = None;
-                    cancellation.checkpoint()?;
-                    tracing::warn!(%error, "GPU capture unavailable; restarting capture from unmodified camera source on CPU");
-                    // Evict the extra reference before CPU's budgeted scratch.
-                    self.source = None;
-                    source.capture_cpu(cancellation)?
-                }
-            }
-        } else {
-            source.capture_cpu(cancellation)?
-        };
+        let captured = source.capture_cpu(cancellation)?;
         cancellation.checkpoint()?;
         if retain {
             self.captured = Some((capture_key, captured.clone()));
         }
         cpu.complete_camera_source(captured, cancellation)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_gpu(
+        &mut self,
+        cpu: &CpuPipeline,
+        frame: &RawFrame,
+        recipe: &EditRecipe,
+        options: PreviewOptions,
+        keys: &PreviewCacheKeys,
+        cancellation: &CancellationToken,
+    ) -> Result<(GpuSpatialPreview, SpatialMetrics), GpuPreviewError> {
+        let result = self.prepare_gpu_inner(cpu, frame, recipe, options, keys, cancellation, false);
+        self.record_gpu_result(&result);
+        result.map(|(source, metrics)| match source {
+            PreparedSpatial::Preview(preview) => (preview, metrics),
+            PreparedSpatial::Full(_) => unreachable!("preview preparation returned a full source"),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_gpu_full(
+        &mut self,
+        cpu: &CpuPipeline,
+        frame: &RawFrame,
+        recipe: &EditRecipe,
+        options: PreviewOptions,
+        keys: &PreviewCacheKeys,
+        cancellation: &CancellationToken,
+    ) -> Result<(GpuSpatialFullSource, SpatialMetrics), GpuPreviewError> {
+        let result = self.prepare_gpu_inner(cpu, frame, recipe, options, keys, cancellation, true);
+        self.record_gpu_result(&result);
+        result.map(|(source, metrics)| match source {
+            PreparedSpatial::Full(source) => (source, metrics),
+            PreparedSpatial::Preview(_) => unreachable!("full preparation returned a preview"),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_gpu_inner(
+        &mut self,
+        cpu: &CpuPipeline,
+        frame: &RawFrame,
+        recipe: &EditRecipe,
+        options: PreviewOptions,
+        keys: &PreviewCacheKeys,
+        cancellation: &CancellationToken,
+        full_resolution: bool,
+    ) -> Result<(PreparedSpatial, SpatialMetrics), GpuPreviewError> {
+        if cancellation.is_cancelled() {
+            return Err(GpuPreviewError::Cancelled);
+        }
+        let key = PreCaptureKey {
+            decoded: keys.decoded.clone(),
+            crop: options.render.raw_crop_policy,
+            demosaic: options.render.demosaic,
+            highlight: keys.reconstructed.highlight.clone(),
+            profile: camera_profile_key(&recipe.color.camera_profile),
+            version: keys.reconstructed.reconstruction_version,
+        };
+        if self
+            .source
+            .as_ref()
+            .is_some_and(|(stored, _)| stored != &key)
+        {
+            self.source = None;
+            self.captured = None;
+            self.gpu_captured = None;
+        }
+        let source = if let Some((_, source)) = &self.source {
+            source
+                .clone()
+                .with_recipe(recipe, options)
+                .map_err(gpu_error)?
+        } else {
+            // Without the retained immutable camera source, the newly prepared
+            // description has a new identity and cannot relabel an old upload.
+            self.gpu_captured = None;
+            cpu.prepare_camera_source(frame, recipe, options, cancellation)
+                .map_err(gpu_error)?
+        };
+        let contract = source.capture_contract().map_err(gpu_error)?;
+        let capture_key = CaptureKey {
+            source: key.clone(),
+            settings: keys.reconstructed.capture_sharpening,
+            ceilings: contract.ceilings().map(f32::to_bits),
+            gpu: true,
+        };
+        if self
+            .gpu_captured
+            .as_ref()
+            .is_some_and(|(stored, _)| stored != &capture_key)
+        {
+            self.gpu_captured = None;
+        }
+        let description = cpu
+            .describe_spatial_completion(&source, cancellation)
+            .map_err(gpu_error)?;
+        // Retaining the CPU source is an optimization, not a requirement for
+        // resident GPU reuse. Leave room for subsequent CPU fallback scratch.
+        if source.buffer_bytes() <= CACHE_BUDGET / 2
+            && source
+                .buffer_bytes()
+                .checked_mul(6)
+                .is_some_and(|bytes| bytes <= rohditor_core::CPU_WORKING_SET_LIMIT_BYTES)
+        {
+            self.source = Some((key, source.clone()));
+        } else {
+            self.source = None;
+        }
+        self.captured = None;
+        if self.gpu.is_none() {
+            let (device, queue) =
+                self.device
+                    .as_ref()
+                    .ok_or_else(|| GpuPreviewError::Unsupported {
+                        reason: "preview spatial device is unavailable".into(),
+                    })?;
+            self.gpu = Some(GpuSpatialProcessor::new(device, queue)?);
+        }
+        let mut source_metrics = SpatialMetrics::default();
+        if self.gpu_captured.is_none() {
+            let (resident, metrics) = self
+                .gpu
+                .as_mut()
+                .expect("spatial processor initialized")
+                .upload_captured_source(cpu, &source, cancellation)?;
+            source_metrics = metrics;
+            self.gpu_captured = Some((capture_key, resident));
+        }
+        let (_, resident) = self
+            .gpu_captured
+            .as_ref()
+            .expect("resident source initialized");
+        let (prepared, mut metrics) = if full_resolution {
+            let full = self
+                .gpu
+                .as_ref()
+                .expect("spatial processor initialized")
+                .full_resolution_source(resident, description)?;
+            (
+                PreparedSpatial::Full(full),
+                SpatialMetrics {
+                    estimated_gpu_bytes: resident.estimated_bytes(),
+                    ..SpatialMetrics::default()
+                },
+            )
+        } else {
+            let (preview, metrics) = self
+                .gpu
+                .as_ref()
+                .expect("spatial processor initialized")
+                .reduce_preview(resident, description, cancellation)?;
+            (PreparedSpatial::Preview(preview), metrics)
+        };
+        metrics.capture = source_metrics.capture;
+        metrics.upload = source_metrics.upload;
+        metrics.uploaded_bytes = source_metrics.uploaded_bytes;
+        metrics.estimated_gpu_bytes = metrics
+            .estimated_gpu_bytes
+            .max(source_metrics.estimated_gpu_bytes);
+        self.recovery = None;
+        Ok((prepared, metrics))
+    }
+
+    fn record_gpu_result<T>(&mut self, result: &Result<T, GpuPreviewError>) {
+        if let Err(error) = result
+            && !matches!(error, GpuPreviewError::Cancelled)
+        {
+            self.recovery = Some(error.to_string());
+            self.gpu_captured = None;
+            self.gpu = None;
+        }
+    }
+}
+
+enum PreparedSpatial {
+    Preview(GpuSpatialPreview),
+    Full(GpuSpatialFullSource),
+}
+
+fn gpu_error(error: PipelineError) -> GpuPreviewError {
+    if matches!(error, PipelineError::Cancelled) {
+        GpuPreviewError::Cancelled
+    } else {
+        GpuPreviewError::InvalidInput {
+            reason: error.to_string(),
+        }
     }
 }

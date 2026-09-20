@@ -54,11 +54,14 @@ pub use pipeline::{
     CPU_WORKING_SET_LIMIT_BYTES, CapturedCameraSource, CpuPipeline, CpuPreviewWorkspace,
     DEFAULT_PREVIEW_LONG_EDGE, DemosaicedBase, DemosaicedCameraSource, ExportRenderResult,
     MemoryEstimate, OutputPolicy, PreviewOptions, RawCropPolicy, ReconstructedPreview,
-    RenderOptions, RenderResult, StageTimings,
+    RenderOptions, RenderResult, SpatialCompletionDescription, SpatialOptics, StageTimings,
 };
 pub use rendering::{
     BASE_RENDERING_LUT_SIZE, BaseRenderingLut, ROHDITOR_STANDARD_MIDDLE_GRAY,
     standard_base_rendering_lut,
+};
+pub use resample::{
+    AREA_REDUCTION_ALGORITHM_VERSION, AreaAxisSample, AreaReductionAxis, AreaReductionPlan,
 };
 pub use rohditor_color::{
     CHROMA_COMPRESS_ALGORITHM_VERSION, GamutMapStatus, GamutMappingDiagnostics,
@@ -68,9 +71,9 @@ pub use rohditor_highlight::{
     ReconstructionStats,
 };
 pub use rohditor_optics::{
-    CorrectionComponents, DatabaseProvenance, LensProfileSummary, MetadataField,
-    OPTICS_ALGORITHM_VERSION, OpticsError, OpticsProvenance, OpticsQuery, OpticsService,
-    ProfileMatch, ProfileRequest,
+    CorrectionComponents, DatabaseProvenance, DistortionModel, LensProfileSummary, MetadataField,
+    OPTICS_ALGORITHM_VERSION, OpticsError, OpticsExecution, OpticsProvenance, OpticsQuery,
+    OpticsService, ProfileMatch, ProfileRequest, TcaModel, VignettingModel,
 };
 pub use sharpening::{
     CAPTURE_SHARPENING_ALGORITHM_VERSION, CAPTURE_SHARPENING_FLOOR, CAPTURE_SHARPENING_ITERATIONS,

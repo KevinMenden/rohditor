@@ -19,10 +19,16 @@ pub struct GpuCapabilities {
     pub target_format: String,
     /// Maximum usable two-dimensional texture edge on the shared device.
     pub max_texture_dimension_2d: u32,
+    /// Maximum number of layers in each resident planar texture array.
+    pub max_texture_array_layers: u32,
+    /// Maximum bind groups available to the direct spatial pipelines.
+    pub max_bind_groups: u32,
     /// Maximum compute-workgroup count along one dimension.
     pub max_compute_workgroups_per_dimension: u32,
     /// Whether the shared device permits the unfiltered `Rgba32Float` source.
     pub rgba32float_sampled: bool,
+    /// Whether planar camera sources can use sampled/write-only `R32Float`.
+    pub r32float_sampled_storage: bool,
     /// Whether the shared device permits the `Rgba16Float` working target.
     pub rgba16float_storage: bool,
     /// Whether the shared device permits the egui-compatible `Rgba8Unorm`
@@ -45,6 +51,7 @@ impl GpuCapabilities {
         let rgba16float = adapter.get_texture_format_features(wgpu::TextureFormat::Rgba16Float);
         let rgba32float = adapter.get_texture_format_features(wgpu::TextureFormat::Rgba32Float);
         let rgba8unorm = adapter.get_texture_format_features(wgpu::TextureFormat::Rgba8Unorm);
+        let r32float = adapter.get_texture_format_features(wgpu::TextureFormat::R32Float);
         let limits = device.limits();
         let rgba32float_sampled = rgba32float
             .allowed_usages
@@ -57,6 +64,11 @@ impl GpuCapabilities {
                 | wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::COPY_SRC,
         );
+        let r32float_sampled_storage = r32float.allowed_usages.contains(
+            wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::STORAGE_BINDING,
+        );
 
         Self {
             adapter_name: info.name,
@@ -66,8 +78,11 @@ impl GpuCapabilities {
             driver_info: info.driver_info,
             target_format: format!("{target_format:?}"),
             max_texture_dimension_2d: limits.max_texture_dimension_2d,
+            max_texture_array_layers: limits.max_texture_array_layers,
+            max_bind_groups: limits.max_bind_groups,
             max_compute_workgroups_per_dimension: limits.max_compute_workgroups_per_dimension,
             rgba32float_sampled,
+            r32float_sampled_storage,
             rgba16float_storage,
             rgba8unorm_storage,
             timestamp_queries: device.features().contains(wgpu::Features::TIMESTAMP_QUERY),
@@ -90,6 +105,9 @@ impl GpuCapabilities {
         if !self.rgba32float_sampled {
             missing.push("Rgba32Float upload/sample support");
         }
+        if !self.r32float_sampled_storage {
+            missing.push("R32Float planar sampled/storage support");
+        }
         if !self.rgba16float_storage {
             missing.push("Rgba16Float storage-texture support");
         }
@@ -98,6 +116,12 @@ impl GpuCapabilities {
         }
         if self.max_compute_workgroups_per_dimension == 0 {
             missing.push("compute workgroups");
+        }
+        if self.max_texture_array_layers == 0 {
+            missing.push("texture array layers");
+        }
+        if self.max_bind_groups < 3 {
+            missing.push("three compute bind groups");
         }
         if missing.is_empty() {
             Ok(())

@@ -11,16 +11,30 @@ use crate::persistence::{self, SaveJob, SaveResult};
 impl RohditorApp {
     pub(super) fn update_autosave(&mut self, context: &egui::Context) {
         let now = std::time::Instant::now();
-        let Some(document) = self.document.as_mut() else {
-            return;
+        let (revision_changed, due, delay) = {
+            let Some(document) = self.document.as_mut() else {
+                return;
+            };
+            let revision_changed = document.autosave.observe(
+                document.edits.revision(),
+                document.edits.gesture_active(),
+                now,
+            );
+            let due = document.autosave.take_due(now);
+            let delay = document.autosave.delay(now);
+            (revision_changed, due, delay)
         };
-        document.autosave.observe(
-            document.edits.revision(),
-            document.edits.gesture_active(),
-            now,
-        );
-        let due = document.autosave.take_due(now);
-        if let Some(delay) = document.autosave.delay(now) {
+        if revision_changed
+            && self
+                .recipe_save_status
+                .as_ref()
+                .is_some_and(|status| status.notice_deadline().is_some())
+        {
+            // A previous success message must not describe the newly edited
+            // recipe while its replacement is still in the debounce window.
+            self.recipe_save_status = None;
+        }
+        if let Some(delay) = delay {
             context.request_repaint_after(delay);
         }
         if due {
@@ -120,9 +134,9 @@ impl RohditorApp {
             recipe: recipe.clone(),
         };
         self.recipe_save_status = Some(if immediate {
-            "Saving edits…".to_owned()
+            super::RecipeSaveStatus::Pending("Saving edits…".to_owned())
         } else {
-            "Edits pending save…".to_owned()
+            super::RecipeSaveStatus::Pending("Edits pending save…".to_owned())
         });
         self.recipe_save_error = None;
         if let Err(error) = self.recipe_saves.enqueue(job, immediate) {
@@ -174,9 +188,12 @@ impl RohditorApp {
                         document.edits.mark_saved_if_current(revision, &recipe)
                     });
                 self.recipe_save_status = Some(if !newer_pending && (!same_document || current) {
-                    format!("Saved edits to {}.", path.display())
+                    super::RecipeSaveStatus::Notice {
+                        message: format!("Saved edits to {}.", path.display()),
+                        until: std::time::Instant::now() + super::RECIPE_SAVE_NOTICE_DURATION,
+                    }
                 } else {
-                    "Edits pending save…".to_owned()
+                    super::RecipeSaveStatus::Pending("Edits pending save…".to_owned())
                 });
                 if current
                     && let Some(document) = self
@@ -191,9 +208,9 @@ impl RohditorApp {
             Err(error) => {
                 let newer_pending = self.queued_recipe_snapshots.contains_key(&source);
                 self.recipe_save_status = Some(if newer_pending {
-                    "Edits pending save…".to_owned()
+                    super::RecipeSaveStatus::Pending("Edits pending save…".to_owned())
                 } else {
-                    "Could not save edits".to_owned()
+                    super::RecipeSaveStatus::Error("Could not save edits".to_owned())
                 });
                 self.recipe_save_error = Some(error.clone());
                 if let Some(document) = self

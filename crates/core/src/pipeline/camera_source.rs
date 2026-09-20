@@ -6,6 +6,7 @@ use rohditor_raw::RawFileInfo;
 /// Immutable unsharpened camera RGB. No WB, optics, or reduction has run.
 #[derive(Debug, Clone)]
 pub struct DemosaicedCameraSource {
+    identity: CameraSourceIdentity,
     image: Arc<LinearRgbImage<f32>>,
     info: RawFileInfo,
     recipe: EditRecipe,
@@ -201,6 +202,71 @@ impl CpuPipeline {
             cancellation,
         )
     }
+
+    /// Resolve the immutable spatial contract without allocating output pixel
+    /// storage. CPU and GPU completion consume this same description.
+    pub fn describe_spatial_completion(
+        &self,
+        source: &DemosaicedCameraSource,
+        cancellation: &CancellationToken,
+    ) -> Result<SpatialCompletionDescription, PipelineError> {
+        describe_spatial_completion(
+            self.optics_service().map(AsRef::as_ref),
+            source,
+            cancellation,
+        )
+    }
+}
+
+fn describe_spatial_completion(
+    optics: Option<&OpticsService>,
+    source: &DemosaicedCameraSource,
+    cancellation: &CancellationToken,
+) -> Result<SpatialCompletionDescription, PipelineError> {
+    cancellation.checkpoint()?;
+    let source_dimensions = (source.image.width(), source.image.height());
+    let target_dimensions = preview_dimensions(
+        source_dimensions.0,
+        source_dimensions.1,
+        source.options.max_long_edge,
+    )?;
+    let execution = crate::optics::resolve_execution(
+        optics,
+        &source.info,
+        &source.recipe.optics,
+        source_dimensions.0,
+        source_dimensions.1,
+    )?;
+    let area_reduction = crate::AreaReductionPlan::new(
+        source_dimensions.0,
+        source_dimensions.1,
+        target_dimensions.0,
+        target_dimensions.1,
+    )?;
+    cancellation.checkpoint()?;
+    Ok(SpatialCompletionDescription {
+        source_identity: source.identity.clone(),
+        source_dimensions,
+        target_dimensions,
+        optics: execution.map_or(SpatialOptics::Off, |execution| {
+            SpatialOptics::Enabled(Box::new(execution))
+        }),
+        area_reduction,
+        calibration: source.calibration.clone(),
+        source_orientation: source.info.orientation,
+        profile_selection: source.recipe.color.camera_profile.clone(),
+        camera_profile: camera_profile_key(&source.recipe.color.camera_profile),
+        highlight_adjustments: source.recipe.raw.highlights,
+        highlight_white_balance: source.recipe.color.white_balance,
+        highlight_diagnostics: source.highlight_diagnostics,
+        capture_sharpening: CaptureSharpeningProvenance::for_settings(
+            source.recipe.capture_sharpening,
+        ),
+        preparation_timings: source.timings,
+        decoded_raw_bytes: source.decoded_raw_bytes,
+        normalized_mosaic_bytes: source.normalized_mosaic_bytes,
+        highlight_scratch_bytes: source.highlight_scratch_bytes,
+    })
 }
 
 fn prepare_camera_source(
@@ -283,6 +349,7 @@ fn prepare_camera_source(
     drop(mosaic);
 
     Ok(DemosaicedCameraSource {
+        identity: CameraSourceIdentity::default(),
         image: Arc::new(full_linear),
         info: frame.info.clone(),
         recipe: recipe.clone(),
@@ -350,6 +417,7 @@ fn complete_camera_source(
 ) -> Result<ReconstructedPreview, PipelineError> {
     cancellation.checkpoint()?;
     let total_started = Instant::now();
+    let description = describe_spatial_completion(optics, &captured.source, cancellation)?;
     let CapturedCameraSource {
         source,
         stage: capture,
@@ -358,7 +426,7 @@ fn complete_camera_source(
         image: full_linear,
         info,
         recipe,
-        options,
+        options: _,
         calibration,
         highlight_diagnostics,
         decoded_raw_bytes,
@@ -417,16 +485,18 @@ fn complete_camera_source(
         ..
     } = timings;
     let optics_started = Instant::now();
-    let optics_result =
-        crate::optics::apply_cancellable(optics, &info, &recipe.optics, full_linear, cancellation)?;
+    let optics_result = crate::optics::apply_execution_cancellable(
+        description.optics.execution(),
+        full_linear,
+        cancellation,
+    )?;
     let optics = optics_result.image;
     let optics_provenance = optics_result.provenance;
     let optics_output_bytes = optics_result.output_bytes;
     let optics_scratch_bytes = optics_result.scratch_bytes;
     let optics_timing = optics_started.elapsed();
 
-    let (target_width, target_height) =
-        preview_dimensions(source_width, source_height, options.max_long_edge)?;
+    let (target_width, target_height) = description.target_dimensions;
     let unchanged_dimensions = source_width == target_width && source_height == target_height;
     let resample_intermediate_bytes = if unchanged_dimensions {
         0
@@ -464,7 +534,8 @@ fn complete_camera_source(
     validate_working_set(preparation_peak_bytes)?;
 
     let resampling_started = Instant::now();
-    let image = resize_area_cancellable(optics, target_width, target_height, cancellation)?;
+    let image =
+        resize_area_with_plan_cancellable(optics, &description.area_reduction, cancellation)?;
     let resampling = resampling_started.elapsed();
     let timings = StageTimings {
         metadata,

@@ -11,21 +11,104 @@ use crate::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum DistortionModel {
+pub enum DistortionModel {
     Poly3 { k1: f32 },
     Poly5 { k1: f32, k2: f32 },
     Ptlens { a: f32, b: f32, c: f32 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum TcaModel {
+pub enum TcaModel {
     Linear { kr: f32, kb: f32 },
     Poly3 { red: [f32; 3], blue: [f32; 3] },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum VignettingModel {
+pub enum VignettingModel {
     Pa { k1: f32, k2: f32, k3: f32 },
+}
+
+/// Complete immutable mathematical input to one optics execution.
+///
+/// The f64 setup constants preserve the authoritative CPU coordinate path;
+/// GPU backends explicitly narrow the stable subset they upload to shaders.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OpticsExecution {
+    pub(crate) width: usize,
+    pub(crate) height: usize,
+    pub(crate) norm_scale: f64,
+    pub(crate) norm_unscale: f64,
+    pub(crate) center_x: f64,
+    pub(crate) center_y: f64,
+    pub(crate) scale: f32,
+    pub(crate) distortion: Option<DistortionModel>,
+    pub(crate) tca: Option<TcaModel>,
+    pub(crate) vignetting: Option<VignettingModel>,
+    pub(crate) provenance: crate::OpticsProvenance,
+}
+
+impl OpticsExecution {
+    #[must_use]
+    pub const fn dimensions(&self) -> (usize, usize) {
+        (self.width, self.height)
+    }
+
+    #[must_use]
+    pub const fn normalization(&self) -> (f64, f64) {
+        (self.norm_scale, self.norm_unscale)
+    }
+
+    #[must_use]
+    pub const fn center(&self) -> (f64, f64) {
+        (self.center_x, self.center_y)
+    }
+
+    #[must_use]
+    pub const fn scale(&self) -> f32 {
+        self.scale
+    }
+
+    #[must_use]
+    pub const fn distortion(&self) -> Option<DistortionModel> {
+        self.distortion
+    }
+
+    #[must_use]
+    pub const fn tca(&self) -> Option<TcaModel> {
+        self.tca
+    }
+
+    #[must_use]
+    pub const fn vignetting(&self) -> Option<VignettingModel> {
+        self.vignetting
+    }
+
+    #[must_use]
+    pub const fn components(&self) -> crate::CorrectionComponents {
+        self.provenance.applied
+    }
+
+    #[must_use]
+    pub const fn provenance(&self) -> &crate::OpticsProvenance {
+        &self.provenance
+    }
+
+    /// Authoritative CPU coordinate mapping for qualification of another
+    /// backend's f32 port.
+    pub fn map_coordinates(
+        &self,
+        x: usize,
+        y: usize,
+    ) -> Result<[(f32, f32); 3], crate::OpticsError> {
+        if x >= self.width || y >= self.height {
+            return Err(crate::OpticsError::InvalidDimensions {
+                width: self.width,
+                height: self.height,
+                reason: "requested coordinate is outside the optics output".to_owned(),
+            });
+        }
+        map_coordinates_execution(self, x, y)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -37,20 +120,6 @@ struct MappingContext {
     scale: f32,
     distortion: Option<DistortionModel>,
     tca: Option<TcaModel>,
-}
-
-impl MappingContext {
-    fn from_plan(plan: &LensCorrectionPlan) -> Self {
-        Self {
-            norm_scale: plan.norm_scale,
-            norm_unscale: plan.norm_unscale,
-            center_x: plan.center_x,
-            center_y: plan.center_y,
-            scale: plan.scale,
-            distortion: plan.distortion,
-            tca: plan.tca,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -343,12 +412,24 @@ fn rescale_vignetting(
     }
 }
 
-pub(crate) fn map_coordinates(
-    plan: &LensCorrectionPlan,
+pub(crate) fn map_coordinates_execution(
+    execution: &OpticsExecution,
     x: usize,
     y: usize,
 ) -> Result<[(f32, f32); 3], OpticsError> {
-    map_coordinates_values(&MappingContext::from_plan(plan), x, y)
+    map_coordinates_values(
+        &MappingContext {
+            norm_scale: execution.norm_scale,
+            norm_unscale: execution.norm_unscale,
+            center_x: execution.center_x,
+            center_y: execution.center_y,
+            scale: execution.scale,
+            distortion: execution.distortion,
+            tca: execution.tca,
+        },
+        x,
+        y,
+    )
 }
 
 fn map_coordinates_values(

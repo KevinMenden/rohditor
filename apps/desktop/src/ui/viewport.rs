@@ -55,6 +55,7 @@ pub(crate) enum PreviewSource {
     HighQualityCpu,
     HighQualityGpu,
     OneToOneCpu,
+    OneToOneGpu,
 }
 
 impl PreviewSource {
@@ -83,6 +84,7 @@ impl PreviewSource {
             Self::HighQualityCpu => "HIGH-QUALITY ANTIALIASED PREVIEW · CPU",
             Self::HighQualityGpu => "HIGH-QUALITY ANTIALIASED PREVIEW · GPU",
             Self::OneToOneCpu => "1:1 SOURCE-SCALE DEVELOPED · CPU",
+            Self::OneToOneGpu => "1:1 SOURCE-SCALE DEVELOPED · GPU",
         }
     }
 
@@ -94,6 +96,7 @@ impl PreviewSource {
             Self::HighQualityCpu => "High-quality preview · CPU",
             Self::HighQualityGpu => "High-quality preview · GPU",
             Self::OneToOneCpu => "1:1 source-scale · CPU",
+            Self::OneToOneGpu => "1:1 source-scale · GPU",
         }
     }
 }

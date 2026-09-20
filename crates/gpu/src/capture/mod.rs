@@ -186,6 +186,72 @@ impl GpuCaptureProcessor {
         }
         result.map(Some)
     }
+
+    pub(crate) fn process_to_resident(
+        &mut self,
+        image: &LinearRgbImage<f32>,
+        contract: &CaptureSharpeningContract,
+        retained_host_bytes: usize,
+        resident: &crate::spatial::source::ResidentCameraPlanes,
+        scatter: &crate::spatial::CaptureScatter,
+        cancellation: &CancellationToken,
+    ) -> Result<CaptureMetrics, GpuPreviewError> {
+        check_cancel(cancellation)?;
+        contract.settings().validate().map_err(error)?;
+        if !contract.settings().is_active() {
+            return Err(error(
+                "active capture contract required for resident execution",
+            ));
+        }
+        if image.space() != rohditor_image::LinearRgbSpace::CameraNative {
+            return Err(error(
+                "capture requires camera-native RGB before white balance and optics",
+            ));
+        }
+        if (image.width(), image.height())
+            != (
+                resident.layout.width as usize,
+                resident.layout.height as usize,
+            )
+        {
+            return Err(error(
+                "resident capture target dimensions do not match the source",
+            ));
+        }
+        let plan = TilePlan::new_resident(
+            image.width(),
+            image.height(),
+            contract.halo(),
+            self.budget,
+            &self.device.limits(),
+            self.maximum_tile_edge,
+        )?;
+        let host = image
+            .data()
+            .len()
+            .checked_mul(4)
+            .and_then(|value| value.checked_add(retained_host_bytes))
+            .and_then(|value| value.checked_add(plan.host_bytes))
+            .ok_or_else(|| error("resident capture host allocation overflow"))?;
+        if host > CPU_WORKING_SET_LIMIT_BYTES {
+            return Err(error(
+                "resident capture source and staging exceed CPU working-set limit",
+            ));
+        }
+        self.device.push_error_scope(wgpu::ErrorFilter::Internal);
+        self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let result =
+            self.process_resident_inner(image, contract, &plan, resident, scatter, cancellation);
+        let validation = pollster::block_on(self.device.pop_error_scope());
+        let allocation = pollster::block_on(self.device.pop_error_scope());
+        let internal = pollster::block_on(self.device.pop_error_scope());
+        check_cancel(cancellation)?;
+        if let Some(error_value) = validation.or(allocation).or(internal) {
+            return Err(error(error_value));
+        }
+        result
+    }
 }
 
 fn error(e: impl std::fmt::Display) -> GpuPreviewError {

@@ -1,6 +1,6 @@
 //! Interactive GPU preview facade.
 
-mod processor;
+pub(crate) mod processor;
 mod readback;
 mod resources;
 mod upload;

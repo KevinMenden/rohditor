@@ -1,16 +1,14 @@
 //! Shared GPU color processing for native preview and headless export.
 //!
-//! RAW decoding, normalization, demosaicing, and optics remain in
-//! `rohditor-core`'s CPU preparation path. Optional capture sharpening runs on
-//! bounded f32 GPU tiles before a temporary readback for CPU optics/reduction.
-//! Preview and export share f32 color
-//! kernels; export quantizes directly to 8/16-bit integers in bounded bands and
-//! returns codec-independent pixels for CPU encoding and transactional writes.
-//! The desktop path uploads one camera-native
-//! [`rohditor_core::ReconstructedPreview`] without source float quantization and
-//! applies white balance, the camera transform, exposure, contrast, saturation,
-//! HSL, three-way grading, orientation, and the
-//! explicit sRGB output transform as GPU parameters. A legacy converted
+//! RAW decoding, normalization, and demosaicing remain in `rohditor-core`.
+//! Camera-native f32 planes stay resident after optional bounded capture
+//! sharpening; optics and exact area reduction execute from the same tiled
+//! source without a camera-RGB readback. Preview and export share f32 color
+//! kernels. Export evaluates optics and color in bounded bands, quantizes
+//! directly to 8/16-bit integers, and returns only codec-independent final
+//! pixels for CPU encoding and transactional writes. Fit preview retains a
+//! reduced camera-native source, while Source 1:1 develops directly into its
+//! display texture. A legacy converted
 //! [`rohditor_core::DemosaicedBase`] upload remains available for lower-level
 //! callers. Normal interaction never reads the display result back to CPU
 //! memory.
@@ -21,8 +19,12 @@ pub use memory::{GpuMemoryReservations, gpu_memory_reservations};
 mod capture;
 pub use capture::{CaptureMetrics, GpuCaptureProcessor, GpuCaptureResult};
 mod preview;
+mod spatial;
 
 pub use preview::{GpuExportProcessor, GpuExportResult};
+pub use spatial::{
+    GpuCapturedSource, GpuSpatialFullSource, GpuSpatialPreview, GpuSpatialProcessor, SpatialMetrics,
+};
 
 pub use capabilities::GpuCapabilities;
 pub use preview::{

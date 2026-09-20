@@ -18,6 +18,7 @@ use rohditor_edit::{
     RenderingProfileSelection, WhiteBalance,
 };
 use rohditor_image::{LinearRgbSpace, Orientation};
+use wgpu::util::DeviceExt;
 
 use crate::{GpuCapabilities, GpuPreviewError};
 
@@ -395,8 +396,8 @@ pub struct GpuPreviewFrame {
     _memory: crate::memory::Reservation,
     // Keep the linear texture alive for future stages even though the current
     // fused dispatch does not read it back in a second pass.
-    _working_texture: wgpu::Texture,
-    working_view: wgpu::TextureView,
+    _working_texture: Option<wgpu::Texture>,
+    working_view: Option<wgpu::TextureView>,
     display_texture: wgpu::Texture,
     display_view: wgpu::TextureView,
     source_dimensions: (u32, u32),
@@ -446,9 +447,11 @@ impl GpuPreviewFrame {
     /// Estimated bytes occupied by the working and display textures.
     #[must_use]
     pub fn estimated_bytes(&self) -> usize {
-        let working = (self.source_dimensions.0 as usize)
-            .saturating_mul(self.source_dimensions.1 as usize)
-            .saturating_mul(8);
+        let working = self.working_view.as_ref().map_or(0, |_| {
+            (self.source_dimensions.0 as usize)
+                .saturating_mul(self.source_dimensions.1 as usize)
+                .saturating_mul(8)
+        });
         let display = (self.output_dimensions.0 as usize)
             .saturating_mul(self.output_dimensions.1 as usize)
             .saturating_mul(4);
@@ -456,7 +459,13 @@ impl GpuPreviewFrame {
     }
 
     fn can_reuse(&self, source_dimensions: (u32, u32), output_dimensions: (u32, u32)) -> bool {
-        self.source_dimensions == source_dimensions && self.output_dimensions == output_dimensions
+        self.working_view.is_some()
+            && self.source_dimensions == source_dimensions
+            && self.output_dimensions == output_dimensions
+    }
+
+    fn can_reuse_display_only(&self, output_dimensions: (u32, u32)) -> bool {
+        self.working_view.is_none() && self.output_dimensions == output_dimensions
     }
 }
 
@@ -537,6 +546,7 @@ pub struct GpuPreviewProcessor {
     queue: wgpu::Queue,
     capabilities: GpuCapabilities,
     pipeline: wgpu::ComputePipeline,
+    spatial_pipeline: wgpu::ComputePipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     parameters: wgpu::Buffer,
     base_rendering_lut: wgpu::Buffer,
@@ -648,6 +658,29 @@ impl GpuPreviewProcessor {
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             cache: None,
         });
+        let spatial_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("rohditor direct spatial display shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                concat!(
+                    include_str!("../preview.wgsl"),
+                    "\n",
+                    include_str!("../color_adjustments.wgsl"),
+                    "\n",
+                    include_str!("../spatial/spatial.wgsl"),
+                    "\n",
+                    include_str!("../spatial/full_output.wgsl")
+                )
+                .into(),
+            ),
+        });
+        let spatial_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("rohditor direct full-resolution spatial display"),
+            layout: None,
+            module: &spatial_shader,
+            entry_point: Some("develop_spatial_full"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
         let parameters = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("rohditor GPU preview parameters"),
             size: (PARAMETER_WORDS * size_of::<u32>()) as u64,
@@ -678,6 +711,7 @@ impl GpuPreviewProcessor {
             queue: queue.clone(),
             capabilities,
             pipeline,
+            spatial_pipeline,
             bind_group_layout,
             parameters,
             base_rendering_lut,
@@ -786,6 +820,57 @@ impl GpuPreviewProcessor {
         })
     }
 
+    /// Adopt an RGBA32Float camera source produced on this processor's device
+    /// by the spatial executor. This performs no packing, upload, or readback.
+    pub fn adopt_spatial_preview(
+        &self,
+        preview: crate::GpuSpatialPreview,
+        recipe: &EditRecipe,
+    ) -> Result<GpuPreviewSource, GpuPreviewError> {
+        let description = &preview.description;
+        if description.capture_sharpening()
+            != rohditor_core::CaptureSharpeningProvenance::for_settings(recipe.capture_sharpening)
+            || !highlight_adjustments_match(
+                description.highlight_adjustments(),
+                recipe.raw.highlights,
+            )
+            || !optics_provenance_matches(description.optics().provenance(), &recipe.optics)
+        {
+            return Err(GpuPreviewError::BaseMismatch {
+                reason: "spatial GPU source provenance does not match the recipe".into(),
+            });
+        }
+        let resolved = resolve_camera_colour(
+            description.calibration(),
+            &recipe.color.camera_profile,
+            recipe.color.white_balance,
+        )
+        .map_err(|error| GpuPreviewError::InvalidInput {
+            reason: error.to_string(),
+        })?;
+        let (width, height) = description.target_dimensions();
+        let (width, height) = upload_dimensions(width, height)?;
+        let white_balance_dynamic =
+            description.highlight_adjustments().method != rohditor_edit::HighlightMethod::Clip;
+        Ok(GpuPreviewSource {
+            _memory: preview._memory,
+            _texture: preview.texture,
+            view: preview.view,
+            width,
+            height,
+            source_orientation: description.source_orientation(),
+            white_balance: recipe.color.white_balance,
+            highlight_adjustments: description.highlight_adjustments(),
+            capture_sharpening: description.capture_sharpening(),
+            optics_provenance: description.optics().provenance().cloned(),
+            white_balance_dynamic,
+            white_balance_gains: resolved.white_balance_gains,
+            camera_to_linear_rec2020: resolved.camera_to_linear_rec2020,
+            calibration: Some(description.calibration().clone()),
+            highlight_camera_profile: description.camera_profile_key().clone(),
+        })
+    }
+
     /// Apply downstream edits to an uploaded base and write an egui-compatible
     /// oriented display texture. Passing the prior frame reuses its GPU textures
     /// whenever dimensions are unchanged.
@@ -810,6 +895,241 @@ impl GpuPreviewProcessor {
         reusable: Option<GpuPreviewFrame>,
     ) -> Result<GpuPreviewFrame, GpuPreviewError> {
         self.render_with_clip_draft(source, recipe, output_policy, reusable, true)
+    }
+
+    /// Develop a full-resolution resident camera source directly into the
+    /// display texture. Optics and downstream colour processing remain on the
+    /// shared device; the only readback is the four-byte spatial failure flag.
+    pub fn render_spatial_full(
+        &self,
+        source: &crate::GpuSpatialFullSource,
+        recipe: &EditRecipe,
+        output_policy: OutputPolicy,
+        reusable: Option<GpuPreviewFrame>,
+    ) -> Result<GpuPreviewFrame, GpuPreviewError> {
+        self.device.push_error_scope(wgpu::ErrorFilter::Internal);
+        self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let result = self.render_spatial_full_inner(source, recipe, output_policy, reusable);
+        let validation = pollster::block_on(self.device.pop_error_scope());
+        let allocation = pollster::block_on(self.device.pop_error_scope());
+        let internal = pollster::block_on(self.device.pop_error_scope());
+        if let Some(error) = validation.or(allocation).or(internal) {
+            return Err(GpuPreviewError::Unsupported {
+                reason: format!("full-resolution GPU display failed: {error}"),
+            });
+        }
+        result
+    }
+
+    fn render_spatial_full_inner(
+        &self,
+        source: &crate::GpuSpatialFullSource,
+        recipe: &EditRecipe,
+        output_policy: OutputPolicy,
+        reusable: Option<GpuPreviewFrame>,
+    ) -> Result<GpuPreviewFrame, GpuPreviewError> {
+        recipe
+            .validate()
+            .map_err(|error| GpuPreviewError::InvalidInput {
+                reason: error.to_string(),
+            })?;
+        let description = &source.description;
+        if description.capture_sharpening()
+            != rohditor_core::CaptureSharpeningProvenance::for_settings(recipe.capture_sharpening)
+            || !highlight_adjustments_match(
+                description.highlight_adjustments(),
+                recipe.raw.highlights,
+            )
+            || !optics_provenance_matches(description.optics().provenance(), &recipe.optics)
+            || description.camera_profile_key() != &camera_profile_key(&recipe.color.camera_profile)
+            || (description.highlight_adjustments().method == rohditor_edit::HighlightMethod::Clip
+                && description.highlight_white_balance() != recipe.color.white_balance)
+        {
+            return Err(GpuPreviewError::BaseMismatch {
+                reason: "full-resolution spatial source provenance does not match the recipe"
+                    .into(),
+            });
+        }
+        let resolved = resolve_camera_colour(
+            description.calibration(),
+            &recipe.color.camera_profile,
+            recipe.color.white_balance,
+        )
+        .map_err(|error| GpuPreviewError::InvalidInput {
+            reason: error.to_string(),
+        })?;
+        let (source_width, source_height) = description.source_dimensions();
+        let orientation = recipe
+            .geometry
+            .orientation_override
+            .unwrap_or(description.source_orientation());
+        let output_geometry = OutputGeometry::new(
+            source_width,
+            source_height,
+            orientation,
+            recipe.geometry.crop,
+        )
+        .map_err(|error| GpuPreviewError::InvalidInput {
+            reason: error.to_string(),
+        })?;
+        let output_dimensions = self.capabilities.validate_dimensions(
+            output_geometry.output_dimensions().0,
+            output_geometry.output_dimensions().1,
+        )?;
+        let workgroups = (
+            output_dimensions.0.div_ceil(WORKGROUP_EDGE),
+            output_dimensions.1.div_ceil(WORKGROUP_EDGE),
+        );
+        if workgroups.0 > self.capabilities.max_compute_workgroups_per_dimension
+            || workgroups.1 > self.capabilities.max_compute_workgroups_per_dimension
+        {
+            return Err(GpuPreviewError::InvalidDimensions {
+                width: output_dimensions.0 as usize,
+                height: output_dimensions.1 as usize,
+                reason: "full-resolution display dispatch exceeds the device workgroup limit"
+                    .into(),
+            });
+        }
+        let source_dimensions = (source_width as u32, source_height as u32);
+        let output_bytes = u64::from(output_dimensions.0) * u64::from(output_dimensions.1) * 4;
+        if source
+            .planes
+            .layout
+            .resident_bytes
+            .saturating_add(output_bytes)
+            > crate::spatial::resources::DEFAULT_BUDGET.saturating_sub(64 * 1024)
+        {
+            return Err(GpuPreviewError::Unsupported {
+                reason: "resident camera source and Source 1:1 display exceed the GPU budget"
+                    .into(),
+            });
+        }
+        let (mut frame, textures_reused) = match reusable {
+            Some(frame) if frame.can_reuse_display_only(output_dimensions) => (frame, true),
+            _ => (
+                self.create_display_frame(source_dimensions, output_dimensions),
+                false,
+            ),
+        };
+        frame.textures_reused = textures_reused;
+
+        let parameters = build_parameters(
+            source_dimensions,
+            orientation,
+            output_geometry,
+            recipe,
+            output_policy,
+            resolved.white_balance_gains,
+            resolved.camera_to_linear_rec2020,
+        );
+        self.queue
+            .write_buffer(&self.parameters, 0, bytemuck::cast_slice(&parameters));
+        let light_tone_lut = LightToneLut::new(&recipe.light);
+        self.queue.write_buffer(
+            &self.light_tone_lut,
+            0,
+            bytemuck::cast_slice(light_tone_lut.values()),
+        );
+        let optics = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("full-resolution GPU optics parameters"),
+                contents: bytemuck::cast_slice(&crate::spatial::reduction::pack_optics_parameters(
+                    &source.planes.layout,
+                    description.optics().execution(),
+                )),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let failure = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("full-resolution GPU spatial failure flag"),
+                contents: &[0; 4],
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            });
+        let failure_staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("full-resolution GPU spatial failure readback"),
+            size: 4,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let colour_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("full-resolution GPU colour bindings"),
+            layout: &self.spatial_pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.parameters.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: self.light_tone_lut.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: self.base_rendering_lut.as_entire_binding(),
+                },
+            ],
+        });
+        let output_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("full-resolution GPU display binding"),
+            layout: &self.spatial_pipeline.get_bind_group_layout(1),
+            entries: &[wgpu::BindGroupEntry {
+                binding: 7,
+                resource: wgpu::BindingResource::TextureView(&frame.display_view),
+            }],
+        });
+        let plane_entries = source.planes.sampled_entries();
+        let spatial_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("full-resolution resident camera bindings"),
+            layout: &self.spatial_pipeline.get_bind_group_layout(2),
+            entries: &[
+                plane_entries[0].clone(),
+                plane_entries[1].clone(),
+                plane_entries[2].clone(),
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: optics.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: failure.as_entire_binding(),
+                },
+            ],
+        });
+        let submitted = Instant::now();
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("full-resolution GPU display commands"),
+            });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("full-resolution optics and display"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.spatial_pipeline);
+            pass.set_bind_group(0, &colour_bind_group, &[]);
+            pass.set_bind_group(1, &output_bind_group, &[]);
+            pass.set_bind_group(2, &spatial_bind_group, &[]);
+            pass.dispatch_workgroups(workgroups.0, workgroups.1, 1);
+        }
+        encoder.copy_buffer_to_buffer(&failure, 0, &failure_staging, 0, 4);
+        self.queue.submit([encoder.finish()]);
+        crate::spatial::reduction::read_failure(
+            &self.device,
+            &failure_staging,
+            &CancellationToken::new(),
+        )?;
+        frame.submission_time = submitted.elapsed();
+        let completion = Arc::new(AtomicU64::new(0));
+        completion.store(
+            submitted.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
+            Ordering::Release,
+        );
+        frame.queue_completion_nanos = completion;
+        Ok(frame)
     }
 
     fn render_with_clip_draft(
@@ -916,7 +1236,12 @@ impl GpuPreviewProcessor {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&frame.working_view),
+                    resource: wgpu::BindingResource::TextureView(
+                        frame
+                            .working_view
+                            .as_ref()
+                            .expect("reduced preview frame has a linear working texture"),
+                    ),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -1114,8 +1439,42 @@ impl GpuPreviewProcessor {
                 u64::from(source_dimensions.0) * u64::from(source_dimensions.1) * 8
                     + u64::from(output_dimensions.0) * u64::from(output_dimensions.1) * 4,
             ),
-            _working_texture: working_texture,
-            working_view,
+            _working_texture: Some(working_texture),
+            working_view: Some(working_view),
+            display_texture,
+            display_view,
+            source_dimensions,
+            output_dimensions,
+            submission_time: Duration::ZERO,
+            queue_completion_nanos: Arc::new(AtomicU64::new(0)),
+            textures_reused: false,
+        }
+    }
+
+    fn create_display_frame(
+        &self,
+        source_dimensions: (u32, u32),
+        output_dimensions: (u32, u32),
+    ) -> GpuPreviewFrame {
+        let display_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("rohditor direct full-resolution GPU display"),
+            size: extent(output_dimensions),
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let display_view = display_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        GpuPreviewFrame {
+            _memory: crate::memory::Reservation::new(
+                u64::from(output_dimensions.0) * u64::from(output_dimensions.1) * 4,
+            ),
+            _working_texture: None,
+            working_view: None,
             display_texture,
             display_view,
             source_dimensions,
@@ -1158,7 +1517,7 @@ fn highlight_adjustments_match(
     }
 }
 
-fn optics_provenance_matches(
+pub(crate) fn optics_provenance_matches(
     provenance: Option<&OpticsProvenance>,
     adjustments: &rohditor_edit::OpticsAdjustments,
 ) -> bool {
@@ -1400,7 +1759,7 @@ fn orientation_code(orientation: Orientation) -> u32 {
 mod color_tests;
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
     use rohditor_core::{CpuPipeline, DatabaseProvenance, LensProfileSummary, PreviewOptions};
@@ -2264,7 +2623,7 @@ mod tests {
     /// The reference RADV stack is reliable for these tests one device at a
     /// time, but concurrent device creation can destabilize the driver. Keep
     /// this guard local to opt-in hardware tests; production preview work is
-    pub(super) fn gpu_test_guard() -> MutexGuard<'static, ()> {
+    pub(crate) fn gpu_test_guard() -> MutexGuard<'static, ()> {
         static GPU_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         GPU_TEST_LOCK
             .get_or_init(|| Mutex::new(()))
@@ -2651,7 +3010,7 @@ mod tests {
         }
     }
 
-    pub(super) fn synthetic_frame(orientation: Orientation) -> RawFrame {
+    pub(crate) fn synthetic_frame(orientation: Orientation) -> RawFrame {
         let width = 8;
         let height = 6;
         let mosaic = (0..width * height)

@@ -286,8 +286,7 @@ fn color_saturation(pixel: vec3<f32>, luminance: f32) -> f32 {
     return clamp(chroma / max(abs(luminance), 0.000001), 0.0, 1.0);
 }
 
-fn develop_color(source: vec2<u32>) -> vec3<f32> {
-    let camera_native = textureLoad(source_base, vec2<i32>(source), 0).rgb;
+fn develop_camera_color(camera_native: vec3<f32>) -> vec3<f32> {
     let balanced = camera_native * parameters.white_balance.xyz;
     let base = vec3<f32>(
         dot(parameters.camera_to_rec2020_row0.xyz, balanced),
@@ -302,6 +301,10 @@ fn develop_color(source: vec2<u32>) -> vec3<f32> {
         * (1.0 + parameters.vibrance * (1.0 - color_saturation(toned, luminance)));
     let saturated = vec3<f32>(luminance) + saturation * (toned - vec3<f32>(luminance));
     return apply_color_grading(apply_hsl_adjustments(saturated));
+}
+
+fn develop_color(source: vec2<u32>) -> vec3<f32> {
+    return develop_camera_color(textureLoad(source_base, vec2<i32>(source), 0).rgb);
 }
 
 fn encode_output(adjusted: vec3<f32>) -> vec3<f32> {

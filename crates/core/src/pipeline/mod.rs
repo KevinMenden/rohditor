@@ -17,7 +17,7 @@ pub use prepare::{CpuPreviewWorkspace, DemosaicedBase, ReconstructedPreview};
 pub use render::CpuPipeline;
 pub use types::{
     ExportRenderResult, OutputPolicy, PreviewOptions, RawCropPolicy, RenderOptions, RenderResult,
-    StageTimings,
+    SpatialCompletionDescription, SpatialOptics, StageTimings,
 };
 
 pub const DEFAULT_PREVIEW_LONG_EDGE: usize = orchestration::DEFAULT_PREVIEW_LONG_EDGE;

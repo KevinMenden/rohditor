@@ -19,6 +19,7 @@ pub(super) fn processor() -> GpuCaptureProcessor {
 #[test]
 #[ignore = "requires Vulkan; simulates loss of an isolated test device"]
 fn destroyed_device_returns_recoverable_error() {
+    let _guard = crate::preview::processor::tests::gpu_test_guard();
     let mut gpu = processor();
     let input = LinearRgbImage::new(
         3,
@@ -51,6 +52,7 @@ fn destroyed_device_returns_recoverable_error() {
 #[test]
 #[ignore = "requires Vulkan; cancellation must drain bounded work and preserve recovery source"]
 fn cancellation_and_constrained_budget_recovery() {
+    let _guard = crate::preview::processor::tests::gpu_test_guard();
     let mut gpu = processor();
     let contract = CaptureSharpeningContract::new(
         CaptureSharpening {
@@ -108,6 +110,7 @@ fn cancellation_and_constrained_budget_recovery() {
 #[test]
 #[ignore = "requires Vulkan; checks each CPU reference stage before RGB application"]
 fn intermediate_guide_mask_and_every_iteration_match() {
+    let _guard = crate::preview::processor::tests::gpu_test_guard();
     let gpu = processor();
     let token = CancellationToken::new();
     let (w, h) = (17, 11);
@@ -196,6 +199,7 @@ fn intermediate_guide_mask_and_every_iteration_match() {
 #[test]
 #[ignore = "requires Vulkan; software adapter results are structural qualification only"]
 fn asymmetric_tiled_camera_rgb_parity_and_bypass() {
+    let _guard = crate::preview::processor::tests::gpu_test_guard();
     let mut gpu = processor();
     let token = CancellationToken::new();
     for (w, h) in [(1, 1), (1, 19), (23, 1), (83, 71), (257, 193)] {

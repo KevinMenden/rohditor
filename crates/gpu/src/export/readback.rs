@@ -14,6 +14,34 @@ impl GpuExportProcessor {
         band_parameters: &wgpu::Buffer,
         bindings: &wgpu::BindGroup,
     ) -> Result<ExportImage, GpuPreviewError> {
+        self.read_bands_with_pipeline(
+            width,
+            height,
+            depth,
+            dithering,
+            cancellation,
+            output,
+            staging,
+            band_parameters,
+            &self.pipeline,
+            &[(0, bindings)],
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn read_bands_with_pipeline(
+        &self,
+        width: usize,
+        height: usize,
+        depth: OutputBitDepth,
+        dithering: DitherMode,
+        cancellation: &CancellationToken,
+        output: &wgpu::Buffer,
+        staging: &wgpu::Buffer,
+        band_parameters: &wgpu::Buffer,
+        pipeline: &wgpu::ComputePipeline,
+        bindings: &[(u32, &wgpu::BindGroup)],
+    ) -> Result<ExportImage, GpuPreviewError> {
         let count = width
             .checked_mul(height)
             .and_then(|n| n.checked_mul(3))
@@ -51,8 +79,10 @@ impl GpuExportProcessor {
                     label: Some("rohditor export color band"),
                     timestamp_writes: None,
                 });
-                pass.set_pipeline(&self.pipeline);
-                pass.set_bind_group(0, bindings, &[]);
+                pass.set_pipeline(pipeline);
+                for (index, bindings) in bindings {
+                    pass.set_bind_group(*index, *bindings, &[]);
+                }
                 pass.dispatch_workgroups(
                     (width as u32).div_ceil(WORKGROUP_EDGE),
                     rows.div_ceil(WORKGROUP_EDGE),

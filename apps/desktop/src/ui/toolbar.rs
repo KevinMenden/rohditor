@@ -80,7 +80,10 @@ pub(crate) struct StatusBarModel {
     pub processor: String,
     pub ui_renderer: String,
     pub activity: Option<String>,
+    pub activity_busy: bool,
     pub busy: bool,
+    pub save_status: Option<String>,
+    pub save_pending: bool,
     pub preview_dimensions: Option<(usize, usize)>,
     pub preview_milliseconds: Option<f64>,
     pub startup_error: Option<String>,
@@ -390,10 +393,17 @@ pub(crate) fn show_status(context: &egui::Context, model: &StatusBarModel) {
                         );
                         if let Some(activity) = &model.activity {
                             ui.separator();
-                            if model.busy {
+                            if model.activity_busy {
                                 ui.spinner();
                             }
                             ui.add(egui::Label::new(activity).truncate());
+                        }
+                        if let Some(save_status) = &model.save_status {
+                            ui.separator();
+                            if model.save_pending {
+                                ui.spinner();
+                            }
+                            ui.add(egui::Label::new(save_status).truncate());
                         }
                         if let Some(error) = &model.startup_error {
                             ui.separator();

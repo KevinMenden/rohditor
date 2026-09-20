@@ -12,6 +12,7 @@ mod resample;
 
 pub use catalog::OpticsService;
 pub use correction::{Cancellation, CorrectionResult};
+pub use plan::{DistortionModel, OpticsExecution, TcaModel, VignettingModel};
 
 /// Version of Rohditor's optics plan and sampling contract.
 pub const OPTICS_ALGORITHM_VERSION: u32 = 1;
@@ -150,6 +151,27 @@ pub struct LensCorrectionPlan {
 }
 
 impl LensCorrectionPlan {
+    /// Lensfun-free, owned execution data for CPU and GPU correction backends.
+    ///
+    /// A valid value can only be obtained from a resolved correction plan. It
+    /// deliberately contains no database handles or interpolation state.
+    #[must_use]
+    pub fn execution(&self) -> OpticsExecution {
+        OpticsExecution {
+            width: self.width,
+            height: self.height,
+            norm_scale: self.norm_scale,
+            norm_unscale: self.norm_unscale,
+            center_x: self.center_x,
+            center_y: self.center_y,
+            scale: self.scale,
+            distortion: self.distortion,
+            tca: self.tca,
+            vignetting: self.vignetting,
+            provenance: self.provenance(),
+        }
+    }
+
     #[must_use]
     pub fn provenance(&self) -> OpticsProvenance {
         OpticsProvenance {
