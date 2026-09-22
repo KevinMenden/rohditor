@@ -1,4 +1,5 @@
 //! Typed full-resolution camera-native preparation, capture, and CPU completion.
+use super::super::sensor::SensorDevelopmentDescription;
 use super::*;
 use crate::{CaptureSharpeningContract, CaptureSharpeningProvenance};
 use rohditor_raw::RawFileInfo;
@@ -181,6 +182,18 @@ impl CapturedCameraSource {
 }
 
 impl CpuPipeline {
+    /// Resolve the immutable sensor-development contract without allocating
+    /// normalized mosaic or camera RGB storage. CPU preparation consumes this
+    /// contract today; GPU sensor execution will use the same boundary.
+    pub fn describe_sensor_development(
+        &self,
+        frame: &RawFrame,
+        recipe: &EditRecipe,
+        options: RenderOptions,
+    ) -> Result<SensorDevelopmentDescription, PipelineError> {
+        SensorDevelopmentDescription::from_frame(frame, recipe, options)
+    }
+
     pub fn prepare_camera_source(
         &self,
         frame: &RawFrame,
@@ -292,21 +305,15 @@ fn prepare_camera_source(
         purpose = "preview reconstruction"
     );
     let metadata_guard = metadata_span.enter();
-    recipe.validate()?;
+    let sensor = SensorDevelopmentDescription::from_frame(frame, recipe, options.render)?;
     validate_optics_crop(options.render.raw_crop_policy, recipe)?;
-    let calibration = CameraCalibration::from_raw_info(&frame.info);
-    let resolved = resolve_camera_colour(
-        &calibration,
-        &recipe.color.camera_profile,
-        recipe.color.white_balance,
-    )?;
-    let highlight_gains = (recipe.raw.highlights.method == HighlightMethod::Clip)
-        .then_some(resolved.white_balance_gains);
+    let calibration = sensor.calibration().clone();
+    let gains = sensor.white_balance_gains();
     let metadata = metadata_started.elapsed();
     drop(metadata_guard);
 
     let normalization_started = Instant::now();
-    let mosaic = normalize_raw_cancellable(frame, options.render.raw_crop_policy, cancellation)?;
+    let mosaic = sensor.normalization().normalize_full(frame, cancellation)?;
     let normalization = normalization_started.elapsed();
     let decoded_raw_bytes = frame
         .mosaic
@@ -315,19 +322,11 @@ fn prepare_camera_source(
         .ok_or_else(|| dimension_overflow(frame.info.width, frame.info.height))?;
     let source_width = mosaic.width();
     let source_height = mosaic.height();
-    let normalized_mosaic_bytes = mosaic
-        .data()
-        .len()
-        .checked_mul(size_of::<f32>())
-        .ok_or_else(|| dimension_overflow(source_width, source_height))?;
+    let normalized_mosaic_bytes = sensor.normalization().normalized_mosaic_bytes()?;
 
     let highlight_started = Instant::now();
-    let highlighted = apply_highlight_cancellable(
-        mosaic,
-        recipe.raw.highlights,
-        highlight_gains.unwrap_or(WhiteBalanceGains::identity()),
-        cancellation,
-    )?;
+    let highlighted =
+        apply_highlight_cancellable(mosaic, sensor.highlight_execution(), cancellation)?;
     let highlight_processing = highlight_started.elapsed();
     let highlight_diagnostics = highlighted.diagnostics;
     let highlight_scratch_bytes = estimated_highlight_scratch_bytes(
@@ -342,7 +341,7 @@ fn prepare_camera_source(
     let full_linear = demosaic_cancellable(
         &mosaic,
         WhiteBalanceGains::identity(),
-        options.render.demosaic,
+        sensor.demosaic().algorithm(),
         cancellation,
     )?;
     let demosaic = demosaic_started.elapsed();
@@ -359,7 +358,7 @@ fn prepare_camera_source(
         decoded_raw_bytes,
         normalized_mosaic_bytes,
         highlight_scratch_bytes,
-        gains: resolved.white_balance_gains,
+        gains,
         timings: StageTimings {
             metadata,
             normalization,

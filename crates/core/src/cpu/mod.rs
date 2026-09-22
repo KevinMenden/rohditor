@@ -27,7 +27,7 @@ pub(crate) use display::{
     render_display_srgb8_dithered_with_geometry_and_diagnostics,
     render_display_srgb16_with_geometry_and_diagnostics,
 };
-pub(crate) use normalize::{normalize_raw_cancellable, preview_dimensions};
+pub(crate) use normalize::preview_dimensions;
 pub use stages::raw_crop_dimensions;
 pub(crate) use white_balance::{
     apply_camera_color_transform_cancellable, apply_white_balance_cancellable,
