@@ -62,6 +62,21 @@ impl Reservation {
             }
         }
     }
+
+    /// Release a completed operation's transient allocation while retaining
+    /// ownership of its resident result.
+    ///
+    /// Callers must reserve their complete peak before creating resources, then
+    /// reduce the reservation only after the transient resources have been
+    /// dropped and no submitted work still references them.
+    pub(crate) fn release_to(&mut self, resident_bytes: u64) {
+        let released = self
+            .0
+            .checked_sub(resident_bytes)
+            .expect("resident reservation cannot exceed its original peak");
+        self.0 = resident_bytes;
+        RESERVED.fetch_sub(released, Ordering::AcqRel);
+    }
 }
 
 impl Drop for Reservation {
@@ -72,9 +87,20 @@ impl Drop for Reservation {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
+
+    // The production counter is process-global so preview and export can share
+    // one budget. These fixtures choose tiny budgets relative to its current
+    // value, therefore they must not overlap each other under the test runner.
+    static RESERVATION_TEST_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn simultaneous_workers_contribute_to_combined_peak() {
+        let _guard = RESERVATION_TEST_LOCK
+            .lock()
+            .expect("test lock is available");
         let before = gpu_memory_reservations();
         let preview = Reservation::try_new(100, before.current_bytes + 300)
             .expect("preview reservation should fit");
@@ -95,11 +121,34 @@ mod tests {
 
     #[test]
     fn reservation_refuses_to_displace_an_outgoing_frame() {
+        let _guard = RESERVATION_TEST_LOCK
+            .lock()
+            .expect("test lock is available");
         let before = gpu_memory_reservations();
         let current_frame = Reservation::try_new(100, before.current_bytes + 150)
             .expect("current frame should fit");
         assert!(Reservation::try_new(51, before.current_bytes + 150).is_err());
         drop(current_frame);
+        assert_eq!(
+            gpu_memory_reservations().current_bytes,
+            before.current_bytes
+        );
+    }
+
+    #[test]
+    fn reservation_releases_transient_bytes_before_its_resident_result_drops() {
+        let _guard = RESERVATION_TEST_LOCK
+            .lock()
+            .expect("test lock is available");
+        let before = gpu_memory_reservations();
+        let mut result = Reservation::try_new(300, before.current_bytes + 300)
+            .expect("peak reservation should fit");
+        result.release_to(100);
+        assert_eq!(
+            gpu_memory_reservations().current_bytes,
+            before.current_bytes + 100
+        );
+        drop(result);
         assert_eq!(
             gpu_memory_reservations().current_bytes,
             before.current_bytes

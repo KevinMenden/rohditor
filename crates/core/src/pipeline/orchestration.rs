@@ -1,4 +1,5 @@
 // The public pipeline facade re-exports this orchestration layer.
+use super::sensor::SensorDevelopmentDescription;
 use std::mem::size_of;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -17,7 +18,7 @@ use crate::color::{
 };
 use crate::cpu::{
     apply_adjustments_cancellable, apply_camera_color_transform_cancellable,
-    apply_white_balance_cancellable, normalize_raw_cancellable, preview_dimensions,
+    apply_white_balance_cancellable, preview_dimensions,
     render_display_srgb8_cancellable_with_geometry,
     render_display_srgb8_dithered_with_geometry_and_diagnostics,
     render_display_srgb16_with_geometry_and_diagnostics,
@@ -1209,32 +1210,22 @@ fn prepare_base_cancellable(
         purpose = "full pipeline base"
     );
     let metadata_guard = metadata_span.enter();
-    recipe.validate()?;
+    let sensor = SensorDevelopmentDescription::from_frame(frame, recipe, options)?;
     validate_optics_crop(options.raw_crop_policy, recipe)?;
-    let calibration = CameraCalibration::from_raw_info(&frame.info);
-    let resolved = resolve_camera_colour(
-        &calibration,
-        &recipe.color.camera_profile,
-        recipe.color.white_balance,
-    )?;
-    let gains = resolved.white_balance_gains;
+    let gains = sensor.white_balance_gains();
     let metadata = metadata_started.elapsed();
     drop(metadata_guard);
 
     let normalization_started = Instant::now();
-    let normalized = normalize_raw_cancellable(frame, options.raw_crop_policy, cancellation)?;
+    let normalized = sensor.normalization().normalize_full(frame, cancellation)?;
     let normalization = normalization_started.elapsed();
-    let normalized_mosaic_bytes = normalized
-        .data()
-        .len()
-        .checked_mul(size_of::<f32>())
-        .ok_or_else(|| dimension_overflow(normalized.width(), normalized.height()))?;
+    let normalized_mosaic_bytes = sensor.normalization().normalized_mosaic_bytes()?;
     let normalized_width = normalized.width();
     let normalized_height = normalized.height();
 
     let highlight_started = Instant::now();
     let highlighted =
-        apply_highlight_cancellable(normalized, recipe.raw.highlights, gains, cancellation)?;
+        apply_highlight_cancellable(normalized, sensor.highlight_execution(), cancellation)?;
     let highlight_processing = highlight_started.elapsed();
     let highlight_diagnostics = highlighted.diagnostics;
     let highlight_scratch_bytes = estimated_highlight_scratch_bytes(
@@ -1254,7 +1245,7 @@ fn prepare_base_cancellable(
         } else {
             gains
         },
-        options.demosaic,
+        sensor.demosaic().algorithm(),
         cancellation,
     )?;
     let demosaic = demosaic_started.elapsed();
@@ -1281,7 +1272,7 @@ fn prepare_base_cancellable(
     }
     apply_camera_color_transform_cancellable(
         &mut linear,
-        &resolved.camera_color_transform(),
+        sensor.camera_color_transform(),
         cancellation,
     )?;
     let color_conversion = color_started.elapsed();

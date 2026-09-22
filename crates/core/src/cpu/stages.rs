@@ -7,11 +7,10 @@ use rohditor_edit::{
     WHITE_BALANCE_MULTIPLIER_RANGE, WhiteBalance,
 };
 use rohditor_image::{
-    BayerPattern, CfaColor, DisplayRgbImage, DisplayTransfer, ImageRegion, LinearRgbImage,
-    LinearRgbSpace, MosaicImage, Orientation, allocate_zeroed_f32, allocate_zeroed_u8,
-    allocate_zeroed_u16,
+    DisplayRgbImage, DisplayTransfer, LinearRgbImage, LinearRgbSpace, MosaicImage, Orientation,
+    allocate_zeroed_u8, allocate_zeroed_u16,
 };
-use rohditor_raw::{ImageRect, LevelPattern, PhotometricInterpretation, RawFileInfo, RawFrame};
+use rohditor_raw::{RawFileInfo, RawFrame};
 
 use crate::color::{
     CameraColorTransform, LINEAR_REC2020_TO_XYZ_D65, XYZ_D65_TO_LINEAR_SRGB,
@@ -58,14 +57,6 @@ pub(super) mod normalize {
         normalize_raw_impl(frame, crop_policy, None, &CancellationToken::new())
     }
 
-    pub(crate) fn normalize_raw_cancellable(
-        frame: &RawFrame,
-        crop_policy: RawCropPolicy,
-        cancellation: &CancellationToken,
-    ) -> Result<MosaicImage<f32>, PipelineError> {
-        normalize_raw_impl(frame, crop_policy, None, cancellation)
-    }
-
     /// Normalize a resolution-limited Bayer mosaic for interactive development.
     ///
     /// Samples are selected on their original color-filter phase, so reducing the
@@ -91,14 +82,17 @@ pub(super) mod normalize {
         max_long_edge: Option<usize>,
         cancellation: &CancellationToken,
     ) -> Result<MosaicImage<f32>, PipelineError> {
+        let contract =
+            crate::pipeline::sensor::NormalizationContract::from_frame(frame, crop_policy)?;
         cancellation.checkpoint()?;
-        validate_raw_layout(frame)?;
-        let (pattern, crop) = development_geometry(&frame.info, crop_policy)?;
-        validate_levels(&frame.info, pattern)?;
 
         let (output_width, output_height) = match max_long_edge {
-            Some(max_long_edge) => preview_dimensions(crop.width, crop.height, max_long_edge)?,
-            None => (crop.width, crop.height),
+            Some(max_long_edge) => preview_dimensions(
+                contract.crop().dimensions().0,
+                contract.crop().dimensions().1,
+                max_long_edge,
+            )?,
+            None => contract.crop().dimensions(),
         };
         let span = tracing::info_span!(
             "cpu.normalize",
@@ -110,44 +104,7 @@ pub(super) mod normalize {
         );
         let _guard = span.enter();
 
-        let elements = output_width.checked_mul(output_height).ok_or_else(|| {
-            invalid_dimensions(
-                output_width,
-                output_height,
-                output_width,
-                "preview crop overflowed",
-            )
-        })?;
-        let mut normalized = allocate_zeroed_f32(elements)?;
-        normalized
-            .par_chunks_mut(output_width)
-            .enumerate()
-            .try_for_each(|(output_y, output_row)| -> Result<(), PipelineError> {
-                cancellation.checkpoint()?;
-                let crop_y = phase_preserving_sample(output_y, output_height, crop.height);
-                let sensor_y = crop.y + crop_y;
-                for (output_x, destination) in output_row.iter_mut().enumerate() {
-                    let crop_x = phase_preserving_sample(output_x, output_width, crop.width);
-                    let sensor_x = crop.x + crop_x;
-                    let sample = frame.mosaic[sensor_y * frame.row_stride + sensor_x];
-                    let black_index = level_index(&frame.info.black_levels, sensor_x, sensor_y, 0);
-                    let black = frame.info.black_levels.values[black_index];
-                    let color = pattern.color_at(sensor_x, sensor_y);
-                    let white = white_level(&frame.info, black_index, color);
-                    *destination = (f32::from(sample) - black) / (white - black);
-                }
-                Ok(())
-            })?;
-        cancellation.checkpoint()?;
-
-        MosaicImage::new(
-            output_width,
-            output_height,
-            output_width,
-            pattern.shifted(crop.x, crop.y),
-            normalized,
-        )
-        .map_err(Into::into)
+        contract.normalize_preview(frame, (output_width, output_height), cancellation)
     }
 
     pub(crate) fn preview_dimensions(
@@ -186,28 +143,6 @@ pub(super) mod normalize {
             Ok((numerator / long_edge).clamp(2, dimension))
         };
         Ok((scale(width)?, scale(height)?))
-    }
-
-    fn phase_preserving_sample(
-        output_index: usize,
-        output_length: usize,
-        source_length: usize,
-    ) -> usize {
-        if output_length == source_length {
-            return output_index;
-        }
-
-        let phase = output_index & 1;
-        let output_phase_count = (output_length + (1 - phase)) / 2;
-        let source_phase_count = (source_length + (1 - phase)) / 2;
-        let output_phase_index = output_index / 2;
-        let source_phase_index = if output_phase_count <= 1 {
-            0
-        } else {
-            (output_phase_index * (source_phase_count - 1) + (output_phase_count - 1) / 2)
-                / (output_phase_count - 1)
-        };
-        phase + source_phase_index * 2
     }
 }
 
@@ -1087,191 +1022,13 @@ pub(super) mod display {
     }
 }
 
-fn validate_raw_layout(frame: &RawFrame) -> Result<(), PipelineError> {
-    if frame.info.components_per_pixel != 1 {
-        return Err(PipelineError::InvalidMetadata {
-            field: "components_per_pixel",
-            reason: format!(
-                "Bayer normalization requires one component, received {}",
-                frame.info.components_per_pixel
-            ),
-        });
-    }
-    if frame.row_stride < frame.info.width {
-        return Err(invalid_dimensions(
-            frame.info.width,
-            frame.info.height,
-            frame.row_stride,
-            "decoded row stride is shorter than the sensor width",
-        ));
-    }
-    let expected = frame
-        .row_stride
-        .checked_mul(frame.info.height)
-        .ok_or_else(|| {
-            invalid_dimensions(
-                frame.info.width,
-                frame.info.height,
-                frame.row_stride,
-                "decoded sample count overflowed",
-            )
-        })?;
-    if frame.mosaic.len() != expected {
-        return Err(invalid_dimensions(
-            frame.info.width,
-            frame.info.height,
-            frame.row_stride,
-            &format!(
-                "decoded buffer has {} samples, expected {expected}",
-                frame.mosaic.len()
-            ),
-        ));
-    }
-    Ok(())
-}
-
-fn development_geometry(
-    info: &RawFileInfo,
-    policy: RawCropPolicy,
-) -> Result<(BayerPattern, ImageRegion), PipelineError> {
-    let pattern = match &info.photometric_interpretation {
-        PhotometricInterpretation::Cfa { pattern } => {
-            BayerPattern::parse(&pattern.name, pattern.width, pattern.height)?
-        }
-        other => {
-            return Err(PipelineError::InvalidMetadata {
-                field: "photometric_interpretation",
-                reason: format!("CPU Bayer pipeline cannot process {other:?}"),
-            });
-        }
-    };
-    let full = ImageRegion {
-        x: 0,
-        y: 0,
-        width: info.width,
-        height: info.height,
-    };
-    validate_region(full, full, "sensor dimensions")?;
-    let active = info.active_area.map_or(full, image_region);
-    validate_region(active, full, "active_area")?;
-    let crop = match policy {
-        RawCropPolicy::ActiveArea => active,
-        RawCropPolicy::Recommended => info.crop_area.map_or(active, image_region),
-    };
-    validate_region(crop, active, "crop_area")?;
-    Ok((pattern, crop))
-}
-
 /// Validated sensor-development dimensions before user crop and orientation.
 /// Backends can preflight resource limits without allocating a normalized image.
 pub fn raw_crop_dimensions(
     info: &RawFileInfo,
     policy: RawCropPolicy,
 ) -> Result<(usize, usize), PipelineError> {
-    let (_, crop) = development_geometry(info, policy)?;
-    Ok((crop.width, crop.height))
-}
-
-fn validate_levels(info: &RawFileInfo, pattern: BayerPattern) -> Result<(), PipelineError> {
-    let levels = &info.black_levels;
-    if levels.repeat_width == 0 || levels.repeat_height == 0 || levels.components_per_pixel != 1 {
-        return Err(PipelineError::InvalidMetadata {
-            field: "black_levels",
-            reason: "a non-empty one-component repeat pattern is required".to_owned(),
-        });
-    }
-    let expected = levels
-        .repeat_width
-        .checked_mul(levels.repeat_height)
-        .and_then(|count| count.checked_mul(levels.components_per_pixel))
-        .ok_or_else(|| PipelineError::InvalidMetadata {
-            field: "black_levels",
-            reason: "repeat-pattern dimensions overflowed".to_owned(),
-        })?;
-    if levels.values.len() != expected || levels.values.iter().any(|value| !value.is_finite()) {
-        return Err(PipelineError::InvalidMetadata {
-            field: "black_levels",
-            reason: format!(
-                "expected {expected} finite values, found {}",
-                levels.values.len()
-            ),
-        });
-    }
-    let white_count = info.white_levels.len();
-    if !matches!(white_count, 1 | 3) && white_count != expected {
-        return Err(PipelineError::InvalidMetadata {
-            field: "white_levels",
-            reason: format!("expected 1, 3, or {expected} values, found {white_count}"),
-        });
-    }
-    if info.white_levels.iter().any(|value| !value.is_finite()) {
-        return Err(PipelineError::InvalidMetadata {
-            field: "white_levels",
-            reason: "all white levels must be finite".to_owned(),
-        });
-    }
-    for y in 0..levels.repeat_height {
-        for x in 0..levels.repeat_width {
-            let index = level_index(levels, x, y, 0);
-            let black = levels.values[index];
-            let white = white_level(info, index, pattern.color_at(x, y));
-            if white <= black {
-                return Err(PipelineError::InvalidMetadata {
-                    field: "white_levels",
-                    reason: format!("white level {white} must exceed black level {black}"),
-                });
-            }
-        }
-    }
-    Ok(())
-}
-
-fn level_index(levels: &LevelPattern, x: usize, y: usize, component: usize) -> usize {
-    ((y % levels.repeat_height) * levels.repeat_width + (x % levels.repeat_width))
-        * levels.components_per_pixel
-        + component
-}
-
-fn white_level(info: &RawFileInfo, black_index: usize, color: CfaColor) -> f32 {
-    match info.white_levels.as_slice() {
-        [global] => *global,
-        [red, green, blue] => [*red, *green, *blue][color.channel_index()],
-        values => values[black_index],
-    }
-}
-
-fn image_region(rect: ImageRect) -> ImageRegion {
-    ImageRegion {
-        x: rect.x,
-        y: rect.y,
-        width: rect.width,
-        height: rect.height,
-    }
-}
-
-fn validate_region(
-    region: ImageRegion,
-    bounds: ImageRegion,
-    field: &'static str,
-) -> Result<(), PipelineError> {
-    let region_end_x = region.x.checked_add(region.width);
-    let region_end_y = region.y.checked_add(region.height);
-    let bounds_end_x = bounds.x.checked_add(bounds.width);
-    let bounds_end_y = bounds.y.checked_add(bounds.height);
-    let valid = region.width > 0
-        && region.height > 0
-        && region.x >= bounds.x
-        && region.y >= bounds.y
-        && region_end_x.is_some_and(|end| bounds_end_x.is_some_and(|bound| end <= bound))
-        && region_end_y.is_some_and(|end| bounds_end_y.is_some_and(|bound| end <= bound));
-    if valid {
-        Ok(())
-    } else {
-        Err(PipelineError::InvalidMetadata {
-            field,
-            reason: format!("region {region:?} is outside {bounds:?}"),
-        })
-    }
+    crate::pipeline::sensor::raw_crop_dimensions(info, policy)
 }
 
 fn require_space(
@@ -1322,8 +1079,11 @@ use white_balance::{white_balance_gains, white_balance_gains_from_calibration};
 mod tests {
     use std::sync::Arc;
 
-    use rohditor_image::OrientationMap;
-    use rohditor_raw::{CameraColorMatrix, CaptureMetadata, CfaPattern, LevelPattern, RawFileInfo};
+    use rohditor_image::{BayerPattern, CfaColor, OrientationMap};
+    use rohditor_raw::{
+        CameraColorMatrix, CaptureMetadata, CfaPattern, ImageRect, LevelPattern,
+        PhotometricInterpretation, RawFileInfo,
+    };
 
     use super::*;
     use rohditor_demosaic::{DemosaicAlgorithm, demosaic};

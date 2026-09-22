@@ -28,6 +28,10 @@ pub const LOCAL_RATIOS_ALGORITHM_VERSION: u8 = 1;
 /// identities. Numerical contract changes must increment this value.
 pub const OPPOSED_ALGORITHM_VERSION: u8 = 1;
 
+/// Version of the deterministic Clip operation used in backend/cache identities.
+/// Numerical contract changes must increment this value.
+pub const CLIP_ALGORITHM_VERSION: u8 = 1;
+
 use rohditor_image::ImageError;
 use thiserror::Error;
 
@@ -146,6 +150,76 @@ impl ReconstructionStats {
 pub struct LocalRatioOutput {
     pub mosaic: rohditor_image::MosaicImage<f32>,
     pub stats: ReconstructionStats,
+}
+
+/// Fully resolved highlight operation, independent of recipe and RAW metadata.
+///
+/// Core resolves recipe controls and white-balance-dependent Clip ceilings into
+/// this type once. CPU and future GPU executors can then consume exactly the
+/// same channel levels without interpreting edit settings themselves.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum HighlightExecution {
+    Off,
+    Clip(ChannelClipLevels),
+    LocalRatios(LocalRatioOptions),
+    Opposed(OpposedOptions),
+}
+
+/// Method-tagged result of a resolved highlight operation.
+#[derive(Debug, PartialEq)]
+pub enum HighlightExecutionOutput {
+    Off(rohditor_image::MosaicImage<f32>),
+    Clip(ClipOutput),
+    LocalRatios(LocalRatioOutput),
+    Opposed(OpposedOutput),
+}
+
+impl HighlightExecution {
+    #[must_use]
+    pub const fn stable_name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Clip(_) => "clip",
+            Self::LocalRatios(_) => "local_ratios",
+            Self::Opposed(_) => "opposed",
+        }
+    }
+
+    /// Version of the selected pixel-producing method, if any.
+    #[must_use]
+    pub const fn algorithm_version(self) -> Option<u8> {
+        match self {
+            Self::Off => None,
+            Self::Clip(_) => Some(CLIP_ALGORITHM_VERSION),
+            Self::LocalRatios(_) => Some(LOCAL_RATIOS_ALGORITHM_VERSION),
+            Self::Opposed(_) => Some(OPPOSED_ALGORITHM_VERSION),
+        }
+    }
+
+    /// Execute the resolved operation without any recipe or metadata access.
+    pub fn apply_cancellable(
+        self,
+        mosaic: rohditor_image::MosaicImage<f32>,
+        cancellation: &dyn CancellationCheck,
+    ) -> Result<HighlightExecutionOutput, HighlightError> {
+        match self {
+            Self::Off => {
+                checkpoint(cancellation)?;
+                Ok(HighlightExecutionOutput::Off(mosaic))
+            }
+            Self::Clip(levels) => {
+                clip_cancellable(mosaic, levels, cancellation).map(HighlightExecutionOutput::Clip)
+            }
+            Self::LocalRatios(options) => {
+                reconstruct_local_ratios_cancellable(mosaic, options, cancellation)
+                    .map(HighlightExecutionOutput::LocalRatios)
+            }
+            Self::Opposed(options) => {
+                reconstruct_opposed_cancellable(mosaic, options, cancellation)
+                    .map(HighlightExecutionOutput::Opposed)
+            }
+        }
+    }
 }
 
 /// Configuration for version-one Opposed / local-inpainting reconstruction.

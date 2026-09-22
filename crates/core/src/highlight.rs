@@ -1,10 +1,7 @@
 //! Pipeline adapter for normalized RAW highlight handling.
 
-use rohditor_demosaic::WhiteBalanceGains;
-use rohditor_edit::{HighlightAdjustments, HighlightMethod};
 use rohditor_highlight::{
-    ChannelClipLevels, ChannelDetectionLevels, ClipOutput, ClipStats, OpposedStats,
-    ReconstructionStats,
+    ClipStats, HighlightExecution, HighlightExecutionOutput, OpposedStats, ReconstructionStats,
 };
 use rohditor_image::MosaicImage;
 
@@ -72,90 +69,36 @@ impl HighlightDiagnostics {
     }
 }
 
-/// Apply the selected RAW-stage highlight method. Clip uses limits that
-/// produce a common post-white-balance ceiling; Local ratios and Opposed use
-/// independent camera-native detection levels before white balance.
+/// Apply a pre-resolved RAW-stage highlight operation.
 pub(crate) fn apply_cancellable(
     mosaic: MosaicImage<f32>,
-    adjustments: HighlightAdjustments,
-    gains: WhiteBalanceGains,
+    execution: HighlightExecution,
     cancellation: &CancellationToken,
 ) -> Result<HighlightOutput, PipelineError> {
     let span = tracing::info_span!(
         "cpu.highlight_processing",
         width = mosaic.width(),
         height = mosaic.height(),
-        method = ?adjustments.method,
-        clip_threshold = adjustments.clip.threshold,
-        local_ratios_detection_threshold = adjustments.local_ratios.detection_threshold,
-        opposed_detection_threshold = adjustments.opposed.detection_threshold
+        execution = ?execution,
     );
     let _guard = span.enter();
 
-    if adjustments.method == HighlightMethod::Off {
-        cancellation.checkpoint()?;
-        return Ok(HighlightOutput {
+    match execution.apply_cancellable(mosaic, &|| cancellation.is_cancelled())? {
+        HighlightExecutionOutput::Off(mosaic) => Ok(HighlightOutput {
             mosaic,
             diagnostics: HighlightDiagnostics::Off,
-        });
-    }
-
-    match adjustments.method {
-        HighlightMethod::Off => unreachable!("Off returned before method dispatch"),
-        HighlightMethod::Clip => {
-            let common_ceiling =
-                adjustments.clip.threshold * gains.red.min(gains.green).min(gains.blue);
-            let levels = ChannelClipLevels {
-                red: common_ceiling / gains.red,
-                green: common_ceiling / gains.green,
-                blue: common_ceiling / gains.blue,
-            };
-            let ClipOutput { mosaic, stats } =
-                rohditor_highlight::clip_cancellable(mosaic, levels, &|| {
-                    cancellation.is_cancelled()
-                })?;
-            Ok(HighlightOutput {
-                mosaic,
-                diagnostics: HighlightDiagnostics::Clip(stats),
-            })
-        }
-        HighlightMethod::LocalRatios => {
-            let level = adjustments.local_ratios.detection_threshold;
-            let levels = ChannelDetectionLevels {
-                red: level,
-                green: level,
-                blue: level,
-            };
-            let output = rohditor_highlight::reconstruct_local_ratios_cancellable(
-                mosaic,
-                rohditor_highlight::LocalRatioOptions {
-                    detection_levels: levels,
-                },
-                &|| cancellation.is_cancelled(),
-            )?;
-            Ok(HighlightOutput {
-                mosaic: output.mosaic,
-                diagnostics: HighlightDiagnostics::LocalRatios(output.stats),
-            })
-        }
-        HighlightMethod::Opposed => {
-            let level = adjustments.opposed.detection_threshold;
-            let levels = ChannelDetectionLevels {
-                red: level,
-                green: level,
-                blue: level,
-            };
-            let output = rohditor_highlight::reconstruct_opposed_cancellable(
-                mosaic,
-                rohditor_highlight::OpposedOptions {
-                    detection_levels: levels,
-                },
-                &|| cancellation.is_cancelled(),
-            )?;
-            Ok(HighlightOutput {
-                mosaic: output.mosaic,
-                diagnostics: HighlightDiagnostics::Opposed(output.stats),
-            })
-        }
+        }),
+        HighlightExecutionOutput::Clip(output) => Ok(HighlightOutput {
+            mosaic: output.mosaic,
+            diagnostics: HighlightDiagnostics::Clip(output.stats),
+        }),
+        HighlightExecutionOutput::LocalRatios(output) => Ok(HighlightOutput {
+            mosaic: output.mosaic,
+            diagnostics: HighlightDiagnostics::LocalRatios(output.stats),
+        }),
+        HighlightExecutionOutput::Opposed(output) => Ok(HighlightOutput {
+            mosaic: output.mosaic,
+            diagnostics: HighlightDiagnostics::Opposed(output.stats),
+        }),
     }
 }

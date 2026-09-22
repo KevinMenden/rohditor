@@ -59,6 +59,14 @@ where
     }
 }
 
+/// Neighborhood required to reconstruct a bilinear output region.
+pub const BILINEAR_HALO: Halo = Halo {
+    left: 1,
+    right: 1,
+    top: 1,
+    bottom: 1,
+};
+
 /// Neighborhood required to reconstruct an MHC output region.
 pub const MALVAR_HE_CUTLER_HALO: Halo = Halo {
     left: 2,
@@ -106,6 +114,74 @@ impl DemosaicAlgorithm {
             Self::Rcd => "rcd",
             Self::Amaze => "amaze",
         }
+    }
+
+    /// Resolve this algorithm's spatial requirements and deterministic edge
+    /// behavior for a backend executor.
+    #[must_use]
+    pub const fn contract(self) -> DemosaicContract {
+        DemosaicContract::for_algorithm(self)
+    }
+}
+
+/// Deterministic policy for pixels without a complete algorithm neighborhood.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DemosaicBorderPolicy {
+    /// Use the bilinear reference reconstruction at image and incomplete-tile
+    /// borders. This is also the complete Bilinear algorithm policy.
+    BilinearReference,
+}
+
+/// Pixel-storage-independent execution facts for a selectable demosaic method.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DemosaicContract {
+    algorithm: DemosaicAlgorithm,
+    required_halo: Halo,
+    border_policy: DemosaicBorderPolicy,
+    algorithm_version: u8,
+}
+
+impl DemosaicContract {
+    #[must_use]
+    pub const fn for_algorithm(algorithm: DemosaicAlgorithm) -> Self {
+        let required_halo = match algorithm {
+            DemosaicAlgorithm::Bilinear => BILINEAR_HALO,
+            DemosaicAlgorithm::MalvarHeCutler => MALVAR_HE_CUTLER_HALO,
+            DemosaicAlgorithm::Rcd => RCD_HALO,
+            DemosaicAlgorithm::Amaze => AMAZE_HALO,
+        };
+        Self {
+            algorithm,
+            required_halo,
+            border_policy: DemosaicBorderPolicy::BilinearReference,
+            algorithm_version: 1,
+        }
+    }
+
+    #[must_use]
+    pub const fn algorithm(self) -> DemosaicAlgorithm {
+        self.algorithm
+    }
+
+    #[must_use]
+    pub const fn required_halo(self) -> Halo {
+        self.required_halo
+    }
+
+    #[must_use]
+    pub const fn border_policy(self) -> DemosaicBorderPolicy {
+        self.border_policy
+    }
+
+    /// Increment when this algorithm's numerical result changes.
+    #[must_use]
+    pub const fn algorithm_version(self) -> u8 {
+        self.algorithm_version
+    }
+
+    #[must_use]
+    pub const fn stable_name(self) -> &'static str {
+        self.algorithm.stable_name()
     }
 }
 
@@ -235,6 +311,34 @@ fn invalid_dimensions(mosaic: &MosaicImage<f32>, row_stride: usize, reason: &str
         height: mosaic.height(),
         row_stride,
         reason: reason.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod contract_tests {
+    use super::*;
+
+    #[test]
+    fn contracts_expose_each_algorithm_halo_and_common_edge_policy() {
+        for (algorithm, halo) in [
+            (DemosaicAlgorithm::Bilinear, 1),
+            (DemosaicAlgorithm::MalvarHeCutler, 2),
+            (DemosaicAlgorithm::Rcd, 10),
+            (DemosaicAlgorithm::Amaze, 16),
+        ] {
+            let contract = algorithm.contract();
+            assert_eq!(contract.algorithm(), algorithm);
+            assert_eq!(contract.required_halo().left, halo);
+            assert_eq!(contract.required_halo().right, halo);
+            assert_eq!(contract.required_halo().top, halo);
+            assert_eq!(contract.required_halo().bottom, halo);
+            assert_eq!(
+                contract.border_policy(),
+                DemosaicBorderPolicy::BilinearReference
+            );
+            assert_eq!(contract.stable_name(), algorithm.stable_name());
+            assert_eq!(contract.algorithm_version(), 1);
+        }
     }
 }
 
