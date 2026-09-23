@@ -225,7 +225,7 @@ pub(crate) struct CaptureScatter {
 }
 
 impl CaptureScatter {
-    fn new(device: &wgpu::Device) -> Self {
+    pub(crate) fn new(device: &wgpu::Device) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("capture core resident scatter"),
             source: wgpu::ShaderSource::Wgsl(include_str!("scatter.wgsl").into()),

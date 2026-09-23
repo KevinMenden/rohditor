@@ -78,8 +78,10 @@ pub struct GpuSensorProcessor {
     pub(super) queue: wgpu::Queue,
     normalization_pipeline: wgpu::ComputePipeline,
     pub(super) clip_pipeline: wgpu::ComputePipeline,
+    pub(super) demosaic_planes_pipeline: wgpu::ComputePipeline,
+    pub(super) demosaic_tile_pipeline: wgpu::ComputePipeline,
     pub(super) budget: u64,
-    maximum_tile_edge: u32,
+    pub(super) maximum_tile_edge: u32,
 }
 
 impl GpuSensorProcessor {
@@ -122,6 +124,22 @@ impl GpuSensorProcessor {
             compilation_options: Default::default(),
             cache: None,
         });
+        let demosaic_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Bayer bilinear and MHC"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("demosaic.wgsl").into()),
+        });
+        let demosaic_pipeline = |entry| {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(entry),
+                layout: None,
+                module: &demosaic_shader,
+                entry_point: Some(entry),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        };
+        let demosaic_planes_pipeline = demosaic_pipeline("demosaic_planes");
+        let demosaic_tile_pipeline = demosaic_pipeline("demosaic_tile");
         let validation = pollster::block_on(device.pop_error_scope());
         let allocation = pollster::block_on(device.pop_error_scope());
         let internal = pollster::block_on(device.pop_error_scope());
@@ -133,6 +151,8 @@ impl GpuSensorProcessor {
             queue: queue.clone(),
             normalization_pipeline,
             clip_pipeline,
+            demosaic_planes_pipeline,
+            demosaic_tile_pipeline,
             budget: DEFAULT_BUDGET,
             maximum_tile_edge: device.limits().max_texture_dimension_2d,
         })
@@ -416,13 +436,15 @@ impl GpuSensorProcessor {
                 .poll(wgpu::PollType::Poll)
                 .map_err(|error| synchronization(&format!("{error:?}")))?;
             match receiver.try_recv() {
-                Ok(()) => return Ok(()),
+                Ok(()) => return check_cancel(cancellation),
                 Err(mpsc::TryRecvError::Disconnected) => {
                     return Err(synchronization(
                         "normalization completion callback disconnected",
                     ));
                 }
-                Err(mpsc::TryRecvError::Empty) => check_cancel(cancellation)?,
+                // Keep reservations alive until the submitted unit finishes,
+                // even if cancellation arrived while it was in flight.
+                Err(mpsc::TryRecvError::Empty) => {}
             }
             std::thread::yield_now();
         }
@@ -434,6 +456,7 @@ pub(super) fn output_usage() -> wgpu::TextureUsages {
     wgpu::TextureUsages::TEXTURE_BINDING
         | wgpu::TextureUsages::STORAGE_BINDING
         | wgpu::TextureUsages::COPY_SRC
+        | wgpu::TextureUsages::COPY_DST
 }
 
 #[cfg(not(test))]
@@ -676,7 +699,7 @@ fn pack_raw_tile(
     Ok(())
 }
 
-fn bayer_pattern_code(pattern: BayerPattern) -> usize {
+pub(super) fn bayer_pattern_code(pattern: BayerPattern) -> usize {
     match pattern {
         BayerPattern::Rggb => 0,
         BayerPattern::Bggr => 1,

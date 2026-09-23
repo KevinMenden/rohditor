@@ -10,16 +10,24 @@ use crate::{GpuPreviewError, memory::Reservation};
 
 pub(crate) struct ResidentCameraPlanes {
     _memory: Reservation,
-    textures: [wgpu::Texture; 3],
+    pub(crate) textures: [wgpu::Texture; 3],
     views: [wgpu::TextureView; 3],
     pub layout: ResidentLayout,
 }
 
 impl ResidentCameraPlanes {
     pub fn new(device: &wgpu::Device, layout: ResidentLayout) -> Result<Self, GpuPreviewError> {
+        Self::with_budget(device, layout, super::resources::DEFAULT_BUDGET)
+    }
+
+    pub(crate) fn with_budget(
+        device: &wgpu::Device,
+        layout: ResidentLayout,
+        budget: u64,
+    ) -> Result<Self, GpuPreviewError> {
         // Reserve before touching the driver. This includes display frames
         // retained by the UI while the worker prepares a replacement.
-        let memory = Reservation::try_new(layout.resident_bytes, super::resources::DEFAULT_BUDGET)?;
+        let memory = Reservation::try_new(layout.resident_bytes, budget)?;
         let texture = |label| {
             device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
@@ -34,7 +42,12 @@ impl ResidentCameraPlanes {
                 format: wgpu::TextureFormat::R32Float,
                 usage: wgpu::TextureUsages::COPY_DST
                     | wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::STORAGE_BINDING,
+                    | wgpu::TextureUsages::STORAGE_BINDING
+                    | if cfg!(test) {
+                        wgpu::TextureUsages::COPY_SRC
+                    } else {
+                        wgpu::TextureUsages::empty()
+                    },
                 view_formats: &[],
             })
         };

@@ -86,6 +86,11 @@ impl GpuCaptureProcessor {
         self.budget = bytes.min(resources::DEFAULT_BUDGET);
     }
 
+    #[cfg(test)]
+    pub(crate) fn force_maximum_tile_edge(&mut self, edge: usize) {
+        self.maximum_tile_edge = edge.max(1);
+    }
+
     pub fn prepare(
         &mut self,
         cpu: &CpuPipeline,

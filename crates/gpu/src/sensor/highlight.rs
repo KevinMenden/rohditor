@@ -41,9 +41,9 @@ pub struct HighlightMetrics {
 /// upcoming GPU demosaic stage. It deliberately has no CPU pixel conversion.
 pub struct GpuHighlightedMosaic {
     _memory: Reservation,
-    _texture: wgpu::Texture,
-    layout: MosaicLayout,
-    normalization: rohditor_core::NormalizationContract,
+    pub(super) _texture: wgpu::Texture,
+    pub(super) layout: MosaicLayout,
+    pub(super) normalization: rohditor_core::NormalizationContract,
     execution: HighlightExecution,
 }
 

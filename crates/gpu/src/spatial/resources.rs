@@ -27,6 +27,51 @@ impl ResidentLayout {
         limits: &wgpu::Limits,
         maximum_tile_edge: u32,
     ) -> Result<Self, GpuPreviewError> {
+        Self::with_upload_cost(
+            width,
+            height,
+            retained_bytes,
+            work_bytes,
+            budget,
+            limits,
+            maximum_tile_edge,
+            4,
+        )
+    }
+
+    /// GPU producers write the final planes directly and require no CPU upload staging.
+    pub(crate) fn new_generated(
+        width: usize,
+        height: usize,
+        retained_bytes: u64,
+        work_bytes: u64,
+        budget: u64,
+        limits: &wgpu::Limits,
+        maximum_tile_edge: u32,
+    ) -> Result<Self, GpuPreviewError> {
+        Self::with_upload_cost(
+            width,
+            height,
+            retained_bytes,
+            work_bytes,
+            budget,
+            limits,
+            maximum_tile_edge,
+            0,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn with_upload_cost(
+        width: usize,
+        height: usize,
+        retained_bytes: u64,
+        work_bytes: u64,
+        budget: u64,
+        limits: &wgpu::Limits,
+        maximum_tile_edge: u32,
+        upload_bytes_per_pixel: u64,
+    ) -> Result<Self, GpuPreviewError> {
         let width_u32 =
             u32::try_from(width).map_err(|_| dimensions(width, height, "width exceeds u32"))?;
         let height_u32 =
@@ -72,7 +117,8 @@ impl ResidentLayout {
                 let Some(resident_bytes) = padded_pixels.checked_mul(12) else {
                     continue;
                 };
-                let upload_staging = u64::from(tile_width) * u64::from(tile_height) * 4;
+                let upload_staging =
+                    u64::from(tile_width) * u64::from(tile_height) * upload_bytes_per_pixel;
                 let Some(estimated_peak_bytes) = resident_bytes
                     .checked_add(upload_staging)
                     .and_then(|value| value.checked_add(work_bytes))
@@ -123,6 +169,40 @@ fn dimensions(width: usize, height: usize, reason: &str) -> GpuPreviewError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generated_rgb_accounts_for_retained_mosaic_without_upload_staging() {
+        let limits = wgpu::Limits::default();
+        let mosaic_bytes = 8000 * 6000 * 4;
+        let work_bytes = 16 * 1024 * 1024;
+        let layout = ResidentLayout::new_generated(
+            8000,
+            6000,
+            mosaic_bytes,
+            work_bytes,
+            DEFAULT_BUDGET,
+            &limits,
+            limits.max_texture_dimension_2d,
+        )
+        .expect("48 MP bounded sensor lifetime");
+        assert_eq!(layout.resident_bytes, 8000 * 6000 * 12);
+        assert_eq!(
+            layout.estimated_peak_bytes,
+            mosaic_bytes + layout.resident_bytes + work_bytes + RESOURCE_OVERHEAD
+        );
+        assert!(
+            ResidentLayout::new_generated(
+                8000,
+                6000,
+                mosaic_bytes,
+                work_bytes,
+                768_000_000,
+                &limits,
+                limits.max_texture_dimension_2d
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn layout_minimizes_padding_and_rejects_constrained_budgets() {

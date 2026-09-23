@@ -10,35 +10,18 @@ impl GpuCaptureProcessor {
         scatter: &crate::spatial::CaptureScatter,
         cancellation: &CancellationToken,
     ) -> Result<CaptureMetrics, GpuPreviewError> {
-        let started = Instant::now();
-        let _reservation = crate::memory::Reservation::try_new(
-            plan.gpu_bytes,
-            crate::spatial::resources::DEFAULT_BUDGET,
-        )?;
-        let resources = Resources::new_resident(&self.device, &self.queue, plan.pixels, contract);
         let mut packed = Vec::<f32>::new();
         packed.try_reserve_exact(plan.pixels * 3).map_err(error)?;
-        let halo = contract.halo();
-        let mut metrics = CaptureMetrics {
-            tile_edge: plan.edge,
-            halo,
-            estimated_gpu_bytes: plan.gpu_bytes + resident.layout.resident_bytes,
-            estimated_host_bytes: plan.host_bytes,
-            ..Default::default()
-        };
-        for top in (0..image.height()).step_by(plan.edge) {
-            for left in (0..image.width()).step_by(plan.edge) {
-                check_cancel(cancellation)?;
-                let x0 = left.saturating_sub(halo);
-                let y0 = top.saturating_sub(halo);
-                let right = (left + plan.edge).min(image.width());
-                let bottom = (top + plan.edge).min(image.height());
-                let x1 = (right + halo).min(image.width());
-                let y1 = (bottom + halo).min(image.height());
-                let (width, height) = (x1 - x0, y1 - y0);
-                let upload_started = Instant::now();
+        self.process_resident_tiles(
+            (image.width(), image.height()),
+            contract,
+            plan,
+            resident,
+            scatter,
+            cancellation,
+            |buffer, x0, y0, width, height| {
                 packed.clear();
-                for y in y0..y1 {
+                for y in y0..y0 + height {
                     check_cancel(cancellation)?;
                     let row = &image.data()[y * image.row_stride() + x0 * 3..][..width * 3];
                     if row.iter().any(|value| !value.is_finite()) {
@@ -47,9 +30,57 @@ impl GpuCaptureProcessor {
                     packed.extend_from_slice(row);
                 }
                 self.queue
-                    .write_buffer(&resources.rgb, 0, bytemuck::cast_slice(&packed));
-                metrics.uploaded_bytes += packed.len() as u64 * 4;
-                metrics.upload += upload_started.elapsed();
+                    .write_buffer(buffer, 0, bytemuck::cast_slice(&packed));
+                Ok(packed.len() as u64 * 4)
+            },
+        )
+    }
+
+    /// Share the exact capture passes between CPU uploads and GPU-generated
+    /// tiles. The producer fills just one halo-expanded input buffer.
+    #[allow(clippy::too_many_arguments)]
+    fn process_resident_tiles(
+        &self,
+        dimensions: (usize, usize),
+        contract: &CaptureSharpeningContract,
+        plan: &TilePlan,
+        resident: &crate::spatial::source::ResidentCameraPlanes,
+        scatter: &crate::spatial::CaptureScatter,
+        cancellation: &CancellationToken,
+        mut fill: impl FnMut(&wgpu::Buffer, usize, usize, usize, usize) -> Result<u64, GpuPreviewError>,
+    ) -> Result<CaptureMetrics, GpuPreviewError> {
+        let started = Instant::now();
+        let _reservation = crate::memory::Reservation::try_new(
+            plan.gpu_bytes,
+            crate::spatial::resources::DEFAULT_BUDGET,
+        )?;
+        let resources = Resources::new_resident(&self.device, &self.queue, plan.pixels, contract);
+        let halo = contract.halo();
+        let mut metrics = CaptureMetrics {
+            tile_edge: plan.edge,
+            halo,
+            estimated_gpu_bytes: plan.gpu_bytes + resident.layout.resident_bytes,
+            estimated_host_bytes: plan.host_bytes,
+            ..Default::default()
+        };
+        for top in (0..dimensions.1).step_by(plan.edge) {
+            for left in (0..dimensions.0).step_by(plan.edge) {
+                check_cancel(cancellation)?;
+                let x0 = left.saturating_sub(halo);
+                let y0 = top.saturating_sub(halo);
+                let right = (left + plan.edge).min(dimensions.0);
+                let bottom = (top + plan.edge).min(dimensions.1);
+                let x1 = (right + halo).min(dimensions.0);
+                let y1 = (bottom + halo).min(dimensions.1);
+                let (width, height) = (x1 - x0, y1 - y0);
+                let upload_started = Instant::now();
+                let uploaded = fill(&resources.rgb, x0, y0, width, height)?;
+                metrics.uploaded_bytes += uploaded;
+                if uploaded == 0 {
+                    metrics.compute_and_wait += upload_started.elapsed();
+                } else {
+                    metrics.upload += upload_started.elapsed();
+                }
 
                 let compute_started = Instant::now();
                 let mut encoder = self.encoder();
@@ -134,6 +165,37 @@ impl GpuCaptureProcessor {
         metrics.total = started.elapsed();
         metrics.combined_gpu_reservations = crate::gpu_memory_reservations();
         Ok(metrics)
+    }
+
+    pub(crate) fn process_generated_to_resident(
+        &self,
+        contract: &CaptureSharpeningContract,
+        resident: &crate::spatial::source::ResidentCameraPlanes,
+        cancellation: &CancellationToken,
+        fill: impl FnMut(&wgpu::Buffer, usize, usize, usize, usize) -> Result<u64, GpuPreviewError>,
+    ) -> Result<CaptureMetrics, GpuPreviewError> {
+        let dimensions = (
+            resident.layout.width as usize,
+            resident.layout.height as usize,
+        );
+        let plan = TilePlan::new_generated(
+            dimensions.0,
+            dimensions.1,
+            contract.halo(),
+            self.budget,
+            &self.device.limits(),
+            self.maximum_tile_edge,
+        )?;
+        let scatter = crate::spatial::CaptureScatter::new(&self.device);
+        self.process_resident_tiles(
+            dimensions,
+            contract,
+            &plan,
+            resident,
+            &scatter,
+            cancellation,
+            fill,
+        )
     }
 
     pub(super) fn process_inner(
