@@ -1,10 +1,15 @@
 use std::sync::Arc;
 
-use rohditor_core::{CancellationToken, NormalizationContract, RawCropPolicy, normalize_raw};
+use rohditor_core::{
+    CancellationToken, HighlightDiagnostics, HighlightExecution, NormalizationContract,
+    RawCropPolicy, RenderOptions, SensorDevelopmentDescription, normalize_raw,
+};
+use rohditor_edit::{EditRecipe, HighlightMethod};
 use rohditor_image::Orientation;
 use rohditor_raw::{CfaPattern, ImageRect, LevelPattern, PhotometricInterpretation, RawFrame};
 
 use super::GpuSensorProcessor;
+use super::highlight::readback_for_qualification as readback_highlight_for_qualification;
 use super::normalize::readback_for_qualification;
 
 fn processor() -> GpuSensorProcessor {
@@ -139,6 +144,137 @@ fn cancellation_and_budget_failure_leave_the_immutable_raw_frame_usable() {
         gpu.normalize(&frame, &contract, &CancellationToken::new())
             .is_err()
     );
+    assert_eq!(frame.mosaic, original);
+    normalize_raw(&frame, RawCropPolicy::Recommended).expect("CPU recovery reference");
+}
+
+#[test]
+#[ignore = "requires Vulkan; software validates structure and numerical parity only"]
+fn off_and_clip_match_cpu_highlight_with_bounded_diagnostics() {
+    let _guard = crate::preview::processor::tests::gpu_test_guard();
+    let mut gpu = processor();
+    gpu.force_maximum_tile_edge(2);
+    let cancellation = CancellationToken::new();
+    let options = RenderOptions {
+        raw_crop_policy: RawCropPolicy::Recommended,
+        ..RenderOptions::default()
+    };
+
+    for pattern in ["RGGB", "BGGR", "GRBG", "GBRG"] {
+        let frame = frame(pattern, vec![1200.0, 2200.0, 3200.0]);
+        let mut recipe = EditRecipe::default();
+        recipe.raw.highlights.method = HighlightMethod::Clip;
+        let description = SensorDevelopmentDescription::from_frame(&frame, &recipe, options)
+            .expect("Clip sensor description");
+        let reference =
+            normalize_raw(&frame, RawCropPolicy::Recommended).expect("CPU reference normalization");
+        let HighlightExecution::Clip(levels) = description.highlight_execution() else {
+            panic!("Clip recipe must resolve Clip execution");
+        };
+        let expected = rohditor_highlight::clip(reference, levels).expect("CPU Clip reference");
+        let (normalized, _) = gpu
+            .normalize(&frame, description.normalization(), &cancellation)
+            .expect("GPU normalization");
+        let (highlighted, diagnostics, metrics) = gpu
+            .apply_highlight(normalized, &description, &cancellation)
+            .expect("GPU Clip highlight");
+
+        assert!(highlighted.matches_description(&description));
+        assert_eq!(highlighted.dimensions(), (5, 4));
+        assert_eq!(diagnostics, HighlightDiagnostics::Clip(expected.stats));
+        assert!(metrics.tiles > 1);
+        assert_eq!(metrics.submissions as usize, metrics.tiles + 1);
+        assert_eq!(metrics.diagnostic_readback_bytes, 6 * 4);
+        assert_eq!(metrics.resident_gpu_bytes, highlighted.estimated_bytes());
+        assert!(metrics.estimated_gpu_bytes > highlighted.estimated_bytes());
+
+        let actual = readback_highlight_for_qualification(&gpu, &highlighted, &cancellation)
+            .expect("GPU Clip qualification readback");
+        assert_eq!(actual.len(), expected.mosaic.data().len());
+        for (index, (actual, expected)) in actual.iter().zip(expected.mosaic.data()).enumerate() {
+            assert!(
+                (actual - expected).abs() <= 1.0e-6,
+                "{pattern}, sample {index}: GPU {actual}, CPU {expected}"
+            );
+        }
+    }
+
+    let frame = frame("RGGB", vec![1200.0]);
+    let mut recipe = EditRecipe::default();
+    recipe.raw.highlights.method = HighlightMethod::Off;
+    let description = SensorDevelopmentDescription::from_frame(&frame, &recipe, options)
+        .expect("Off sensor description");
+    let (normalized, _) = gpu
+        .normalize(&frame, description.normalization(), &cancellation)
+        .expect("GPU normalization for Off");
+    let (highlighted, diagnostics, metrics) = gpu
+        .apply_highlight(normalized, &description, &cancellation)
+        .expect("GPU Off highlight");
+    assert!(highlighted.matches_description(&description));
+    assert_eq!(diagnostics, HighlightDiagnostics::Off);
+    assert_eq!(metrics.tiles, 0);
+    assert_eq!(metrics.submissions, 0);
+    assert_eq!(metrics.diagnostic_readback_bytes, 0);
+    let expected =
+        normalize_raw(&frame, RawCropPolicy::Recommended).expect("CPU Off normalization reference");
+    let actual = readback_highlight_for_qualification(&gpu, &highlighted, &cancellation)
+        .expect("GPU Off qualification readback");
+    for (index, (actual, expected)) in actual.iter().zip(expected.data()).enumerate() {
+        assert!(
+            (actual - expected).abs() <= 1.0e-6,
+            "Off sample {index}: GPU {actual}, CPU {expected}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires Vulkan; validates Clip recovery before a highlighted state is published"]
+fn clip_cancellation_and_budget_failure_preserve_cpu_recovery() {
+    let _guard = crate::preview::processor::tests::gpu_test_guard();
+    let mut gpu = processor();
+    let frame = frame("RGGB", vec![1200.0, 2200.0, 3200.0]);
+    let original = frame.mosaic.clone();
+    let mut recipe = EditRecipe::default();
+    recipe.raw.highlights.method = HighlightMethod::Clip;
+    let description = SensorDevelopmentDescription::from_frame(
+        &frame,
+        &recipe,
+        RenderOptions {
+            raw_crop_policy: RawCropPolicy::Recommended,
+            ..RenderOptions::default()
+        },
+    )
+    .expect("Clip sensor description");
+
+    let normalized = gpu
+        .normalize(
+            &frame,
+            description.normalization(),
+            &CancellationToken::new(),
+        )
+        .expect("GPU normalization before cancellation")
+        .0;
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    assert!(matches!(
+        gpu.apply_highlight(normalized, &description, &cancelled),
+        Err(crate::GpuPreviewError::Cancelled)
+    ));
+    assert_eq!(frame.mosaic, original);
+
+    let normalized = gpu
+        .normalize(
+            &frame,
+            description.normalization(),
+            &CancellationToken::new(),
+        )
+        .expect("GPU normalization before budget rejection")
+        .0;
+    gpu.set_budget(64);
+    assert!(matches!(
+        gpu.apply_highlight(normalized, &description, &CancellationToken::new()),
+        Err(crate::GpuPreviewError::Unsupported { .. })
+    ));
     assert_eq!(frame.mosaic, original);
     normalize_raw(&frame, RawCropPolicy::Recommended).expect("CPU recovery reference");
 }

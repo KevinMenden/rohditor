@@ -68,8 +68,8 @@ pub use rohditor_color::{
     CHROMA_COMPRESS_ALGORITHM_VERSION, GamutMapStatus, GamutMappingDiagnostics,
 };
 pub use rohditor_highlight::{
-    ClipStats, LOCAL_RATIOS_ALGORITHM_VERSION, OPPOSED_ALGORITHM_VERSION, OpposedStats,
-    ReconstructionStats,
+    CLIP_ALGORITHM_VERSION, ChannelClipLevels, ClipStats, HighlightExecution,
+    LOCAL_RATIOS_ALGORITHM_VERSION, OPPOSED_ALGORITHM_VERSION, OpposedStats, ReconstructionStats,
 };
 pub use rohditor_optics::{
     CorrectionComponents, DatabaseProvenance, DistortionModel, LensProfileSummary, MetadataField,
