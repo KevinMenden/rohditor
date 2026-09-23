@@ -1,11 +1,12 @@
 //! Shared GPU color processing for native preview and headless export.
 //!
 //! RAW decoding remains in `rohditor-core`; its immutable u16 mosaic is the
-//! reference and recovery source. Bounded GPU sensor normalization now creates
-//! a typed resident mosaic, while highlight reconstruction and demosaicing
-//! remain on the CPU path until their GPU slices are integrated. Camera-native
-//! f32 planes stay resident after optional bounded capture
-//! sharpening; optics and exact area reduction execute from the same tiled
+//! reference and recovery source. Bounded GPU sensor normalization and its
+//! Off/Clip highlight methods now create typed resident mosaics, while the
+//! remaining highlight reconstruction and demosaicing stay on the CPU path
+//! until their GPU slices are integrated. Camera-native f32 planes stay
+//! resident after optional bounded capture sharpening; optics and exact area
+//! reduction execute from the same tiled
 //! source without a camera-RGB readback. Preview and export share f32 color
 //! kernels. Export evaluates optics and color in bounded bands, quantizes
 //! directly to 8/16-bit integers, and returns only codec-independent final
@@ -35,7 +36,9 @@ pub use preview::{
     GpuDisplayReadback, GpuDisplayReadbackPending, GpuPreviewFrame, GpuPreviewProcessor,
     GpuPreviewSource, GpuPreviewUpload,
 };
-pub use sensor::{GpuNormalizedMosaic, GpuSensorProcessor, SensorMetrics};
+pub use sensor::{
+    GpuHighlightedMosaic, GpuNormalizedMosaic, GpuSensorProcessor, HighlightMetrics, SensorMetrics,
+};
 
 use thiserror::Error;
 

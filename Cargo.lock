@@ -2947,6 +2947,7 @@ dependencies = [
  "rohditor-core",
  "rohditor-demosaic",
  "rohditor-edit",
+ "rohditor-highlight",
  "rohditor-image",
  "rohditor-raw",
  "serde_json",

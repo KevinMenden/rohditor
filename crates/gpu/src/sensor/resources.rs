@@ -148,6 +148,21 @@ impl MosaicLayout {
             ),
         })
     }
+
+    /// Reserve a second mosaic plus the caller's short-lived pass resources
+    /// while the prior stage remains resident. The caller releases this down
+    /// to `resident_bytes` before publishing the new state.
+    pub(super) fn additional_mosaic_peak_bytes(
+        self,
+        transient_bytes: u64,
+    ) -> Result<u64, GpuPreviewError> {
+        self.resident_bytes
+            .checked_add(transient_bytes)
+            .and_then(|value| value.checked_add(RESOURCE_OVERHEAD))
+            .ok_or_else(|| GpuPreviewError::Unsupported {
+                reason: "GPU highlight allocation estimate overflowed".into(),
+            })
+    }
 }
 
 fn dimensions(width: usize, height: usize, reason: &str) -> GpuPreviewError {

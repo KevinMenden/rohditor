@@ -9,7 +9,7 @@ use wgpu::util::DeviceExt;
 use super::resources::{DEFAULT_BUDGET, MosaicLayout};
 use crate::{GpuMemoryReservations, GpuPreviewError, memory::Reservation};
 
-const WORKGROUP_EDGE: u32 = 8;
+pub(super) const WORKGROUP_EDGE: u32 = 8;
 const PARAMETER_WORDS: usize = 12;
 
 /// Timing and allocation facts for one bounded sensor normalization.
@@ -34,10 +34,10 @@ pub struct SensorMetrics {
 /// and demosaic stages consume this state directly. The immutable decoded RAW
 /// frame remains available to the caller for CPU recovery.
 pub struct GpuNormalizedMosaic {
-    _memory: Reservation,
-    _texture: wgpu::Texture,
-    layout: MosaicLayout,
-    contract: NormalizationContract,
+    pub(super) _memory: Reservation,
+    pub(super) _texture: wgpu::Texture,
+    pub(super) layout: MosaicLayout,
+    pub(super) contract: NormalizationContract,
 }
 
 impl GpuNormalizedMosaic {
@@ -74,10 +74,11 @@ impl std::fmt::Debug for GpuNormalizedMosaic {
 
 /// Ordered GPU executor for the first sensor-development stage.
 pub struct GpuSensorProcessor {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    pub(super) device: wgpu::Device,
+    pub(super) queue: wgpu::Queue,
     normalization_pipeline: wgpu::ComputePipeline,
-    budget: u64,
+    pub(super) clip_pipeline: wgpu::ComputePipeline,
+    pub(super) budget: u64,
     maximum_tile_edge: u32,
 }
 
@@ -109,6 +110,18 @@ impl GpuSensorProcessor {
                 compilation_options: Default::default(),
                 cache: None,
             });
+        let clip_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("RAW Clip highlight shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("highlight.wgsl").into()),
+        });
+        let clip_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("resident RAW Clip highlight"),
+            layout: None,
+            module: &clip_shader,
+            entry_point: Some("clip"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
         let validation = pollster::block_on(device.pop_error_scope());
         let allocation = pollster::block_on(device.pop_error_scope());
         let internal = pollster::block_on(device.pop_error_scope());
@@ -119,6 +132,7 @@ impl GpuSensorProcessor {
             device: device.clone(),
             queue: queue.clone(),
             normalization_pipeline,
+            clip_pipeline,
             budget: DEFAULT_BUDGET,
             maximum_tile_edge: device.limits().max_texture_dimension_2d,
         })
@@ -392,7 +406,7 @@ impl GpuSensorProcessor {
         ))
     }
 
-    fn wait(&self, cancellation: &CancellationToken) -> Result<(), GpuPreviewError> {
+    pub(super) fn wait(&self, cancellation: &CancellationToken) -> Result<(), GpuPreviewError> {
         let (sender, receiver) = mpsc::sync_channel(1);
         self.queue.on_submitted_work_done(move || {
             let _ = sender.send(());
@@ -416,14 +430,14 @@ impl GpuSensorProcessor {
 }
 
 #[cfg(test)]
-fn output_usage() -> wgpu::TextureUsages {
+pub(super) fn output_usage() -> wgpu::TextureUsages {
     wgpu::TextureUsages::TEXTURE_BINDING
         | wgpu::TextureUsages::STORAGE_BINDING
         | wgpu::TextureUsages::COPY_SRC
 }
 
 #[cfg(not(test))]
-fn output_usage() -> wgpu::TextureUsages {
+pub(super) fn output_usage() -> wgpu::TextureUsages {
     wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING
 }
 
@@ -671,13 +685,13 @@ fn bayer_pattern_code(pattern: BayerPattern) -> usize {
     }
 }
 
-fn invalid(reason: &str) -> GpuPreviewError {
+pub(super) fn invalid(reason: &str) -> GpuPreviewError {
     GpuPreviewError::InvalidInput {
         reason: reason.to_owned(),
     }
 }
 
-fn synchronization(reason: &str) -> GpuPreviewError {
+pub(super) fn synchronization(reason: &str) -> GpuPreviewError {
     GpuPreviewError::Synchronization {
         reason: reason.to_owned(),
     }
@@ -691,7 +705,7 @@ fn pipeline_error(error: rohditor_core::PipelineError) -> GpuPreviewError {
     }
 }
 
-fn check_cancel(token: &CancellationToken) -> Result<(), GpuPreviewError> {
+pub(super) fn check_cancel(token: &CancellationToken) -> Result<(), GpuPreviewError> {
     if token.is_cancelled() {
         Err(GpuPreviewError::Cancelled)
     } else {
@@ -705,27 +719,31 @@ pub(super) fn readback_for_qualification(
     mosaic: &GpuNormalizedMosaic,
     cancellation: &CancellationToken,
 ) -> Result<Vec<f32>, GpuPreviewError> {
+    readback_texture_for_qualification(processor, &mosaic._texture, mosaic.layout, cancellation)
+}
+
+#[cfg(test)]
+pub(super) fn readback_texture_for_qualification(
+    processor: &GpuSensorProcessor,
+    texture: &wgpu::Texture,
+    layout: MosaicLayout,
+    cancellation: &CancellationToken,
+) -> Result<Vec<f32>, GpuPreviewError> {
     check_cancel(cancellation)?;
-    let width = mosaic.layout.width as usize;
-    let height = mosaic.layout.height as usize;
+    let width = layout.width as usize;
+    let height = layout.height as usize;
     let elements = width
         .checked_mul(height)
         .ok_or_else(|| invalid("normalized qualification output overflowed"))?;
     let mut result = vec![0.0_f32; elements];
-    for tile_y in 0..mosaic.layout.rows {
-        for tile_x in 0..mosaic.layout.columns {
+    for tile_y in 0..layout.rows {
+        for tile_x in 0..layout.columns {
             check_cancel(cancellation)?;
-            let left = (tile_x * mosaic.layout.tile_width) as usize;
-            let top = (tile_y * mosaic.layout.tile_height) as usize;
-            let tile_width = mosaic
-                .layout
-                .tile_width
-                .min(mosaic.layout.width - left as u32) as usize;
-            let tile_height = mosaic
-                .layout
-                .tile_height
-                .min(mosaic.layout.height - top as u32) as usize;
-            let layer = tile_y * mosaic.layout.columns + tile_x;
+            let left = (tile_x * layout.tile_width) as usize;
+            let top = (tile_y * layout.tile_height) as usize;
+            let tile_width = layout.tile_width.min(layout.width - left as u32) as usize;
+            let tile_height = layout.tile_height.min(layout.height - top as u32) as usize;
+            let layer = tile_y * layout.columns + tile_x;
             let row_bytes = tile_width
                 .checked_mul(std::mem::size_of::<f32>())
                 .ok_or_else(|| invalid("normalized qualification row overflowed"))?;
@@ -748,7 +766,7 @@ pub(super) fn readback_for_qualification(
                     });
             encoder.copy_texture_to_buffer(
                 wgpu::TexelCopyTextureInfo {
-                    texture: &mosaic._texture,
+                    texture,
                     mip_level: 0,
                     origin: wgpu::Origin3d {
                         x: 0,

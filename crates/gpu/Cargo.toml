@@ -23,4 +23,5 @@ wgpu.workspace = true
 
 [dev-dependencies]
 image.workspace = true
+rohditor-highlight = { path = "../highlight" }
 serde_json.workspace = true
