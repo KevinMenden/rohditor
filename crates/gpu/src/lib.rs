@@ -2,9 +2,9 @@
 //!
 //! RAW decoding remains in `rohditor-core`; its immutable u16 mosaic is the
 //! reference and recovery source. Bounded GPU sensor normalization and its
-//! Off/Clip highlight methods now create typed resident mosaics, while the
-//! remaining highlight reconstruction and demosaicing stay on the CPU path
-//! until their GPU slices are integrated. Camera-native f32 planes stay
+//! Off/Clip highlight methods feed GPU bilinear/MHC and optional capture without
+//! an image readback. Application sensor-backend integration is still pending;
+//! normal preview/export sensor preparation continues to use the CPU. Camera-native f32 planes stay
 //! resident after optional bounded capture sharpening; optics and exact area
 //! reduction execute from the same tiled
 //! source without a camera-RGB readback. Preview and export share f32 color
@@ -37,7 +37,8 @@ pub use preview::{
     GpuPreviewSource, GpuPreviewUpload,
 };
 pub use sensor::{
-    GpuHighlightedMosaic, GpuNormalizedMosaic, GpuSensorProcessor, HighlightMetrics, SensorMetrics,
+    DemosaicMetrics, GpuHighlightedMosaic, GpuNormalizedMosaic, GpuSensorCameraSource,
+    GpuSensorProcessor, HighlightMetrics, SensorMetrics,
 };
 
 use thiserror::Error;

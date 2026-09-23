@@ -12,7 +12,7 @@ use super::GpuSensorProcessor;
 use super::highlight::readback_for_qualification as readback_highlight_for_qualification;
 use super::normalize::readback_for_qualification;
 
-fn processor() -> GpuSensorProcessor {
+pub(super) fn processor() -> GpuSensorProcessor {
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
         ..Default::default()
@@ -29,7 +29,7 @@ fn processor() -> GpuSensorProcessor {
     GpuSensorProcessor::new(&adapter, &device, &queue).expect("sensor normalization processor")
 }
 
-fn frame(pattern: &str, white_levels: Vec<f32>) -> RawFrame {
+pub(super) fn frame(pattern: &str, white_levels: Vec<f32>) -> RawFrame {
     let width = 7;
     let height = 5;
     let row_stride = 10;

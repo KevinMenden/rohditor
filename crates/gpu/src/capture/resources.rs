@@ -34,6 +34,19 @@ impl TilePlan {
         Self::new_with_cost(width, height, halo, budget, limits, maximum, 48, 12)
     }
 
+    pub(crate) fn new_generated(
+        width: usize,
+        height: usize,
+        halo: usize,
+        budget: u64,
+        limits: &wgpu::Limits,
+        maximum: usize,
+    ) -> Result<Self, GpuPreviewError> {
+        // GPU demosaic fills RGB input/output directly: six working planes,
+        // three RGB channels, and no host packing or upload staging.
+        Self::new_with_cost(width, height, halo, budget, limits, maximum, 36, 0)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn new_with_cost(
         width: usize,
