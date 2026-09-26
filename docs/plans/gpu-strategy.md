@@ -62,12 +62,12 @@ success. Source 1:1 and fit results are published only for the current ticket.
 | Migration | Implemented and evidenced | Open qualification or work |
 | --- | --- | --- |
 | HSL and three-way grading | Shared fused color pass; 33 controls retain the GPU source. RX 9070 XT shader/corpus parity was recorded on six Sony files, with at most one output code difference. | Measure actual slider-to-display and rapid-edit latency against a neutral baseline; review a representative portrait/skin-tone RAW. The reported sub-millisecond resident GPU timings exclude source preparation and presentation. |
-| Base rendering and output gamut | Standard/Neutral base rendering and default hard sRGB clipping run on CPU and GPU. Opt-in Chroma Compress is wired through recipe, cache, preview and export. | Finish private-corpus visual review and hardware GPU parity for Chroma Compress; qualify the Standard look with the chosen gamut policy before changing defaults. |
+| Base rendering and output gamut | Standard/Neutral base rendering and default hard sRGB clipping run on CPU and GPU. Opt-in Chroma Compress is wired through recipe, cache, preview and export. | The RX 9070 XT full-resolution 16-bit Chroma Compress test exceeded its 16-code maximum (18–24 observed). Diagnose the output mismatch, then complete visual review and qualify the Standard look with the chosen gamut policy. |
 | Full-resolution export | Shared color/output kernels, headless execution, 8/16-bit quantization and bounded readback; CPU encoding and auto fallback. | RX 9070 XT parity and visual review for full exports; transfer-inclusive throughput, measured physical memory, concurrent-preview latency and failure recovery. |
 | Capture sharpening | Bounded f32 GPU tiles with the CPU algorithm as reference; the old full-camera-RGB readback bridge was removed by resident spatial processing. A historical RX 9070 XT bridge test passed camera parity but averaged 1.560 s versus 784.7 ms for a matching CPU fixture. | Re-measure the *current resident path* with Capture On; check visual usefulness on real photos, memory, cancellation and recovery. The old bridge timings do not measure today's path. |
 | Optics, reduction and Source 1:1 | Resident planar camera RGB; CPU Lensfun plan, GPU vignetting/remap/exact reduction; GPU fit and 1:1 textures; bounded export bands. Software Vulkan fixtures and a 24 MP Sony comparison passed their documented gates. | RX 9070 XT 24/48 MP optics and Capture Off/On parity, saved corner/worst-difference crops, actual memory, transfer-inclusive timing and editor interaction. Software Source 1:1 had an isolated 26-code maximum difference at high-contrast cubic samples (144 channel samples above three codes of 72 million); inspect hardware and real-image worst crops rather than relying on an average. |
-| GPU sensor: normalization, Off/Clip, bilinear/MHC | Shared sensor contract and bounded u16 upload, f32 mosaic, resident camera planes; connected to fit, 1:1 and export with CPU recovery. Software fixtures cover crop/CFA, signed/HDR values, boundaries and lifecycle. | RX 9070 XT corpus, physical-memory, latency and recovery gates against the CPU-sensor/GPU-spatial baseline. |
-| GPU RCD | Shared 194/10/174 tile geometry; one 978,536-byte scratch tile and nine ordered passes; resident capture handoff; software stage/seam/corpus tests and one 6000×4000 Sony full-resolution camera-RGB comparison passed. Off/Clip RCD is already eligible for `auto`. | Broader real-photo review, RX 9070 XT 24/48 MP transfer-inclusive speed, physical memory, interaction and recovery. The software run used 902 submissions and 3.893 s for RCD after normalization/Clip; these are *llvmpipe* numbers, not discrete-GPU performance. Decide normal auto selection from hardware results. |
+| GPU sensor: normalization, Off/Clip, bilinear/MHC | Shared sensor contract and bounded u16 upload, f32 mosaic, resident camera planes; connected to fit, 1:1 and export with CPU recovery. Software fixtures cover crop/CFA, signed/HDR values, boundaries and lifecycle; RX 9070 XT MHC camera parity passed. | Two synthetic normalization/Off tests failed their 1e-6 absolute gate at an HDR value near 72 on the RX 9070 XT. Resolve the numerical contract; still measure broader corpus, memory, interaction and recovery. |
+| GPU RCD | Shared 194/10/174 tile geometry; one 978,536-byte scratch tile and nine ordered passes; resident capture handoff; software stage/seam/corpus tests passed. Off/Clip RCD is already eligible for `auto`. | RX 9070 XT full-resolution camera-RGB and 8-bit export parity tests **failed**. Its speed advantage is not acceptance. Diagnose stage divergence and re-run corpus, visual, 24/48 MP memory, interaction and recovery gates before normal auto selection. |
 | Remaining sensor methods | CPU Local Ratios/Opposed and AMaZE remain selectable through fallback. | Port Local Ratios and Opposed with exact diagnostic/decision parity, then AMaZE with its CPU tile/border semantics, or explicitly revise the desired GPU coverage and keep the fallback visible. |
 
 The RCD software evidence used `llvmpipe (device_type: Cpu)` without `/dev/dri`.
@@ -80,14 +80,49 @@ resident RGB images alone require about 1.344 GB, above the 768 MiB default
 reservation before padding and scratch, so that combination currently needs
 CPU recovery or a separately qualified memory/streaming design.
 
+### First RX 9070 XT measurements, 2026-09-26
+
+Release CLI, two 6000×4000 Sony RAWs, Clip, 8-bit PNG, optics Off, two warmups
+and five measured fresh-process runs per case. Median complete export time,
+including decode, device creation, processing, readback, encoding and commit:
+
+| Algorithm | Capture | CPU range | GPU range | Result |
+| --- | --- | --- | --- | --- |
+| MHC | Off | 0.86–0.91 s | 0.60–0.65 s | GPU about 1.4× faster |
+| MHC | On | 1.64 s | 2.01–2.06 s | GPU about 20–25% slower |
+| RCD | Off | 2.88–2.92 s | 1.01–1.06 s | GPU about 2.8× faster, parity failed |
+| RCD | On | 3.60–3.64 s | 2.66–2.82 s | GPU about 1.3× faster, parity failed |
+
+A further pass with precise process completion timing on `DSC00851.ARW` gave
+MHC 0.84/0.58 s Off and 1.66/2.04 s On (CPU/GPU), and RCD 2.75/0.95 s Off
+and 3.72/2.71 s On. Capture added 0.81/1.46 s to MHC and 0.97/1.76 s to
+RCD (CPU/GPU). On the GPU, 96 capture tiles spent 1.42 s (MHC) or 1.69 s
+(RCD) in compute/wait, with zero camera-RGB upload/readback; the capture
+penalty is not the old transfer bridge. Full exports reported 1,124 MHC Capture
+On submissions or 2,025 RCD Capture On submissions. These are export timings,
+not resident editor slider-to-display measurements. The 24 MP RCD Capture On
+case sampled about 698 MiB additional system-wide VRAM; no 48 MP case was
+available. Full sample data are produced by `scripts/benchmark-gpu.py`.
+
+With automatic Lensfun corrections on `DSC00851.ARW`, three further measured
+MHC runs gave 2.28/1.16 s Capture Off and 3.02/2.48 s Capture On (CPU/GPU).
+GPU optics gains therefore outweighed its slower capture stage in this complete
+export. Capture itself still added 0.74 s on CPU versus 1.32 s on GPU.
+The existing retained-source color timing test measured 0.332 ms median GPU
+queue completion at 2560×1707; it excludes sensor work and screen presentation.
+
+The ignored GPU suite selected the RX 9070 XT (RADV/Mesa 26.2.2): 39 passed,
+7 failed. Failures include RCD camera/output parity, 16-bit Chroma Compress
+export, and two strict synthetic normalization/Off HDR tolerances. MHC camera
+parity and the spatial suite passed. Do not promote RCD or call the GPU path
+fully qualified from these performance numbers.
+
 ## Strategy and implementation concerns
 
 1. **Automatic selection is ahead of qualification.** `GpuSensorProcessor::supports`
    admits Off/Clip RCD and the desktop/export paths attempt it under automatic
-   selection. There is no recorded RX 9070 XT end-to-end acceptance for RCD or
-   the new sensor path. Qualify representative workloads and explicitly decide
-   whether to keep that selection; successful software Vulkan tests alone are
-   insufficient.
+   selection, although RX 9070 XT camera/output parity now fails. Repair and
+   qualify representative workloads before treating that selection as accepted.
 2. **Memory pressure can change the backend.** The 768 MiB reservation is shared
    by preview and export, but it estimates tracked resources rather than actual
    driver/host peaks. RCD Capture On can retain two full camera images, and 48 MP
@@ -95,10 +130,12 @@ CPU recovery or a separately qualified memory/streaming design.
    memory under concurrent preview/export; consider bounded capture handoff or
    measured batching only where these results justify it. Keep the fallback
    visible and preserve image semantics.
-3. **Too many RCD submissions may dominate latency.** The faithful fixed-tile
-   port deliberately waits once per tile. Compare complete CPU-sensor/GPU-spatial
-   and GPU-sensor paths on hardware before batching or fusing passes, then
-   recheck stage parity and cancellation. Do not infer a win from shader time.
+3. **Capture is the measured latency target.** At 24 MP its 96 GPU tiles add
+   roughly 1.3–1.8 s to export, almost entirely reported as compute/wait with
+   no camera-RGB transfer. Use GPU timestamps or controlled batching to separate
+   shader work from submission/synchronization cost; preserve the eight-iteration
+   halo contract and parity before changing tile scheduling. RCD also waits per
+   fixed tile, but its measured complete export is currently faster than CPU.
 4. **Fallback has two granularities.** Preview can retain GPU spatial/color
    after CPU sensor recovery, whereas export currently retries the entire CPU
    pipeline. This is valid but should stay explicit in status, logs and timing;

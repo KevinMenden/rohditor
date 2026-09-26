@@ -1032,7 +1032,7 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
                         format!("could not export developed image to {}", output.display())
                     })?;
                 return write_stdout(&format!(
-                    "Developed {}x{} {}-bit sRGB {} to {} ({} bytes)\nColor processor: GPU, {} ({}, {} {})\nSensor processor: {}\nRAW decode: {:?}; Full-quality preparation: {:?}; GPU upload: {:?}; color and readback: {:?}; encoding: {:?}\nGPU allocation estimate: {} MiB; CPU buffer estimate: {} MiB; uploaded {} bytes; read back {} bytes in {} submissions\nOutput gamut pixel counts: unavailable on GPU",
+                    "Developed {}x{} {}-bit sRGB {} to {} ({} bytes)\nColor processor: GPU, {} ({}, {} {})\nSensor processor: {}\nRAW decode: {:?}; Full-quality preparation: {:?}; GPU upload: {:?}; color and readback: {:?}; encoding: {:?}\nGPU capture: {} tiles of {} pixels, halo {}, compute/wait {:?}, upload {:?}, readback {:?}\nGPU allocation estimate: {} MiB; CPU buffer estimate: {} MiB; uploaded {} bytes; read back {} bytes in {} submissions\nOutput gamut pixel counts: unavailable on GPU",
                     report.width,
                     report.height,
                     report.bit_depth.bits(),
@@ -1049,6 +1049,12 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
                     result.upload_time,
                     result.color_and_readback_time,
                     encode_started.elapsed(),
+                    result.capture.tiles,
+                    result.capture.tile_edge,
+                    result.capture.halo,
+                    result.capture.compute_and_wait,
+                    result.capture.upload,
+                    result.capture.readback,
                     result.estimated_gpu_bytes / (1024 * 1024),
                     result.estimated_cpu_bytes / (1024 * 1024),
                     result.uploaded_bytes,

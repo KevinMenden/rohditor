@@ -50,6 +50,9 @@ impl GpuSensorCameraSource {
 pub struct DemosaicMetrics {
     /// Wall time including bounded submissions and the validation flag readback.
     pub total: Duration,
+    /// Demosaic dispatches performed inside capture's generated-tile callback.
+    /// This time also appears in `capture.total` until the caller separates it.
+    pub capture_input_demosaic: Duration,
     pub capture: CaptureMetrics,
     pub tiles: usize,
     pub submissions: u32,
@@ -178,6 +181,7 @@ impl GpuSensorProcessor {
         {
             let mut dispatch = |region: [u32; 4], target: Option<&wgpu::Buffer>| {
                 check_cancel(cancellation)?;
+                let dispatch_started = Instant::now();
                 self.dispatch_demosaic(
                     &mosaic,
                     &view,
@@ -188,6 +192,9 @@ impl GpuSensorProcessor {
                     target,
                 );
                 self.wait(cancellation)?;
+                if target.is_some() {
+                    metrics.capture_input_demosaic += dispatch_started.elapsed();
+                }
                 metrics.tiles += 1;
                 metrics.submissions += 1;
                 Ok::<_, GpuPreviewError>(0)
