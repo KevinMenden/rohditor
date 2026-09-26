@@ -583,7 +583,7 @@ fn private_export_parity(
                 }
                 let (max, mean) = difference(&actual.image, &reference);
                 eprintln!(
-                    "export {name} {algorithm:?} {}x{} {depth:?} {policy:?}: max={max} mean={mean:.5}, prepare={:?} upload={:?} color/readback={:?} gpu_bytes={} upload_bytes={} readback_bytes={} bands={}",
+                    "export {name} {algorithm:?} {}x{} {depth:?} {policy:?}: max={max} mean={mean:.5}, prepare={:?} upload={:?} color/readback={:?} gpu_bytes={} upload_bytes={} readback_bytes={} submissions={}",
                     actual.image.width(),
                     actual.image.height(),
                     actual.preparation.total,

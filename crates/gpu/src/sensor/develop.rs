@@ -90,14 +90,22 @@ impl GpuSensorProcessor {
             self.apply_highlight(normalized, metadata.sensor(), cancellation)?;
         let (camera, demosaic) =
             self.demosaic(highlighted, metadata.sensor(), &contract, cancellation)?;
+        // Generated capture tiles include demosaic dispatch in their timer.
+        // Separate the overlapping durations before reporting stage totals.
+        let mut capture = demosaic.capture;
+        capture.total = capture
+            .total
+            .saturating_sub(demosaic.capture_input_demosaic);
+        capture.compute_and_wait = capture
+            .compute_and_wait
+            .saturating_sub(demosaic.capture_input_demosaic);
+        let demosaic_time = demosaic.total.saturating_sub(capture.total);
         let timings = StageTimings {
             normalization: normalization.total,
             highlight_processing: highlight.total,
             highlight_clipping: highlight.total,
-            demosaic: demosaic.total.saturating_sub(demosaic.capture.total),
-            total: normalization.total
-                + highlight.total
-                + demosaic.total.saturating_sub(demosaic.capture.total),
+            demosaic: demosaic_time,
+            total: normalization.total + highlight.total + demosaic_time,
             ..Default::default()
         };
         let description = cpu
@@ -105,7 +113,7 @@ impl GpuSensorProcessor {
             .map_err(pipeline_error)?;
         let metrics = SpatialMetrics {
             sensor_gpu: true,
-            capture: demosaic.capture,
+            capture,
             upload: normalization.upload,
             uploaded_bytes: normalization.uploaded_bytes,
             readback_bytes: highlight.diagnostic_readback_bytes
