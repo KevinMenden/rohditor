@@ -10,7 +10,12 @@ mod amaze_stages;
 mod bilinear;
 mod malvar_he_cutler;
 mod rcd;
+mod rcd_geometry;
 mod rcd_stages;
+
+pub use rcd_geometry::{
+    RCD_BORDER, RCD_MIN_DIMENSION, RCD_TILE_SIZE, RCD_TILE_STEP, RcdTileGeometry, rcd_tiles,
+};
 
 use rohditor_image::{
     Halo, ImageError, LinearRgbImage, LinearRgbSpace, MosaicImage, allocate_zeroed_f32,
@@ -77,10 +82,10 @@ pub const MALVAR_HE_CUTLER_HALO: Halo = Halo {
 
 /// Neighborhood required to reconstruct an RCD output region.
 pub const RCD_HALO: Halo = Halo {
-    left: 10,
-    right: 10,
-    top: 10,
-    bottom: 10,
+    left: RCD_BORDER,
+    right: RCD_BORDER,
+    top: RCD_BORDER,
+    bottom: RCD_BORDER,
 };
 
 /// Neighborhood required to reconstruct an AMaZE output region.

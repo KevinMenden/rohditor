@@ -4,7 +4,6 @@ use std::time::{Duration, Instant};
 use rohditor_core::{CancellationToken, NormalizationContract};
 use rohditor_image::BayerPattern;
 use rohditor_raw::RawFrame;
-use wgpu::util::DeviceExt;
 
 use super::resources::{DEFAULT_BUDGET, MosaicLayout};
 use crate::{GpuMemoryReservations, GpuPreviewError, memory::Reservation};
@@ -257,20 +256,20 @@ impl GpuSensorProcessor {
             view_formats: &[],
         });
         let input_view = input.create_view(&wgpu::TextureViewDescriptor::default());
-        let black_levels = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("RAW black level pattern"),
-                contents: bytemuck::cast_slice(&contract.black_levels().values),
-                usage: wgpu::BufferUsages::STORAGE,
+        let level_buffer = |label, values: &[f32]| {
+            // Mapping at creation can panic on device loss before error scopes drain.
+            let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: std::mem::size_of_val(values) as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
             });
-        let white_levels = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("RAW white level table"),
-                contents: bytemuck::cast_slice(contract.white_levels()),
-                usage: wgpu::BufferUsages::STORAGE,
-            });
+            self.queue
+                .write_buffer(&buffer, 0, bytemuck::cast_slice(values));
+            buffer
+        };
+        let black_levels = level_buffer("RAW black level pattern", &contract.black_levels().values);
+        let white_levels = level_buffer("RAW white level table", contract.white_levels());
         let parameters = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("RAW normalization tile parameters"),
             size: (PARAMETER_WORDS * std::mem::size_of::<u32>()) as u64,
@@ -503,6 +502,8 @@ fn level_bytes(contract: &NormalizationContract) -> Result<u64, GpuPreviewError>
         .ok_or_else(|| invalid("RAW level table count overflowed"))?;
     let bytes = values
         .checked_mul(std::mem::size_of::<f32>())
+        // Level buffers and their pending queue upload coexist until submission.
+        .and_then(|value| value.checked_mul(2))
         .and_then(|value| value.checked_add(PARAMETER_WORDS * std::mem::size_of::<u32>()))
         .ok_or_else(|| invalid("RAW level table byte count overflowed"))?;
     u64::try_from(bytes).map_err(|_| invalid("RAW level table byte count exceeds u64"))

@@ -577,6 +577,9 @@ impl PreviewCache {
         rohditor_gpu::GpuPreviewError,
     > {
         self.workspace = CpuPreviewWorkspace::default();
+        self.reconstructed = None;
+        self.demosaiced = None;
+        self.adjusted = None;
         self.spatial
             .prepare_gpu(pipeline, frame, recipe, options, keys, cancellation)
     }
@@ -597,6 +600,9 @@ impl PreviewCache {
         rohditor_gpu::GpuPreviewError,
     > {
         self.workspace = CpuPreviewWorkspace::default();
+        self.reconstructed = None;
+        self.demosaiced = None;
+        self.adjusted = None;
         self.spatial
             .prepare_gpu_full(pipeline, frame, recipe, options, keys, cancellation)
     }
@@ -610,6 +616,10 @@ impl PreviewCache {
     ) -> Result<rohditor_gpu::GpuPreviewFrame, rohditor_gpu::GpuPreviewError> {
         self.spatial
             .render_gpu_full(source, recipe, output_policy, cancellation)
+    }
+
+    pub(crate) fn select_cpu(&mut self) {
+        self.spatial.release_gpu_images();
     }
 
     pub(crate) fn insert_reconstructed(
@@ -866,7 +876,7 @@ mod tests {
         assert_ne!(creative.adjusted, on.adjusted);
     }
 
-    fn frame() -> RawFrame {
+    pub(super) fn frame() -> RawFrame {
         RawFrame {
             info: RawFileInfo {
                 format: "fixture".to_owned(),

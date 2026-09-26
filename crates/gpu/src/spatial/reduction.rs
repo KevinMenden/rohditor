@@ -5,7 +5,6 @@ use rohditor_core::{
     AreaReductionAxis, CancellationToken, DistortionModel, OpticsExecution,
     SpatialCompletionDescription, TcaModel, VignettingModel,
 };
-use wgpu::util::DeviceExt;
 
 use super::{GpuCapturedSource, GpuSpatialPreview, check_cancel, invalid};
 use crate::{GpuPreviewError, memory::Reservation};
@@ -45,11 +44,11 @@ impl super::GpuSpatialProcessor {
                         .into(),
                 });
             }
+            let transient =
+                Reservation::try_new(estimated_bytes.saturating_sub(output_bytes), self.budget)?;
             self.device.push_error_scope(wgpu::ErrorFilter::Internal);
             self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
             self.device.push_error_scope(wgpu::ErrorFilter::Validation);
-            let transient =
-                Reservation::try_new(estimated_bytes.saturating_sub(output_bytes), self.budget)?;
             let result = self.materialize_preview_inner(
                 source,
                 description,
@@ -78,6 +77,8 @@ impl super::GpuSpatialProcessor {
         let estimated_bytes = output_bytes
             .checked_add(scratch_bytes)
             .and_then(|value| value.checked_add(table_bytes))
+            // The device tables and their queue-upload staging coexist.
+            .and_then(|value| value.checked_add(table_bytes))
             .and_then(|value| value.checked_add(64 * 1024))
             .ok_or_else(|| invalid("spatial allocation estimate overflowed"))?;
         if source
@@ -105,11 +106,11 @@ impl super::GpuSpatialProcessor {
             });
         }
 
+        let transient =
+            Reservation::try_new(estimated_bytes.saturating_sub(output_bytes), self.budget)?;
         self.device.push_error_scope(wgpu::ErrorFilter::Internal);
         self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
         self.device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let transient =
-            Reservation::try_new(estimated_bytes.saturating_sub(output_bytes), self.budget)?;
         let result = self.reduce_preview_inner(
             source,
             description,
@@ -158,23 +159,27 @@ impl super::GpuSpatialProcessor {
             view_formats: &[],
         });
         let output_view = output.create_view(&wgpu::TextureViewDescriptor::default());
-        let optics = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let optics = crate::memory::initialized_buffer(
+            &self.device,
+            &self.queue,
+            &wgpu::util::BufferInitDescriptor {
                 label: Some("direct materialization optics parameters"),
                 contents: bytemuck::cast_slice(&pack_optics_parameters(
                     &source.planes.layout,
                     description.optics().execution(),
                 )),
                 usage: wgpu::BufferUsages::UNIFORM,
-            });
-        let failure = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            },
+        );
+        let failure = crate::memory::initialized_buffer(
+            &self.device,
+            &self.queue,
+            &wgpu::util::BufferInitDescriptor {
                 label: Some("direct materialization failure flag"),
                 contents: &[0; 4],
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            });
+            },
+        );
         let failure_staging = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("direct materialization failure readback"),
             size: 4,
@@ -286,31 +291,37 @@ impl super::GpuSpatialProcessor {
         });
         let horizontal = axis_buffers(
             &self.device,
+            &self.queue,
             description.area_reduction().horizontal(),
             "horizontal",
         )?;
         let vertical = axis_buffers(
             &self.device,
+            &self.queue,
             description.area_reduction().vertical(),
             "vertical",
         )?;
-        let optics_parameters = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let optics_parameters = crate::memory::initialized_buffer(
+            &self.device,
+            &self.queue,
+            &wgpu::util::BufferInitDescriptor {
                 label: Some("GPU optics execution parameters"),
                 contents: bytemuck::cast_slice(&pack_optics_parameters(
                     &source.planes.layout,
                     description.optics().execution(),
                 )),
                 usage: wgpu::BufferUsages::UNIFORM,
-            });
-        let failure = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            },
+        );
+        let failure = crate::memory::initialized_buffer(
+            &self.device,
+            &self.queue,
+            &wgpu::util::BufferInitDescriptor {
                 label: Some("GPU spatial failure flag"),
                 contents: &[0; 4],
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            });
+            },
+        );
         let failure_staging = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("GPU spatial failure readback"),
             size: 4,
@@ -523,6 +534,7 @@ struct AxisBuffers {
 
 fn axis_buffers(
     device: &wgpu::Device,
+    queue: &wgpu::Queue,
     axis: &AreaReductionAxis,
     label: &str,
 ) -> Result<AxisBuffers, GpuPreviewError> {
@@ -542,16 +554,24 @@ fn axis_buffers(
         })
         .collect::<Result<_, GpuPreviewError>>()?;
     Ok(AxisBuffers {
-        samples: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some(&format!("{label} area samples")),
-            contents: bytemuck::cast_slice(&samples),
-            usage: wgpu::BufferUsages::STORAGE,
-        }),
-        weights: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some(&format!("{label} area weights")),
-            contents: bytemuck::cast_slice(axis.weights()),
-            usage: wgpu::BufferUsages::STORAGE,
-        }),
+        samples: crate::memory::initialized_buffer(
+            device,
+            queue,
+            &wgpu::util::BufferInitDescriptor {
+                label: Some(&format!("{label} area samples")),
+                contents: bytemuck::cast_slice(&samples),
+                usage: wgpu::BufferUsages::STORAGE,
+            },
+        ),
+        weights: crate::memory::initialized_buffer(
+            device,
+            queue,
+            &wgpu::util::BufferInitDescriptor {
+                label: Some(&format!("{label} area weights")),
+                contents: bytemuck::cast_slice(axis.weights()),
+                usage: wgpu::BufferUsages::STORAGE,
+            },
+        ),
     })
 }
 

@@ -34,6 +34,8 @@ pub(super) struct SpatialCache {
     source: Option<(PreCaptureKey, DemosaicedCameraSource)>,
     captured: Option<(CaptureKey, CapturedCameraSource)>,
     gpu_captured: Option<(CaptureKey, GpuCapturedSource)>,
+    sensor_source: Option<(CaptureKey, rohditor_gpu::GpuDevelopedSource)>,
+    sensor: Option<rohditor_gpu::GpuSensorProcessor>,
     gpu: Option<GpuSpatialProcessor>,
     gpu_display: Option<GpuPreviewProcessor>,
     device: Option<(wgpu::Device, wgpu::Queue)>,
@@ -57,6 +59,7 @@ impl SpatialCache {
         target_format: wgpu::TextureFormat,
     ) {
         self.gpu = None;
+        self.sensor = None;
         self.gpu_display = None;
         self.device = Some((device, queue));
         self.display = Some((adapter, target_format));
@@ -67,6 +70,13 @@ impl SpatialCache {
         self.source = None;
         self.captured = None;
         self.gpu_captured = None;
+        self.sensor_source = None;
+        self.recovery = None;
+    }
+    pub fn release_gpu_images(&mut self) {
+        self.gpu_captured = None;
+        self.sensor_source = None;
+        self.gpu_display = None;
         self.recovery = None;
     }
     pub fn resident_bytes(&self) -> usize {
@@ -91,6 +101,7 @@ impl SpatialCache {
         // images even when the upstream camera-source key is unchanged.
         self.gpu_captured = None;
         self.gpu = None;
+        self.sensor_source = None;
         let key = PreCaptureKey {
             decoded: keys.decoded.clone(),
             crop: options.render.raw_crop_policy,
@@ -247,6 +258,33 @@ impl SpatialCache {
             profile: camera_profile_key(&recipe.color.camera_profile),
             version: keys.reconstructed.reconstruction_version,
         };
+        let sensor_result = self.prepare_sensor(
+            cpu,
+            frame,
+            recipe,
+            options,
+            keys,
+            key.clone(),
+            cancellation,
+            full_resolution,
+        );
+        let sensor_failure = match sensor_result {
+            Ok(result) => {
+                self.recovery = None;
+                return Ok(result);
+            }
+            Err(GpuPreviewError::Cancelled) => return Err(GpuPreviewError::Cancelled),
+            Err(error) => {
+                self.sensor_source = None;
+                self.sensor = None;
+                if !matches!(error, GpuPreviewError::UnsupportedEdits { .. }) {
+                    self.gpu = None;
+                    self.gpu_display = None;
+                }
+                tracing::warn!(%error, "GPU sensor development unavailable; using CPU sensor with GPU spatial/color processing");
+                Some(error.to_string())
+            }
+        };
         if self
             .source
             .as_ref()
@@ -348,8 +386,126 @@ impl SpatialCache {
         metrics.estimated_gpu_bytes = metrics
             .estimated_gpu_bytes
             .max(source_metrics.estimated_gpu_bytes);
-        self.recovery = None;
+        self.recovery = sensor_failure;
         Ok((prepared, metrics))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_sensor(
+        &mut self,
+        cpu: &CpuPipeline,
+        frame: &RawFrame,
+        recipe: &EditRecipe,
+        options: PreviewOptions,
+        keys: &PreviewCacheKeys,
+        key: PreCaptureKey,
+        cancellation: &CancellationToken,
+        full_resolution: bool,
+    ) -> Result<(PreparedSpatial, SpatialMetrics), GpuPreviewError> {
+        let metadata =
+            rohditor_core::SensorCameraMetadata::new(frame, recipe, options).map_err(gpu_error)?;
+        if !rohditor_gpu::GpuSensorProcessor::supports(metadata.sensor()) {
+            return Err(GpuPreviewError::UnsupportedEdits {
+                reason: format!(
+                    "GPU sensor {} / {} is unavailable",
+                    metadata.sensor().highlight_execution().stable_name(),
+                    metadata.sensor().demosaic().stable_name()
+                ),
+            });
+        }
+        let contract = metadata.capture_contract().map_err(gpu_error)?;
+        let key = CaptureKey {
+            source: key,
+            settings: keys.reconstructed.capture_sharpening,
+            ceilings: contract.ceilings().map(f32::to_bits),
+            gpu: true,
+        };
+        if self
+            .sensor_source
+            .as_ref()
+            .is_some_and(|(stored, _)| stored != &key)
+        {
+            self.sensor_source = None;
+        }
+        self.source = None;
+        self.captured = None;
+        self.gpu_captured = None;
+        let (device, queue) = self
+            .device
+            .as_ref()
+            .ok_or_else(|| GpuPreviewError::Unsupported {
+                reason: "GPU sensor device unavailable".into(),
+            })?;
+        if self.sensor.is_none() {
+            let (adapter, _) =
+                self.display
+                    .as_ref()
+                    .ok_or_else(|| GpuPreviewError::Unsupported {
+                        reason: "GPU sensor adapter unavailable".into(),
+                    })?;
+            self.sensor = Some(rohditor_gpu::GpuSensorProcessor::new(
+                adapter, device, queue,
+            )?);
+        }
+        if self.gpu.is_none() {
+            self.gpu = Some(GpuSpatialProcessor::new(device, queue)?);
+        }
+        let mut metrics = SpatialMetrics {
+            sensor_gpu: true,
+            ..Default::default()
+        };
+        let cached_description = match self
+            .sensor_source
+            .as_ref()
+            .map(|(_, source)| source.describe(cpu, frame, recipe, options, cancellation))
+        {
+            Some(Ok(description)) => Some(description),
+            Some(Err(GpuPreviewError::BaseMismatch { .. })) => {
+                self.sensor_source = None;
+                None
+            }
+            Some(Err(error)) => return Err(error),
+            None => None,
+        };
+        let description =
+            if let Some(description) = cached_description {
+                description
+            } else {
+                let (source, preparation) = self
+                    .sensor
+                    .as_ref()
+                    .expect("sensor initialized")
+                    .develop(cpu, frame, recipe, options, cancellation)?;
+                metrics = preparation;
+                let description = source.initial_description().clone();
+                self.sensor_source = Some((key, source));
+                description
+            };
+        let resident = self
+            .sensor_source
+            .as_ref()
+            .expect("sensor source initialized")
+            .1
+            .captured();
+        let spatial = self.gpu.as_ref().expect("spatial initialized");
+        if full_resolution {
+            metrics.estimated_gpu_bytes =
+                metrics.estimated_gpu_bytes.max(resident.estimated_bytes());
+            Ok((
+                PreparedSpatial::Full(spatial.full_resolution_source(resident, description)?),
+                metrics,
+            ))
+        } else {
+            let (preview, reduction) =
+                spatial.reduce_preview(resident, description, cancellation)?;
+            metrics.spatial = reduction.spatial;
+            metrics.readback_bytes += reduction.readback_bytes;
+            metrics.submissions += reduction.submissions;
+            metrics.estimated_gpu_bytes = metrics
+                .estimated_gpu_bytes
+                .max(reduction.estimated_gpu_bytes);
+            Ok((PreparedSpatial::Preview(preview), metrics))
+        }
     }
 
     fn record_gpu_result<T>(&mut self, result: &Result<T, GpuPreviewError>) {
@@ -358,6 +514,8 @@ impl SpatialCache {
         {
             self.recovery = Some(error.to_string());
             self.gpu_captured = None;
+            self.sensor_source = None;
+            self.sensor = None;
             self.gpu = None;
             self.gpu_display = None;
         }
@@ -401,3 +559,7 @@ mod tests {
         assert!(cache.gpu_captured.is_none());
     }
 }
+
+#[cfg(test)]
+#[path = "sensor_tests.rs"]
+mod sensor_tests;

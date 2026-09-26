@@ -90,13 +90,14 @@ fn optics_export_reads_back_only_final_integer_bands() {
             )
             .expect("resident GPU optics export");
         assert_eq!(actual.capture.readback_bytes, 0);
+        assert!(actual.sensor_gpu);
         assert_eq!(
             actual.uploaded_bytes,
-            (frame.info.width * frame.info.height * 12) as u64
+            (frame.info.width * frame.info.height * 2) as u64
         );
         assert_eq!(
             actual.readback_bytes,
-            (actual.image.width() * actual.image.height() * 12 + 4) as u64
+            (actual.image.width() * actual.image.height() * 12 + 4 + 4) as u64
         );
         let (maximum, mean) = difference(&actual.image, &expected.image);
         let (max_limit, mean_limit) = if depth == OutputBitDepth::Eight {
@@ -108,6 +109,68 @@ fn optics_export_reads_back_only_final_integer_bands() {
             maximum <= max_limit && mean <= mean_limit,
             "{depth:?}: max={maximum}, mean={mean}"
         );
+    }
+}
+
+#[test]
+#[ignore = "requires Vulkan; RCD sensor path through full-resolution integer export"]
+fn rcd_export_matches_cpu_with_capture_and_both_gamut_policies() {
+    let _guard = gpu_test_guard();
+    let mut gpu = processor(false).expect("RCD export device");
+    let cpu = CpuPipeline::default();
+    let mut frame = synthetic_frame(Orientation::Normal);
+    frame.info.width = 38;
+    frame.info.height = 142;
+    frame.row_stride = 38;
+    frame.mosaic = (0..38 * 142)
+        .map(|i| ((i * 137 + (i / 38) * 503) % 65536) as u16)
+        .collect::<Vec<_>>()
+        .into();
+    let mut recipe = neutral_recipe();
+    recipe.geometry.crop = Some(rohditor_edit::NormalizedCropRect {
+        left: 0.1,
+        top: 0.1,
+        right: 0.9,
+        bottom: 0.9,
+    });
+    let token = CancellationToken::new();
+    for capture_on in [false, true] {
+        recipe.capture_sharpening.enabled = capture_on;
+        for output_policy in [OutputPolicy::ClipToSrgb, OutputPolicy::ChromaCompressToSrgb] {
+            let options = RenderOptions {
+                demosaic: rohditor_demosaic::DemosaicAlgorithm::Rcd,
+                output_policy,
+                ..Default::default()
+            };
+            for depth in [OutputBitDepth::Eight, OutputBitDepth::Sixteen] {
+                let expected = cpu
+                    .render_export(&frame, &recipe, options, depth, DitherMode::None)
+                    .expect("CPU RCD export");
+                let actual = gpu
+                    .render(
+                        &cpu,
+                        &frame,
+                        &recipe,
+                        options,
+                        depth,
+                        DitherMode::None,
+                        &token,
+                    )
+                    .expect("GPU RCD export");
+                assert!(actual.sensor_gpu);
+                assert_eq!(actual.capture.readback_bytes, 0);
+                let (max, mean) = difference(&actual.image, &expected.image);
+                let (max_limit, mean_limit) = if depth == OutputBitDepth::Eight {
+                    (2, 0.1)
+                } else {
+                    (16, 1.0)
+                };
+                assert!(
+                    max <= max_limit && mean <= mean_limit,
+                    "RCD capture={capture_on} {output_policy:?} {depth:?}: max={max}, mean={mean}"
+                );
+            }
+        }
     }
 }
 
@@ -170,6 +233,24 @@ fn capture_bridge_precedes_reduction_and_matches_export() {
             right: 0.9,
             bottom: 0.85,
         });
+        if !matches!(
+            method,
+            rohditor_edit::HighlightMethod::Off | rohditor_edit::HighlightMethod::Clip
+        ) {
+            assert!(matches!(
+                gpu.render(
+                    &cpu,
+                    &frame,
+                    &recipe,
+                    RenderOptions::default(),
+                    OutputBitDepth::Eight,
+                    DitherMode::None,
+                    &token
+                ),
+                Err(GpuPreviewError::UnsupportedEdits { .. })
+            ));
+            continue;
+        }
         for output_policy in [OutputPolicy::ClipToSrgb, OutputPolicy::ChromaCompressToSrgb] {
             let options = RenderOptions {
                 output_policy,
@@ -359,22 +440,44 @@ fn difference(a: &ExportImage, b: &ExportImage) -> (u32, f64) {
 #[test]
 #[ignore = "requires private RAW corpus and hardware Vulkan GPU"]
 fn private_full_resolution_export_parity() {
-    private_export_parity(true, false);
+    private_export_parity(
+        true,
+        false,
+        rohditor_demosaic::DemosaicAlgorithm::MalvarHeCutler,
+    );
 }
 
 #[test]
 #[ignore = "private full-resolution software Vulkan check; not hardware qualification"]
 fn private_full_resolution_export_software_structure() {
-    private_export_parity(false, false);
+    private_export_parity(
+        false,
+        false,
+        rohditor_demosaic::DemosaicAlgorithm::MalvarHeCutler,
+    );
 }
 
 #[test]
 #[ignore = "private full-resolution capture plus color export; software is not hardware qualification"]
 fn private_full_resolution_capture_export_software_structure() {
-    private_export_parity(false, true);
+    private_export_parity(
+        false,
+        true,
+        rohditor_demosaic::DemosaicAlgorithm::MalvarHeCutler,
+    );
 }
 
-fn private_export_parity(hardware: bool, capture: bool) {
+#[test]
+#[ignore = "private 24 MP Sony RAW and Vulkan; RCD rendered output parity on software"]
+fn private_rcd_full_resolution_export_software_structure() {
+    private_export_parity(false, false, rohditor_demosaic::DemosaicAlgorithm::Rcd);
+}
+
+fn private_export_parity(
+    hardware: bool,
+    capture: bool,
+    algorithm: rohditor_demosaic::DemosaicAlgorithm,
+) {
     let _guard = gpu_test_guard();
     let Some(mut gpu) = processor(hardware) else {
         return;
@@ -404,33 +507,13 @@ fn private_export_parity(hardware: bool, capture: bool) {
             .prepare_export_source(
                 &frame,
                 &recipe,
-                RenderOptions::default(),
+                RenderOptions {
+                    demosaic: algorithm,
+                    ..Default::default()
+                },
                 &CancellationToken::new(),
             )
             .expect("export qualification fixture");
-        let gpu_prepared = if capture {
-            let token = CancellationToken::new();
-            let source = cpu
-                .prepare_camera_source(
-                    &frame,
-                    &recipe,
-                    rohditor_core::PreviewOptions {
-                        max_long_edge: usize::MAX,
-                        ..Default::default()
-                    },
-                    &token,
-                )
-                .expect("GPU capture camera source");
-            let (captured, _) = gpu
-                .capture_source(source, &token)
-                .expect("full-resolution GPU capture");
-            Some(
-                cpu.complete_camera_source(captured, &token)
-                    .expect("GPU capture completion"),
-            )
-        } else {
-            None
-        };
         for policy in [OutputPolicy::ClipToSrgb, OutputPolicy::ChromaCompressToSrgb] {
             let base = cpu
                 .prepare_preview_base_from_reconstruction(&prepared, &recipe)
@@ -440,15 +523,22 @@ fn private_export_parity(hardware: bool, capture: bool) {
             apply_adjustments(&mut linear, &recipe).expect("export qualification fixture");
             for depth in [OutputBitDepth::Eight, OutputBitDepth::Sixteen] {
                 let actual = gpu
-                    .render_prepared(
-                        gpu_prepared.as_ref().unwrap_or(&prepared),
+                    .render(
+                        &cpu,
+                        &frame,
                         &recipe,
-                        policy,
+                        RenderOptions {
+                            demosaic: algorithm,
+                            output_policy: policy,
+                            ..Default::default()
+                        },
                         depth,
                         DitherMode::Ordered8x8,
                         &CancellationToken::new(),
                     )
                     .expect("export qualification fixture");
+                assert!(actual.sensor_gpu);
+                assert_eq!(actual.uploaded_bytes, 6000 * 4000 * 2);
                 let reference = match depth {
                     OutputBitDepth::Eight => ExportImage::Rgb8(
                         render_display_srgb8_dithered(
@@ -469,9 +559,31 @@ fn private_export_parity(hardware: bool, capture: bool) {
                         .expect("export qualification fixture"),
                     ),
                 };
+                if algorithm == rohditor_demosaic::DemosaicAlgorithm::Rcd
+                    && depth == OutputBitDepth::Eight
+                    && policy == OutputPolicy::ClipToSrgb
+                    && let Some(destination) = std::env::var_os("ROHDITOR_GPU_RCD_ARTIFACTS")
+                {
+                    let destination = std::path::PathBuf::from(destination);
+                    std::fs::create_dir_all(&destination).expect("RCD review artifact directory");
+                    for (label, output) in [("cpu", &reference), ("gpu", &actual.image)] {
+                        let ExportImage::Rgb8(image) = output else {
+                            unreachable!()
+                        };
+                        assert_eq!(image.row_stride(), image.width() * 3);
+                        image::save_buffer(
+                            destination.join(format!("{name}-{label}-rcd.png")),
+                            image.data(),
+                            image.width() as u32,
+                            image.height() as u32,
+                            image::ColorType::Rgb8,
+                        )
+                        .expect("RCD matched review image");
+                    }
+                }
                 let (max, mean) = difference(&actual.image, &reference);
                 eprintln!(
-                    "export {name} {}x{} {depth:?} {policy:?}: max={max} mean={mean:.5}, prepare={:?} upload={:?} color/readback={:?} gpu_bytes={} upload_bytes={} readback_bytes={} bands={}",
+                    "export {name} {algorithm:?} {}x{} {depth:?} {policy:?}: max={max} mean={mean:.5}, prepare={:?} upload={:?} color/readback={:?} gpu_bytes={} upload_bytes={} readback_bytes={} bands={}",
                     actual.image.width(),
                     actual.image.height(),
                     actual.preparation.total,

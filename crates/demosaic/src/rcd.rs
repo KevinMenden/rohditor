@@ -5,8 +5,11 @@
 //! bilinear reconstruction for the pixels where a complete RCD neighborhood
 //! is not available.
 
+use super::rcd_geometry::{
+    RCD_BORDER as BORDER, RCD_MIN_DIMENSION, RCD_TILE_SIZE as TILE_SIZE, rcd_tiles,
+};
 use super::{
-    CancellationCheck, DemosaicError, RCD_HALO, WhiteBalanceGains, bilinear, checkpoint,
+    CancellationCheck, DemosaicError, WhiteBalanceGains, bilinear, checkpoint,
     require_finite_output,
 };
 use rohditor_image::{BayerPattern, MosaicImage, allocate_zeroed_f32};
@@ -21,9 +24,6 @@ use super::rcd_stages::{
 // See https://github.com/darktable-org/darktable/blob/master/src/iop/demosaicing/rcd.c
 // and https://github.com/RawTherapee/RawTherapee/blob/dev/rtengine/rcd_demosaic.cc.
 
-pub(super) const BORDER: usize = RCD_HALO.left;
-pub(super) const TILE_SIZE: usize = 194;
-pub(super) const TILE_VALID: usize = TILE_SIZE - 2 * BORDER;
 pub(super) const PLANE_ELEMENTS: usize = TILE_SIZE * TILE_SIZE;
 pub(super) const HALF_PLANE_ELEMENTS: usize = PLANE_ELEMENTS / 2;
 pub(super) const EPSILON: f32 = 1.0e-5;
@@ -40,76 +40,40 @@ pub(super) fn reconstruct(
     // not need special-case indexing in the directional stages.
     bilinear::reconstruct(mosaic, gains, cancellation, row_stride, output)?;
 
-    if mosaic.width() <= 2 * BORDER + 4 || mosaic.height() <= 2 * BORDER + 4 {
-        return Ok(());
-    }
-
-    let horizontal_tiles = tile_count(mosaic.width());
-    let vertical_tiles = tile_count(mosaic.height());
-    let mut scratch = RcdScratch::new()?;
-
-    for tile_y in 0..vertical_tiles {
-        let origin_y = tile_y * TILE_VALID;
-        let tile_height = TILE_SIZE.min(mosaic.height() - origin_y);
-        for tile_x in 0..horizontal_tiles {
-            checkpoint(cancellation)?;
-            let origin_x = tile_x * TILE_VALID;
-            let tile_width = TILE_SIZE.min(mosaic.width() - origin_x);
-
-            // A small last tile is still covered by the bilinear base image.
-            // Keeping it out of the RCD stages avoids partial-tile state being
-            // mistaken for a complete directional neighborhood.
-            if tile_width <= 2 * BORDER + 4 || tile_height <= 2 * BORDER + 4 {
-                continue;
-            }
-
-            scratch.clear();
-            let tile = RcdTile {
-                origin_x,
-                origin_y,
-                width: tile_width,
-                height: tile_height,
-                pattern: mosaic.pattern().shifted(origin_x, origin_y),
-            };
-            populate(&mut scratch, mosaic, tile, cancellation)?;
-            find_directions(&mut scratch, tile.width, tile.height, cancellation)?;
-            calculate_low_pass(
-                &mut scratch,
-                tile.pattern,
-                tile.width,
-                tile.height,
-                cancellation,
-            )?;
-            interpolate_green(
-                &mut scratch,
-                tile.pattern,
-                tile.width,
-                tile.height,
-                cancellation,
-            )?;
-            interpolate_red_blue(
-                &mut scratch,
-                tile.pattern,
-                tile.width,
-                tile.height,
-                cancellation,
-            )?;
-            write_tile(
-                &scratch,
-                mosaic,
-                gains,
-                tile,
-                row_stride,
-                output,
-                cancellation,
-            )?;
-        }
+    let mut scratch = if mosaic.width() > RCD_MIN_DIMENSION && mosaic.height() > RCD_MIN_DIMENSION {
+        Some(RcdScratch::new()?)
+    } else {
+        None
+    };
+    for geometry in rcd_tiles(mosaic.width(), mosaic.height()) {
+        checkpoint(cancellation)?;
+        let scratch = scratch.as_mut().expect("eligible RCD tile has scratch");
+        scratch.clear();
+        let tile = RcdTile {
+            origin_x: geometry.origin_x,
+            origin_y: geometry.origin_y,
+            width: geometry.width,
+            height: geometry.height,
+            pattern: mosaic
+                .pattern()
+                .shifted(geometry.origin_x, geometry.origin_y),
+        };
+        populate(scratch, mosaic, tile, cancellation)?;
+        find_directions(scratch, tile.width, tile.height, cancellation)?;
+        calculate_low_pass(scratch, tile.pattern, tile.width, tile.height, cancellation)?;
+        interpolate_green(scratch, tile.pattern, tile.width, tile.height, cancellation)?;
+        interpolate_red_blue(scratch, tile.pattern, tile.width, tile.height, cancellation)?;
+        write_tile(
+            scratch,
+            mosaic,
+            gains,
+            tile,
+            row_stride,
+            output,
+            cancellation,
+        )?;
     }
     Ok(())
-}
-
-fn tile_count(length: usize) -> usize {
-    1 + (length - 2 * BORDER - 1) / TILE_VALID
 }
 
 #[derive(Clone, Copy)]
@@ -228,4 +192,95 @@ fn write_tile(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod stage_fixtures {
+    use super::super::rcd_stages::{
+        calculate_diagonal_directions, calculate_diagonal_high_pass, interpolate_at_green,
+        interpolate_opposite_color,
+    };
+    use super::*;
+
+    #[test]
+    fn asymmetric_signed_partial_tile_stage_snapshot() {
+        let (width, height) = (29, 31);
+        let data = (0..width * height)
+            .map(|i| {
+                let (x, y) = (i % width, i / width);
+                match (x + 3 * y) % 11 {
+                    0 => -0.0,
+                    1 => 1.0e-6,
+                    2 => -1.0e-6,
+                    3 => 1.5,
+                    4 => -0.2,
+                    5 => 2.0,
+                    _ => ((x * 37 + y * 19) % 101) as f32 / 63.0 - 0.4,
+                }
+            })
+            .collect();
+        let mosaic = MosaicImage::new(width, height, width, BayerPattern::Rggb, data)
+            .expect("valid signed RCD fixture");
+        let geometry = rcd_tiles(width, height)
+            .next()
+            .expect("eligible partial tile");
+        let tile = RcdTile {
+            origin_x: geometry.origin_x,
+            origin_y: geometry.origin_y,
+            width: geometry.width,
+            height: geometry.height,
+            pattern: mosaic.pattern(),
+        };
+        let mut scratch = RcdScratch::new().expect("RCD scratch allocation");
+        let cancellation = || false;
+        let red = 10 * TILE_SIZE + 10;
+        let green = 10 * TILE_SIZE + 11;
+        populate(&mut scratch, &mosaic, tile, &cancellation).expect("populate");
+        assert_eq!(scratch.rgb[0][green], *mosaic.sample(11, 10));
+        assert_eq!(scratch.rgb[1][green], *mosaic.sample(11, 10));
+        find_directions(&mut scratch, width, height, &cancellation).expect("directions");
+        let vh = scratch.vh_direction[red];
+        calculate_low_pass(&mut scratch, tile.pattern, width, height, &cancellation)
+            .expect("low pass");
+        let low = scratch.pq_direction[red / 2];
+        interpolate_green(&mut scratch, tile.pattern, width, height, &cancellation)
+            .expect("green interpolation");
+        let interpolated_green = scratch.rgb[1][red];
+        calculate_diagonal_high_pass(&mut scratch, width, height, &cancellation)
+            .expect("diagonal high pass");
+        let (p, q) = (
+            scratch.p_color_difference[green / 2],
+            scratch.q_color_difference[green / 2],
+        );
+        calculate_diagonal_directions(&mut scratch, tile.pattern, width, height, &cancellation)
+            .expect("diagonal directions");
+        let pq = scratch.pq_direction[red / 2];
+        interpolate_opposite_color(&mut scratch, tile.pattern, width, height, &cancellation)
+            .expect("opposite color");
+        let opposite = scratch.rgb[2][red];
+        interpolate_at_green(&mut scratch, tile.pattern, width, height, &cancellation)
+            .expect("green-site color");
+        let (at_green_r, at_green_b) = (scratch.rgb[0][green], scratch.rgb[2][green]);
+        let probes = [
+            vh,
+            low,
+            interpolated_green,
+            p,
+            q,
+            pq,
+            opposite,
+            at_green_r,
+            at_green_b,
+        ];
+        let frozen = [
+            0.51112366, 2.155159, 0.60279745, 1.1650273, 63.11414, 0.20751585, 0.9695636,
+            0.94769496, 1.0202518,
+        ];
+        for (stage, (&actual, &expected)) in probes.iter().zip(frozen.iter()).enumerate() {
+            assert!(
+                (actual - expected).abs() <= 1e-6 + 1e-6 * expected.abs(),
+                "CPU RCD stage probe {stage}: {actual} != {expected}"
+            );
+        }
+    }
 }

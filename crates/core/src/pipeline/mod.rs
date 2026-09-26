@@ -11,7 +11,7 @@ mod prepare;
 mod render;
 pub(crate) mod sensor;
 mod types;
-pub use orchestration::{CapturedCameraSource, DemosaicedCameraSource};
+pub use orchestration::{CapturedCameraSource, DemosaicedCameraSource, SensorCameraMetadata};
 pub use sensor::{NormalizationContract, SensorCrop, SensorDevelopmentDescription};
 
 pub use memory::{CPU_WORKING_SET_LIMIT_BYTES, MemoryEstimate};

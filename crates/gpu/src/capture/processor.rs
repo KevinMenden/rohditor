@@ -19,6 +19,7 @@ impl GpuCaptureProcessor {
             resident,
             scatter,
             cancellation,
+            None,
             |buffer, x0, y0, width, height| {
                 packed.clear();
                 for y in y0..y0 + height {
@@ -47,13 +48,17 @@ impl GpuCaptureProcessor {
         resident: &crate::spatial::source::ResidentCameraPlanes,
         scatter: &crate::spatial::CaptureScatter,
         cancellation: &CancellationToken,
+        reservation: Option<crate::memory::Reservation>,
         mut fill: impl FnMut(&wgpu::Buffer, usize, usize, usize, usize) -> Result<u64, GpuPreviewError>,
     ) -> Result<CaptureMetrics, GpuPreviewError> {
         let started = Instant::now();
-        let _reservation = crate::memory::Reservation::try_new(
-            plan.gpu_bytes,
-            crate::spatial::resources::DEFAULT_BUDGET,
-        )?;
+        let _reservation = match reservation {
+            Some(held) => held,
+            None => crate::memory::Reservation::try_new(
+                plan.gpu_bytes,
+                crate::spatial::resources::DEFAULT_BUDGET,
+            )?,
+        };
         let resources = Resources::new_resident(&self.device, &self.queue, plan.pixels, contract);
         let halo = contract.halo();
         let mut metrics = CaptureMetrics {
@@ -145,6 +150,7 @@ impl GpuCaptureProcessor {
                 );
                 scatter.encode(
                     &self.device,
+                    &self.queue,
                     &mut encoder,
                     &resources.rgb,
                     resident,
@@ -194,7 +200,127 @@ impl GpuCaptureProcessor {
             resident,
             &scatter,
             cancellation,
+            None,
             fill,
+        )
+    }
+
+    /// Hold capture's bounded scratch before the preceding RCD work begins.
+    pub(crate) fn reserve_generated(
+        &self,
+        contract: &CaptureSharpeningContract,
+        dimensions: (usize, usize),
+    ) -> Result<crate::memory::Reservation, GpuPreviewError> {
+        let plan = TilePlan::new_generated(
+            dimensions.0,
+            dimensions.1,
+            contract.halo(),
+            self.budget,
+            &self.device.limits(),
+            self.maximum_tile_edge,
+        )?;
+        crate::memory::Reservation::try_new(
+            plan.gpu_bytes,
+            crate::spatial::resources::DEFAULT_BUDGET,
+        )
+    }
+
+    /// Load each halo-expanded input tile from resident demosaic planes.
+    /// No camera RGB crosses the CPU boundary.
+    pub(crate) fn process_resident_from_resident(
+        &self,
+        contract: &CaptureSharpeningContract,
+        source: &crate::spatial::source::ResidentCameraPlanes,
+        destination: &crate::spatial::source::ResidentCameraPlanes,
+        reservation: crate::memory::Reservation,
+        cancellation: &CancellationToken,
+    ) -> Result<CaptureMetrics, GpuPreviewError> {
+        let dimensions = (source.layout.width as usize, source.layout.height as usize);
+        let plan = TilePlan::new_generated(
+            dimensions.0,
+            dimensions.1,
+            contract.halo(),
+            self.budget,
+            &self.device.limits(),
+            self.maximum_tile_edge,
+        )?;
+        let shader = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("resident camera capture input"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("resident_load.wgsl").into()),
+            });
+        let pipeline = self
+            .device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("load resident capture tile"),
+                layout: None,
+                module: &shader,
+                entry_point: Some("load_resident"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        let scatter = crate::spatial::CaptureScatter::new(&self.device);
+        self.process_resident_tiles(
+            dimensions,
+            contract,
+            &plan,
+            destination,
+            &scatter,
+            cancellation,
+            Some(reservation),
+            |buffer, x, y, width, height| {
+                let layout = source.layout;
+                let words = [
+                    layout.tile_width,
+                    layout.tile_height,
+                    layout.columns,
+                    0,
+                    x as u32,
+                    y as u32,
+                    width as u32,
+                    height as u32,
+                ];
+                let uniform = crate::memory::initialized_buffer(
+                    &self.device,
+                    &self.queue,
+                    &wgpu::util::BufferInitDescriptor {
+                        label: Some("resident capture region"),
+                        contents: bytemuck::cast_slice(&words),
+                        usage: wgpu::BufferUsages::UNIFORM,
+                    },
+                );
+                let mut entries = source.sampled_entries().to_vec();
+                entries.push(wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: buffer.as_entire_binding(),
+                });
+                entries.push(wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: uniform.as_entire_binding(),
+                });
+                let bindings = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("resident capture input bindings"),
+                    layout: &pipeline.get_bind_group_layout(0),
+                    entries: &entries,
+                });
+                let mut encoder = self.encoder();
+                {
+                    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some("load resident capture input"),
+                        timestamp_writes: None,
+                    });
+                    pass.set_pipeline(&pipeline);
+                    pass.set_bind_group(0, &bindings, &[]);
+                    pass.dispatch_workgroups(
+                        (width as u32).div_ceil(8),
+                        (height as u32).div_ceil(8),
+                        1,
+                    );
+                }
+                self.submit(encoder, cancellation)?;
+                Ok(0)
+            },
         )
     }
 

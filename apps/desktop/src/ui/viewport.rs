@@ -76,6 +76,10 @@ impl PreviewSource {
         !matches!(self, Self::Embedded)
     }
 
+    pub(crate) const fn is_source_scale(self) -> bool {
+        matches!(self, Self::OneToOneCpu | Self::OneToOneGpu)
+    }
+
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Embedded => "EMBEDDED PREVIEW · DEVELOPING RAW",
@@ -132,6 +136,16 @@ impl ViewState {
         self.zoom = 1.0;
         self.pan = egui::Vec2::ZERO;
         self.show_zoom_feedback(now);
+    }
+
+    pub(crate) fn source_scale_frame_ready(
+        &mut self,
+        previous_source: Option<PreviewSource>,
+        now: f64,
+    ) {
+        if !previous_source.is_some_and(PreviewSource::is_source_scale) {
+            self.actual_size(now);
+        }
     }
 
     pub(crate) const fn is_fit(&self) -> bool {
@@ -430,6 +444,26 @@ mod tests {
         state.actual_size(4.0);
         assert!(!state.is_fit());
         assert_eq!(state.zoom_label(), "SOURCE 100%");
+    }
+
+    #[test]
+    fn source_scale_frame_resets_zoom_on_entry_and_preserves_it_on_refresh() {
+        let mut state = ViewState {
+            fit: false,
+            zoom: 0.4,
+            pan: egui::vec2(28.0, -16.0),
+            zoom_feedback_until: 0.0,
+        };
+
+        state.source_scale_frame_ready(Some(PreviewSource::HighQualityCpu), 1.0);
+        assert_eq!(state.zoom, 1.0);
+        assert_eq!(state.pan, egui::Vec2::ZERO);
+
+        state.zoom = 0.35;
+        state.pan = egui::vec2(-42.0, 19.0);
+        state.source_scale_frame_ready(Some(PreviewSource::OneToOneGpu), 2.0);
+        assert_eq!(state.zoom, 0.35);
+        assert_eq!(state.pan, egui::vec2(-42.0, 19.0));
     }
 
     #[test]

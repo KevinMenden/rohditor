@@ -18,6 +18,7 @@ pub use source::{GpuCapturedSource, GpuSpatialFullSource, GpuSpatialPreview};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SpatialMetrics {
+    pub sensor_gpu: bool,
     pub capture: crate::CaptureMetrics,
     pub upload: Duration,
     pub spatial: Duration,
@@ -245,6 +246,7 @@ impl CaptureScatter {
     pub(crate) fn encode(
         &self,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         rgb: &wgpu::Buffer,
         planes: &source::ResidentCameraPlanes,
@@ -256,7 +258,6 @@ impl CaptureScatter {
         core_width: usize,
         core_height: usize,
     ) -> Result<(), GpuPreviewError> {
-        use wgpu::util::DeviceExt;
         let layout = planes.layout;
         let words = [
             u32::try_from(input_width).map_err(|_| invalid("capture tile width exceeds u32"))?,
@@ -272,11 +273,15 @@ impl CaptureScatter {
             0,
             0,
         ];
-        let parameters = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("capture resident scatter parameters"),
-            contents: bytemuck::cast_slice(&words),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
+        let parameters = crate::memory::initialized_buffer(
+            device,
+            queue,
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("capture resident scatter parameters"),
+                contents: bytemuck::cast_slice(&words),
+                usage: wgpu::BufferUsages::UNIFORM,
+            },
+        );
         let views = planes.storage_views();
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("capture resident scatter bindings"),

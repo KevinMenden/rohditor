@@ -1,6 +1,7 @@
 //! RCD's directional reconstruction stages.
 
-use super::rcd::{EPSILON, EPSILON_SQUARED, RcdScratch, TILE_SIZE};
+use super::rcd::{EPSILON, EPSILON_SQUARED, RcdScratch};
+use super::rcd_geometry::RCD_TILE_SIZE as TILE_SIZE;
 use super::{CancellationCheck, DemosaicError, checkpoint};
 use rohditor_image::BayerPattern;
 
@@ -449,4 +450,18 @@ fn refined_direction(
 
 fn interpolate(direction: f32, horizontal: f32, vertical: f32) -> f32 {
     direction.mul_add(horizontal, (1.0 - direction) * vertical)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signed_zero_guard_and_direction_ties_are_part_of_the_rcd_contract() {
+        assert_eq!(nonzero_denominator(-0.0).to_bits(), (-EPSILON).to_bits());
+        assert_eq!(nonzero_denominator(0.0).to_bits(), EPSILON.to_bits());
+        assert_eq!(nonzero_denominator(-1.0e-6), -EPSILON);
+        assert_eq!(refined_direction(0.7, 0.3, 0.3, 0.3, 0.3), 0.7);
+        assert_eq!(refined_direction(0.5, 0.9, 0.9, 0.9, 0.9), 0.9);
+    }
 }

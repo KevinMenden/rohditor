@@ -178,10 +178,10 @@ impl ResidentCameraPlanes {
 
 /// Complete camera-native GPU source after the optional capture stage.
 pub struct GpuCapturedSource {
-    pub(super) planes: Arc<ResidentCameraPlanes>,
-    pub(super) description: SpatialCompletionDescription,
-    pub(super) capture_contract: CaptureSharpeningContract,
-    pub(super) uploaded_bytes: u64,
+    pub(crate) planes: Arc<ResidentCameraPlanes>,
+    pub(crate) description: SpatialCompletionDescription,
+    pub(crate) capture_contract: CaptureSharpeningContract,
+    pub(crate) uploaded_bytes: u64,
 }
 
 impl GpuCapturedSource {

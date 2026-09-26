@@ -8,6 +8,23 @@ use crate::GpuPreviewError;
 static RESERVED: AtomicU64 = AtomicU64::new(0);
 static PEAK: AtomicU64 = AtomicU64::new(0);
 
+/// Initialize through the queue so device loss is reported by error scopes or
+/// readback, rather than panicking while mapping an invalid allocation.
+pub(crate) fn initialized_buffer(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    descriptor: &wgpu::util::BufferInitDescriptor<'_>,
+) -> wgpu::Buffer {
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: descriptor.label,
+        size: descriptor.contents.len() as u64,
+        usage: descriptor.usage | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    queue.write_buffer(&buffer, 0, descriptor.contents);
+    buffer
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct GpuMemoryReservations {
     pub current_bytes: u64,

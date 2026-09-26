@@ -1,9 +1,13 @@
 use std::time::{Duration, Instant};
 
-use rohditor_core::{CancellationToken, CaptureSharpeningContract, SensorDevelopmentDescription};
+use rohditor_core::{
+    CAPTURE_SHARPENING_ITERATIONS, CancellationToken, CaptureSharpeningContract,
+    SensorDevelopmentDescription,
+};
 use rohditor_demosaic::DemosaicAlgorithm;
 
 use super::normalize::{bayer_pattern_code, check_cancel, invalid};
+use super::rcd::RcdExecutor;
 use super::{GpuHighlightedMosaic, GpuSensorProcessor};
 use crate::spatial::{resources::ResidentLayout, source::ResidentCameraPlanes};
 use crate::{CaptureMetrics, GpuCaptureProcessor, GpuPreviewError, memory::Reservation};
@@ -48,6 +52,7 @@ pub struct DemosaicMetrics {
     pub total: Duration,
     pub capture: CaptureMetrics,
     pub tiles: usize,
+    pub submissions: u32,
     pub diagnostic_readback_bytes: u64,
     pub resident_gpu_bytes: u64,
     /// Logical mosaic, final RGB, and transient allocations, excluding driver pools.
@@ -77,6 +82,7 @@ impl GpuSensorProcessor {
         let algorithm = match description.demosaic().algorithm() {
             DemosaicAlgorithm::Bilinear => 0,
             DemosaicAlgorithm::MalvarHeCutler => 1,
+            DemosaicAlgorithm::Rcd => 2,
             other => {
                 return Err(GpuPreviewError::UnsupportedEdits {
                     reason: format!("GPU demosaic {} is not implemented", other.stable_name()),
@@ -112,23 +118,52 @@ impl GpuSensorProcessor {
         let started = Instant::now();
         let (width, height) = mosaic.dimensions();
         let limits = self.device.limits();
+        let rcd_bytes = if algorithm == 2 {
+            RcdExecutor::scratch_bytes() + 64
+        } else {
+            0
+        };
         let layout = ResidentLayout::new_generated(
             width,
             height,
             mosaic.estimated_bytes(),
-            WORK_BYTES,
+            WORK_BYTES + rcd_bytes,
             self.budget,
             &limits,
             self.maximum_tile_edge,
         )?;
         let _work = Reservation::try_new(WORK_BYTES, self.budget)?;
         let planes = ResidentCameraPlanes::with_budget(&self.device, layout, self.budget)?;
+        let rcd = if algorithm == 2 {
+            Some(RcdExecutor::new(self)?)
+        } else {
+            None
+        };
+        let captured_planes = if algorithm == 2 && capture.settings().is_active() {
+            Some(ResidentCameraPlanes::with_budget(
+                &self.device,
+                layout,
+                self.budget,
+            )?)
+        } else {
+            None
+        };
         let remaining = self
             .budget
             .checked_sub(crate::gpu_memory_reservations().current_bytes)
             .ok_or_else(|| GpuPreviewError::Unsupported {
                 reason: "sensor camera planes exceed the operation budget".into(),
             })?;
+        let mut prepared_capture = if captured_planes.is_some() {
+            let mut processor = GpuCaptureProcessor::new(&self.device, &self.queue)?;
+            processor.set_remaining_budget(remaining);
+            #[cfg(test)]
+            processor.force_maximum_tile_edge(self.maximum_tile_edge as usize);
+            let reservation = processor.reserve_generated(capture, (width, height))?;
+            Some((processor, reservation))
+        } else {
+            None
+        };
         let validation = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("demosaic finite flag"),
             size: 4,
@@ -140,60 +175,84 @@ impl GpuSensorProcessor {
             ..Default::default()
         });
         let mut metrics = DemosaicMetrics::default();
-        let mut dispatch = |region: [u32; 4], target: Option<&wgpu::Buffer>| {
-            check_cancel(cancellation)?;
-            self.dispatch_demosaic(
-                &mosaic,
-                &view,
-                &planes,
-                &validation,
-                algorithm,
-                region,
-                target,
-            );
-            self.wait(cancellation)?;
-            metrics.tiles += 1;
-            Ok::<_, GpuPreviewError>(0)
-        };
-        if capture.settings().is_active() {
-            let mut processor = GpuCaptureProcessor::new(&self.device, &self.queue)?;
-            processor.set_remaining_budget(remaining);
-            #[cfg(test)]
-            processor.force_maximum_tile_edge(self.maximum_tile_edge as usize);
-            metrics.capture = processor.process_generated_to_resident(
-                capture,
-                &planes,
-                cancellation,
-                |buffer, x, y, w, h| {
-                    dispatch([x as u32, y as u32, w as u32, h as u32], Some(buffer))
-                },
-            )?;
-        } else {
-            // Bound submission size independently of texture-array layout.
-            let edge = 512.min(
-                limits
-                    .max_compute_workgroups_per_dimension
-                    .saturating_mul(8),
-            );
-            for y in (0..layout.height).step_by(edge as usize) {
-                for x in (0..layout.width).step_by(edge as usize) {
-                    dispatch(
-                        [
-                            x,
-                            y,
-                            edge.min(layout.width - x),
-                            edge.min(layout.height - y),
-                        ],
-                        None,
-                    )?;
+        {
+            let mut dispatch = |region: [u32; 4], target: Option<&wgpu::Buffer>| {
+                check_cancel(cancellation)?;
+                self.dispatch_demosaic(
+                    &mosaic,
+                    &view,
+                    &planes,
+                    &validation,
+                    if algorithm == 2 { 0 } else { algorithm },
+                    region,
+                    target,
+                );
+                self.wait(cancellation)?;
+                metrics.tiles += 1;
+                metrics.submissions += 1;
+                Ok::<_, GpuPreviewError>(0)
+            };
+            if capture.settings().is_active() && algorithm != 2 {
+                let mut processor = GpuCaptureProcessor::new(&self.device, &self.queue)?;
+                processor.set_remaining_budget(remaining);
+                #[cfg(test)]
+                processor.force_maximum_tile_edge(self.maximum_tile_edge as usize);
+                metrics.capture = processor.process_generated_to_resident(
+                    capture,
+                    &planes,
+                    cancellation,
+                    |buffer, x, y, w, h| {
+                        dispatch([x as u32, y as u32, w as u32, h as u32], Some(buffer))
+                    },
+                )?;
+            } else {
+                // Bound submission size independently of texture-array layout.
+                let edge = 512.min(
+                    limits
+                        .max_compute_workgroups_per_dimension
+                        .saturating_mul(8),
+                );
+                for y in (0..layout.height).step_by(edge as usize) {
+                    for x in (0..layout.width).step_by(edge as usize) {
+                        dispatch(
+                            [
+                                x,
+                                y,
+                                edge.min(layout.width - x),
+                                edge.min(layout.height - y),
+                            ],
+                            None,
+                        )?;
+                    }
                 }
             }
         }
+        if let Some(rcd) = &rcd {
+            metrics.submissions +=
+                rcd.run(self, &mosaic, &view, &planes, &validation, cancellation)? as u32;
+        }
+        if let Some((processor, reservation)) = prepared_capture.take() {
+            metrics.capture = processor.process_resident_from_resident(
+                capture,
+                &planes,
+                captured_planes.as_ref().expect("reserved capture target"),
+                reservation,
+                cancellation,
+            )?;
+            metrics.submissions += metrics.capture.tiles as u32;
+        }
+        metrics.submissions +=
+            metrics.capture.tiles as u32 * (CAPTURE_SHARPENING_ITERATIONS as u32 + 2);
         self.validate_demosaic(&validation, cancellation)?;
+        metrics.submissions += 1;
         metrics.diagnostic_readback_bytes = 4;
         metrics.estimated_gpu_bytes = mosaic.estimated_bytes()
             + layout.resident_bytes
             + WORK_BYTES
+            + rcd_bytes
+            + captured_planes
+                .as_ref()
+                .map_or(0, |_| layout.resident_bytes)
             + metrics
                 .capture
                 .estimated_gpu_bytes
@@ -202,6 +261,13 @@ impl GpuSensorProcessor {
         drop(mosaic);
         metrics.resident_gpu_bytes = layout.resident_bytes;
         metrics.total = started.elapsed();
+        let planes = match captured_planes {
+            Some(captured) => {
+                drop(planes);
+                captured
+            }
+            None => planes,
+        };
         Ok((
             GpuSensorCameraSource {
                 planes,

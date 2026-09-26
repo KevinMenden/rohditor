@@ -1060,6 +1060,7 @@ impl RohditorApp {
                 if let Some(document) = self.document.as_mut().filter(|document| {
                     document.id == ticket.document_id && document.ticket() == ticket
                 }) {
+                    let previous_source = document.preview_source;
                     document.gpu_preview = Some(GpuDocumentPreview {
                         ticket,
                         algorithm: diagnostics.algorithm,
@@ -1083,7 +1084,10 @@ impl RohditorApp {
                         },
                     );
                     if diagnostics.resolution == PreviewResolution::SourceScale {
-                        document.view.actual_size(context.input(|input| input.time));
+                        document.view.source_scale_frame_ready(
+                            previous_source,
+                            context.input(|input| input.time),
+                        );
                     }
                     document.preview_status = None;
                     document.last_preview_time = Some(elapsed);
@@ -1222,6 +1226,7 @@ impl RohditorApp {
                 let output_size = gpu_output_size(frame.output_dimensions());
                 let submission = frame.submission_time();
                 let mut worker = previous_worker_diagnostics.unwrap_or(WorkerPreviewDiagnostics {
+                    sensor_gpu: false,
                     backend: PreviewBackend::GpuBase,
                     resolution: PreviewResolution::Fit,
                     algorithm: preview.algorithm,
@@ -1549,7 +1554,7 @@ impl RohditorApp {
                 .and_then(|document| document.preview_diagnostics)
                 .is_some_and(|diagnostics| diagnostics.worker.capture_cpu_recovery)
             {
-                return format!("CPU capture recovery · GPU available · {hardware}");
+                return format!("CPU sensor recovery · GPU spatial/color · {hardware}");
             }
             match self
                 .document
@@ -1558,7 +1563,18 @@ impl RohditorApp {
                 .map(|diagnostics| diagnostics.worker.backend)
             {
                 Some(PreviewBackend::Cpu) => format!("CPU fallback · GPU available · {hardware}"),
-                Some(PreviewBackend::GpuBase) => format!("GPU active · {hardware}"),
+                Some(PreviewBackend::GpuBase) => {
+                    let sensor_gpu = self
+                        .document
+                        .as_ref()
+                        .and_then(|d| d.preview_diagnostics)
+                        .is_some_and(|d| d.worker.sensor_gpu);
+                    if sensor_gpu {
+                        format!("GPU sensor/spatial/color · {hardware}")
+                    } else {
+                        format!("CPU sensor · GPU spatial/color · {hardware}")
+                    }
+                }
                 None => format!("GPU available · {hardware}"),
             }
         } else {
@@ -1751,7 +1767,12 @@ impl RohditorApp {
             if actions.actual_size && self.crop_tool.is_none() {
                 let changed_mode = !document.source_scale_requested;
                 document.source_scale_requested = true;
-                document.view.actual_size(now);
+                let preview_is_source_scale = document
+                    .preview_source
+                    .is_some_and(PreviewSource::is_source_scale);
+                if preview_is_source_scale {
+                    document.view.actual_size(now);
+                }
                 if changed_mode {
                     view_changed_document = Some(document.id);
                 }
@@ -2538,7 +2559,16 @@ impl RohditorApp {
             .and_then(|preview| {
                 let document = self.document.as_ref()?;
                 Some(PreviewModel {
-                    backend: preview.worker.backend.label().to_owned(),
+                    backend: if preview.worker.backend == PreviewBackend::GpuBase {
+                        if preview.worker.sensor_gpu {
+                            "GPU sensor/spatial/color"
+                        } else {
+                            "CPU sensor / GPU spatial/color"
+                        }
+                    } else {
+                        preview.worker.backend.label()
+                    }
+                    .to_owned(),
                     algorithm: preview.worker.algorithm.stable_name().to_owned(),
                     profile: camera_profile_diagnostic(document),
                     capture_sharpening: preview.worker.capture_sharpening.map_or_else(

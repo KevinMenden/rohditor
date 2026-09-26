@@ -88,6 +88,7 @@ fn process_export(
         match result {
             Ok(result) => {
                 info!(
+                    sensor_backend = if result.sensor_gpu { "GPU" } else { "CPU" },
                     upload_ms = result.upload_time.as_millis(),
                     color_readback_ms = result.color_and_readback_time.as_millis(),
                     gpu_bytes = result.estimated_gpu_bytes,
