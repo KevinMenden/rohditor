@@ -149,6 +149,7 @@ impl RohditorApp {
                     let Some(document) = self.document.as_mut() else {
                         return;
                     };
+                    let previous_source = document.preview_source;
                     let source = if resolution == PreviewResolution::SourceScale {
                         PreviewSource::OneToOneCpu
                     } else {
@@ -160,7 +161,10 @@ impl RohditorApp {
                         document.histogram_revision = Some(ticket.revision);
                     }
                     if resolution == PreviewResolution::SourceScale {
-                        document.view.actual_size(context.input(|input| input.time));
+                        document.view.source_scale_frame_ready(
+                            previous_source,
+                            context.input(|input| input.time),
+                        );
                     }
                     document.preview_status = None;
                     document.last_preview_time = Some(diagnostics.timings.total);

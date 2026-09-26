@@ -6,10 +6,13 @@
 //! Application backend selection and other reconstruction methods remain separate.
 
 mod demosaic;
+mod develop;
+pub use develop::GpuDevelopedSource;
 #[cfg(test)]
 mod demosaic_tests;
 mod highlight;
 mod normalize;
+mod rcd;
 mod resources;
 #[cfg(test)]
 mod tests;

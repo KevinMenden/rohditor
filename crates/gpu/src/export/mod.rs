@@ -8,7 +8,6 @@ use super::*;
 use rohditor_core::{CpuPipeline, DitherMode, ExportImage, OutputBitDepth, RenderOptions};
 use rohditor_image::{DisplayRgbImage, DisplayTransfer};
 use rohditor_raw::RawFrame;
-use wgpu::util::DeviceExt;
 
 mod readback;
 #[cfg(test)]
@@ -20,6 +19,7 @@ const MEMORY_BUDGET: u64 = 768 * 1024 * 1024;
 
 /// Completed export pixels and separately measured preparation/GPU costs.
 pub struct GpuExportResult {
+    pub sensor_gpu: bool,
     pub combined_gpu_reservations: crate::GpuMemoryReservations,
     pub capture: crate::CaptureMetrics,
     pub image: ExportImage,
@@ -38,6 +38,8 @@ pub struct GpuExportResult {
 /// A presentation-independent export processor. Use a dedicated instance per
 /// worker; mutable rendering prevents concurrent writes to shared uniforms.
 pub struct GpuExportProcessor {
+    sensor: Option<crate::GpuSensorProcessor>,
+    adapter: wgpu::Adapter,
     capture: Option<crate::GpuCaptureProcessor>,
     spatial: crate::GpuSpatialProcessor,
     processor: GpuPreviewProcessor,
@@ -102,6 +104,8 @@ impl GpuExportProcessor {
         });
         let spatial = crate::GpuSpatialProcessor::new(device, queue)?;
         Ok(Self {
+            sensor: None,
+            adapter: adapter.clone(),
             capture: None,
             spatial,
             processor,
@@ -174,7 +178,8 @@ impl GpuExportProcessor {
         processor.capture_source(source, cancellation)
     }
 
-    /// CPU RAW preparation remains full resolution and observes cancellation.
+    /// Develop supported RAW sensor methods on the GPU at full resolution.
+    /// Any error returns before encoding; the caller owns the backend policy.
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
@@ -193,26 +198,27 @@ impl GpuExportProcessor {
         self.processor
             .capabilities
             .validate_dimensions(width, height)?;
-        let source = cpu
-            .prepare_camera_source(
-                frame,
-                recipe,
-                rohditor_core::PreviewOptions {
-                    render: options,
-                    max_long_edge: frame.info.width.max(frame.info.height),
-                },
-                cancellation,
-            )
-            .map_err(pipeline_error)?;
-        let description = cpu
-            .describe_spatial_completion(&source, cancellation)
-            .map_err(pipeline_error)?;
-        let (resident, metrics) =
-            self.spatial
-                .upload_captured_source(cpu, &source, cancellation)?;
+        if self.sensor.is_none() {
+            self.sensor = Some(crate::GpuSensorProcessor::new(
+                &self.adapter,
+                &self.processor.device,
+                &self.processor.queue,
+            )?);
+        }
+        let (resident, metrics) = self.sensor.as_ref().expect("sensor initialized").develop(
+            cpu,
+            frame,
+            recipe,
+            rohditor_core::PreviewOptions {
+                render: options,
+                max_long_edge: frame.info.width.max(frame.info.height),
+            },
+            cancellation,
+        )?;
+        let description = resident.initial_description().clone();
         let full = self
             .spatial
-            .full_resolution_source(&resident, description)?;
+            .full_resolution_source(resident.captured(), description)?;
         self.render_spatial_source(
             &full,
             recipe,
@@ -390,7 +396,11 @@ impl GpuExportProcessor {
         let estimated_cpu_bytes = description.decoded_raw_bytes() as u64
             + description.normalized_mosaic_bytes() as u64
             + description.highlight_scratch_bytes() as u64
-            + source_pixels * 12
+            + if spatial_metrics.sensor_gpu {
+                0
+            } else {
+                source_pixels * 12
+            }
             + output_pixels * 3 * u64::from(depth.bits() / 8)
             + band_bytes;
         if estimated_cpu_bytes > rohditor_core::CPU_WORKING_SET_LIMIT_BYTES as u64 {
@@ -417,24 +427,36 @@ impl GpuExportProcessor {
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let band_parameters = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("resident spatial export band parameters"),
-            contents: &[0; 16],
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
-        let optics = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("resident export optics parameters"),
-            contents: bytemuck::cast_slice(&crate::spatial::reduction::pack_optics_parameters(
-                &source.planes.layout,
-                description.optics().execution(),
-            )),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
-        let failure = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("resident export spatial failure"),
-            contents: &[0; 4],
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        });
+        let band_parameters = crate::memory::initialized_buffer(
+            device,
+            queue,
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("resident spatial export band parameters"),
+                contents: &[0; 16],
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            },
+        );
+        let optics = crate::memory::initialized_buffer(
+            device,
+            queue,
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("resident export optics parameters"),
+                contents: bytemuck::cast_slice(&crate::spatial::reduction::pack_optics_parameters(
+                    &source.planes.layout,
+                    description.optics().execution(),
+                )),
+                usage: wgpu::BufferUsages::UNIFORM,
+            },
+        );
+        let failure = crate::memory::initialized_buffer(
+            device,
+            queue,
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("resident export spatial failure"),
+                contents: &[0; 4],
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            },
+        );
         let failure_staging = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("resident export spatial failure readback"),
             size: 4,
@@ -516,8 +538,12 @@ impl GpuExportProcessor {
         crate::spatial::reduction::read_failure(device, &failure_staging, cancellation)?;
         let mut preparation = description.preparation_timings();
         preparation.capture_sharpening = spatial_metrics.capture.total;
-        preparation.total += spatial_metrics.capture.total + spatial_metrics.upload;
+        preparation.total += spatial_metrics.capture.total;
+        if !spatial_metrics.sensor_gpu {
+            preparation.total += spatial_metrics.upload;
+        }
         Ok(GpuExportResult {
+            sensor_gpu: spatial_metrics.sensor_gpu,
             combined_gpu_reservations: crate::gpu_memory_reservations(),
             capture: spatial_metrics.capture,
             image,
@@ -527,8 +553,8 @@ impl GpuExportProcessor {
             estimated_gpu_bytes,
             estimated_cpu_bytes,
             uploaded_bytes: spatial_metrics.uploaded_bytes,
-            readback_bytes: output_pixels * 12 + 4,
-            submissions: (height as u32).div_ceil(BAND_ROWS) + 1,
+            readback_bytes: output_pixels * 12 + 4 + spatial_metrics.readback_bytes,
+            submissions: spatial_metrics.submissions + (height as u32).div_ceil(BAND_ROWS) + 1,
         })
     }
 
@@ -650,11 +676,15 @@ impl GpuExportProcessor {
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let band_parameters = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("rohditor export band parameters"),
-            contents: &[0; 16],
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
+        let band_parameters = crate::memory::initialized_buffer(
+            device,
+            queue,
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("rohditor export band parameters"),
+                contents: &[0; 16],
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            },
+        );
         let bindings = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("rohditor export bindings"),
             layout: &self.layout,
@@ -698,6 +728,7 @@ impl GpuExportProcessor {
         )?;
         Ok(GpuExportResult {
             combined_gpu_reservations: crate::gpu_memory_reservations(),
+            sensor_gpu: false,
             capture: crate::CaptureMetrics::default(),
             image,
             preparation: prepared.timings(),
@@ -715,14 +746,6 @@ impl GpuExportProcessor {
 fn input_error(error: impl std::fmt::Display) -> GpuPreviewError {
     GpuPreviewError::InvalidInput {
         reason: error.to_string(),
-    }
-}
-
-fn pipeline_error(error: rohditor_core::PipelineError) -> GpuPreviewError {
-    if matches!(error, rohditor_core::PipelineError::Cancelled) {
-        GpuPreviewError::Cancelled
-    } else {
-        input_error(error)
     }
 }
 

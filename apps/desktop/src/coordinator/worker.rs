@@ -109,6 +109,7 @@ pub(crate) struct PreviewQueueStats {
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct WorkerPreviewDiagnostics {
+    pub sensor_gpu: bool,
     pub backend: PreviewBackend,
     pub resolution: PreviewResolution,
     pub algorithm: DemosaicAlgorithm,
@@ -611,6 +612,9 @@ fn worker_loop(
                     continue;
                 };
                 let ticket = scheduled.job.ticket;
+                if scheduled.job.backend == PreviewBackend::Cpu {
+                    preview_cache.select_cpu();
+                }
                 let completion = if abandoned.contains(&ticket.document_id) {
                     PreviewCompletion::Cancelled
                 } else if scheduled.job.resolution == PreviewResolution::SourceScale {
@@ -1025,6 +1029,7 @@ fn process_source_scale_preview(
             let (optics_applied, optics_fallback, optics_scale) =
                 optics_metrics(result.optics_provenance.as_ref());
             let diagnostics = WorkerPreviewDiagnostics {
+                sensor_gpu: false,
                 backend: PreviewBackend::Cpu,
                 resolution: PreviewResolution::SourceScale,
                 algorithm: options.demosaic,
@@ -1241,13 +1246,15 @@ fn process_gpu_base(
     let mut timings = description.preparation_timings();
     timings.capture_sharpening = metrics.capture.total;
     timings.resampling = metrics.spatial;
-    timings.total += metrics.capture.total + metrics.upload + metrics.spatial;
-    let upload_preparation = metrics.capture.total + metrics.upload + metrics.spatial;
+    timings.total += metrics.capture.total + metrics.spatial;
+    if !metrics.sensor_gpu {
+        timings.total += metrics.upload;
+    }
+    let upload_preparation = timings.total;
     let (optics_applied, optics_fallback, optics_scale) =
         optics_metrics(spatial.optics_provenance());
     let cache_resident_bytes = preview_cache.resident_bytes();
     let source_pixels = description.source_dimensions().0 * description.source_dimensions().1;
-    let target_pixels = width * height;
     let memory = MemoryEstimate {
         decoded_raw_bytes: description.decoded_raw_bytes(),
         normalized_mosaic_bytes: description.normalized_mosaic_bytes(),
@@ -1256,14 +1263,19 @@ fn process_gpu_base(
         optics_output_bytes: 0,
         optics_scratch_bytes: 0,
         resample_intermediate_bytes: 0,
-        linear_rgb_bytes: target_pixels.saturating_mul(12),
-        display_rgb_bytes: target_pixels.saturating_mul(3),
+        linear_rgb_bytes: 0,
+        display_rgb_bytes: 0,
         estimated_peak_bytes: description
             .decoded_raw_bytes()
-            .saturating_add(source_pixels.saturating_mul(12))
+            .saturating_add(if metrics.sensor_gpu {
+                0
+            } else {
+                source_pixels.saturating_mul(12)
+            })
             .saturating_add(cache_resident_bytes),
     };
     let diagnostics = WorkerPreviewDiagnostics {
+        sensor_gpu: metrics.sensor_gpu,
         backend: PreviewBackend::GpuBase,
         resolution: job.resolution,
         algorithm: options.render.demosaic,
@@ -1325,6 +1337,7 @@ fn develop_preview(
             image,
             histogram,
             WorkerPreviewDiagnostics {
+                sensor_gpu: false,
                 backend: PreviewBackend::Cpu,
                 resolution: job.resolution,
                 algorithm: options.render.demosaic,
@@ -1381,6 +1394,7 @@ fn develop_preview(
         result.output_gamut_diagnostics,
     );
     let diagnostics = WorkerPreviewDiagnostics {
+        sensor_gpu: false,
         backend: PreviewBackend::Cpu,
         resolution: job.resolution,
         algorithm: options.render.demosaic,
@@ -1644,6 +1658,7 @@ fn log_preview_diagnostics(
         document_id = ticket.document_id,
         revision = ticket.revision,
         backend = diagnostics.backend.label(),
+        sensor_backend = if diagnostics.sensor_gpu { "GPU" } else { "CPU" },
         algorithm = ?diagnostics.algorithm,
         width,
         height,
@@ -2129,7 +2144,7 @@ mod tests {
         let (sender, receiver) = mpsc::channel();
         let options = PreviewOptions {
             render: RenderOptions {
-                demosaic: DemosaicAlgorithm::Rcd,
+                demosaic: DemosaicAlgorithm::MalvarHeCutler,
                 ..RenderOptions::default()
             },
             ..PreviewOptions::default()
@@ -2190,7 +2205,10 @@ mod tests {
         let (source, diagnostics) =
             upload.expect("GPU preview request should return a resident source");
         assert_eq!(source.dimensions(), (4, 4));
-        assert_eq!(diagnostics.algorithm, DemosaicAlgorithm::Rcd);
+        assert_eq!(diagnostics.algorithm, DemosaicAlgorithm::MalvarHeCutler);
+        assert!(diagnostics.sensor_gpu);
+        assert_eq!(diagnostics.memory.normalized_mosaic_bytes, 0);
+        assert_eq!(diagnostics.memory.linear_rgb_bytes, 0);
         assert!(
             !events
                 .iter()
@@ -2232,6 +2250,7 @@ mod tests {
         assert!(matches!(source.as_ref(), PreparedGpuSource::Full { .. }));
         assert_eq!(source.dimensions(), (4, 4));
         assert_eq!(diagnostics.resolution, PreviewResolution::SourceScale);
+        assert!(diagnostics.sensor_gpu);
         assert!(
             !events
                 .iter()

@@ -54,8 +54,8 @@ pub use pipeline::{
     CPU_WORKING_SET_LIMIT_BYTES, CapturedCameraSource, CpuPipeline, CpuPreviewWorkspace,
     DEFAULT_PREVIEW_LONG_EDGE, DemosaicedBase, DemosaicedCameraSource, ExportRenderResult,
     MemoryEstimate, NormalizationContract, OutputPolicy, PreviewOptions, RawCropPolicy,
-    ReconstructedPreview, RenderOptions, RenderResult, SensorCrop, SensorDevelopmentDescription,
-    SpatialCompletionDescription, SpatialOptics, StageTimings,
+    ReconstructedPreview, RenderOptions, RenderResult, SensorCameraMetadata, SensorCrop,
+    SensorDevelopmentDescription, SpatialCompletionDescription, SpatialOptics, StageTimings,
 };
 pub use rendering::{
     BASE_RENDERING_LUT_SIZE, BaseRenderingLut, ROHDITOR_STANDARD_MIDDLE_GRAY,

@@ -5,7 +5,6 @@ use rohditor_core::{
     CancellationToken, ClipStats, HighlightDiagnostics, HighlightExecution,
     SensorDevelopmentDescription,
 };
-use wgpu::util::DeviceExt;
 
 use super::normalize::{
     GpuNormalizedMosaic, GpuSensorProcessor, WORKGROUP_EDGE, check_cancel, invalid, output_usage,
@@ -212,13 +211,13 @@ impl GpuSensorProcessor {
             array_layer_count: Some(layout.layers),
             ..Default::default()
         });
-        let diagnostics = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("GPU Clip diagnostics"),
-                contents: bytemuck::cast_slice(&[0_u32; CLIP_COUNTER_WORDS]),
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            });
+        // WebGPU zero-initializes storage without a host mapping.
+        let diagnostics = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("GPU Clip diagnostics"),
+            size: CLIP_COUNTER_BYTES,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
         let diagnostic_readback = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("GPU Clip diagnostic readback"),
             size: CLIP_COUNTER_BYTES,

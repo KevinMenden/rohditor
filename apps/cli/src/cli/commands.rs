@@ -1032,7 +1032,7 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
                         format!("could not export developed image to {}", output.display())
                     })?;
                 return write_stdout(&format!(
-                    "Developed {}x{} {}-bit sRGB {} to {} ({} bytes)\nColor processor: GPU, {} ({}, {} {})\nFull-quality CPU preparation: {:?}; GPU upload: {:?}; color and readback: {:?}; encoding: {:?}\nGPU allocation estimate: {} MiB; CPU buffer estimate: {} MiB; uploaded {} bytes; read back {} bytes in {} bands\nOutput gamut pixel counts: unavailable on GPU",
+                    "Developed {}x{} {}-bit sRGB {} to {} ({} bytes)\nColor processor: GPU, {} ({}, {} {})\nSensor processor: {}\nRAW decode: {:?}; Full-quality preparation: {:?}; GPU upload: {:?}; color and readback: {:?}; encoding: {:?}\nGPU allocation estimate: {} MiB; CPU buffer estimate: {} MiB; uploaded {} bytes; read back {} bytes in {} submissions\nOutput gamut pixel counts: unavailable on GPU",
                     report.width,
                     report.height,
                     report.bit_depth.bits(),
@@ -1043,7 +1043,9 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
                     capabilities.backend,
                     capabilities.driver,
                     capabilities.driver_info,
-                    result.preparation.total,
+                    if result.sensor_gpu { "GPU" } else { "CPU" },
+                    decode_time,
+                    result.preparation,
                     result.upload_time,
                     result.color_and_readback_time,
                     encode_started.elapsed(),

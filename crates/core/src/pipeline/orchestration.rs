@@ -1076,6 +1076,9 @@ pub(super) mod render {
 mod camera_source;
 use camera_source::prepare_reconstructed_preview;
 pub use camera_source::{CapturedCameraSource, DemosaicedCameraSource};
+#[path = "sensor_source.rs"]
+mod sensor_source;
+pub use sensor_source::SensorCameraMetadata;
 
 fn prepare_demosaiced_preview(
     reconstructed: &ReconstructedPreview,
