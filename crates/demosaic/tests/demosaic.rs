@@ -454,6 +454,72 @@ fn mhc_is_identical_with_one_and_multiple_rayon_threads() -> Result<(), Box<dyn 
     Ok(())
 }
 
+#[test]
+fn amaze_is_identical_with_one_and_multiple_rayon_threads() -> Result<(), Box<dyn Error>> {
+    // Several tile rows and columns, so bands run on different threads.
+    let mosaic = mosaic_from_rgb(520, 470, BayerPattern::Grbg, |x, y| {
+        let (xf, yf) = (x as f32, y as f32);
+        [
+            (xf * 0.071 + yf * 0.013).sin() * 0.3 + 0.4,
+            (xf * 0.029 - yf * 0.053).cos() * 0.3 + 0.45,
+            ((x * 17 + y * 31) % 101) as f32 / 150.0 + 0.1,
+        ]
+    })?;
+    let run = |threads| -> Result<_, Box<dyn Error>> {
+        let pool = ThreadPoolBuilder::new().num_threads(threads).build()?;
+        Ok(pool.install(|| demosaic(&mosaic, UNBALANCED, DemosaicAlgorithm::Amaze))?)
+    };
+    assert_eq!(run(1)?, run(4)?);
+    Ok(())
+}
+
+/// Soft colour edge, ~5 degrees off horizontal, in an unbalanced raw-like
+/// colour space.
+fn soft_slanted_edge(x: usize, y: usize) -> [f32; 3] {
+    let distance = (x as f32 - 128.0) * 0.087 + (y as f32 - 96.0) * 0.996;
+    let t = ((distance + 1.5) / 3.0).clamp(0.0, 1.0);
+    let t = t * t * (3.0 - 2.0 * t);
+    [0.15 + 0.65 * t, 0.2 + 0.35 * t, 0.7 - 0.6 * t]
+}
+
+fn interior_psnr(
+    mosaic_truth: impl Fn(usize, usize) -> [f32; 3],
+    image: &rohditor_image::LinearRgbImage<f32>,
+) -> f64 {
+    let mut squared = 0.0_f64;
+    let mut count = 0_usize;
+    for y in 16..image.height() - 16 {
+        for x in 16..image.width() - 16 {
+            let expected = mosaic_truth(x, y);
+            let actual = image.pixel(x, y).expect("interior pixel");
+            for channel in 0..3 {
+                let error = f64::from(actual[channel] - expected[channel]);
+                squared += error * error;
+                count += 1;
+            }
+        }
+    }
+    -10.0 * (squared / count as f64).log10()
+}
+
+/// Guards against regressing to a simplified AMaZE. The port reaches 55.3 dB
+/// here against 42.9 dB for bilinear; the former simplified adaptation was
+/// only a few dB above bilinear on comparable edges.
+#[test]
+fn amaze_reconstructs_a_soft_colour_edge_far_better_than_bilinear() -> Result<(), Box<dyn Error>> {
+    let mosaic = mosaic_from_rgb(256, 192, BayerPattern::Rggb, soft_slanted_edge)?;
+    let amaze = demosaic(&mosaic, UNBALANCED, DemosaicAlgorithm::Amaze)?;
+    let bilinear = demosaic(&mosaic, UNBALANCED, DemosaicAlgorithm::Bilinear)?;
+    let amaze_psnr = interior_psnr(soft_slanted_edge, &amaze);
+    let bilinear_psnr = interior_psnr(soft_slanted_edge, &bilinear);
+    assert!(amaze_psnr > 54.0, "AMaZE reached only {amaze_psnr:.2} dB");
+    assert!(
+        amaze_psnr > bilinear_psnr + 10.0,
+        "AMaZE {amaze_psnr:.2} dB vs bilinear {bilinear_psnr:.2} dB"
+    );
+    Ok(())
+}
+
 const UNBALANCED: WhiteBalanceGains = WhiteBalanceGains {
     red: 2.1,
     green: 1.0,

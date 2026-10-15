@@ -3,9 +3,7 @@
 
 use rohditor_image::BayerPattern;
 
-use super::math::{
-    ARTHRESH, EPS, EPSSQ, TS, V1, V2, V3, at, fc, green_at_even, median, sqr,
-};
+use super::math::{ARTHRESH, EPS, EPSSQ, TS, V1, V2, V3, at, fc, green_at_even, median, sqr};
 use super::scratch::AmazeScratch;
 
 /// Direction weights and gradient energy from the raw CFA.
@@ -19,10 +17,8 @@ pub(super) fn gradients(s: &mut AmazeScratch) {
                 + (s.cfa[i + 2 * TS] - s.cfa[i]).abs()
                 + (s.cfa[i] - s.cfa[i - 2 * TS]).abs()
                 + delv;
-            s.dirwts1[i] = EPS
-                + (s.cfa[i + 2] - s.cfa[i]).abs()
-                + (s.cfa[i] - s.cfa[i - 2]).abs()
-                + delh;
+            s.dirwts1[i] =
+                EPS + (s.cfa[i + 2] - s.cfa[i]).abs() + (s.cfa[i] - s.cfa[i - 2]).abs() + delh;
             s.delhvsqsum[i] = sqr(delh) + sqr(delv);
         }
     }
@@ -31,11 +27,7 @@ pub(super) fn gradients(s: &mut AmazeScratch) {
 /// Vertical and horizontal colour differences (G - R or G - B) using adaptive
 /// ratios, plus the Hamilton-Adams alternative. `clip_pt8` is 80% of the
 /// level at which the first channel saturates.
-pub(super) fn colour_differences(
-    s: &mut AmazeScratch,
-    pattern: BayerPattern,
-    clip_pt8: f32,
-) {
+pub(super) fn colour_differences(s: &mut AmazeScratch, pattern: BayerPattern, clip_pt8: f32) {
     for rr in 4..TS - 4 {
         let mut fcswitch = fc(pattern, rr, 4) & 1 == 1;
         for cc in 4..TS - 4 {
@@ -128,11 +120,9 @@ pub(super) fn bound_differences(s: &mut AmazeScratch, pattern: BayerPattern, cli
             let i = rr * TS + cc;
             let hcdvar = 3.0 * (sqr(s.hcd[i - 2]) + sqr(s.hcd[i]) + sqr(s.hcd[i + 2]))
                 - sqr(s.hcd[i - 2] + s.hcd[i] + s.hcd[i + 2]);
-            let hcdaltvar = 3.0
-                * (sqr(s.hcdalt[i - 2]) + sqr(s.hcdalt[i]) + sqr(s.hcdalt[i + 2]))
+            let hcdaltvar = 3.0 * (sqr(s.hcdalt[i - 2]) + sqr(s.hcdalt[i]) + sqr(s.hcdalt[i + 2]))
                 - sqr(s.hcdalt[i - 2] + s.hcdalt[i] + s.hcdalt[i + 2]);
-            let vcdvar = 3.0
-                * (sqr(s.vcd[i - 2 * TS]) + sqr(s.vcd[i]) + sqr(s.vcd[i + 2 * TS]))
+            let vcdvar = 3.0 * (sqr(s.vcd[i - 2 * TS]) + sqr(s.vcd[i]) + sqr(s.vcd[i + 2 * TS]))
                 - sqr(s.vcd[i - 2 * TS] + s.vcd[i] + s.vcd[i + 2 * TS]);
             let vcdaltvar = 3.0
                 * (sqr(s.vcdalt[i - 2 * TS]) + sqr(s.vcdalt[i]) + sqr(s.vcdalt[i + 2 * TS]))
@@ -158,8 +148,8 @@ pub(super) fn bound_differences(s: &mut AmazeScratch, pattern: BayerPattern, cli
                         s.hcd[i] = -median(ginth, left, right) + cur;
                     } else {
                         let hwt = 1.0 - 3.0 * s.hcd[i] / (EPS + ginth + cur);
-                        s.hcd[i] = hwt * s.hcd[i]
-                            + (1.0 - hwt) * (-median(ginth, left, right) + cur);
+                        s.hcd[i] =
+                            hwt * s.hcd[i] + (1.0 - hwt) * (-median(ginth, left, right) + cur);
                     }
                 }
                 if s.vcd[i] > 0.0 {
@@ -167,8 +157,7 @@ pub(super) fn bound_differences(s: &mut AmazeScratch, pattern: BayerPattern, cli
                         s.vcd[i] = -median(gintv, up, down) + cur;
                     } else {
                         let vwt = 1.0 - 3.0 * s.vcd[i] / (EPS + gintv + cur);
-                        s.vcd[i] =
-                            vwt * s.vcd[i] + (1.0 - vwt) * (-median(gintv, up, down) + cur);
+                        s.vcd[i] = vwt * s.vcd[i] + (1.0 - vwt) * (-median(gintv, up, down) + cur);
                     }
                 }
                 if ginth > clip_pt {
@@ -195,8 +184,7 @@ pub(super) fn bound_differences(s: &mut AmazeScratch, pattern: BayerPattern, cli
                         s.vcd[i] = median(gintv, up, down) - cur;
                     } else {
                         let vwt = 1.0 + 3.0 * s.vcd[i] / (EPS + gintv + cur);
-                        s.vcd[i] =
-                            vwt * s.vcd[i] + (1.0 - vwt) * (median(gintv, up, down) - cur);
+                        s.vcd[i] = vwt * s.vcd[i] + (1.0 - vwt) * (median(gintv, up, down) - cur);
                     }
                 }
                 if ginth > clip_pt {

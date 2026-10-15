@@ -22,18 +22,14 @@ pub(super) fn diagonal_gradients(s: &mut AmazeScratch, pattern: BayerPattern) {
                 s.delp[i >> 1] = (cfa[at(i, P1)] - cfa[at(i, -P1)]).abs();
                 s.delm[i >> 1] = (cfa[at(i, M1)] - cfa[at(i, -M1)]).abs();
                 let g = i + 1;
-                s.dgrbsq1p[i >> 1] =
-                    sqr(cfa[g] - cfa[at(g, -P1)]) + sqr(cfa[g] - cfa[at(g, P1)]);
-                s.dgrbsq1m[i >> 1] =
-                    sqr(cfa[g] - cfa[at(g, -M1)]) + sqr(cfa[g] - cfa[at(g, M1)]);
+                s.dgrbsq1p[i >> 1] = sqr(cfa[g] - cfa[at(g, -P1)]) + sqr(cfa[g] - cfa[at(g, P1)]);
+                s.dgrbsq1m[i >> 1] = sqr(cfa[g] - cfa[at(g, -M1)]) + sqr(cfa[g] - cfa[at(g, M1)]);
             }
         } else {
             for cc in (6..TS - 6).step_by(2) {
                 let i = rr * TS + cc;
-                s.dgrbsq1p[i >> 1] =
-                    sqr(cfa[i] - cfa[at(i, -P1)]) + sqr(cfa[i] - cfa[at(i, P1)]);
-                s.dgrbsq1m[i >> 1] =
-                    sqr(cfa[i] - cfa[at(i, -M1)]) + sqr(cfa[i] - cfa[at(i, M1)]);
+                s.dgrbsq1p[i >> 1] = sqr(cfa[i] - cfa[at(i, -P1)]) + sqr(cfa[i] - cfa[at(i, P1)]);
+                s.dgrbsq1m[i >> 1] = sqr(cfa[i] - cfa[at(i, -M1)]) + sqr(cfa[i] - cfa[at(i, M1)]);
                 let g = i + 1;
                 s.delp[i >> 1] = (cfa[at(g, P1)] - cfa[at(g, -P1)]).abs();
                 s.delm[i >> 1] = (cfa[at(g, M1)] - cfa[at(g, -M1)]).abs();

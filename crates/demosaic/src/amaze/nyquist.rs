@@ -5,8 +5,8 @@
 use rohditor_image::BayerPattern;
 
 use super::math::{
-    EPSSQ, GAUSSGRAD, GAUSSODD, GQUINC, M1, M2, P1, P2, TS, V1, V2, at, green_at_even, half,
-    intp, sqr,
+    EPSSQ, GAUSSGRAD, GAUSSODD, GQUINC, M1, M2, P1, P2, TS, V1, V2, at, green_at_even, half, intp,
+    sqr,
 };
 use super::scratch::AmazeScratch;
 
@@ -31,16 +31,12 @@ pub(super) fn detect(s: &mut AmazeScratch, pattern: BayerPattern) -> Option<Nyqu
             let c = &s.cddiffsq;
             let d = &s.delhvsqsum;
             s.nyqutest[i >> 1] = (GAUSSODD[0] * c[i]
-                + GAUSSODD[1]
-                    * (c[at(i, -M1)] + c[at(i, P1)] + c[at(i, -P1)] + c[at(i, M1)])
+                + GAUSSODD[1] * (c[at(i, -M1)] + c[at(i, P1)] + c[at(i, -P1)] + c[at(i, M1)])
                 + GAUSSODD[2] * (c[at(i, -V2)] + c[i - 2] + c[i + 2] + c[at(i, V2)])
-                + GAUSSODD[3]
-                    * (c[at(i, -M2)] + c[at(i, P2)] + c[at(i, -P2)] + c[at(i, M2)]))
+                + GAUSSODD[3] * (c[at(i, -M2)] + c[at(i, P2)] + c[at(i, -P2)] + c[at(i, M2)]))
                 - (GAUSSGRAD[0] * d[i]
-                    + GAUSSGRAD[1]
-                        * (d[at(i, -V1)] + d[i + 1] + d[i - 1] + d[at(i, V1)])
-                    + GAUSSGRAD[2]
-                        * (d[at(i, -M1)] + d[at(i, P1)] + d[at(i, -P1)] + d[at(i, M1)])
+                    + GAUSSGRAD[1] * (d[at(i, -V1)] + d[i + 1] + d[i - 1] + d[at(i, V1)])
+                    + GAUSSGRAD[2] * (d[at(i, -M1)] + d[at(i, P1)] + d[at(i, -P1)] + d[at(i, M1)])
                     + GAUSSGRAD[3] * (d[at(i, -V2)] + d[i - 2] + d[i + 2] + d[at(i, V2)])
                     + GAUSSGRAD[4]
                         * (d[at(i, -V2 - 1)]
@@ -51,8 +47,7 @@ pub(super) fn detect(s: &mut AmazeScratch, pattern: BayerPattern) -> Option<Nyqu
                             + d[i + TS + 2]
                             + d[at(i, V2 - 1)]
                             + d[at(i, V2 + 1)])
-                    + GAUSSGRAD[5]
-                        * (d[at(i, -M2)] + d[at(i, P2)] + d[at(i, -P2)] + d[at(i, M2)]));
+                    + GAUSSGRAD[5] * (d[at(i, -M2)] + d[at(i, P2)] + d[at(i, -P2)] + d[at(i, M2)]));
             cc += 2;
         }
     }

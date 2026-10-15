@@ -16,7 +16,7 @@
 //! the outer 16-pixel image boundary keeps the bilinear reference result;
 //! samples are 0..1 instead of 0..65535; and the tile's measured sample is
 //! written back unchanged. Like upstream, reconstructed values are clamped at
-//! zero.
+//! zero. Rows of tiles are processed in parallel.
 //!
 //! AMaZE was authored by Emil Martinec and optimized by Ingo Weyrich, with
 //! additional ideas from Luis Sanz Rodríguez and Paul Lee. The upstream code
@@ -32,6 +32,7 @@ mod math;
 mod nyquist;
 mod scratch;
 
+use rayon::prelude::*;
 use rohditor_image::{BayerPattern, MosaicImage};
 
 use super::{
@@ -62,24 +63,37 @@ pub(super) fn reconstruct(
         return Ok(());
     }
 
-    let mut scratch = AmazeScratch::new()?;
-    for tile_y in 0..tile_count(mosaic.height()) {
-        checkpoint(cancellation)?;
-        let origin_y = tile_y * TILE_VALID;
-        for tile_x in 0..tile_count(mosaic.width()) {
-            checkpoint(cancellation)?;
-            let tile = AmazeTile {
-                origin_x: tile_x * TILE_VALID,
-                origin_y,
-                pattern: mosaic.pattern().shifted(0, origin_y),
-            };
-            scratch.clear();
-            populate(&mut scratch, mosaic, tile);
-            reconstruct_tile(&mut scratch, tile.pattern, clip_point);
-            write_tile(&scratch, mosaic, gains, tile, row_stride, output, cancellation)?;
-        }
-    }
-    Ok(())
+    // Tiles are independent, and each row of tiles owns a contiguous band of
+    // `TILE_VALID` output rows, so bands are processed in parallel without
+    // sharing any state. The result does not depend on the thread count.
+    output
+        .par_chunks_mut(TILE_VALID * row_stride)
+        .enumerate()
+        .try_for_each(|(tile_y, band)| {
+            let origin_y = tile_y * TILE_VALID;
+            let mut scratch = AmazeScratch::new()?;
+            for tile_x in 0..tile_count(mosaic.width()) {
+                checkpoint(cancellation)?;
+                let tile = AmazeTile {
+                    origin_x: tile_x * TILE_VALID,
+                    origin_y,
+                    pattern: mosaic.pattern().shifted(0, origin_y),
+                };
+                scratch.clear();
+                populate(&mut scratch, mosaic, tile);
+                reconstruct_tile(&mut scratch, tile.pattern, clip_point);
+                write_tile(
+                    &scratch,
+                    mosaic,
+                    gains,
+                    tile,
+                    row_stride,
+                    band,
+                    cancellation,
+                )?;
+            }
+            Ok(())
+        })
 }
 
 fn tile_count(length: usize) -> usize {
@@ -147,7 +161,7 @@ fn write_tile(
     gains: WhiteBalanceGains,
     tile: AmazeTile,
     row_stride: usize,
-    output: &mut [f32],
+    band: &mut [f32],
     cancellation: &dyn CancellationCheck,
 ) -> Result<(), DemosaicError> {
     let x_start = if tile.origin_x == 0 {
@@ -190,8 +204,9 @@ fn write_tile(
             rgb[measured_channel] = *mosaic.sample(global_x, global_y);
             gains.apply(&mut rgb);
             require_finite_output(&rgb, global_x, global_y)?;
-            let output_index = global_y * row_stride + global_x * 3;
-            output[output_index..output_index + 3].copy_from_slice(&rgb);
+            // `band` starts at this tile row's first output row.
+            let output_index = (global_y - tile.origin_y) * row_stride + global_x * 3;
+            band[output_index..output_index + 3].copy_from_slice(&rgb);
         }
     }
     Ok(())
