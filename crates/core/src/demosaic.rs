@@ -7,7 +7,7 @@ use crate::{CancellationToken, PipelineError};
 
 pub(crate) fn demosaic_cancellable(
     mosaic: &MosaicImage<f32>,
-    gains: WhiteBalanceGains,
+    balance: WhiteBalanceGains,
     algorithm: DemosaicAlgorithm,
     cancellation: &CancellationToken,
 ) -> Result<LinearRgbImage<f32>, PipelineError> {
@@ -18,7 +18,7 @@ pub(crate) fn demosaic_cancellable(
         algorithm = ?algorithm
     );
     let _guard = span.enter();
-    rohditor_demosaic::demosaic_cancellable(mosaic, gains, algorithm, &|| {
+    rohditor_demosaic::demosaic_cancellable(mosaic, balance, algorithm, &|| {
         cancellation.is_cancelled()
     })
     .map_err(Into::into)

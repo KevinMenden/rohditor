@@ -3000,6 +3000,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rohditor-reference"
+version = "0.1.0"
+dependencies = [
+ "rohditor-demosaic",
+ "rohditor-image",
+ "rohditor-raw",
+ "thiserror 2.0.20",
+ "tiff",
+]
+
+[[package]]
 name = "roxmltree"
 version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

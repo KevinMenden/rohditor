@@ -4,7 +4,7 @@ use rohditor_core::{
     CAPTURE_SHARPENING_ITERATIONS, CancellationToken, CaptureSharpeningContract,
     SensorDevelopmentDescription,
 };
-use rohditor_demosaic::DemosaicAlgorithm;
+use rohditor_demosaic::{ChannelBalance, DemosaicAlgorithm};
 
 use super::normalize::{bayer_pattern_code, check_cancel, invalid};
 use super::rcd::RcdExecutor;
@@ -122,7 +122,7 @@ impl GpuSensorProcessor {
         let (width, height) = mosaic.dimensions();
         let limits = self.device.limits();
         let rcd_bytes = if algorithm == 2 {
-            RcdExecutor::scratch_bytes() + 64
+            RcdExecutor::reserved_bytes()
         } else {
             0
         };
@@ -138,7 +138,10 @@ impl GpuSensorProcessor {
         let _work = Reservation::try_new(WORK_BYTES, self.budget)?;
         let planes = ResidentCameraPlanes::with_budget(&self.device, layout, self.budget)?;
         let rcd = if algorithm == 2 {
-            Some(RcdExecutor::new(self)?)
+            Some(RcdExecutor::new(
+                self,
+                ChannelBalance::new(description.demosaic_balance()),
+            )?)
         } else {
             None
         };

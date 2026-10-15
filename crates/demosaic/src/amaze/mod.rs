@@ -1,42 +1,55 @@
 //! Tiled AMaZE (Aliasing Minimization and Zipper Elimination) demosaicing.
 //!
-//! The implementation keeps the published AMaZE working-set boundary and
-//! directional interpolation stages, but adapts the storage and edge policy
-//! to this crate: tiles are processed serially with mirrored CFA samples and
-//! the outer 16-pixel image boundary remains the bilinear reference result.
-//! This keeps peak memory bounded without making the deterministic CPU path
-//! depend on a decoder or an application.
+//! This is a port of RawTherapee's scalar `amaze_demosaic_RT.cc` (5.13). The
+//! stages, their order, loop bounds, and the half-resolution plane addressing
+//! (`index >> 1`) follow the source so the two can be compared directly;
+//! each stage lives in its own file:
+//!
+//! 1. [`green`]: gradients, colour differences, bounding, direction weights
+//! 2. [`nyquist`]: Nyquist texture detection, area interpolation, green
+//! 3. [`diagonal`]: diagonal R/B estimates and a second green pass
+//! 4. [`chroma`]: fancy chrominance interpolation and the output planes
+//!
+//! Differences from upstream, all about storage and edges: tiles are 256
+//! pixels wide with the usual 16-pixel halo; every plane has its own buffer
+//! instead of sharing memory between stages; the halo is filled by mirroring;
+//! the outer 16-pixel image boundary keeps the bilinear reference result;
+//! samples are 0..1 instead of 0..65535; and the tile's measured sample is
+//! written back unchanged. Like upstream, reconstructed values are clamped at
+//! zero.
 //!
 //! AMaZE was authored by Emil Martinec and optimized by Ingo Weyrich, with
-//! additional ideas from Luis Sanz Rodríguez and Paul Lee. This Rust
-//! adaptation is based on the GPLv3-or-later implementations in darktable and
-//! RawTherapee:
+//! additional ideas from Luis Sanz Rodríguez and Paul Lee. The upstream code
+//! is GPLv3-or-later:
+//! https://github.com/RawTherapee/RawTherapee/blob/5.13/rtengine/amaze_demosaic_RT.cc
+//! darktable carries a derivative:
 //! https://github.com/darktable-org/darktable/blob/master/src/iop/demosaicing/amaze.cc
-//! https://github.com/RawTherapee/RawTherapee/blob/dev/rtengine/amaze_demosaic_RT.cc
+
+mod chroma;
+mod diagonal;
+mod green;
+mod math;
+mod nyquist;
+mod scratch;
+
+use rohditor_image::{BayerPattern, MosaicImage};
 
 use super::{
     AMAZE_HALO, CancellationCheck, DemosaicError, WhiteBalanceGains, bilinear, checkpoint,
     require_finite_output,
 };
-use rohditor_image::{BayerPattern, MosaicImage, allocate_zeroed_f32};
+use scratch::AmazeScratch;
 
-use super::amaze_stages::{calculate_gradients, interpolate_chroma, interpolate_green};
-
-// AMaZE's source implementations use a configurable tile that is a multiple
-// of 32. A fixed 256-pixel tile is large enough to amortize the 16-pixel halo
-// while keeping the scratch set small and predictable.
-pub(super) const TILE_SIZE: usize = 256;
-pub(super) const BORDER: usize = AMAZE_HALO.left;
-pub(super) const TILE_VALID: usize = TILE_SIZE - 2 * BORDER;
-pub(super) const PLANE_ELEMENTS: usize = TILE_SIZE * TILE_SIZE;
-pub(super) const EPSILON: f32 = 1.0e-5;
-pub(super) const EPSILON_SQUARED: f32 = 1.0e-10;
-pub(super) const AR_THRESHOLD: f32 = 0.75;
-pub(super) const CLIP_POINT: f32 = 1.0;
+// Upstream uses a configurable tile that is a multiple of 32. A fixed
+// 256-pixel tile amortizes the 16-pixel halo while keeping the scratch set small.
+const TILE_SIZE: usize = 256;
+const BORDER: usize = AMAZE_HALO.left;
+const TILE_VALID: usize = TILE_SIZE - 2 * BORDER;
 
 pub(super) fn reconstruct(
     mosaic: &MosaicImage<f32>,
     gains: WhiteBalanceGains,
+    clip_point: f32,
     cancellation: &dyn CancellationCheck,
     row_stride: usize,
     output: &mut [f32],
@@ -53,31 +66,17 @@ pub(super) fn reconstruct(
     for tile_y in 0..tile_count(mosaic.height()) {
         checkpoint(cancellation)?;
         let origin_y = tile_y * TILE_VALID;
-        let tile = AmazeTile {
-            origin_x: 0,
-            origin_y,
-            pattern: mosaic.pattern().shifted(0, origin_y),
-        };
         for tile_x in 0..tile_count(mosaic.width()) {
             checkpoint(cancellation)?;
             let tile = AmazeTile {
                 origin_x: tile_x * TILE_VALID,
-                ..tile
+                origin_y,
+                pattern: mosaic.pattern().shifted(0, origin_y),
             };
             scratch.clear();
             populate(&mut scratch, mosaic, tile);
-            calculate_gradients(&mut scratch, cancellation)?;
-            interpolate_green(&mut scratch, tile.pattern, cancellation)?;
-            interpolate_chroma(&mut scratch, tile.pattern, cancellation)?;
-            write_tile(
-                &scratch,
-                mosaic,
-                gains,
-                tile,
-                row_stride,
-                output,
-                cancellation,
-            )?;
+            reconstruct_tile(&mut scratch, tile.pattern, clip_point);
+            write_tile(&scratch, mosaic, gains, tile, row_stride, output, cancellation)?;
         }
     }
     Ok(())
@@ -87,57 +86,42 @@ fn tile_count(length: usize) -> usize {
     length.div_ceil(TILE_VALID)
 }
 
+/// Run every AMaZE stage on a populated tile.
+fn reconstruct_tile(s: &mut AmazeScratch, pattern: BayerPattern, clip_point: f32) {
+    // Highlights are treated as clipped from 80% of the saturation level.
+    let clip_pt8 = 0.8 * clip_point;
+
+    green::gradients(s);
+    green::colour_differences(s, pattern, clip_pt8);
+    green::bound_differences(s, pattern, clip_point);
+    green::direction_weights(s, pattern);
+
+    let nyquist = nyquist::detect(s, pattern);
+    if let Some(area) = &nyquist {
+        nyquist::area_interpolation(s, pattern, area);
+    }
+    nyquist::populate_green(s, pattern);
+    if let Some(area) = &nyquist {
+        nyquist::refine_green(s, pattern, area);
+    }
+
+    diagonal::diagonal_gradients(s, pattern);
+    diagonal::diagonal_estimates(s, pattern, clip_point);
+    diagonal::combine_diagonals(s, pattern);
+    diagonal::refine_green_with_rb(s, pattern, clip_point);
+
+    chroma::interpolate_chroma(s, pattern);
+    chroma::finish_planes(s, pattern);
+}
+
 #[derive(Clone, Copy)]
-pub(super) struct AmazeTile {
-    pub(super) origin_x: usize,
-    pub(super) origin_y: usize,
-    pub(super) pattern: BayerPattern,
+struct AmazeTile {
+    origin_x: usize,
+    origin_y: usize,
+    pattern: BayerPattern,
 }
 
-pub(super) struct AmazeScratch {
-    pub(super) cfa: Vec<f32>,
-    pub(super) green: Vec<f32>,
-    pub(super) red: Vec<f32>,
-    pub(super) blue: Vec<f32>,
-    pub(super) vertical_weights: Vec<f32>,
-    pub(super) horizontal_weights: Vec<f32>,
-    pub(super) vertical_difference: Vec<f32>,
-    pub(super) horizontal_difference: Vec<f32>,
-    pub(super) vertical_alternative: Vec<f32>,
-    pub(super) horizontal_alternative: Vec<f32>,
-}
-
-impl AmazeScratch {
-    fn new() -> Result<Self, DemosaicError> {
-        let plane = || allocate_zeroed_f32(PLANE_ELEMENTS).map_err(DemosaicError::from);
-        Ok(Self {
-            cfa: plane()?,
-            green: plane()?,
-            red: plane()?,
-            blue: plane()?,
-            vertical_weights: plane()?,
-            horizontal_weights: plane()?,
-            vertical_difference: plane()?,
-            horizontal_difference: plane()?,
-            vertical_alternative: plane()?,
-            horizontal_alternative: plane()?,
-        })
-    }
-
-    fn clear(&mut self) {
-        self.cfa.fill(0.0);
-        self.green.fill(0.0);
-        self.red.fill(0.0);
-        self.blue.fill(0.0);
-        self.vertical_weights.fill(0.0);
-        self.horizontal_weights.fill(0.0);
-        self.vertical_difference.fill(0.0);
-        self.horizontal_difference.fill(0.0);
-        self.vertical_alternative.fill(0.0);
-        self.horizontal_alternative.fill(0.0);
-    }
-}
-
+/// Fill the tile's CFA plane, mirroring samples beyond the image edge.
 fn populate(scratch: &mut AmazeScratch, mosaic: &MosaicImage<f32>, tile: AmazeTile) {
     for row in 0..TILE_SIZE {
         let source_y = mirror_coordinate(
@@ -153,11 +137,6 @@ fn populate(scratch: &mut AmazeScratch, mosaic: &MosaicImage<f32>, tile: AmazeTi
             let index = row * TILE_SIZE + col;
             scratch.cfa[index] = value;
             scratch.green[index] = value;
-            match tile.pattern.color_at(col, row).channel_index() {
-                0 => scratch.red[index] = value,
-                2 => scratch.blue[index] = value,
-                _ => {}
-            }
         }
     }
 }
@@ -205,7 +184,7 @@ fn write_tile(
                 .channel_index();
             let mut rgb = [
                 scratch.red[index],
-                scratch.green[index],
+                scratch.green[index].max(0.0),
                 scratch.blue[index],
             ];
             rgb[measured_channel] = *mosaic.sample(global_x, global_y);

@@ -1296,7 +1296,7 @@ mod tests {
     }
 
     #[test]
-    fn demosaic_applies_white_balance_without_clipping() {
+    fn demosaic_is_camera_native_and_does_not_apply_white_balance() {
         let mosaic =
             MosaicImage::new(2, 2, 2, BayerPattern::Rggb, vec![0.5; 4]).expect("valid fixture");
         let rgb = demosaic(
@@ -1309,7 +1309,7 @@ mod tests {
             DemosaicAlgorithm::Bilinear,
         )
         .expect("demosaic succeeds");
-        assert_eq!(rgb.pixel(0, 0), Some(&[1.5, 0.5, 1.0][..]));
+        assert_eq!(rgb.pixel(0, 0), Some(&[0.5, 0.5, 0.5][..]));
     }
 
     #[test]

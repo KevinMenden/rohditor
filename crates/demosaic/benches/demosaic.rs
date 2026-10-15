@@ -7,6 +7,11 @@ use rohditor_image::{BayerPattern, MosaicImage};
 
 const PREVIEW_WIDTH: usize = 2_560;
 const PREVIEW_HEIGHT: usize = 1_703;
+const AS_SHOT_GAINS: WhiteBalanceGains = WhiteBalanceGains {
+    red: 2.1,
+    green: 1.0,
+    blue: 2.6,
+};
 
 fn benchmark_demosaic(criterion: &mut Criterion) {
     for (name, width, height) in [
@@ -30,6 +35,10 @@ fn benchmark_demosaic(criterion: &mut Criterion) {
                         algorithm,
                     ))
                 });
+            });
+            // Typical as-shot gains: RCD and AMaZE also scale the mosaic.
+            group.bench_function(format!("{algorithm_name}_balanced"), |bencher| {
+                bencher.iter(|| must(demosaic(black_box(&mosaic), AS_SHOT_GAINS, algorithm)));
             });
         }
         group.finish();

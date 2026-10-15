@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="XMP Core 4.4.0-Exiv2">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about=""
+   xmlns:darktable="http://darktable.sf.net/"
+   darktable:xmp_version="5"
+   darktable:raw_params="0"
+   darktable:auto_presets_applied="1"
+   darktable:history_end="1"
+   darktable:iop_order_version="4">
+   <darktable:history>
+    <rdf:Seq>
+     <!-- demosaic v4 params: green_eq, median_thrs, color_smoothing, method, lmmse_refine, dual_thrs -->
+     <rdf:li darktable:num="0" darktable:operation="demosaic" darktable:enabled="1" darktable:modversion="4" darktable:params="000000000000000000000000@METHOD@00000000cdcc4c3e" darktable:multi_name="" darktable:multi_name_hand_edited="0" darktable:multi_priority="0" darktable:blendop_version="11"/>
+    </rdf:Seq>
+   </darktable:history>
+  </rdf:Description>
+ </rdf:RDF>
+</x:xmpmeta>

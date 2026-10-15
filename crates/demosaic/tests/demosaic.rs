@@ -82,7 +82,7 @@ fn mhc_reconstructs_affine_fields_at_every_interior_phase() -> Result<(), Box<dy
 }
 
 #[test]
-fn mhc_preserves_observed_sites_before_white_balance_for_all_layouts() -> Result<(), Box<dyn Error>>
+fn mhc_ignores_balance_and_preserves_observed_sites_for_all_layouts() -> Result<(), Box<dyn Error>>
 {
     let gains = WhiteBalanceGains {
         red: 1.7,
@@ -99,12 +99,7 @@ fn mhc_preserves_observed_sites_before_white_balance_for_all_layouts() -> Result
             for x in 0..mosaic.width() {
                 let color = pattern.color_at(x, y);
                 let channel = channel_index(color);
-                let gain = match color {
-                    CfaColor::Red => gains.red,
-                    CfaColor::Green => gains.green,
-                    CfaColor::Blue => gains.blue,
-                };
-                let expected = mosaic.get(x, y).expect("source sample") * gain;
+                let expected = *mosaic.get(x, y).expect("source sample");
                 let actual = image.pixel(x, y).expect("output pixel")[channel];
                 assert!(
                     (actual - expected).abs() <= 1.0e-6,
@@ -117,7 +112,7 @@ fn mhc_preserves_observed_sites_before_white_balance_for_all_layouts() -> Result
 }
 
 #[test]
-fn rcd_preserves_observed_sites_after_white_balance_for_all_layouts() -> Result<(), Box<dyn Error>>
+fn rcd_preserves_observed_sites_under_channel_balance_for_all_layouts() -> Result<(), Box<dyn Error>>
 {
     let gains = WhiteBalanceGains {
         red: 1.7,
@@ -134,12 +129,7 @@ fn rcd_preserves_observed_sites_after_white_balance_for_all_layouts() -> Result<
             for x in 0..mosaic.width() {
                 let color = pattern.color_at(x, y);
                 let channel = channel_index(color);
-                let gain = match color {
-                    CfaColor::Red => gains.red,
-                    CfaColor::Green => gains.green,
-                    CfaColor::Blue => gains.blue,
-                };
-                let expected = mosaic.get(x, y).expect("source sample") * gain;
+                let expected = *mosaic.get(x, y).expect("source sample");
                 let actual = image.pixel(x, y).expect("output pixel")[channel];
                 assert!(
                     (actual - expected).abs() <= 1.0e-6,
@@ -152,8 +142,8 @@ fn rcd_preserves_observed_sites_after_white_balance_for_all_layouts() -> Result<
 }
 
 #[test]
-fn amaze_preserves_observed_sites_after_white_balance_for_all_layouts() -> Result<(), Box<dyn Error>>
-{
+fn amaze_preserves_observed_sites_under_channel_balance_for_all_layouts()
+-> Result<(), Box<dyn Error>> {
     let gains = WhiteBalanceGains {
         red: 1.7,
         green: 0.8,
@@ -169,12 +159,7 @@ fn amaze_preserves_observed_sites_after_white_balance_for_all_layouts() -> Resul
             for x in 0..mosaic.width() {
                 let color = pattern.color_at(x, y);
                 let channel = channel_index(color);
-                let gain = match color {
-                    CfaColor::Red => gains.red,
-                    CfaColor::Green => gains.green,
-                    CfaColor::Blue => gains.blue,
-                };
-                let expected = mosaic.get(x, y).expect("source sample") * gain;
+                let expected = *mosaic.get(x, y).expect("source sample");
                 let actual = image.pixel(x, y).expect("output pixel")[channel];
                 assert!(
                     (actual - expected).abs() <= 1.0e-6,
@@ -398,7 +383,7 @@ fn mhc_retains_negative_values_and_over_range_highlights() -> Result<(), Box<dyn
         DemosaicAlgorithm::MalvarHeCutler,
     )?;
     for pixel in image.data().as_chunks::<3>().0 {
-        assert_close(pixel, &[-0.5, 1.25, 3.0], 1.0e-6);
+        assert_close(pixel, &[-0.25, 1.25, 2.0], 1.0e-6);
     }
     Ok(())
 }
@@ -466,6 +451,88 @@ fn mhc_is_identical_with_one_and_multiple_rayon_threads() -> Result<(), Box<dyn 
         )
     })?;
     assert_eq!(single, multiple);
+    Ok(())
+}
+
+const UNBALANCED: WhiteBalanceGains = WhiteBalanceGains {
+    red: 2.1,
+    green: 1.0,
+    blue: 2.6,
+};
+
+/// A textured colour image with dim red and blue, like raw sensor data.
+fn textured_unbalanced(x: usize, y: usize) -> [f32; 3] {
+    let (fx, fy) = (x as f32, y as f32);
+    let detail = 0.04 * (0.9 * fx).sin() * (0.7 * fy).cos();
+    let edge = if x * 3 + y > 60 { 0.25 } else { 0.0 };
+    [
+        0.10 + 0.5 * edge + 0.4 * detail,
+        0.30 + edge + detail,
+        0.08 + 0.4 * edge + 0.3 * detail,
+    ]
+}
+
+#[test]
+fn balance_leaves_flat_images_camera_native_for_every_algorithm() -> Result<(), Box<dyn Error>> {
+    for algorithm in [
+        DemosaicAlgorithm::Bilinear,
+        DemosaicAlgorithm::MalvarHeCutler,
+        DemosaicAlgorithm::Rcd,
+        DemosaicAlgorithm::Amaze,
+    ] {
+        for pattern in PATTERNS {
+            let mosaic = mosaic_from_rgb(48, 40, pattern, |_, _| [0.15, 0.3, 0.12])?;
+            let image = demosaic(&mosaic, UNBALANCED, algorithm)?;
+            for pixel in image.data().as_chunks::<3>().0 {
+                // The algorithms' EPSILON terms act on the dimmer balanced values.
+                assert_close(pixel, &[0.15, 0.3, 0.12], 1.0e-4);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn linear_algorithms_ignore_balance_bit_for_bit() -> Result<(), Box<dyn Error>> {
+    let mosaic = mosaic_from_rgb(40, 40, BayerPattern::Rggb, textured_unbalanced)?;
+    for algorithm in [
+        DemosaicAlgorithm::Bilinear,
+        DemosaicAlgorithm::MalvarHeCutler,
+    ] {
+        let balanced = demosaic(&mosaic, UNBALANCED, algorithm)?;
+        let plain = demosaic(&mosaic, WhiteBalanceGains::identity(), algorithm)?;
+        assert_eq!(balanced.data(), plain.data(), "{algorithm:?}");
+    }
+    Ok(())
+}
+
+#[test]
+fn directional_algorithms_use_balance_and_only_its_channel_ratios() -> Result<(), Box<dyn Error>> {
+    let mosaic = mosaic_from_rgb(64, 64, BayerPattern::Grbg, textured_unbalanced)?;
+    let scaled_gains = WhiteBalanceGains {
+        red: UNBALANCED.red * 3.0,
+        green: UNBALANCED.green * 3.0,
+        blue: UNBALANCED.blue * 3.0,
+    };
+    for algorithm in [DemosaicAlgorithm::Rcd, DemosaicAlgorithm::Amaze] {
+        let plain = demosaic(&mosaic, WhiteBalanceGains::identity(), algorithm)?;
+        let balanced = demosaic(&mosaic, UNBALANCED, algorithm)?;
+        let rescaled = demosaic(&mosaic, scaled_gains, algorithm)?;
+        let difference = |a: &[f32], b: &[f32]| {
+            a.iter()
+                .zip(b)
+                .map(|(x, y)| (x - y).abs())
+                .fold(0.0_f32, f32::max)
+        };
+        assert!(
+            difference(plain.data(), balanced.data()) > 1.0e-4,
+            "{algorithm:?} ignored the balance"
+        );
+        assert!(
+            difference(balanced.data(), rescaled.data()) < 1.0e-5,
+            "{algorithm:?} depends on the overall gain scale"
+        );
+    }
     Ok(())
 }
 

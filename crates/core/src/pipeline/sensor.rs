@@ -21,8 +21,8 @@ use rohditor_raw::{ImageRect, LevelPattern, PhotometricInterpretation, RawFileIn
 
 use super::{RawCropPolicy, RenderOptions};
 use crate::{
-    CameraCalibration, CameraColorTransform, CameraProfileKey, CancellationToken, PipelineError,
-    camera_profile_key, resolve_camera_colour,
+    CameraCalibration, CameraColorTransform, CameraProfileKey, CancellationToken, Matrix3,
+    PipelineError, camera_profile_key, resolve_camera_colour, white_balance_gains_from_calibration,
 };
 
 /// Resolved crop and Bayer phase for one sensor-development request.
@@ -287,6 +287,10 @@ pub struct SensorDevelopmentDescription {
     camera_color_transform: CameraColorTransform,
     white_balance: WhiteBalance,
     white_balance_gains: WhiteBalanceGains,
+    /// As-shot gains: the channel balance demosaicing reconstructs under.
+    /// Independent of the recipe, so white-balance edits never invalidate the
+    /// demosaiced image.
+    demosaic_balance: WhiteBalanceGains,
     highlight_adjustments: HighlightAdjustments,
     highlight_execution: HighlightExecution,
     demosaic: DemosaicContract,
@@ -308,6 +312,11 @@ impl SensorDevelopmentDescription {
         let white_balance = recipe.color.white_balance;
         let resolved = resolve_camera_colour(&calibration, &profile_selection, white_balance)?;
         let highlight_adjustments = recipe.raw.highlights;
+        let demosaic_balance = white_balance_gains_from_calibration(
+            calibration.as_shot_white_balance,
+            Matrix3::identity(),
+            WhiteBalance::AsShot,
+        )?;
         Ok(Self {
             normalization,
             calibration,
@@ -316,6 +325,7 @@ impl SensorDevelopmentDescription {
             profile_selection,
             white_balance,
             white_balance_gains: resolved.white_balance_gains,
+            demosaic_balance,
             highlight_execution: highlight_execution(
                 highlight_adjustments,
                 resolved.white_balance_gains,
@@ -359,6 +369,12 @@ impl SensorDevelopmentDescription {
     #[must_use]
     pub const fn white_balance_gains(&self) -> WhiteBalanceGains {
         self.white_balance_gains
+    }
+
+    /// Channel balance for demosaicing: the file's as-shot white balance.
+    #[must_use]
+    pub const fn demosaic_balance(&self) -> WhiteBalanceGains {
+        self.demosaic_balance
     }
 
     #[must_use]

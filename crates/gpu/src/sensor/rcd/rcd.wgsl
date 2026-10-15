@@ -1,7 +1,9 @@
 // Port of crates/demosaic/src/rcd.rs and rcd_stages.rs. RCD follows the
 // RawTherapee/darktable tiled formulation attributed there to Luis Sanz
 // Rodríguez, Ingo Weyrich, and Hanno Schwalm. Keep stage domains and arithmetic
-// aligned with the CPU reference when changing this file.
+// aligned with the CPU reference when changing this file. Like the CPU path, the
+// mosaic is scaled by the channel balance before reconstruction and the planes
+// are scaled back when written; measured samples are written unscaled.
 const EDGE: u32 = 194u;
 const FULL: u32 = EDGE * EDGE;
 const HALF: u32 = FULL / 2u;
@@ -21,6 +23,8 @@ struct Params {
     source: vec4<u32>, // mosaic columns, Bayer phase, unused, unused
     destination: vec4<u32>, // camera tile width, camera tile height, columns, unused
     tile: vec4<u32>, // global origin x/y, local width/height
+    forward: vec4<f32>, // channel balance applied to the mosaic before reconstruction
+    inverse: vec4<f32>, // undoes `forward` on the reconstructed planes
 };
 @group(0) @binding(0) var mosaic: texture_2d_array<f32>;
 @group(0) @binding(1) var<uniform> p: Params;
@@ -96,7 +100,7 @@ fn clear_populate(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let pos = position(i);
     if any(pos >= p.tile.zw) { return; }
-    let value = sample(p.tile.xy + pos);
+    let value = sample(p.tile.xy + pos) * p.forward[color(p.tile.xy + pos)];
     let first = color(p.tile.xy + vec2(0u, pos.y));
     let second = color(p.tile.xy + vec2(1u, pos.y));
     scratch[CFA + i] = value;
@@ -274,7 +278,7 @@ fn scatter_core(@builtin(global_invocation_id) id: vec3<u32>) {
     let measured = color(global);
     let original = sample(global);
     let i = i32(id.x);
-    var values = vec3(read(RED,i), read(GREEN,i), read(BLUE,i));
+    var values = vec3(read(RED,i), read(GREEN,i), read(BLUE,i)) * p.inverse.xyz;
     values[measured] = original;
     if any((bitcast<vec3<u32>>(values) & vec3(0x7f800000u)) == vec3(0x7f800000u)) {
         atomicOr(&invalid, 1u);

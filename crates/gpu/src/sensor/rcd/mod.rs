@@ -1,7 +1,7 @@
 //! One fixed RCD scratch tile and an explicit, ordered shader pass sequence.
 
 use rohditor_core::CancellationToken;
-use rohditor_demosaic::{RCD_TILE_SIZE, rcd_tiles};
+use rohditor_demosaic::{ChannelBalance, RCD_TILE_SIZE, rcd_tiles};
 
 use super::normalize::{bayer_pattern_code, check_cancel};
 use super::{GpuHighlightedMosaic, GpuSensorProcessor};
@@ -22,6 +22,9 @@ const NAMES: [&str; 9] = [
     "scatter_core",
 ];
 
+/// Tile parameters: 16 words followed by the forward and inverse channel balance.
+const UNIFORM_BYTES: u64 = 96;
+
 pub(super) struct RcdExecutor {
     _memory: Reservation,
     scratch: wgpu::Buffer,
@@ -30,11 +33,20 @@ pub(super) struct RcdExecutor {
 }
 
 impl RcdExecutor {
+    #[cfg(test)]
     pub(super) const fn scratch_bytes() -> u64 {
         SCRATCH_BYTES
     }
 
-    pub(super) fn new(processor: &GpuSensorProcessor) -> Result<Self, GpuPreviewError> {
+    /// Scratch plus the parameter buffer, as reserved by [`Self::new`].
+    pub(super) const fn reserved_bytes() -> u64 {
+        SCRATCH_BYTES + UNIFORM_BYTES
+    }
+
+    pub(super) fn new(
+        processor: &GpuSensorProcessor,
+        balance: ChannelBalance,
+    ) -> Result<Self, GpuPreviewError> {
         let limits = processor.device.limits();
         if SCRATCH_BYTES > limits.max_buffer_size
             || SCRATCH_BYTES > u64::from(limits.max_storage_buffer_binding_size)
@@ -43,7 +55,7 @@ impl RcdExecutor {
             || limits.max_storage_textures_per_shader_stage < 3
             || limits.max_sampled_textures_per_shader_stage < 1
             || limits.max_uniform_buffers_per_shader_stage < 1
-            || limits.max_uniform_buffer_binding_size < 64
+            || limits.max_uniform_buffer_binding_size < UNIFORM_BYTES as u32
             || limits.max_bindings_per_bind_group < 7
             || limits.max_bind_groups < 1
             || limits.max_compute_invocations_per_workgroup < 64
@@ -53,7 +65,7 @@ impl RcdExecutor {
                 reason: "device limits cannot hold one bounded GPU RCD scratch tile".into(),
             });
         }
-        let memory = Reservation::try_new(SCRATCH_BYTES + 64, processor.budget)?;
+        let memory = Reservation::try_new(SCRATCH_BYTES + UNIFORM_BYTES, processor.budget)?;
         let scratch = processor.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("RCD tile scratch"),
             size: SCRATCH_BYTES,
@@ -67,10 +79,27 @@ impl RcdExecutor {
         });
         let uniform = processor.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("RCD tile parameters"),
-            size: 64,
+            size: UNIFORM_BYTES,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        // Balance factors follow the 64 bytes of per-tile words.
+        let [forward_red, forward_green, forward_blue] = balance.forward();
+        let [inverse_red, inverse_green, inverse_blue] = balance.inverse();
+        processor.queue.write_buffer(
+            &uniform,
+            64,
+            bytemuck::cast_slice(&[
+                forward_red,
+                forward_green,
+                forward_blue,
+                1.0,
+                inverse_red,
+                inverse_green,
+                inverse_blue,
+                1.0,
+            ]),
+        );
         let shader = processor
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {

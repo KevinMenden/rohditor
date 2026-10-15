@@ -23,6 +23,13 @@ assert_no_dependencies rohditor-gpu 'rohditor-(cli|desktop)'
 # Headless GPU export is an application-level dependency; core stays GPU-free.
 assert_no_dependencies rohditor-cli 'rohditor-desktop'
 
+# The reference harness is dev-only: no other crate may depend on it.
+if grep -rl 'rohditor-reference' --include=Cargo.toml apps crates \
+    | grep -qv '^crates/reference/'; then
+    echo "a crate depends on the dev-only rohditor-reference harness" >&2
+    exit 1
+fi
+
 if grep -Eq 'pub use rohditor_(demosaic|edit|image)' \
     crates/core/src/lib.rs crates/raw/src/lib.rs; then
     echo "found a legacy facade re-export for an extracted crate" >&2
