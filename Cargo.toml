@@ -13,6 +13,7 @@ members = [
     "crates/image",
     "crates/optics",
     "crates/raw",
+    "crates/reference",
 ]
 resolver = "3"
 
@@ -39,6 +40,7 @@ rfd = { version = "=0.17.2", default-features = false, features = ["xdg-portal"]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
+tiff = { version = "0.11", default-features = false, features = ["deflate"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 wgpu = { version = "=27.0.1", default-features = false, features = ["vulkan", "wgsl"] }

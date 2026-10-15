@@ -340,7 +340,7 @@ fn prepare_camera_source(
     let demosaic_started = Instant::now();
     let full_linear = demosaic_cancellable(
         &mosaic,
-        WhiteBalanceGains::identity(),
+        sensor.demosaic_balance(),
         sensor.demosaic().algorithm(),
         cancellation,
     )?;

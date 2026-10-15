@@ -6,13 +6,14 @@
 //! camera-native linear RGB rows.
 
 mod amaze;
-mod amaze_stages;
+mod balance;
 mod bilinear;
 mod malvar_he_cutler;
 mod rcd;
 mod rcd_geometry;
 mod rcd_stages;
 
+pub use balance::ChannelBalance;
 pub use rcd_geometry::{
     RCD_BORDER, RCD_MIN_DIMENSION, RCD_TILE_SIZE, RCD_TILE_STEP, RcdTileGeometry, rcd_tiles,
 };
@@ -155,11 +156,16 @@ impl DemosaicContract {
             DemosaicAlgorithm::Rcd => RCD_HALO,
             DemosaicAlgorithm::Amaze => AMAZE_HALO,
         };
+        // Version 2 of RCD and AMaZE reconstructs on a channel-balanced mosaic.
+        let algorithm_version = match algorithm {
+            DemosaicAlgorithm::Rcd | DemosaicAlgorithm::Amaze => 2,
+            DemosaicAlgorithm::Bilinear | DemosaicAlgorithm::MalvarHeCutler => 1,
+        };
         Self {
             algorithm,
             required_halo,
             border_policy: DemosaicBorderPolicy::BilinearReference,
-            algorithm_version: 1,
+            algorithm_version,
         }
     }
 
@@ -190,7 +196,8 @@ impl DemosaicContract {
     }
 }
 
-/// Effective multipliers applied to reconstructed camera-native R, G, and B.
+/// White-balance multipliers for camera-native R, G, and B. Their overall
+/// scale does not matter; only the ratios between channels are used.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WhiteBalanceGains {
     pub red: f32,
@@ -230,26 +237,53 @@ impl WhiteBalanceGains {
 
 /// Reconstruct a normalized Bayer mosaic into camera-native linear RGB.
 ///
-/// White-balance gains are applied only after all three channels have been
-/// reconstructed. Values are not clipped, so negative filter lobes and
-/// over-range highlights remain available to later pipeline stages.
+/// `balance` is the white balance the image will be viewed with (normally the
+/// as-shot gains). RCD and AMaZE reconstruct on a mosaic scaled by it, as
+/// RawTherapee and darktable do, because unbalanced channels degrade their
+/// direction and colour-difference decisions (see `balance.rs`). The scaling
+/// is undone afterwards, so the result is camera-native regardless of
+/// `balance` and white balance remains a separate later stage. Bilinear and
+/// Malvar-He-Cutler are linear and ignore it. Values are not clipped, so
+/// negative filter lobes and over-range highlights remain available to later
+/// pipeline stages.
 pub fn demosaic(
     mosaic: &MosaicImage<f32>,
-    gains: WhiteBalanceGains,
+    balance: WhiteBalanceGains,
     algorithm: DemosaicAlgorithm,
 ) -> Result<LinearRgbImage<f32>, DemosaicError> {
-    demosaic_cancellable(mosaic, gains, algorithm, &|| false)
+    demosaic_cancellable(mosaic, balance, algorithm, &|| false)
 }
 
 pub fn demosaic_cancellable(
     mosaic: &MosaicImage<f32>,
-    gains: WhiteBalanceGains,
+    balance: WhiteBalanceGains,
     algorithm: DemosaicAlgorithm,
     cancellation: &dyn CancellationCheck,
 ) -> Result<LinearRgbImage<f32>, DemosaicError> {
     checkpoint(cancellation)?;
-    gains.validate()?;
+    balance.validate()?;
     validate_mosaic(mosaic, cancellation)?;
+
+    // Only the gradient/ratio based algorithms benefit from balanced input.
+    let balance = ChannelBalance::new(balance);
+    let balanced = match algorithm {
+        DemosaicAlgorithm::Rcd | DemosaicAlgorithm::Amaze if !balance.is_identity() => {
+            Some(balance.scale_mosaic(mosaic, cancellation)?)
+        }
+        _ => None,
+    };
+    let (mosaic, gains, clip_point) = match &balanced {
+        // The algorithms apply `gains` to their output, which undoes the scaling.
+        Some(scaled) => {
+            let [red, green, blue] = balance.inverse();
+            (
+                scaled,
+                WhiteBalanceGains { red, green, blue },
+                balance.clip_point(),
+            )
+        }
+        None => (mosaic, WhiteBalanceGains::identity(), 1.0),
+    };
 
     let row_stride = mosaic
         .width()
@@ -269,9 +303,14 @@ pub fn demosaic_cancellable(
         DemosaicAlgorithm::Rcd => {
             rcd::reconstruct(mosaic, gains, cancellation, row_stride, &mut output)?
         }
-        DemosaicAlgorithm::Amaze => {
-            amaze::reconstruct(mosaic, gains, cancellation, row_stride, &mut output)?
-        }
+        DemosaicAlgorithm::Amaze => amaze::reconstruct(
+            mosaic,
+            gains,
+            clip_point,
+            cancellation,
+            row_stride,
+            &mut output,
+        )?,
     }
     checkpoint(cancellation)?;
     LinearRgbImage::new(
@@ -342,7 +381,12 @@ mod contract_tests {
                 DemosaicBorderPolicy::BilinearReference
             );
             assert_eq!(contract.stable_name(), algorithm.stable_name());
-            assert_eq!(contract.algorithm_version(), 1);
+            // RCD and AMaZE are at version 2 (channel-balanced reconstruction).
+            let expected_version = match algorithm {
+                DemosaicAlgorithm::Rcd | DemosaicAlgorithm::Amaze => 2,
+                _ => 1,
+            };
+            assert_eq!(contract.algorithm_version(), expected_version);
         }
     }
 }

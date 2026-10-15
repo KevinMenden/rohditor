@@ -4,7 +4,7 @@ use rohditor_core::{
     CancellationToken, CaptureSharpeningContract, RawCropPolicy, RenderOptions,
     SensorDevelopmentDescription, normalize_raw,
 };
-use rohditor_demosaic::{DemosaicAlgorithm, WhiteBalanceGains, demosaic};
+use rohditor_demosaic::{ChannelBalance, DemosaicAlgorithm, WhiteBalanceGains, demosaic};
 use rohditor_edit::{CaptureSharpening, EditRecipe, HighlightMethod};
 use rohditor_raw::{ImageRect, LevelPattern, RawFrame};
 
@@ -118,7 +118,7 @@ fn rcd_support_is_limited_to_off_and_clip_highlights() {
     )
     .expect("RCD highlight description");
     assert!(!GpuSensorProcessor::supports(&unsupported));
-    assert_eq!(DemosaicAlgorithm::Rcd.contract().algorithm_version(), 1);
+    assert_eq!(DemosaicAlgorithm::Rcd.contract().algorithm_version(), 2);
 }
 
 fn highlighted(
@@ -218,6 +218,43 @@ fn bilinear_and_mhc_match_cpu_at_borders_and_across_mosaic_tiles() {
 }
 
 #[test]
+#[ignore = "requires Vulkan; GPU RCD with a non-unit as-shot channel balance"]
+fn rcd_matches_cpu_under_a_non_unit_channel_balance() {
+    let _guard = crate::preview::processor::tests::gpu_test_guard();
+    let gpu = processor();
+    let capture = CaptureSharpeningContract::new(CaptureSharpening::default(), [1.0; 3])
+        .expect("capture off");
+    for pattern in ["RGGB", "GBRG"] {
+        for kind in [0, 2, 5] {
+            let mut frame = frame(pattern, 199, 201, kind);
+            frame.info.as_shot_white_balance = [Some(2.1), Some(1.0), Some(2.6), None];
+            let description = description(&frame, DemosaicAlgorithm::Rcd, false);
+            let balance = description.demosaic_balance();
+            assert!((balance.red - 2.1).abs() < 1e-6 && (balance.blue - 2.6).abs() < 1e-6);
+            let mosaic =
+                normalize_raw(&frame, RawCropPolicy::Recommended).expect("CPU normalized mosaic");
+            let reference = demosaic(&mosaic, balance, DemosaicAlgorithm::Rcd)
+                .expect("CPU balanced RCD reference");
+            let (source, _) = gpu
+                .demosaic(
+                    highlighted(&gpu, &frame, &description),
+                    &description,
+                    &capture,
+                    &CancellationToken::new(),
+                )
+                .expect("GPU balanced RCD");
+            let actual = readback(&gpu, &source);
+            for (i, (&a, &b)) in actual.iter().zip(reference.data()).enumerate() {
+                assert!(
+                    (a - b).abs() <= 2e-5 + 2e-5 * b.abs(),
+                    "balanced RCD {pattern} kind={kind} index={i}: GPU {a}, CPU {b}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 #[ignore = "requires Vulkan; RCD fixed-grid core and partial-tile camera RGB parity"]
 fn rcd_matches_cpu_with_mosaic_layer_seams_and_scratch_reuse() {
     let _guard = crate::preview::processor::tests::gpu_test_guard();
@@ -241,7 +278,7 @@ fn rcd_matches_cpu_with_mosaic_layer_seams_and_scratch_reuse() {
                     .expect("CPU normalized mosaic");
                 let reference = demosaic(
                     &mosaic,
-                    WhiteBalanceGains::identity(),
+                    description.demosaic_balance(),
                     DemosaicAlgorithm::Rcd,
                 )
                 .expect("CPU RCD reference");
@@ -344,7 +381,8 @@ fn rcd_intermediate_stages_match_signed_partial_tile_cpu_snapshot() {
         dimension: Some(wgpu::TextureViewDimension::D2Array),
         ..Default::default()
     });
-    let executor = RcdExecutor::new(&gpu).expect("RCD stage executor");
+    let executor = RcdExecutor::new(&gpu, ChannelBalance::new(WhiteBalanceGains::identity()))
+        .expect("RCD stage executor");
     let snapshots = executor
         .stage_probes(
             &gpu,
@@ -387,12 +425,8 @@ fn rcd_intermediate_stages_match_signed_partial_tile_cpu_snapshot() {
     let cpu_mosaic =
         rohditor_image::MosaicImage::new(29, 31, 29, rohditor_image::BayerPattern::Rggb, values)
             .expect("signed CPU mosaic");
-    let reference = demosaic(
-        &cpu_mosaic,
-        WhiteBalanceGains::identity(),
-        DemosaicAlgorithm::Rcd,
-    )
-    .expect("signed CPU RCD");
+    let reference = demosaic(&cpu_mosaic, desc.demosaic_balance(), DemosaicAlgorithm::Rcd)
+        .expect("signed CPU RCD");
     let capture = CaptureSharpeningContract::new(CaptureSharpening::default(), [1.0; 3])
         .expect("capture off");
     let (source, _) = gpu
@@ -529,7 +563,8 @@ fn rcd_cancellation_between_tiles_keeps_immutable_raw_for_recovery() {
         dimension: Some(wgpu::TextureViewDimension::D2Array),
         ..Default::default()
     });
-    let executor = RcdExecutor::new(&gpu).expect("RCD cancellation executor");
+    let executor = RcdExecutor::new(&gpu, ChannelBalance::new(WhiteBalanceGains::identity()))
+        .expect("RCD cancellation executor");
     let token = CancellationToken::new();
     assert!(matches!(
         executor.cancel_after_first_tile(&gpu, &mosaic, &view, &planes, &validation, &token),
@@ -726,23 +761,36 @@ fn private_camera_parity_and_timings(
     };
     let mosaic = rohditor_highlight::clip(mosaic, levels)?.mosaic;
     let cpu_started = std::time::Instant::now();
-    let reference = demosaic(&mosaic, WhiteBalanceGains::identity(), algorithm)?;
+    let reference = demosaic(&mosaic, desc.demosaic_balance(), algorithm)?;
     let cpu_time = cpu_started.elapsed();
     drop(mosaic);
+    // Reconstruction runs on the balanced mosaic, so f32 rounding differences
+    // between GPU and CPU grow by the inverse gain when scaled back.
+    let slack = ChannelBalance::new(desc.demosaic_balance())
+        .inverse()
+        .into_iter()
+        .fold(1.0_f32, f32::max);
     for iteration in 0..iterations {
         let (normalized, normalization) = gpu.normalize(&frame, desc.normalization(), &token)?;
         let (highlighted, _, highlight) = gpu.apply_highlight(normalized, &desc, &token)?;
         let (source, metrics) = gpu.demosaic(highlighted, &desc, &capture, &token)?;
         let actual = readback(&gpu, &source);
         let mut maximum = 0.0_f32;
-        for (index, (&a, &b)) in actual.iter().zip(reference.data()).enumerate() {
+        let mut outliers = 0usize;
+        for (&a, &b) in actual.iter().zip(reference.data()) {
             let error = (a - b).abs();
-            assert!(
-                error <= 2e-5 + 2e-5 * b.abs(),
-                "RAW camera sample {index}: GPU={a} CPU={b}"
-            );
+            if error > slack * (2e-5 + 2e-5 * b.abs()) {
+                outliers += 1;
+            }
             maximum = maximum.max(error);
         }
+        // A few directional decisions can flip on f32 rounding differences
+        // (DSC00851 has a cluster of 84 samples, max error 1.8e-3, around one
+        // pixel neighbourhood); everything else must match within tolerance.
+        assert!(
+            outliers as f64 <= 1e-5 * actual.len() as f64 && maximum <= 5e-3,
+            "{outliers} samples outside tolerance, max error {maximum}"
+        );
         eprintln!(
             "sensor {algorithm:?} DSC00851 {:?} iteration={iteration} (first/repeated dispatch, same device): CPU={cpu_time:?}, GPU normalization={:?}, Clip={:?}, demosaic={:?}, max camera error={maximum:e}, uploaded={} diagnostic readback={} logical demosaic peak={} retained={} RCD/base tiles={} submissions={}",
             source.dimensions(),

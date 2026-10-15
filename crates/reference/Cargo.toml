@@ -1,0 +1,17 @@
+[package]
+name = "rohditor-reference"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Dev-only harness comparing Rohditor demosaicing with RawTherapee and darktable"
+
+[dependencies]
+rohditor-demosaic = { path = "../demosaic" }
+rohditor-image = { path = "../image" }
+rohditor-raw = { path = "../raw" }
+thiserror.workspace = true
+tiff.workspace = true
+
+[lints]
+workspace = true

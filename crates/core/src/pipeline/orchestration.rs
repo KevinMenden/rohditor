@@ -1238,16 +1238,11 @@ fn prepare_base_cancellable(
         normalized_height,
     )?;
     let normalized = highlighted.mosaic;
-    let optics_enabled = crate::optics::optics_enabled(&recipe.optics);
 
     let demosaic_started = Instant::now();
     let mut linear = demosaic_cancellable(
         &normalized,
-        if optics_enabled || recipe.capture_sharpening.is_active() {
-            WhiteBalanceGains::identity()
-        } else {
-            gains
-        },
+        sensor.demosaic_balance(),
         sensor.demosaic().algorithm(),
         cancellation,
     )?;
@@ -1270,9 +1265,7 @@ fn prepare_base_cancellable(
     let optics_timing = optics_started.elapsed();
 
     let color_started = Instant::now();
-    if optics_enabled || recipe.capture_sharpening.is_active() {
-        apply_white_balance_cancellable(&mut linear, gains, cancellation)?;
-    }
+    apply_white_balance_cancellable(&mut linear, gains, cancellation)?;
     apply_camera_color_transform_cancellable(
         &mut linear,
         sensor.camera_color_transform(),

@@ -1,0 +1,68 @@
+[Version]
+AppVersion=5.13
+Version=351
+
+[Exposure]
+Auto=false
+Clip=0.02
+Compensation=0
+Brightness=0
+Contrast=0
+Saturation=0
+Black=0
+HighlightCompr=0
+HighlightComprThreshold=0
+ShadowCompr=50
+ClampOWhite=false
+CurveMode=Standard
+Curve=0;
+Curve2=0;
+
+[White Balance]
+Enabled=true
+Setting=Camera
+
+[RAW]
+DarkFrame=
+FlatFieldFile=
+
+[RAW Bayer]
+Method=@METHOD@
+Border=4
+CcSteps=0
+PreBlack0=0
+LineDenoise=0
+GreenEqThreshold=0
+DCBIterations=2
+DCBEnhance=false
+PreDemosaic=false
+
+[Sharpening]
+Enabled=false
+
+[Color Management]
+InputProfile=(none)
+ToneCurve=false
+ApplyLookTable=false
+ApplyBaselineExposureOffset=false
+ApplyHueSatMap=false
+DCPIlluminant=0
+WorkingProfile=sRGB
+OutputProfile=RTv4_sRGB
+OutputProfileIntent=1
+OutputBPC=false
+
+[HLRecovery]
+Enabled=false
+
+[Shadows & Highlights]
+Enabled=false
+
+[Local Contrast]
+Enabled=false
+
+[Directional Pyramid Denoising]
+Enabled=false
+
+[Impulse Denoise]
+Enabled=false
