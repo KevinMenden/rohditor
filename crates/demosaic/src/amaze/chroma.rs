@@ -61,7 +61,8 @@ pub(super) fn interpolate_chroma(s: &mut AmazeScratch, pattern: BayerPattern) {
             // Each diagonal contributes its nearest value, extrapolated from
             // the three further ones along it and across it.
             let diagonal = |near: isize, far: isize, along: isize, across: isize| {
-                1.325 * at_half(near) - 0.175 * at_half(far)
+                1.325 * at_half(near)
+                    - 0.175 * at_half(far)
                     - 0.075 * at_half(near + along)
                     - 0.075 * at_half(near + across)
             };

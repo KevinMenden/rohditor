@@ -117,7 +117,10 @@ impl AmazeScratch {
 
     #[cfg(debug_assertions)]
     fn poison(&mut self) {
+        let [dgrb_red, dgrb_blue] = &mut self.dgrb;
         for plane in [
+            dgrb_red,
+            dgrb_blue,
             &mut self.delhvsqsum,
             &mut self.dirwts0,
             &mut self.dirwts1,
@@ -129,8 +132,6 @@ impl AmazeScratch {
             &mut self.dgintv,
             &mut self.dginth,
             &mut self.hvwt,
-            &mut self.dgrb[0],
-            &mut self.dgrb[1],
             &mut self.delp,
             &mut self.delm,
             &mut self.dgrbsq1m,

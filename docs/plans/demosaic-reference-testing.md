@@ -154,19 +154,19 @@ PSNR over all pixels, the 10% strongest-gradient "edge" pixels, and the rest
    4x4: AMaZE 49.98 -> 54.03 dB (reference 54.77), RCD 49.35 -> 54.07 (54.69);
    worst case DSC03270 4x4 RCD 47.25 -> 51.91 (reference 54.58). Bilinear and
    MHC are linear and unaffected.
-2b. After pre-balancing, Rohditor is still 0.3-1.5 dB behind on AMaZE, and
-   behind on RCD in a few cases (DSC03270 4x4: 2.7 dB; DSC01166 4x4: 0.9 dB).
-3. **Rohditor's AMaZE is a simplification, not a port.** Noise-free, no white
-   balance involved: slanted edge 51.3 dB vs ~60.9 (references), disc 47.4 vs
-   49.4, zone plate 15.2 vs 16.7. Compared with RawTherapee's
-   `amaze_demosaic_RT.cc` (5.13), the port has about 140 lines of green
-   interpolation versus ~700 upstream, and ~40 lines of chroma versus ~500.
-   Missing: Nyquist texture detection and area interpolation, G refinement
-   from curvature, variance-weighted combination of the plus/minus diagonal
-   estimates (`pmwt`), the second green pass using the new R+B values, and
-   the "fancy chrominance" smoothing. Errors concentrate at colour edges:
-   red at blue sites is off by 0.13 on a 0.5-step edge. Green at the same pixels
-   already matches the references.
+2b. After pre-balancing, Rohditor was still 0.3-1.5 dB behind on AMaZE (fixed
+   by the port) and is behind on RCD in a few cases (DSC03270 4x4: 2.7 dB;
+   DSC01166 4x4: 0.9 dB).
+3. **Rohditor's AMaZE was a simplification, not a port (fixed, see "Fix:
+   faithful AMaZE port").** Noise-free, no white balance involved, it scored
+   slanted edge 51.3 dB vs ~60.9 (references), disc 47.4 vs 49.4, zone plate
+   15.2 vs 16.7. Compared with RawTherapee's `amaze_demosaic_RT.cc` (5.13) it
+   had about 140 lines of green interpolation versus ~700 upstream and ~40
+   lines of chroma versus ~500: no Nyquist texture handling, no curvature
+   based green refinement, no variance-weighted plus/minus diagonal
+   combination (`pmwt`), no second green pass from R+B, no fancy chrominance
+   smoothing. Errors concentrated at colour edges: red at blue sites was off by
+   0.13 on a 0.5-step edge.
 4. **RCD matches darktable on the slanted edge** (59.27 dB, identical) but trails
    on the disc (51.6 vs 53.4) and zone plate (16.48 vs 16.81), so a smaller
    divergence exists. Not investigated yet.
@@ -222,6 +222,44 @@ Cost (criterion, 2560x1703 mosaic, as-shot-like gains 2.1/1.0/2.6): RCD
 within noise; bilinear and MHC are unchanged because they skip it. The bench
 has `*_balanced` variants for every algorithm.
 
+### Fix: faithful AMaZE port (done)
+
+`crates/demosaic/src/amaze/` is now a port of RawTherapee 5.13's scalar
+`amaze_demosaic_RT.cc`, one file per stage group (`green`, `nyquist`,
+`diagonal`, `chroma`; shared constants and index helpers in `math`, planes in
+`scratch`). Stage order, loop bounds, constants (full upstream decimals) and
+the half-resolution `index >> 1` plane addressing follow the source, so it can
+be diffed against upstream. Deliberate differences: 256 px tiles with a 16 px
+halo mirrored at the edges; one buffer per plane instead of aliased buffers; the
+outer 16 px keep the bilinear reference result; samples are 0..1 rather than
+0..65535; the measured CFA sample is written back unchanged; like upstream,
+reconstructed values are clamped at zero. Rows of tiles run in parallel, each
+with its own scratch, and the result does not depend on the thread count.
+
+Debug builds poison every plane that upstream relies on being fully written
+before it is read; the demosaic tests passing in the dev profile show no stage
+reads stale data.
+
+Result: Rohditor AMaZE now equals RawTherapee and darktable.
+
+| noise-free fixture | before | after | RawTherapee | darktable |
+|---|---|---|---|---|
+| slanted edge | 51.30 | 60.98 | 60.94 | 60.98 |
+| disc | 47.40 | 49.25 | 49.65 | 49.25 |
+| zone plate | 15.22 | 16.71 | 16.72 | 16.71 |
+
+On all 12 real-image cases (2x2 and 4x4 binned, six files) Rohditor, RawTherapee
+and darktable AMaZE agree within 0.01 dB (for example DSC03821 4x4: 54.77 /
+54.77 / 54.77; DSC03270 4x4: 54.55 / 54.55 / 54.54).
+
+Tests: `amaze_reconstructs_a_soft_colour_edge_far_better_than_bilinear` (55.3 dB
+vs 42.9 for bilinear; runs in CI without external tools),
+`amaze_is_identical_with_one_and_multiple_rayon_threads`.
+
+Cost (criterion): 6000x4000 on 12 cores 1.14 s; 2560x1703 346 ms (362 ms with
+channel balance), limited there by only 8 tile rows. The simplified version
+ran serially at 392 ms for 2560x1703.
+
 ### Known issues from this work
 
 - **GPU/CPU RCD outliers.** With balance, GPU and CPU RCD differ on 84 of 72M
@@ -244,21 +282,26 @@ has `*_balanced` variants for every algorithm.
 
 ### Next steps
 
-1. **Port AMaZE faithfully** from `amaze_demosaic_RT.cc` (GPL, already adapted
-   here) and check each stage against the clean fixtures. This is the biggest
-   remaining gap: noise-free slanted edge 51.3 dB vs ~60.9 for the references,
-   disc 47.4 vs 49.4, zone plate 15.2 vs 16.7. Missing stages are listed in
-   finding 3. Expect AMaZE to also need a GPU version later.
-2. **Find the remaining RCD divergence** (noise-free disc 51.6 vs 53.4, zone
+1. **Find the remaining RCD divergence** (noise-free disc 51.6 vs 53.4, zone
    plate 16.48 vs 16.81; DSC03270 4x4 51.9 vs 54.6 after balance). Rohditor
    RCD matches darktable exactly on the slanted edge, so a stage-level diff
-   against darktable's `rcd` should find it quickly.
-3. Settle the GPU/CPU RCD outliers and the failing export parity tests above.
-4. **Level 2** on real ARWs (neutral pp3 / XMP, no synthetic truth), difference
+   against darktable's `rcd` should find it quickly. The AMaZE port is the
+   template: compare against upstream stage by stage on the clean fixtures.
+2. Settle the GPU/CPU RCD outliers and the failing export parity tests above.
+3. **AMaZE speed.** It is scalar with bounds-checked indexing. Parallelism is
+   per tile row, so small images use few cores. Options: per-tile tasks,
+   unchecked-free index patterns, and SIMD along rows as upstream does.
+   RawTherapee's tile size is 160; try it against 256.
+4. AMaZE on the GPU (the GPU supports MHC and RCD only).
+5. **Level 2** on real ARWs (neutral pp3 / XMP, no synthetic truth), difference
    images in `testdata/generated/reference/`.
-5. Lock in baselines as JSON so regressions fail `check.sh`-adjacent tests, and
-   consider running a small version of the clean-fixture comparison without
-   external tools (Rohditor-only thresholds) in normal CI.
-6. Optionally let the user's white balance, not only the as-shot one, set the
+6. Lock in baselines as JSON so regressions fail tests, and run a small version
+   of the clean-fixture comparison without external tools (Rohditor-only
+   thresholds) in normal CI. One such test exists for AMaZE; add RCD.
+7. Border policy: the outer 16 px of AMaZE and RCD are the bilinear result,
+   while RawTherapee and darktable reconstruct to the edge with mirrored
+   data. The upstream stage code already supports this (the tile halo is
+   mirrored), so it could be removed.
+8. Optionally let the user's white balance, not only the as-shot one, set the
    balance when it is far from as-shot; measure first, as it would make every
    white-balance edit re-demosaic.
