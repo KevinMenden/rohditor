@@ -118,7 +118,7 @@ fn rcd_support_is_limited_to_off_and_clip_highlights() {
     )
     .expect("RCD highlight description");
     assert!(!GpuSensorProcessor::supports(&unsupported));
-    assert_eq!(DemosaicAlgorithm::Rcd.contract().algorithm_version(), 2);
+    assert_eq!(DemosaicAlgorithm::Rcd.contract().algorithm_version(), 3);
 }
 
 fn highlighted(
@@ -401,13 +401,13 @@ fn rcd_intermediate_stages_match_signed_partial_tile_cpu_snapshot() {
     let probes = [
         (1, 4 * full + red, 0.51112366_f32),
         (2, 5 * full + red / 2, 2.155159),
-        (3, 2 * full + red, 0.60279745),
+        (3, 2 * full + red, 0.56720024),
         (4, 5 * full + half + green / 2, 1.1650273),
         (4, 5 * full + 2 * half + green / 2, 63.11414),
         (5, 5 * full + red / 2, 0.20751585),
-        (6, 3 * full + red, 0.9695636),
-        (7, full + green, 0.94769496),
-        (7, 3 * full + green, 1.0202518),
+        (6, 3 * full + red, 0.9845681),
+        (7, full + green, 0.95685244),
+        (7, 3 * full + green, 1.0756333),
     ];
     for (stage, index, expected) in probes {
         let actual = snapshots[stage][index];

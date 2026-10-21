@@ -168,8 +168,10 @@ fn green_pass(@builtin(global_invocation_id) id: vec3<u32>) {
     let i = i32(id.x);
     let s = i32(EDGE);
     let low = read(PQ, i/2);
-    let north = ratio(read(CFA,i-s), low, read(PQ,i/2-s/2));
-    let south = ratio(read(CFA,i+s), low, read(PQ,i/2+s/2));
+    // Vertical low-pass neighbours are a full EDGE entry away (two rows over),
+    // matching the CPU path and the reference tools; see rcd_stages.rs.
+    let north = ratio(read(CFA,i-s), low, read(PQ,i/2-s));
+    let south = ratio(read(CFA,i+s), low, read(PQ,i/2+s));
     let west = ratio(read(CFA,i-1), low, read(PQ,i/2-1));
     let east = ratio(read(CFA,i+1), low, read(PQ,i/2+1));
     let vertical = weighted(cardinal_gradient(i,s), north, cardinal_gradient(i,-s), south);

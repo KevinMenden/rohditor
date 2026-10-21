@@ -155,8 +155,8 @@ PSNR over all pixels, the 10% strongest-gradient "edge" pixels, and the rest
    worst case DSC03270 4x4 RCD 47.25 -> 51.91 (reference 54.58). Bilinear and
    MHC are linear and unaffected.
 2b. After pre-balancing, Rohditor was still 0.3-1.5 dB behind on AMaZE (fixed
-   by the port) and is behind on RCD in a few cases (DSC03270 4x4: 2.7 dB;
-   DSC01166 4x4: 0.9 dB).
+   by the port) and 0.9-2.7 dB behind on RCD in a few cases (fixed, see "Fix:
+   RCD low-pass neighbours").
 3. **Rohditor's AMaZE was a simplification, not a port (fixed, see "Fix:
    faithful AMaZE port").** Noise-free, no white balance involved, it scored
    slanted edge 51.3 dB vs ~60.9 (references), disc 47.4 vs 49.4, zone plate
@@ -167,9 +167,9 @@ PSNR over all pixels, the 10% strongest-gradient "edge" pixels, and the rest
    combination (`pmwt`), no second green pass from R+B, no fancy chrominance
    smoothing. Errors concentrated at colour edges: red at blue sites was off by
    0.13 on a 0.5-step edge.
-4. **RCD matches darktable on the slanted edge** (59.27 dB, identical) but trails
-   on the disc (51.6 vs 53.4) and zone plate (16.48 vs 16.81), so a smaller
-   divergence exists. Not investigated yet.
+4. **RCD trailed the references** on the disc (51.6 vs 53.4), zone plate (16.48
+   vs 16.81) and real images, while matching them exactly on the slanted edge.
+   Fixed, see "Fix: RCD low-pass neighbours".
 5. On the noisy 2x2 truth, bilinear often wins on "all" because per-pixel noise
    in the truth cannot be recovered and smoothing is rewarded. Prefer the 4x4
    rows and the edge column for algorithm quality.
@@ -300,6 +300,52 @@ upstream's in-place `hcd` dependency prevents vectorizing along the row. The
 (needs selects for both site types); expect maybe 20 ms. Then `colour_differences`
 (33 ms, six divisions per pixel).
 
+### Fix: RCD low-pass neighbours (done)
+
+Cause: a line-by-line comparison of `rcd_stages.rs` with RawTherapee 5.13's
+`rtengine/rcd_demosaic.cc`. In the green estimate at red and blue sites,
+upstream reads the vertical neighbours of the low-pass plane at
+`lpindx +- tileSize`. That plane stores one row per `tileSize / 2` entries, so
+the offset reaches two rows, not one. darktable's OpenCL kernel `rcd_step_3`
+(`demosaic_rcd.cl`) does the same with `lidx +- w`. Rohditor used the geometric
+one-row offset. The other stages compared (directions, diagonals, chroma)
+already matched upstream's formulas and offsets.
+
+Change: `rcd_stages.rs` and `rcd.wgsl` read `+- TILE_SIZE` (GPU: `+- EDGE`),
+with a comment saying why this looks wrong. RCD's `algorithm_version` is now 3.
+The pinned stage probes changed (the green probe moved from 0.6028 to 0.5672,
+and the diagonal probes with it); the GPU matches the new CPU to about 1e-7.
+
+Noise-free fixtures (PSNR over the interior, `level1_clean_fixtures`):
+
+| fixture | before | after | RawTherapee | darktable |
+|---|---|---|---|---|
+| slanted edge | 59.27 | 59.27 | 59.55 | 59.27 |
+| disc | 51.60 | 53.39 | 53.46 | 53.39 |
+| zone plate | 16.48 | 16.81 | 16.81 | 16.81 |
+
+Real images (`all dB` column of `level1_real_images`, RCD with balance):
+
+| case | before | after | RawTherapee / darktable |
+|---|---|---|---|
+| DSC00851 2x2 | 50.95 | 51.42 | 51.42 / 51.42 |
+| DSC00851 4x4 | 49.41 | 49.78 | 49.78 / 49.78 |
+| DSC01166 2x2 | 47.35 | 47.36 | 47.36 / 47.36 |
+| DSC01166 4x4 | 49.23 | 50.18 | 50.17 / 50.18 |
+| DSC02382 2x2 | 42.78 | 42.93 | 42.93 / 42.93 |
+| DSC02382 4x4 | 44.49 | 44.67 | 44.67 / 44.67 |
+| DSC03270 2x2 | 53.98 | 54.83 | 54.83 / 54.83 |
+| DSC03270 4x4 | 51.91 | 54.58 | 54.58 / 54.58 |
+| DSC03687 2x2 | 44.64 | 45.06 | 45.07 / 45.06 |
+| DSC03687 4x4 | 46.90 | 47.29 | 47.29 / 47.29 |
+| DSC03821 2x2 | 51.23 | 51.72 | 51.72 / 51.72 |
+| DSC03821 4x4 | 54.07 | 54.69 | 54.69 / 54.69 |
+
+All 12 cases now agree with both tools to 0.01 dB. RawTherapee is 0.07 dB ahead
+of darktable on the disc; that difference between the two references is not
+investigated. Reverting the offset fails `rcd::stage_fixtures` on the CPU and
+`rcd_intermediate_stages_match_signed_partial_tile_cpu_snapshot` on the GPU.
+
 ### Known issues from this work
 
 - **GPU/CPU RCD outliers.** With balance, GPU and CPU RCD differ on 84 of 72M
@@ -314,34 +360,33 @@ upstream's in-place `hcd` dependency prevents vectorizing along the row. The
   `private_full_resolution_export_software_structure`,
   `private_full_resolution_capture_export_software_structure` (MHC, 16-bit
   ChromaCompress max=18 against a limit of 16) and
-  `private_rcd_full_resolution_export_software_structure` (RCD: 8-bit max=6 at
-  HEAD, now 2; 16-bit max=700 against a limit of 16 because of the outlier
-  cluster above).
+  `private_rcd_full_resolution_export_software_structure` (RCD: 8-bit max=2;
+  16-bit max=660 against a limit of 16 because of the outlier cluster above).
+- **Sensor-normalization GPU tests fail at HEAD too**:
+  `sensor::tests::off_and_clip_match_cpu_highlight_with_bounded_diagnostics` and
+  `u16_tiles_match_cpu_normalization_for_all_cfa_and_white_level_forms` differ
+  from the CPU by one f32 ulp (72.48334 vs 72.48333). Both fail identically at
+  HEAD ebee004 in a clean worktree.
 - darktable clips and adjusts near-saturated samples, so the identity check
   skips sites >= 0.9.
 
 ### Next steps
 
-1. **Find the remaining RCD divergence** (noise-free disc 51.6 vs 53.4, zone
-   plate 16.48 vs 16.81; DSC03270 4x4 51.9 vs 54.6 after balance). Rohditor
-   RCD matches darktable exactly on the slanted edge, so a stage-level diff
-   against darktable's `rcd` should find it quickly. The AMaZE port is the
-   template: compare against upstream stage by stage on the clean fixtures.
-2. Settle the GPU/CPU RCD outliers and the failing export parity tests above.
-3. **More AMaZE speed** (optional now): split `bound_differences` so the `vcd`
+1. Settle the GPU/CPU RCD outliers and the failing export parity tests above.
+2. **More AMaZE speed** (optional now): split `bound_differences` so the `vcd`
    half vectorizes, `colour_differences` divisions, and portable SIMD once it
    is stable. RCD would gain from the same ideas, and from border-only
    bilinear (`bilinear::reconstruct_border`) like AMaZE.
-4. AMaZE on the GPU (the GPU supports MHC and RCD only).
-5. **Level 2** on real ARWs (neutral pp3 / XMP, no synthetic truth), difference
+3. AMaZE on the GPU (the GPU supports MHC and RCD only).
+4. **Level 2** on real ARWs (neutral pp3 / XMP, no synthetic truth), difference
    images in `testdata/generated/reference/`.
-6. Lock in baselines as JSON so regressions fail tests, and run a small version
+5. Lock in baselines as JSON so regressions fail tests, and run a small version
    of the clean-fixture comparison without external tools (Rohditor-only
    thresholds) in normal CI. One such test exists for AMaZE; add RCD.
-7. Border policy: the outer 16 px of AMaZE and RCD are the bilinear result,
+6. Border policy: the outer 16 px of AMaZE and RCD are the bilinear result,
    while RawTherapee and darktable reconstruct to the edge with mirrored
    data. The upstream stage code already supports this (the tile halo is
    mirrored), so it could be removed.
-8. Optionally let the user's white balance, not only the as-shot one, set the
+7. Optionally let the user's white balance, not only the as-shot one, set the
    balance when it is far from as-shot; measure first, as it would make every
    white-balance edit re-demosaic.
