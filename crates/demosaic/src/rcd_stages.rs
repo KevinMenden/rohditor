@@ -100,15 +100,19 @@ pub(super) fn interpolate_green(
 
             let low_pass_index = index / 2;
             let low_pass = scratch.pq_direction[low_pass_index];
+            // The low-pass plane has one row per TILE_SIZE / 2 entries, but the
+            // vertical neighbours are read a full TILE_SIZE entry away, i.e. two
+            // rows over. RawTherapee and darktable do the same, and matching their
+            // output needs it, so this is deliberate rather than a geometric error.
             let north_estimate = ratio_estimate(
                 scratch.cfa[index - TILE_SIZE],
                 low_pass,
-                scratch.pq_direction[low_pass_index - TILE_SIZE / 2],
+                scratch.pq_direction[low_pass_index - TILE_SIZE],
             );
             let south_estimate = ratio_estimate(
                 scratch.cfa[index + TILE_SIZE],
                 low_pass,
-                scratch.pq_direction[low_pass_index + TILE_SIZE / 2],
+                scratch.pq_direction[low_pass_index + TILE_SIZE],
             );
             let west_estimate = ratio_estimate(
                 scratch.cfa[index - 1],
