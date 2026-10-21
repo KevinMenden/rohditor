@@ -17,16 +17,39 @@ pub(super) fn reconstruct(
     row_stride: usize,
     output: &mut [f32],
 ) -> Result<(), DemosaicError> {
+    reconstruct_border(mosaic, gains, 0, cancellation, row_stride, output)
+}
+
+/// Reconstruct everything except the interior that starts `skip` pixels from
+/// every edge. Higher quality algorithms overwrite that interior and keep
+/// this result for the outer ring, so computing it there would be wasted work.
+/// `skip = 0` reconstructs the whole image; otherwise the image must be larger
+/// than `2 * skip` in both directions.
+pub(super) fn reconstruct_border(
+    mosaic: &MosaicImage<f32>,
+    gains: WhiteBalanceGains,
+    skip: usize,
+    cancellation: &dyn CancellationCheck,
+    row_stride: usize,
+    output: &mut [f32],
+) -> Result<(), DemosaicError> {
+    let (width, height) = (mosaic.width(), mosaic.height());
     output.par_chunks_mut(row_stride).enumerate().try_for_each(
         |(y, output_row)| -> Result<(), DemosaicError> {
             checkpoint(cancellation)?;
-            for (x, pixel) in output_row.as_chunks_mut::<3>().0.iter_mut().enumerate() {
+            let pixels = output_row.as_chunks_mut::<3>().0;
+            let mut fill = |x: usize| -> Result<(), DemosaicError> {
                 let mut rgb = reconstruct_pixel(mosaic, x, y);
                 gains.apply(&mut rgb);
                 require_finite_output(&rgb, x, y)?;
-                pixel.copy_from_slice(&rgb);
+                pixels[x].copy_from_slice(&rgb);
+                Ok(())
+            };
+            if skip == 0 || y < skip || y >= height - skip {
+                (0..width).try_for_each(fill)
+            } else {
+                (0..skip).chain(width - skip..width).try_for_each(&mut fill)
             }
-            Ok(())
         },
     )
 }

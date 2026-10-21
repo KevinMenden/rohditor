@@ -233,12 +233,19 @@ be diffed against upstream. Deliberate differences: 256 px tiles with a 16 px
 halo mirrored at the edges; one buffer per plane instead of aliased buffers; the
 outer 16 px keep the bilinear reference result; samples are 0..1 rather than
 0..65535; the measured CFA sample is written back unchanged; like upstream,
-reconstructed values are clamped at zero. Rows of tiles run in parallel, each
-with its own scratch, and the result does not depend on the thread count.
+reconstructed values are clamped at zero. Tiles run in parallel, each with a
+pooled scratch set, and the result does not depend on the thread count.
 
-Debug builds poison every plane that upstream relies on being fully written
-before it is read; the demosaic tests passing in the dev profile show no stage
-reads stale data.
+Debug builds poison the planes that are fully written before they are read
+(NaN, so a stray read fails the finite-output check). `vcd`, `hcd`, `vcdalt`
+and `hcdalt` are excluded on purpose: the variance stage reads them up to two
+rows and columns outside the written region, and upstream relies on those
+entries being zero from `calloc`; nothing here writes them, so they stay zero.
+With every other plane poisoned by NaN or by a finite 1e6 sentinel the output is
+identical to the unpoisoned build, so no stage reads stale data from them.
+Note that upstream's in-place sweeps make the exact output depend slightly on
+the tile size (256, 224, 192 and 160 all differ in the last bits); the pinned
+hashes assume 256.
 
 Result: Rohditor AMaZE now equals RawTherapee and darktable.
 
@@ -256,9 +263,42 @@ Tests: `amaze_reconstructs_a_soft_colour_edge_far_better_than_bilinear` (55.3 dB
 vs 42.9 for bilinear; runs in CI without external tools),
 `amaze_is_identical_with_one_and_multiple_rayon_threads`.
 
-Cost (criterion): 6000x4000 on 12 cores 1.14 s; 2560x1703 346 ms (362 ms with
-channel balance), limited there by only 8 tile rows. The simplified version
-ran serially at 392 ms for 2560x1703.
+### AMaZE speed (done)
+
+Same arithmetic, same output (bit for bit), about 2.5x faster. Measured on the
+real 2560x1704 crop of DSC03821 against the committed port, alternating runs
+under the same load: single thread 788-818 ms -> 310-320 ms, 12 threads
+(6 cores, SMT) 182-184 ms -> 78-80 ms. Criterion with the machine busy
+(load 8-11): 6000x4000 1.14 s -> 380 ms, 2560x1703 346 ms -> 144 ms.
+
+What changed, with the single-thread per-stage cost before -> after (ms, 4.4 MP):
+
+| change | effect |
+|---|---|
+| Tasks per tile instead of per tile row; scratch sets pooled (a fresh 5 MB set per tile made threads contend on page faults: 94 allocations for 96 tiles) | small images use all cores; 12-thread 153 -> 131 ms |
+| Bilinear only on the 16 px border AMaZE keeps (it ran over the whole image); finite-sample validation parallel and deterministic (`find_map_first`) | ~100 ms serial |
+| `populate`: mirror coordinates once per tile, row copies | 27 -> 6 |
+| `write_tile`: branch-free channel selects, no per-pixel pattern lookup | 50 -> 17 |
+| Row-array views (`&[f32; TS]`) in the stages, so bounds checks vanish inside column loops | `direction_weights` 99 -> 18, `diagonal_estimates` 125 -> 27, `interpolate_chroma` 48 -> 8, `finish_planes` 26 -> 4, `detect` 33 -> 14, `combine_diagonals` 26 -> 14, `populate_green` 30 -> 21, `bound_differences` 148 -> 79 |
+| `min`/`max` as compare-select (`f32::min` is a libm call on baseline x86-64, which blocks auto-vectorization) | `colour_differences` 41 -> 33 |
+| `allocate_zeroed_f32` uses lazily zeroed pages after an up-front `try_reserve_exact` check, instead of a single-threaded 50 MB memset | ~10 ms at 4.4 MP; the zeroing lands on the parallel tile writers |
+
+Stage sum 663 -> ~270 ms. Every step was checked bit-exact against golden
+output from the committed port (real crop and a synthetic noisy image, all four
+Bayer layouts, with and without balance). `amaze_golden.rs` keeps the synthetic
+half of that as a CI test (integer-only input, so the hashes are platform
+independent); the same hashes come out of the pre-optimization code.
+
+Tried and dropped: processing 2 or 4 rows in lockstep in `bound_differences`
+(slower, so that stage is limited by instruction count, not by its dependency
+chain); tile sizes 160, 192 and 224 (no clear gain, different last bits).
+
+Still the largest stage is `bound_differences` (~80 of ~270 ms): per pixel it
+does four variance estimates, two bounded updates with a division each, and
+upstream's in-place `hcd` dependency prevents vectorizing along the row. The
+`vcd` half has no horizontal dependency and could be split out and vectorized
+(needs selects for both site types); expect maybe 20 ms. Then `colour_differences`
+(33 ms, six divisions per pixel).
 
 ### Known issues from this work
 
@@ -288,10 +328,10 @@ ran serially at 392 ms for 2560x1703.
    against darktable's `rcd` should find it quickly. The AMaZE port is the
    template: compare against upstream stage by stage on the clean fixtures.
 2. Settle the GPU/CPU RCD outliers and the failing export parity tests above.
-3. **AMaZE speed.** It is scalar with bounds-checked indexing. Parallelism is
-   per tile row, so small images use few cores. Options: per-tile tasks,
-   unchecked-free index patterns, and SIMD along rows as upstream does.
-   RawTherapee's tile size is 160; try it against 256.
+3. **More AMaZE speed** (optional now): split `bound_differences` so the `vcd`
+   half vectorizes, `colour_differences` divisions, and portable SIMD once it
+   is stable. RCD would gain from the same ideas, and from border-only
+   bilinear (`bilinear::reconstruct_border`) like AMaZE.
 4. AMaZE on the GPU (the GPU supports MHC and RCD only).
 5. **Level 2** on real ARWs (neutral pp3 / XMP, no synthetic truth), difference
    images in `testdata/generated/reference/`.

@@ -32,6 +32,8 @@ mod math;
 mod nyquist;
 mod scratch;
 
+use std::sync::{Mutex, PoisonError};
+
 use rayon::prelude::*;
 use rohditor_image::{BayerPattern, MosaicImage};
 
@@ -47,6 +49,14 @@ const TILE_SIZE: usize = 256;
 const BORDER: usize = AMAZE_HALO.left;
 const TILE_VALID: usize = TILE_SIZE - 2 * BORDER;
 
+/// One tile's share of the output: for each row of the tile's valid region, the
+/// output samples of that tile's columns.
+struct TileJob<'a> {
+    tile_x: usize,
+    tile_y: usize,
+    rows: Vec<&'a mut [f32]>,
+}
+
 pub(super) fn reconstruct(
     mosaic: &MosaicImage<f32>,
     gains: WhiteBalanceGains,
@@ -55,45 +65,70 @@ pub(super) fn reconstruct(
     row_stride: usize,
     output: &mut [f32],
 ) -> Result<(), DemosaicError> {
-    // Keep the crate-wide edge behavior consistent with the other higher
-    // quality algorithms. AMaZE stages only overwrite pixels with a complete
-    // 16-pixel neighborhood.
-    bilinear::reconstruct(mosaic, gains, cancellation, row_stride, output)?;
+    // AMaZE stages only produce pixels with a complete 16-pixel neighbourhood;
+    // the outer ring keeps the bilinear reference result, consistent with the
+    // other higher quality algorithms.
     if mosaic.width() <= 2 * BORDER || mosaic.height() <= 2 * BORDER {
-        return Ok(());
+        return bilinear::reconstruct(mosaic, gains, cancellation, row_stride, output);
+    }
+    bilinear::reconstruct_border(mosaic, gains, BORDER, cancellation, row_stride, output)?;
+
+    // Tiles are independent. Each task owns the output columns of its tile
+    // (the rows of every band are split per tile with `split_at_mut`), so
+    // tiles run in parallel without sharing any state, and the result does not
+    // depend on the thread count.
+    let width = mosaic.width();
+    let tile_columns = tile_count(width);
+    let mut jobs = Vec::new();
+    for (tile_y, band) in output.chunks_mut(TILE_VALID * row_stride).enumerate() {
+        let mut columns: Vec<Vec<&mut [f32]>> = (0..tile_columns).map(|_| Vec::new()).collect();
+        for row in band.chunks_mut(row_stride) {
+            let mut rest = &mut row[..width * 3];
+            for (tile_x, rows) in columns.iter_mut().enumerate() {
+                let samples = TILE_VALID.min(width - tile_x * TILE_VALID) * 3;
+                let (head, tail) = rest.split_at_mut(samples);
+                rows.push(head);
+                rest = tail;
+            }
+        }
+        jobs.extend(
+            columns
+                .into_iter()
+                .enumerate()
+                .map(|(tile_x, rows)| TileJob {
+                    tile_x,
+                    tile_y,
+                    rows,
+                }),
+        );
     }
 
-    // Tiles are independent, and each row of tiles owns a contiguous band of
-    // `TILE_VALID` output rows, so bands are processed in parallel without
-    // sharing any state. The result does not depend on the thread count.
-    output
-        .par_chunks_mut(TILE_VALID * row_stride)
-        .enumerate()
-        .try_for_each(|(tile_y, band)| {
-            let origin_y = tile_y * TILE_VALID;
-            let mut scratch = AmazeScratch::new()?;
-            for tile_x in 0..tile_count(mosaic.width()) {
-                checkpoint(cancellation)?;
-                let tile = AmazeTile {
-                    origin_x: tile_x * TILE_VALID,
-                    origin_y,
-                    pattern: mosaic.pattern().shifted(0, origin_y),
-                };
-                scratch.clear();
-                populate(&mut scratch, mosaic, tile);
-                reconstruct_tile(&mut scratch, tile.pattern, clip_point);
-                write_tile(
-                    &scratch,
-                    mosaic,
-                    gains,
-                    tile,
-                    row_stride,
-                    band,
-                    cancellation,
-                )?;
-            }
-            Ok(())
-        })
+    // Scratch sets are large (several MB), and allocating them per tile makes
+    // threads contend on page faults, so finished tiles return theirs to a
+    // pool. At most one set exists per concurrently running tile.
+    let pool = Mutex::new(Vec::<AmazeScratch>::new());
+    jobs.into_par_iter().try_for_each(|mut job| {
+        checkpoint(cancellation)?;
+        let pooled = pool.lock().unwrap_or_else(PoisonError::into_inner).pop();
+        let mut scratch = match pooled {
+            Some(scratch) => scratch,
+            None => AmazeScratch::new()?,
+        };
+        let origin_y = job.tile_y * TILE_VALID;
+        let tile = AmazeTile {
+            origin_x: job.tile_x * TILE_VALID,
+            origin_y,
+            pattern: mosaic.pattern().shifted(0, origin_y),
+        };
+        scratch.clear();
+        populate(&mut scratch, mosaic, tile);
+        reconstruct_tile(&mut scratch, tile.pattern, clip_point);
+        write_tile(&scratch, mosaic, gains, tile, &mut job.rows)?;
+        pool.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(scratch);
+        Ok(())
+    })
 }
 
 fn tile_count(length: usize) -> usize {
@@ -137,21 +172,27 @@ struct AmazeTile {
 
 /// Fill the tile's CFA plane, mirroring samples beyond the image edge.
 fn populate(scratch: &mut AmazeScratch, mosaic: &MosaicImage<f32>, tile: AmazeTile) {
+    // The source column of each tile column, computed once for all rows.
+    let first_x = tile.origin_x as isize - BORDER as isize;
+    let inside = first_x >= 0 && first_x as usize + TILE_SIZE <= mosaic.width();
+    let source_xs: [usize; TILE_SIZE] =
+        std::array::from_fn(|col| mirror_coordinate(first_x + col as isize, mosaic.width()));
+
     for row in 0..TILE_SIZE {
         let source_y = mirror_coordinate(
             tile.origin_y as isize + row as isize - BORDER as isize,
             mosaic.height(),
         );
-        for col in 0..TILE_SIZE {
-            let source_x = mirror_coordinate(
-                tile.origin_x as isize + col as isize - BORDER as isize,
-                mosaic.width(),
-            );
-            let value = *mosaic.sample(source_x, source_y);
-            let index = row * TILE_SIZE + col;
-            scratch.cfa[index] = value;
-            scratch.green[index] = value;
+        let source = &mosaic.data()[source_y * mosaic.row_stride()..][..mosaic.width()];
+        let cfa = &mut scratch.cfa[row * TILE_SIZE..][..TILE_SIZE];
+        if inside {
+            cfa.copy_from_slice(&source[first_x as usize..][..TILE_SIZE]);
+        } else {
+            for (value, &x) in cfa.iter_mut().zip(&source_xs) {
+                *value = source[x];
+            }
         }
+        scratch.green[row * TILE_SIZE..][..TILE_SIZE].copy_from_slice(cfa);
     }
 }
 
@@ -160,9 +201,7 @@ fn write_tile(
     mosaic: &MosaicImage<f32>,
     gains: WhiteBalanceGains,
     tile: AmazeTile,
-    row_stride: usize,
-    band: &mut [f32],
-    cancellation: &dyn CancellationCheck,
+    rows: &mut [&mut [f32]],
 ) -> Result<(), DemosaicError> {
     let x_start = if tile.origin_x == 0 {
         BORDER
@@ -186,27 +225,63 @@ fn write_tile(
         return Ok(());
     }
 
+    let width = x_end - x_start;
     for global_y in y_start..y_end {
-        checkpoint(cancellation)?;
         let local_y = global_y - tile.origin_y + BORDER;
-        for global_x in x_start..x_end {
-            let local_x = global_x - tile.origin_x + BORDER;
-            let index = local_y * TILE_SIZE + local_x;
-            let measured_channel = mosaic
+        let local_x = x_start - tile.origin_x + BORDER;
+        let at = local_y * TILE_SIZE + local_x;
+        let (red, green, blue) = (
+            &scratch.red[at..at + width],
+            &scratch.green[at..at + width],
+            &scratch.blue[at..at + width],
+        );
+        let measured = &mosaic.data()[global_y * mosaic.row_stride() + x_start..][..width];
+        // The measured channel alternates with the column parity.
+        let channels = [
+            mosaic.pattern().color_at(x_start, global_y).channel_index(),
+            mosaic
                 .pattern()
-                .color_at(global_x, global_y)
-                .channel_index();
+                .color_at(x_start + 1, global_y)
+                .channel_index(),
+        ];
+        let column = (x_start - tile.origin_x) * 3;
+        let output = &mut rows[global_y - tile.origin_y][column..column + width * 3];
+
+        let mut all_finite = true;
+        let pixels = output.as_chunks_mut::<3>().0.iter_mut();
+        for (k, ((((pixel, &r), &g), &b), &sample)) in pixels
+            .zip(red)
+            .zip(green)
+            .zip(blue)
+            .zip(measured)
+            .enumerate()
+        {
+            // The measured sample replaces the reconstructed value of its channel.
+            let channel = channels[k & 1];
             let mut rgb = [
-                scratch.red[index],
-                scratch.green[index].max(0.0),
-                scratch.blue[index],
+                if channel == 0 { sample } else { r },
+                if channel == 1 {
+                    sample
+                } else {
+                    math::fmax(g, 0.0)
+                },
+                if channel == 2 { sample } else { b },
             ];
-            rgb[measured_channel] = *mosaic.sample(global_x, global_y);
             gains.apply(&mut rgb);
-            require_finite_output(&rgb, global_x, global_y)?;
-            // `band` starts at this tile row's first output row.
-            let output_index = (global_y - tile.origin_y) * row_stride + global_x * 3;
-            band[output_index..output_index + 3].copy_from_slice(&rgb);
+            all_finite &= rgb[0].is_finite() & rgb[1].is_finite() & rgb[2].is_finite();
+            *pixel = rgb;
+        }
+        if !all_finite {
+            // Rare: locate the first offending pixel for the error report.
+            let (x, rgb) = output
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .enumerate()
+                .find(|(_, rgb)| rgb.iter().any(|value| !value.is_finite()))
+                .map(|(k, rgb)| (x_start + k, *rgb))
+                .unwrap_or((x_start, [0.0; 3]));
+            require_finite_output(&rgb, x, global_y)?;
         }
     }
     Ok(())

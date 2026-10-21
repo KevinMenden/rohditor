@@ -408,12 +408,15 @@ impl<T> DisplayRgbImage<T> {
 
 #[doc(hidden)]
 pub fn allocate_zeroed_f32(elements: usize) -> Result<Vec<f32>, ImageError> {
-    let mut values = Vec::new();
-    values
+    // Reserving first keeps allocation failure an error instead of an abort.
+    // The buffer itself then comes from `vec!`, which asks the allocator for
+    // zeroed memory: large buffers are lazily zeroed pages, so nothing is
+    // filled on this thread and the page faults land on whichever thread
+    // first writes each region.
+    Vec::<f32>::new()
         .try_reserve_exact(elements)
         .map_err(|_| ImageError::Allocation { elements })?;
-    values.resize(elements, 0.0);
-    Ok(values)
+    Ok(vec![0.0; elements])
 }
 
 #[doc(hidden)]

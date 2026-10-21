@@ -18,6 +18,7 @@ pub use rcd_geometry::{
     RCD_BORDER, RCD_MIN_DIMENSION, RCD_TILE_SIZE, RCD_TILE_STEP, RcdTileGeometry, rcd_tiles,
 };
 
+use rayon::prelude::*;
 use rohditor_image::{
     Halo, ImageError, LinearRgbImage, LinearRgbSpace, MosaicImage, allocate_zeroed_f32,
 };
@@ -334,19 +335,31 @@ fn validate_mosaic(
             "Bayer demosaicing requires at least 2x2 samples",
         ));
     }
-    for y in 0..mosaic.height() {
-        checkpoint(cancellation)?;
-        for x in 0..mosaic.width() {
-            if !mosaic.sample(x, y).is_finite() {
-                return Err(DemosaicError::NonFiniteImageData {
-                    stage: "demosaicing",
-                    x,
-                    y,
-                });
+    // Rows are checked in parallel; the first offending sample in image order
+    // is reported regardless of the thread count.
+    let width = mosaic.width();
+    let bad = mosaic
+        .data()
+        .par_chunks(mosaic.row_stride())
+        .enumerate()
+        .find_map_first(|(y, row)| {
+            if cancellation.is_cancelled() {
+                return None;
             }
-        }
+            row[..width]
+                .iter()
+                .position(|value| !value.is_finite())
+                .map(|x| (x, y))
+        });
+    checkpoint(cancellation)?;
+    match bad {
+        Some((x, y)) => Err(DemosaicError::NonFiniteImageData {
+            stage: "demosaicing",
+            x,
+            y,
+        }),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 fn invalid_dimensions(mosaic: &MosaicImage<f32>, row_stride: usize, reason: &str) -> DemosaicError {

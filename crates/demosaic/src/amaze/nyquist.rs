@@ -5,8 +5,8 @@
 use rohditor_image::BayerPattern;
 
 use super::math::{
-    EPSSQ, GAUSSGRAD, GAUSSODD, GQUINC, M1, M2, P1, P2, TS, V1, V2, at, green_at_even, half, intp,
-    sqr,
+    EPSSQ, GAUSSGRAD, GAUSSODD, GQUINC, M1, M2, P1, P2, Row, TS, TSH, V1, V2, at, green_at_even,
+    half, half_row_mut, half_window_mut, intp, row, rows_around_mut, sqr,
 };
 use super::scratch::AmazeScratch;
 
@@ -25,30 +25,29 @@ pub(super) struct NyquistArea {
 pub(super) fn detect(s: &mut AmazeScratch, pattern: BayerPattern) -> Option<NyquistArea> {
     // Precompute the test statistic.
     for rr in 6..TS - 6 {
-        let mut cc = 6 + green_at_even(pattern, rr);
-        while cc < TS - 6 {
-            let i = rr * TS + cc;
-            let c = &s.cddiffsq;
-            let d = &s.delhvsqsum;
-            s.nyqutest[i >> 1] = (GAUSSODD[0] * c[i]
-                + GAUSSODD[1] * (c[at(i, -M1)] + c[at(i, P1)] + c[at(i, -P1)] + c[at(i, M1)])
-                + GAUSSODD[2] * (c[at(i, -V2)] + c[i - 2] + c[i + 2] + c[at(i, V2)])
-                + GAUSSODD[3] * (c[at(i, -M2)] + c[at(i, P2)] + c[at(i, -P2)] + c[at(i, M2)]))
-                - (GAUSSGRAD[0] * d[i]
-                    + GAUSSGRAD[1] * (d[at(i, -V1)] + d[i + 1] + d[i - 1] + d[at(i, V1)])
-                    + GAUSSGRAD[2] * (d[at(i, -M1)] + d[at(i, P1)] + d[at(i, -P1)] + d[at(i, M1)])
-                    + GAUSSGRAD[3] * (d[at(i, -V2)] + d[i - 2] + d[i + 2] + d[at(i, V2)])
+        // Rows rr-2 ..= rr+2 of the two source planes.
+        let c: [&Row; 5] = std::array::from_fn(|k| row(&s.cddiffsq, rr + k - 2));
+        let d: [&Row; 5] = std::array::from_fn(|k| row(&s.delhvsqsum, rr + k - 2));
+        let out = half_row_mut(&mut s.nyqutest, rr);
+        for cc in (6 + green_at_even(pattern, rr)..TS - 6).step_by(2) {
+            out[cc >> 1] = (GAUSSODD[0] * c[2][cc]
+                + GAUSSODD[1] * (c[1][cc - 1] + c[1][cc + 1] + c[3][cc - 1] + c[3][cc + 1])
+                + GAUSSODD[2] * (c[0][cc] + c[2][cc - 2] + c[2][cc + 2] + c[4][cc])
+                + GAUSSODD[3] * (c[0][cc - 2] + c[0][cc + 2] + c[4][cc - 2] + c[4][cc + 2]))
+                - (GAUSSGRAD[0] * d[2][cc]
+                    + GAUSSGRAD[1] * (d[1][cc] + d[2][cc + 1] + d[2][cc - 1] + d[3][cc])
+                    + GAUSSGRAD[2] * (d[1][cc - 1] + d[1][cc + 1] + d[3][cc - 1] + d[3][cc + 1])
+                    + GAUSSGRAD[3] * (d[0][cc] + d[2][cc - 2] + d[2][cc + 2] + d[4][cc])
                     + GAUSSGRAD[4]
-                        * (d[at(i, -V2 - 1)]
-                            + d[at(i, -V2 + 1)]
-                            + d[i - TS - 2]
-                            + d[i - TS + 2]
-                            + d[i + TS - 2]
-                            + d[i + TS + 2]
-                            + d[at(i, V2 - 1)]
-                            + d[at(i, V2 + 1)])
-                    + GAUSSGRAD[5] * (d[at(i, -M2)] + d[at(i, P2)] + d[at(i, -P2)] + d[at(i, M2)]));
-            cc += 2;
+                        * (d[0][cc - 1]
+                            + d[0][cc + 1]
+                            + d[1][cc - 2]
+                            + d[1][cc + 2]
+                            + d[3][cc - 2]
+                            + d[3][cc + 2]
+                            + d[4][cc - 1]
+                            + d[4][cc + 1])
+                    + GAUSSGRAD[5] * (d[0][cc - 2] + d[0][cc + 2] + d[4][cc - 2] + d[4][cc + 2]));
         }
     }
 
@@ -56,8 +55,8 @@ pub(super) fn detect(s: &mut AmazeScratch, pattern: BayerPattern) -> Option<Nyqu
     let (mut start_row, mut end_row) = (0, 0);
     let (mut start_col, mut end_col) = (TS + 1, 0);
     for rr in 6..TS - 6 {
-        let mut cc = 6 + green_at_even(pattern, rr);
-        while cc < TS - 6 {
+        let first = 6 + green_at_even(pattern, rr);
+        for cc in (first..TS - 6).step_by(2) {
             let i = rr * TS + cc;
             if s.nyqutest[i >> 1] > 0.0 {
                 s.nyquist[i >> 1] = 1;
@@ -68,7 +67,6 @@ pub(super) fn detect(s: &mut AmazeScratch, pattern: BayerPattern) -> Option<Nyqu
                 start_col = start_col.min(cc);
                 end_col = end_col.max(cc);
             }
-            cc += 2;
         }
     }
 
@@ -158,36 +156,46 @@ pub(super) fn area_interpolation(s: &mut AmazeScratch, pattern: BayerPattern, ar
 /// upstream does.
 pub(super) fn populate_green(s: &mut AmazeScratch, pattern: BayerPattern) {
     for rr in 8..TS - 8 {
-        let mut i = rr * TS + 8 + green_at_even(pattern, rr);
-        while i < rr * TS + TS - 8 {
+        let (hv_window, hvwt) = half_window_mut(&mut s.hvwt, rr);
+        let (green_up, green, green_down) = rows_around_mut::<1>(&mut s.green, rr);
+        let (cfa, vcd, hcd) = (row(&s.cfa, rr), row(&s.vcd, rr), row(&s.hcd, rr));
+        let nyquist = <&[u8; TSH]>::try_from(&s.nyquist2[rr * TSH..(rr + 1) * TSH])
+            .expect("a half plane row holds TSH samples");
+        let dgrb = half_row_mut(&mut s.dgrb[0], rr);
+        let (curvature_h, curvature_v) = (
+            half_row_mut(&mut s.dgrb2_h, rr),
+            half_row_mut(&mut s.dgrb2_v, rr),
+        );
+
+        for cc in (8 + green_at_even(pattern, rr)..TS - 8).step_by(2) {
+            let i1 = cc >> 1;
             // First ask if one gets more directional discrimination from the
             // nearby B/R sites (a weight further from 0.5 is more decisive).
-            let alt = (s.hvwt[half(i, -M1)]
-                + s.hvwt[half(i, P1)]
-                + s.hvwt[half(i, -P1)]
-                + s.hvwt[half(i, M1)])
+            let alt = (hv_window.at(-1, cc, -1)
+                + hv_window.at(-1, cc, 1)
+                + hv_window.at(1, cc, -1)
+                + hv_window.at(1, cc, 1))
                 / 4.0;
-            if (0.5 - s.hvwt[i >> 1]).abs() < (0.5 - alt).abs() {
-                s.hvwt[i >> 1] = alt;
+            if (0.5 - hvwt[i1]).abs() < (0.5 - alt).abs() {
+                hvwt[i1] = alt;
             }
 
             // Evaluate the colour difference and G (finally!).
-            s.dgrb[0][i >> 1] = intp(s.hvwt[i >> 1], s.vcd[i], s.hcd[i]);
-            s.green[i] = s.cfa[i] + s.dgrb[0][i >> 1];
+            dgrb[i1] = intp(hvwt[i1], vcd[cc], hcd[cc]);
+            green[cc] = cfa[cc] + dgrb[i1];
 
             // Local curvature in G (preparation for the Nyquist refinement).
-            let nyquist = s.nyquist2[i >> 1] != 0;
-            s.dgrb2_h[i >> 1] = if nyquist {
-                sqr(s.green[i] - 0.5 * (s.green[i - 1] + s.green[i + 1]))
+            let flagged = nyquist[i1] != 0;
+            curvature_h[i1] = if flagged {
+                sqr(green[cc] - 0.5 * (green[cc - 1] + green[cc + 1]))
             } else {
                 0.0
             };
-            s.dgrb2_v[i >> 1] = if nyquist {
-                sqr(s.green[i] - 0.5 * (s.green[at(i, -V1)] + s.green[at(i, V1)]))
+            curvature_v[i1] = if flagged {
+                sqr(green[cc] - 0.5 * (green_up[cc] + green_down[cc]))
             } else {
                 0.0
             };
-            i += 2;
         }
     }
 }

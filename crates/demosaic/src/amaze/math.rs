@@ -13,13 +13,10 @@ pub(super) const TSH: usize = TS / 2;
 // north-east) and minus-diagonal (`M`, towards south-east) neighbours.
 pub(super) const V1: isize = TS as isize;
 pub(super) const V2: isize = 2 * V1;
-pub(super) const V3: isize = 3 * V1;
 pub(super) const P1: isize = -V1 + 1;
 pub(super) const P2: isize = -2 * V1 + 2;
-pub(super) const P3: isize = -3 * V1 + 3;
 pub(super) const M1: isize = V1 + 1;
 pub(super) const M2: isize = 2 * V1 + 2;
-pub(super) const M3: isize = 3 * V1 + 3;
 
 /// Tolerance to avoid dividing by zero.
 pub(super) const EPS: f32 = 1.0e-5;
@@ -86,13 +83,113 @@ pub(super) fn sqr(x: f32) -> f32 {
     x * x
 }
 
-#[inline]
+/// `a.min(b)` for finite inputs, as a plain compare-select. `f32::min` lowers
+/// to a libm call on baseline x86-64, which keeps LLVM from vectorizing loops.
+#[inline(always)]
+pub(super) fn fmin(a: f32, b: f32) -> f32 {
+    if a < b { a } else { b }
+}
+
+/// `a.max(b)` for finite inputs; see [`fmin`].
+#[inline(always)]
+pub(super) fn fmax(a: f32, b: f32) -> f32 {
+    if a > b { a } else { b }
+}
+
+#[inline(always)]
 pub(super) fn median(a: f32, b: f32, c: f32) -> f32 {
-    a.min(b).max(b.max(a).min(c))
+    fmax(fmin(a, b), fmin(fmax(b, a), c))
 }
 
 /// `a * b + (1 - a) * c`, evaluated as upstream does.
 #[inline]
 pub(super) fn intp(a: f32, b: f32, c: f32) -> f32 {
     a * (b - c) + c
+}
+
+/// One tile row of a full-size plane. Fixed-size rows let the compiler drop
+/// per-element bounds checks in column loops.
+pub(super) type Row = [f32; TS];
+
+/// Row `r` of a full-size plane.
+#[inline(always)]
+pub(super) fn row(plane: &[f32], r: usize) -> &Row {
+    <&Row>::try_from(&plane[r * TS..(r + 1) * TS]).expect("a plane row holds TS samples")
+}
+
+/// Row `r` of a full-size plane, mutably.
+#[inline(always)]
+pub(super) fn row_mut(plane: &mut [f32], r: usize) -> &mut Row {
+    <&mut Row>::try_from(&mut plane[r * TS..(r + 1) * TS]).expect("a plane row holds TS samples")
+}
+
+/// Rows `r - D` and `r + D` read-only and row `r` mutable. Rows above `r`
+/// reflect updates made while processing earlier rows, as in upstream's
+/// in-place loops.
+#[inline(always)]
+pub(super) fn rows_around_mut<const D: usize>(
+    plane: &mut [f32],
+    r: usize,
+) -> (&Row, &mut Row, &Row) {
+    let (before, rest) = plane.split_at_mut(r * TS);
+    let (current, after) = rest.split_at_mut(TS);
+    (
+        row(before, r - D),
+        <&mut Row>::try_from(current).expect("a plane row holds TS samples"),
+        row(after, D - 1),
+    )
+}
+
+/// One row of a half-resolution plane.
+pub(super) type HalfRow = [f32; TSH];
+
+/// Row `r` of a half-resolution plane, mutably.
+#[inline(always)]
+pub(super) fn half_row_mut(plane: &mut [f32], r: usize) -> &mut HalfRow {
+    <&mut HalfRow>::try_from(&mut plane[r * TSH..(r + 1) * TSH])
+        .expect("a half plane row holds TSH samples")
+}
+
+/// Row `r` of a half-resolution plane.
+#[inline(always)]
+pub(super) fn half_row(plane: &[f32], r: usize) -> &HalfRow {
+    <&HalfRow>::try_from(&plane[r * TSH..(r + 1) * TSH])
+        .expect("a half plane row holds TSH samples")
+}
+
+/// Rows `r - 3 ..= r - 1` and `r + 1 ..= r + 3` of a half-resolution plane,
+/// read-only, with row `r` mutable. Nothing is written outside row `r`.
+pub(super) struct HalfWindow<'a> {
+    above: [&'a HalfRow; 3],
+    below: [&'a HalfRow; 3],
+}
+
+impl HalfWindow<'_> {
+    /// Value `dr` rows and `dc` columns from the pixel at column `cc` of the
+    /// middle row. `dr` is one of -3, -2, -1, 1, 2, 3.
+    #[inline(always)]
+    pub(super) fn at(&self, dr: isize, cc: usize, dc: isize) -> f32 {
+        let row = if dr < 0 {
+            self.above[(3 + dr) as usize]
+        } else {
+            self.below[(dr - 1) as usize]
+        };
+        row[(cc.wrapping_add_signed(dc)) >> 1]
+    }
+}
+
+/// Split a half-resolution plane into a read-only window around row `r` and
+/// the mutable row `r` itself.
+#[inline(always)]
+pub(super) fn half_window_mut(plane: &mut [f32], r: usize) -> (HalfWindow<'_>, &mut HalfRow) {
+    let (before, rest) = plane.split_at_mut(r * TSH);
+    let (current, after) = rest.split_at_mut(TSH);
+    let window = HalfWindow {
+        above: std::array::from_fn(|k| half_row(before, r - 3 + k)),
+        below: std::array::from_fn(|k| half_row(after, k)),
+    };
+    (
+        window,
+        <&mut HalfRow>::try_from(current).expect("a half plane row holds TSH samples"),
+    )
 }

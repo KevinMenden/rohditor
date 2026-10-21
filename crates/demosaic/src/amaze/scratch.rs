@@ -102,8 +102,14 @@ impl AmazeScratch {
     }
 
     /// Reset what the stages expect to find zeroed. Upstream gets this from
-    /// `calloc` and `memset`; every other plane is fully written before it is
-    /// read. Debug builds poison those planes with NaN so a stage that reads
+    /// `calloc` and `memset`.
+    ///
+    /// Every other plane is fully written before it is read, except `vcd`,
+    /// `hcd`, `vcdalt` and `hcdalt`: the variance stage reads them up to two
+    /// rows and columns outside the region the stages write (the outermost
+    /// rows and columns of the tile), and upstream relies on those entries
+    /// being zero from `calloc`. Nothing writes them here, so they stay zero.
+    /// Debug builds poison the remaining planes with NaN so a stage that reads
     /// an unwritten entry fails the finite-output check instead of silently
     /// depending on the previous tile.
     pub(super) fn clear(&mut self) {
@@ -124,10 +130,6 @@ impl AmazeScratch {
             &mut self.delhvsqsum,
             &mut self.dirwts0,
             &mut self.dirwts1,
-            &mut self.vcd,
-            &mut self.hcd,
-            &mut self.vcdalt,
-            &mut self.hcdalt,
             &mut self.cddiffsq,
             &mut self.dgintv,
             &mut self.dginth,
