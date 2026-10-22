@@ -86,9 +86,10 @@ struct Arguments {
     #[arg(long, value_enum, default_value_t)]
     renderer: RendererPreference,
 
-    /// Interactive preview processor. Full-resolution exports remain CPU-only.
-    #[arg(long, value_enum, default_value_t)]
-    processor: ProcessorPreference,
+    /// Image processor for this run, overriding the persisted "CPU only"
+    /// setting. Without it, the setting decides between `auto` and `cpu`.
+    #[arg(long, value_enum)]
+    processor: Option<ProcessorPreference>,
 
     /// Preview and export demosaic algorithm for development comparisons.
     #[arg(long, value_enum)]
@@ -109,6 +110,7 @@ fn main() -> eframe::Result {
         settings: persisted_settings,
         warning: settings_warning,
     } = settings::load();
+    let processor = resolve_processor(persisted_settings, arguments.processor);
     let effective_settings = resolve_startup_settings(
         persisted_settings,
         arguments.demosaic.map(DemosaicAlgorithm::from),
@@ -117,7 +119,7 @@ fn main() -> eframe::Result {
         RendererPreference::Auto => match launch(
             eframe::Renderer::Wgpu,
             arguments.file.clone(),
-            arguments.processor,
+            processor,
             effective_settings,
             settings_warning.clone(),
             arguments.diagnostics,
@@ -129,7 +131,7 @@ fn main() -> eframe::Result {
                 launch(
                     eframe::Renderer::Glow,
                     arguments.file,
-                    arguments.processor,
+                    processor,
                     effective_settings,
                     settings_warning,
                     arguments.diagnostics,
@@ -139,7 +141,7 @@ fn main() -> eframe::Result {
         RendererPreference::Wgpu => launch(
             eframe::Renderer::Wgpu,
             arguments.file,
-            arguments.processor,
+            processor,
             effective_settings,
             settings_warning,
             arguments.diagnostics,
@@ -147,12 +149,25 @@ fn main() -> eframe::Result {
         RendererPreference::Glow => launch(
             eframe::Renderer::Glow,
             arguments.file,
-            arguments.processor,
+            processor,
             effective_settings,
             settings_warning,
             arguments.diagnostics,
         ),
     }
+}
+
+/// The processor is fixed for the whole run: the "CPU only" setting is read
+/// here once, and the command-line flag takes precedence over it.
+fn resolve_processor(
+    settings: AppSettings,
+    command_line_override: Option<ProcessorPreference>,
+) -> ProcessorPreference {
+    command_line_override.unwrap_or(if settings.cpu_only() {
+        ProcessorPreference::Cpu
+    } else {
+        ProcessorPreference::Auto
+    })
 }
 
 fn launch(
@@ -231,8 +246,8 @@ mod tests {
     use clap::Parser;
 
     use super::{
-        APPLICATION_ID, Arguments, DemosaicAlgorithm, DemosaicPreference, ProcessorPreference,
-        RendererPreference,
+        APPLICATION_ID, AppSettings, Arguments, DemosaicAlgorithm, DemosaicPreference,
+        ProcessorPreference, RendererPreference, resolve_processor,
     };
 
     #[test]
@@ -249,13 +264,33 @@ mod tests {
         ])
         .expect("valid desktop preferences should parse");
         assert_eq!(arguments.renderer, RendererPreference::Glow);
-        assert_eq!(arguments.processor, ProcessorPreference::Cpu);
+        assert_eq!(arguments.processor, Some(ProcessorPreference::Cpu));
         assert_eq!(arguments.demosaic, Some(DemosaicPreference::MalvarHeCutler));
 
         let defaults = Arguments::try_parse_from(["rohditor-desktop"])
             .expect("default desktop arguments parse");
         assert_eq!(defaults.demosaic, None);
+        assert_eq!(defaults.processor, None);
         assert!(arguments.diagnostics);
+    }
+
+    #[test]
+    fn cpu_only_setting_selects_the_processor_unless_overridden() {
+        let mut cpu_only = AppSettings::default();
+        cpu_only.set_cpu_only(true);
+        assert_eq!(
+            resolve_processor(AppSettings::default(), None),
+            ProcessorPreference::Auto
+        );
+        assert_eq!(resolve_processor(cpu_only, None), ProcessorPreference::Cpu);
+        assert_eq!(
+            resolve_processor(cpu_only, Some(ProcessorPreference::Gpu)),
+            ProcessorPreference::Gpu
+        );
+        assert_eq!(
+            resolve_processor(AppSettings::default(), Some(ProcessorPreference::Cpu)),
+            ProcessorPreference::Cpu
+        );
     }
 
     #[test]
