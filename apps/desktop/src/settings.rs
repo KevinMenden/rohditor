@@ -19,6 +19,9 @@ pub(crate) struct AppSettings {
     schema_version: u32,
     demosaic: DemosaicAlgorithm,
     output_policy: OutputPolicy,
+    /// Disables all GPU image processing. Read once at startup, so a change
+    /// takes effect on the next launch.
+    cpu_only: bool,
 }
 
 impl Default for AppSettings {
@@ -27,6 +30,7 @@ impl Default for AppSettings {
             schema_version: SCHEMA_VERSION,
             demosaic: DemosaicAlgorithm::MalvarHeCutler,
             output_policy: OutputPolicy::ClipToSrgb,
+            cpu_only: false,
         }
     }
 }
@@ -47,6 +51,14 @@ impl AppSettings {
 
     pub(crate) fn set_output_policy(&mut self, output_policy: OutputPolicy) {
         self.output_policy = output_policy;
+    }
+
+    pub(crate) const fn cpu_only(self) -> bool {
+        self.cpu_only
+    }
+
+    pub(crate) fn set_cpu_only(&mut self, cpu_only: bool) {
+        self.cpu_only = cpu_only;
     }
 
     pub(crate) fn render_options(self) -> RenderOptions {
@@ -71,6 +83,8 @@ struct StoredSettings {
     demosaic: Option<String>,
     #[serde(default)]
     output_policy: Option<String>,
+    #[serde(default)]
+    cpu_only: Option<bool>,
 }
 
 pub(crate) fn load() -> SettingsLoad {
@@ -159,6 +173,7 @@ fn decode(bytes: &[u8]) -> Result<AppSettings, String> {
         schema_version: SCHEMA_VERSION,
         demosaic,
         output_policy,
+        cpu_only: stored.cpu_only.unwrap_or(false),
     })
 }
 
@@ -179,6 +194,7 @@ fn save_to_path(path: &Path, settings: AppSettings) -> io::Result<()> {
             }
             .to_owned(),
         ),
+        cpu_only: Some(settings.cpu_only),
     };
     let mut bytes = serde_json::to_vec_pretty(&stored).map_err(io::Error::other)?;
     bytes.push(b'\n');
@@ -256,6 +272,21 @@ mod tests {
         save_to_path(&path, settings).expect("save output gamut setting");
         let text = fs::read_to_string(&path).expect("read saved settings");
         assert!(text.contains("\"output_policy\": \"chroma_compress_to_srgb\""));
+        assert_eq!(load_from_path(&path).settings, settings);
+    }
+
+    #[test]
+    fn cpu_only_defaults_to_false_and_round_trips() {
+        let defaults = decode(br#"{"schema_version":1}"#).expect("missing field uses default");
+        assert!(!defaults.cpu_only());
+
+        let directory = TestDirectory::new();
+        let path = directory.path().join("settings.json");
+        let mut settings = AppSettings::default();
+        settings.set_cpu_only(true);
+        save_to_path(&path, settings).expect("save cpu-only setting");
+        let text = fs::read_to_string(&path).expect("read saved settings");
+        assert!(text.contains("\"cpu_only\": true"));
         assert_eq!(load_from_path(&path).settings, settings);
     }
 
