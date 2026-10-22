@@ -818,6 +818,8 @@ impl RohditorApp {
             draft_demosaic: dialog.draft.demosaic(),
             active_output_policy: self.settings.output_policy(),
             draft_output_policy: dialog.draft.output_policy(),
+            active_cpu_only: self.settings.cpu_only(),
+            draft_cpu_only: dialog.draft.cpu_only(),
             warning: self.settings_warning.as_deref(),
         };
         let mut open = true;
@@ -836,6 +838,11 @@ impl RohditorApp {
         {
             dialog.draft.set_output_policy(output_policy);
         }
+        if let Some(cpu_only) = output.selected_cpu_only
+            && let Some(dialog) = self.settings_dialog.as_mut()
+        {
+            dialog.draft.set_cpu_only(cpu_only);
+        }
         if output.apply {
             self.apply_settings(context);
         }
@@ -849,9 +856,15 @@ impl RohditorApp {
             return;
         }
 
+        // The processor is chosen at startup, so a CPU-only change alone does
+        // not alter the current image.
+        let changes_pixels = next.demosaic() != self.settings.demosaic()
+            || next.output_policy() != self.settings.output_policy();
         self.settings = next;
-        self.pending_white_balance_pick = None;
-        self.refresh_current_presentation(context);
+        if changes_pixels {
+            self.pending_white_balance_pick = None;
+            self.refresh_current_presentation(context);
+        }
         match settings::save(next) {
             Ok(()) => {
                 self.settings_warning = None;
