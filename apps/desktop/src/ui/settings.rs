@@ -12,13 +12,24 @@ pub(crate) struct SettingsWindowModel<'a> {
     pub draft_demosaic: DemosaicAlgorithm,
     pub active_output_policy: OutputPolicy,
     pub draft_output_policy: OutputPolicy,
+    pub active_cpu_only: bool,
+    pub draft_cpu_only: bool,
     pub warning: Option<&'a str>,
+}
+
+impl SettingsWindowModel<'_> {
+    fn is_dirty(&self) -> bool {
+        self.draft_demosaic != self.active_demosaic
+            || self.draft_output_policy != self.active_output_policy
+            || self.draft_cpu_only != self.active_cpu_only
+    }
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct SettingsWindowOutput {
     pub selected_demosaic: Option<DemosaicAlgorithm>,
     pub selected_output_policy: Option<OutputPolicy>,
+    pub selected_cpu_only: Option<bool>,
     pub cancel: bool,
     pub apply: bool,
 }
@@ -76,6 +87,19 @@ pub(crate) fn show(
                 output.selected_output_policy = Some(output_policy);
             }
 
+            ui.add_space(12.0);
+            let mut cpu_only = model.draft_cpu_only;
+            ui.checkbox(&mut cpu_only, "CPU only (don't use the GPU)");
+            if cpu_only != model.draft_cpu_only {
+                output.selected_cpu_only = Some(cpu_only);
+            }
+            ui.label(
+                egui::RichText::new(
+                    "Otherwise the GPU is used wherever possible. Takes effect after restart.",
+                )
+                .color(colors::TEXT_MUTED),
+            );
+
             ui.add_space(8.0);
             ui.label(
                 egui::RichText::new("Used for preview, Source 1:1, and export.")
@@ -92,9 +116,9 @@ pub(crate) fn show(
 
             ui.add_space(12.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let dirty = model.draft_demosaic != model.active_demosaic
-                    || model.draft_output_policy != model.active_output_policy;
-                output.apply = ui.add_enabled(dirty, egui::Button::new("Apply")).clicked();
+                output.apply = ui
+                    .add_enabled(model.is_dirty(), egui::Button::new("Apply"))
+                    .clicked();
                 output.cancel = ui.button("Cancel").clicked();
             });
         });
@@ -105,10 +129,7 @@ pub(crate) fn show(
     if context.input(|input| input.key_pressed(egui::Key::Escape)) {
         output.cancel = true;
     }
-    if (model.draft_demosaic != model.active_demosaic
-        || model.draft_output_policy != model.active_output_policy)
-        && context.input(|input| input.key_pressed(egui::Key::Enter))
-    {
+    if model.is_dirty() && context.input(|input| input.key_pressed(egui::Key::Enter)) {
         output.apply = true;
     }
     output
