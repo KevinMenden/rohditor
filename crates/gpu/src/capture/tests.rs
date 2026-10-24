@@ -1,3 +1,4 @@
+use super::processor::{GUIDE, ITERATION, MASK, Op};
 use super::*;
 use rohditor_edit::CaptureSharpening;
 
@@ -98,6 +99,7 @@ fn cancellation_and_constrained_budget_recovery() {
         .expect("recovered processor")
         .expect("active capture");
     assert!(result.metrics.tile_edge < 512);
+    assert_eq!(result.metrics.submissions as usize, result.metrics.tiles);
     let mut reference = input.clone();
     contract
         .apply_cpu(&mut reference, &CancellationToken::new())
@@ -150,21 +152,18 @@ fn intermediate_guide_mask_and_every_iteration_match() {
     });
     for (stage, expected) in reference.iter().enumerate() {
         let mut encoder = gpu.encoder();
-        match stage {
-            0 => gpu.pass(&mut encoder, &resources, &contract, w, h, [0, 0, 0, 0]),
-            1 => {
-                gpu.blur(&mut encoder, &resources, &contract, w, h, 1);
-                gpu.pass(&mut encoder, &resources, &contract, w, h, [2, 0, 0, 0]);
-                gpu.blur(&mut encoder, &resources, &contract, w, h, 0);
-                gpu.pass(&mut encoder, &resources, &contract, w, h, [3, 0, 0, 0]);
-            }
-            _ => {
-                gpu.blur(&mut encoder, &resources, &contract, w, h, 2);
-                gpu.pass(&mut encoder, &resources, &contract, w, h, [4, 0, 0, 0]);
-                gpu.blur(&mut encoder, &resources, &contract, w, h, 5);
-                gpu.pass(&mut encoder, &resources, &contract, w, h, [5, 0, 0, 0]);
-            }
-        }
+        let ops: &[Op] = match stage {
+            0 => &GUIDE,
+            1 => &MASK,
+            _ => &ITERATION,
+        };
+        gpu.encode_ops(
+            &mut encoder,
+            &resources,
+            &contract,
+            (w, h),
+            ops.iter().copied(),
+        );
         encoder.copy_buffer_to_buffer(&resources.planes, 0, &staging, 0, (w * h * 12) as u64);
         gpu.submit(encoder, &token).expect("capture stage");
         let (send, receive) = mpsc::sync_channel(1);
