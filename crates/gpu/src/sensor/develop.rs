@@ -90,15 +90,9 @@ impl GpuSensorProcessor {
             self.apply_highlight(normalized, metadata.sensor(), cancellation)?;
         let (camera, demosaic) =
             self.demosaic(highlighted, metadata.sensor(), &contract, cancellation)?;
-        // Generated capture tiles include demosaic dispatch in their timer.
-        // Separate the overlapping durations before reporting stage totals.
-        let mut capture = demosaic.capture;
-        capture.total = capture
-            .total
-            .saturating_sub(demosaic.capture_input_demosaic);
-        capture.compute_and_wait = capture
-            .compute_and_wait
-            .saturating_sub(demosaic.capture_input_demosaic);
+        // Generated capture tiles record their demosaic dispatch into the same
+        // submission, so that time is reported under capture, not demosaic.
+        let capture = demosaic.capture;
         let demosaic_time = demosaic.total.saturating_sub(capture.total);
         let timings = StageTimings {
             normalization: normalization.total,
