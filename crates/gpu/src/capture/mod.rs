@@ -27,6 +27,8 @@ pub struct CaptureMetrics {
     pub readback: Duration,
     pub uploaded_bytes: u64,
     pub readback_bytes: u64,
+    /// Queue submissions, each followed by one blocking wait: one per tile.
+    pub submissions: u32,
     pub estimated_gpu_bytes: u64,
     pub estimated_host_bytes: usize,
     pub tile_edge: usize,

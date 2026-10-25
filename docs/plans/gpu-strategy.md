@@ -130,12 +130,18 @@ fully qualified from these performance numbers.
    memory under concurrent preview/export; consider bounded capture handoff or
    measured batching only where these results justify it. Keep the fallback
    visible and preserve image semantics.
-3. **Capture is the measured latency target.** At 24 MP its 96 GPU tiles add
+3. **Capture is the measured latency target.** At 24 MP its 96 GPU tiles added
    roughly 1.3–1.8 s to export, almost entirely reported as compute/wait with
-   no camera-RGB transfer. Use GPU timestamps or controlled batching to separate
-   shader work from submission/synchronization cost; preserve the eight-iteration
-   halo contract and parity before changing tile scheduling. RCD also waits per
-   fixed tile, but its measured complete export is currently faster than CPU.
+   no camera-RGB transfer. The tile loop submitted and blocked ~11 times per tile
+   (setup, each of eight RL iterations, apply, plus the demosaic or load input), and
+   the wait slept 1 ms per poll, so about 1,100 waits alone account for that cost.
+   Each tile now records its producer, all passes (one compute pass) and the scatter
+   into a single submission with one blocking wait (`CaptureMetrics::submissions`
+   equals `tiles`); the eight-iteration halo and tile geometry are unchanged. On
+   llvmpipe a synthetic 192-tile case dropped from ~7.5 s to ~5.1 s. **Still open:**
+   re-measure on the RX 9070 XT with `scripts/benchmark-gpu.py` and, if capture
+   remains slow, add GPU timestamps to separate shader time. Cancellation is now
+   observed per tile rather than per iteration. RCD also waits per fixed tile.
 4. **Fallback has two granularities.** Preview can retain GPU spatial/color
    after CPU sensor recovery, whereas export currently retries the entire CPU
    pipeline. This is valid but should stay explicit in status, logs and timing;

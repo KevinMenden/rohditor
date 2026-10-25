@@ -1,9 +1,6 @@
 use std::time::{Duration, Instant};
 
-use rohditor_core::{
-    CAPTURE_SHARPENING_ITERATIONS, CancellationToken, CaptureSharpeningContract,
-    SensorDevelopmentDescription,
-};
+use rohditor_core::{CancellationToken, CaptureSharpeningContract, SensorDevelopmentDescription};
 use rohditor_demosaic::{ChannelBalance, DemosaicAlgorithm};
 
 use super::normalize::{bayer_pattern_code, check_cancel, invalid};
@@ -50,9 +47,6 @@ impl GpuSensorCameraSource {
 pub struct DemosaicMetrics {
     /// Wall time including bounded submissions and the validation flag readback.
     pub total: Duration,
-    /// Demosaic dispatches performed inside capture's generated-tile callback.
-    /// This time also appears in `capture.total` until the caller separates it.
-    pub capture_input_demosaic: Duration,
     pub capture: CaptureMetrics,
     pub tiles: usize,
     pub submissions: u32,
@@ -182,10 +176,11 @@ impl GpuSensorProcessor {
         });
         let mut metrics = DemosaicMetrics::default();
         {
-            let mut dispatch = |region: [u32; 4], target: Option<&wgpu::Buffer>| {
-                check_cancel(cancellation)?;
-                let dispatch_started = Instant::now();
-                self.dispatch_demosaic(
+            let mut encode = |encoder: &mut wgpu::CommandEncoder,
+                              region: [u32; 4],
+                              target: Option<&wgpu::Buffer>| {
+                self.encode_demosaic(
+                    encoder,
                     &mosaic,
                     &view,
                     &planes,
@@ -194,25 +189,26 @@ impl GpuSensorProcessor {
                     region,
                     target,
                 );
-                self.wait(cancellation)?;
-                if target.is_some() {
-                    metrics.capture_input_demosaic += dispatch_started.elapsed();
-                }
                 metrics.tiles += 1;
-                metrics.submissions += 1;
-                Ok::<_, GpuPreviewError>(0)
             };
             if capture.settings().is_active() && algorithm != 2 {
                 let mut processor = GpuCaptureProcessor::new(&self.device, &self.queue)?;
                 processor.set_remaining_budget(remaining);
                 #[cfg(test)]
                 processor.force_maximum_tile_edge(self.maximum_tile_edge as usize);
+                // Each demosaic tile is recorded into its capture tile's
+                // submission, so its time is part of the capture stage.
                 metrics.capture = processor.process_generated_to_resident(
                     capture,
                     &planes,
                     cancellation,
-                    |buffer, x, y, w, h| {
-                        dispatch([x as u32, y as u32, w as u32, h as u32], Some(buffer))
+                    |encoder, buffer, x, y, w, h| {
+                        encode(
+                            encoder,
+                            [x as u32, y as u32, w as u32, h as u32],
+                            Some(buffer),
+                        );
+                        Ok(0)
                     },
                 )?;
             } else {
@@ -224,7 +220,14 @@ impl GpuSensorProcessor {
                 );
                 for y in (0..layout.height).step_by(edge as usize) {
                     for x in (0..layout.width).step_by(edge as usize) {
-                        dispatch(
+                        check_cancel(cancellation)?;
+                        let mut encoder =
+                            self.device
+                                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                    label: Some("demosaic bounded region"),
+                                });
+                        encode(
+                            &mut encoder,
                             [
                                 x,
                                 y,
@@ -232,7 +235,10 @@ impl GpuSensorProcessor {
                                 edge.min(layout.height - y),
                             ],
                             None,
-                        )?;
+                        );
+                        self.queue.submit([encoder.finish()]);
+                        self.wait(cancellation)?;
+                        metrics.submissions += 1;
                     }
                 }
             }
@@ -249,10 +255,8 @@ impl GpuSensorProcessor {
                 reservation,
                 cancellation,
             )?;
-            metrics.submissions += metrics.capture.tiles as u32;
         }
-        metrics.submissions +=
-            metrics.capture.tiles as u32 * (CAPTURE_SHARPENING_ITERATIONS as u32 + 2);
+        metrics.submissions += metrics.capture.submissions;
         self.validate_demosaic(&validation, cancellation)?;
         metrics.submissions += 1;
         metrics.diagnostic_readback_bytes = 4;
@@ -289,8 +293,9 @@ impl GpuSensorProcessor {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn dispatch_demosaic(
+    fn encode_demosaic(
         &self,
+        encoder: &mut wgpu::CommandEncoder,
         mosaic: &GpuHighlightedMosaic,
         view: &wgpu::TextureView,
         planes: &ResidentCameraPlanes,
@@ -364,21 +369,13 @@ impl GpuSensorProcessor {
             layout: &pipeline.get_bind_group_layout(0),
             entries: &entries,
         });
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("demosaic bounded region"),
-            });
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("demosaic"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, &bindings, &[]);
-            pass.dispatch_workgroups(region[2].div_ceil(8), region[3].div_ceil(8), 1);
-        }
-        self.queue.submit([encoder.finish()]);
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("demosaic"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, &bindings, &[]);
+        pass.dispatch_workgroups(region[2].div_ceil(8), region[3].div_ceil(8), 1);
     }
 
     fn validate_demosaic(

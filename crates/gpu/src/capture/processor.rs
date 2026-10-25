@@ -20,7 +20,7 @@ impl GpuCaptureProcessor {
             scatter,
             cancellation,
             None,
-            |buffer, x0, y0, width, height| {
+            |_encoder, buffer, x0, y0, width, height| {
                 packed.clear();
                 for y in y0..y0 + height {
                     check_cancel(cancellation)?;
@@ -49,7 +49,14 @@ impl GpuCaptureProcessor {
         scatter: &crate::spatial::CaptureScatter,
         cancellation: &CancellationToken,
         reservation: Option<crate::memory::Reservation>,
-        mut fill: impl FnMut(&wgpu::Buffer, usize, usize, usize, usize) -> Result<u64, GpuPreviewError>,
+        mut fill: impl FnMut(
+            &mut wgpu::CommandEncoder,
+            &wgpu::Buffer,
+            usize,
+            usize,
+            usize,
+            usize,
+        ) -> Result<u64, GpuPreviewError>,
     ) -> Result<CaptureMetrics, GpuPreviewError> {
         let started = Instant::now();
         let _reservation = match reservation {
@@ -78,75 +85,25 @@ impl GpuCaptureProcessor {
                 let x1 = (right + halo).min(dimensions.0);
                 let y1 = (bottom + halo).min(dimensions.1);
                 let (width, height) = (x1 - x0, y1 - y0);
-                let upload_started = Instant::now();
-                let uploaded = fill(&resources.rgb, x0, y0, width, height)?;
+                // The producer, every capture pass and the scatter share one
+                // submission; the shared scratch is idle again once it completes.
+                let tile_started = Instant::now();
+                let mut encoder = self.encoder();
+                let uploaded = fill(&mut encoder, &resources.rgb, x0, y0, width, height)?;
                 metrics.uploaded_bytes += uploaded;
+                let produced = tile_started.elapsed();
                 if uploaded == 0 {
-                    metrics.compute_and_wait += upload_started.elapsed();
+                    metrics.compute_and_wait += produced;
                 } else {
-                    metrics.upload += upload_started.elapsed();
+                    metrics.upload += produced;
                 }
-
                 let compute_started = Instant::now();
-                let mut encoder = self.encoder();
-                self.pass(
+                self.encode_ops(
                     &mut encoder,
                     &resources,
                     contract,
-                    width,
-                    height,
-                    [0, 0, 0, 0],
-                );
-                self.blur(&mut encoder, &resources, contract, width, height, 1);
-                self.pass(
-                    &mut encoder,
-                    &resources,
-                    contract,
-                    width,
-                    height,
-                    [2, 0, 0, 0],
-                );
-                self.blur(&mut encoder, &resources, contract, width, height, 0);
-                self.pass(
-                    &mut encoder,
-                    &resources,
-                    contract,
-                    width,
-                    height,
-                    [3, 0, 0, 0],
-                );
-                self.submit(encoder, cancellation)?;
-                for _ in 0..CAPTURE_SHARPENING_ITERATIONS {
-                    check_cancel(cancellation)?;
-                    let mut encoder = self.encoder();
-                    self.blur(&mut encoder, &resources, contract, width, height, 2);
-                    self.pass(
-                        &mut encoder,
-                        &resources,
-                        contract,
-                        width,
-                        height,
-                        [4, 0, 0, 0],
-                    );
-                    self.blur(&mut encoder, &resources, contract, width, height, 5);
-                    self.pass(
-                        &mut encoder,
-                        &resources,
-                        contract,
-                        width,
-                        height,
-                        [5, 0, 0, 0],
-                    );
-                    self.submit(encoder, cancellation)?;
-                }
-                let mut encoder = self.encoder();
-                self.pass(
-                    &mut encoder,
-                    &resources,
-                    contract,
-                    width,
-                    height,
-                    [6, 0, 0, 0],
+                    (width, height),
+                    tile_schedule(),
                 );
                 scatter.encode(
                     &self.device,
@@ -164,6 +121,7 @@ impl GpuCaptureProcessor {
                 )?;
                 self.submit(encoder, cancellation)?;
                 metrics.compute_and_wait += compute_started.elapsed();
+                metrics.submissions += 1;
                 metrics.tiles += 1;
             }
         }
@@ -178,7 +136,14 @@ impl GpuCaptureProcessor {
         contract: &CaptureSharpeningContract,
         resident: &crate::spatial::source::ResidentCameraPlanes,
         cancellation: &CancellationToken,
-        fill: impl FnMut(&wgpu::Buffer, usize, usize, usize, usize) -> Result<u64, GpuPreviewError>,
+        fill: impl FnMut(
+            &mut wgpu::CommandEncoder,
+            &wgpu::Buffer,
+            usize,
+            usize,
+            usize,
+            usize,
+        ) -> Result<u64, GpuPreviewError>,
     ) -> Result<CaptureMetrics, GpuPreviewError> {
         let dimensions = (
             resident.layout.width as usize,
@@ -269,7 +234,7 @@ impl GpuCaptureProcessor {
             &scatter,
             cancellation,
             Some(reservation),
-            |buffer, x, y, width, height| {
+            |encoder, buffer, x, y, width, height| {
                 let layout = source.layout;
                 let words = [
                     layout.tile_width,
@@ -304,21 +269,17 @@ impl GpuCaptureProcessor {
                     layout: &pipeline.get_bind_group_layout(0),
                     entries: &entries,
                 });
-                let mut encoder = self.encoder();
-                {
-                    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                        label: Some("load resident capture input"),
-                        timestamp_writes: None,
-                    });
-                    pass.set_pipeline(&pipeline);
-                    pass.set_bind_group(0, &bindings, &[]);
-                    pass.dispatch_workgroups(
-                        (width as u32).div_ceil(8),
-                        (height as u32).div_ceil(8),
-                        1,
-                    );
-                }
-                self.submit(encoder, cancellation)?;
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("load resident capture input"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&pipeline);
+                pass.set_bind_group(0, &bindings, &[]);
+                pass.dispatch_workgroups(
+                    (width as u32).div_ceil(8),
+                    (height as u32).div_ceil(8),
+                    1,
+                );
                 Ok(0)
             },
         )
@@ -388,64 +349,12 @@ impl GpuCaptureProcessor {
                 // At artificial edges the halo prevents their mirrored samples
                 // from influencing a retained core in any of the eight iterations.
                 let mut encoder = self.encoder();
-                self.pass(
+                self.encode_ops(
                     &mut encoder,
                     &resources,
                     contract,
-                    width,
-                    height,
-                    [0, 0, 0, 0],
-                );
-                self.blur(&mut encoder, &resources, contract, width, height, 1);
-                self.pass(
-                    &mut encoder,
-                    &resources,
-                    contract,
-                    width,
-                    height,
-                    [2, 0, 0, 0],
-                );
-                self.blur(&mut encoder, &resources, contract, width, height, 0);
-                self.pass(
-                    &mut encoder,
-                    &resources,
-                    contract,
-                    width,
-                    height,
-                    [3, 0, 0, 0],
-                );
-                self.submit(encoder, cancellation)?;
-                for _ in 0..CAPTURE_SHARPENING_ITERATIONS {
-                    check_cancel(cancellation)?;
-                    let mut encoder = self.encoder();
-                    self.blur(&mut encoder, &resources, contract, width, height, 2);
-                    self.pass(
-                        &mut encoder,
-                        &resources,
-                        contract,
-                        width,
-                        height,
-                        [4, 0, 0, 0],
-                    );
-                    self.blur(&mut encoder, &resources, contract, width, height, 5);
-                    self.pass(
-                        &mut encoder,
-                        &resources,
-                        contract,
-                        width,
-                        height,
-                        [5, 0, 0, 0],
-                    );
-                    self.submit(encoder, cancellation)?;
-                }
-                let mut encoder = self.encoder();
-                self.pass(
-                    &mut encoder,
-                    &resources,
-                    contract,
-                    width,
-                    height,
-                    [6, 0, 0, 0],
+                    (width, height),
+                    tile_schedule(),
                 );
                 let staging = resources
                     .staging
@@ -485,6 +394,7 @@ impl GpuCaptureProcessor {
                 metrics.readback += readback_started.elapsed();
                 metrics.readback_bytes += bytes;
                 metrics.tiles += 1;
+                metrics.submissions += 1;
             }
         }
         check_cancel(cancellation)?;
@@ -522,58 +432,62 @@ impl GpuCaptureProcessor {
         receiver: &mpsc::Receiver<Result<(), E>>,
         cancellation: &CancellationToken,
     ) -> Result<(), GpuPreviewError> {
-        loop {
-            self.device
-                .poll(wgpu::PollType::Poll)
-                .map_err(|e| error(format!("{e:?}")))?;
-            match receiver.try_recv() {
-                Ok(r) => {
-                    r.map_err(error)?;
-                    return check_cancel(cancellation);
-                }
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    return Err(error("capture completion disconnected"));
-                }
-                Err(mpsc::TryRecvError::Empty) => {
-                    // Drain this bounded unit even after cancellation. The next
-                    // request must never overlap still-running capture scratch.
-                    std::thread::sleep(Duration::from_millis(1));
-                }
+        // Always drain the submitted unit, even after cancellation: the next
+        // request must never overlap still-running capture scratch. Blocking in
+        // the driver avoids the scheduler-granularity sleep of a polling loop.
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|e| error(format!("{e:?}")))?;
+        match receiver.try_recv() {
+            Ok(r) => {
+                r.map_err(error)?;
+                check_cancel(cancellation)
             }
+            Err(mpsc::TryRecvError::Disconnected) => Err(error("capture completion disconnected")),
+            Err(mpsc::TryRecvError::Empty) => Err(error("capture completion was not reported")),
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn blur(
+    /// Record `ops` into one compute pass. Dispatches in a pass see each
+    /// other's storage writes, so a whole tile needs one submission instead
+    /// of a blocking round trip per stage. Parameter blocks and bind groups
+    /// are built once per distinct op and reused across RL iterations.
+    pub(super) fn encode_ops(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         resources: &Resources,
         contract: &CaptureSharpeningContract,
-        width: usize,
-        height: usize,
-        input: u32,
+        (width, height): (usize, usize),
+        ops: impl IntoIterator<Item = Op>,
     ) {
-        self.pass(
-            encoder,
-            resources,
-            contract,
-            width,
-            height,
-            [1, input, 3, 0],
-        );
-        self.pass(encoder, resources, contract, width, height, [1, 3, 4, 1]);
+        let mut bindings: Vec<(Op, wgpu::BindGroup)> = Vec::new();
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("capture tile"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        for op in ops {
+            let index = match bindings.iter().position(|(known, _)| *known == op) {
+                Some(index) => index,
+                None => {
+                    let group = self.op_bindings(resources, contract, width, height, op);
+                    bindings.push((op, group));
+                    bindings.len() - 1
+                }
+            };
+            pass.set_bind_group(0, &bindings[index].1, &[]);
+            pass.dispatch_workgroups((width as u32).div_ceil(8), (height as u32).div_ceil(8), 1);
+        }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn pass(
+    fn op_bindings(
         &self,
-        encoder: &mut wgpu::CommandEncoder,
         resources: &Resources,
         contract: &CaptureSharpeningContract,
         width: usize,
         height: usize,
-        op: [u32; 4],
-    ) {
+        op: Op,
+    ) -> wgpu::BindGroup {
         let words = [
             width as u32,
             height as u32,
@@ -602,7 +516,7 @@ impl GpuCaptureProcessor {
         });
         self.queue
             .write_buffer(&uniform, 0, bytemuck::cast_slice(&words));
-        let bindings = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("capture pass bindings"),
             layout: &self.pipeline.get_bind_group_layout(0),
             entries: &[
@@ -623,13 +537,44 @@ impl GpuCaptureProcessor {
                     resource: uniform.as_entire_binding(),
                 },
             ],
-        });
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("capture scalar pass"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &bindings, &[]);
-        pass.dispatch_workgroups((width as u32).div_ceil(8), (height as u32).div_ceil(8), 1);
+        })
     }
+}
+
+/// One scalar-pass invocation: `[mode, input plane, output plane, axis]`,
+/// matching `Parameters` in `capture.wgsl`.
+pub(super) type Op = [u32; 4];
+
+// Pass schedule, shared by production and the stage-by-stage tests. Planes:
+// 0 guide, 1 mask, 2 estimate, 3 temporary, 4 blurred, 5 ratio.
+/// Guide, raw protection mask and initial estimate.
+pub(super) const GUIDE: [Op; 1] = [[0, 0, 0, 0]];
+/// Smooth the mask, then gate it by local contrast and shadow level.
+pub(super) const MASK: [Op; 6] = [
+    [1, 1, 3, 0],
+    [1, 3, 4, 1],
+    [2, 0, 0, 0],
+    [1, 0, 3, 0],
+    [1, 3, 4, 1],
+    [3, 0, 0, 0],
+];
+/// One RL iteration: blur estimate, form ratio, blur ratio, update estimate.
+pub(super) const ITERATION: [Op; 6] = [
+    [1, 2, 3, 0],
+    [1, 3, 4, 1],
+    [4, 0, 0, 0],
+    [1, 5, 3, 0],
+    [1, 3, 4, 1],
+    [5, 0, 0, 0],
+];
+/// Blend the estimate into the RGB tile.
+pub(super) const APPLY: [Op; 1] = [[6, 0, 0, 0]];
+
+/// Every pass for one tile, in order.
+fn tile_schedule() -> impl Iterator<Item = Op> {
+    GUIDE
+        .into_iter()
+        .chain(MASK)
+        .chain((0..CAPTURE_SHARPENING_ITERATIONS).flat_map(|_| ITERATION))
+        .chain(APPLY)
 }

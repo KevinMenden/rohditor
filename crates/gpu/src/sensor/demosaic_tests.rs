@@ -615,6 +615,8 @@ fn mhc_and_rcd_feed_capture_without_rgb_upload_or_readback() {
                 .demosaic(input, &description, &capture, &CancellationToken::new())
                 .expect("resident demosaic/capture");
             assert!(metrics.capture.tiles > 1);
+            // Producer, all RL passes and the scatter share one submission per tile.
+            assert_eq!(metrics.capture.submissions as usize, metrics.capture.tiles);
             assert_eq!(metrics.capture.uploaded_bytes, 0);
             assert_eq!(metrics.capture.readback_bytes, 0);
             for (a, b) in readback(&gpu, &source).iter().zip(reference.data()) {
