@@ -284,6 +284,41 @@ fn mean_absolute_error(reference: &[u8], candidate: &[u8]) -> f64 {
         / reference.len() as f64
 }
 
+#[test]
+#[ignore = "requires the ignored Sony ARW corpus in testdata/private"]
+fn highlight_compare_reports_every_method_against_clip() -> Result<(), Box<dyn Error>> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata");
+    let manifest = root.join("phase-9-quality-crops.json");
+    let corpus = root.join("private");
+    let outputs = TempDirectory::new()?;
+
+    let result = run_cli(
+        &["highlight-compare"],
+        &[manifest.as_path(), corpus.as_path(), outputs.path()],
+    )?;
+    assert_success(&result, "highlight-compare");
+
+    let report: Value = serde_json::from_slice(&fs::read(outputs.path().join("report.json"))?)?;
+    for source in report["sources"].as_array().ok_or("missing sources")? {
+        let methods = source["methods"].as_array().ok_or("missing methods")?;
+        let names: Vec<_> = methods
+            .iter()
+            .filter_map(|m| m["method"].as_str())
+            .collect();
+        assert_eq!(names, ["off", "clip", "local-ratios", "opposed"]);
+        for crop in methods[1]["crops"].as_array().ok_or("missing crops")? {
+            assert_eq!(crop["max_abs_diff_vs_clip"], 0, "Clip must match itself");
+            assert!(
+                outputs
+                    .path()
+                    .join(crop["output_100_percent"].as_str().ok_or("no path")?)
+                    .exists()
+            );
+        }
+    }
+    Ok(())
+}
+
 fn run_cli(options: &[&str], paths: &[&Path]) -> Result<Output, std::io::Error> {
     let mut command = Command::new(env!("CARGO_BIN_EXE_rohditor-cli"));
     command.args(options);
