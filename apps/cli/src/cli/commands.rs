@@ -32,6 +32,8 @@ use rohditor_raw::{
 use serde::{Deserialize, Serialize};
 use tracing_subscriber::EnvFilter;
 
+use super::highlight_compare::highlight_compare;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "rohditor-cli",
@@ -264,6 +266,34 @@ enum Command {
         demosaic: CliDemosaic,
 
         /// Replace existing generated crops and report.json.
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Render every highlight method on the quality-crop manifest and report
+    /// reconstruction counts, scratch bytes, wall time, and differences from Clip.
+    HighlightCompare {
+        /// JSON manifest containing private source names and crop coordinates.
+        #[arg(value_name = "MANIFEST")]
+        manifest: PathBuf,
+
+        /// Directory containing the private RAW sources named by the manifest.
+        #[arg(value_name = "CORPUS_DIR")]
+        corpus: PathBuf,
+
+        /// Destination directory for per-method crop PNGs and report.json.
+        #[arg(value_name = "OUTPUT_DIR")]
+        output: PathBuf,
+
+        /// CPU demosaic algorithm used for every method.
+        #[arg(long, value_enum, default_value_t = CliDemosaic::MalvarHeCutler)]
+        demosaic: CliDemosaic,
+
+        /// Also write each method's full-resolution PNG export.
+        #[arg(long)]
+        full_exports: bool,
+
+        /// Replace existing generated files and report.json.
         #[arg(long)]
         force: bool,
     },
@@ -600,6 +630,21 @@ pub(crate) fn run() -> Result<()> {
             demosaic,
             force,
         } => quality_crops(&manifest, &corpus, &output, demosaic, force),
+        Command::HighlightCompare {
+            manifest,
+            corpus,
+            output,
+            demosaic,
+            full_exports,
+            force,
+        } => highlight_compare(
+            &manifest,
+            &corpus,
+            &output,
+            demosaic.into(),
+            full_exports,
+            force,
+        ),
         Command::VerifyLibraw {
             file,
             libraw_pgm,
@@ -612,21 +657,21 @@ pub(crate) fn run() -> Result<()> {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct QualityCropManifest {
+pub(super) struct QualityCropManifest {
     schema_version: u32,
-    crops: Vec<QualityCropSpec>,
+    pub(super) crops: Vec<QualityCropSpec>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct QualityCropSpec {
-    source: String,
-    name: String,
-    category: String,
-    x: usize,
-    y: usize,
-    width: usize,
-    height: usize,
+pub(super) struct QualityCropSpec {
+    pub(super) source: String,
+    pub(super) name: String,
+    pub(super) category: String,
+    pub(super) x: usize,
+    pub(super) y: usize,
+    pub(super) width: usize,
+    pub(super) height: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -1263,13 +1308,8 @@ fn validate_highlight_options(
     Ok(())
 }
 
-fn quality_crops(
-    manifest_path: &Path,
-    corpus: &Path,
-    output: &Path,
-    demosaic: CliDemosaic,
-    force: bool,
-) -> Result<()> {
+/// Read, version-check, and validate a quality-crop manifest.
+pub(super) fn load_quality_manifest(manifest_path: &Path) -> Result<QualityCropManifest> {
     let manifest_bytes = fs::read(manifest_path)
         .with_context(|| format!("could not read crop manifest {}", manifest_path.display()))?;
     let manifest: QualityCropManifest = serde_json::from_slice(&manifest_bytes)
@@ -1286,6 +1326,17 @@ fn quality_crops(
     for crop in &manifest.crops {
         validate_quality_crop_spec(crop)?;
     }
+    Ok(manifest)
+}
+
+fn quality_crops(
+    manifest_path: &Path,
+    corpus: &Path,
+    output: &Path,
+    demosaic: CliDemosaic,
+    force: bool,
+) -> Result<()> {
+    let manifest = load_quality_manifest(manifest_path)?;
 
     fs::create_dir_all(output).with_context(|| {
         format!(
@@ -1648,7 +1699,7 @@ fn validate_quality_crop_spec(crop: &QualityCropSpec) -> Result<()> {
     Ok(())
 }
 
-fn source_stem_for_artifact(source: &str) -> Result<&str> {
+pub(super) fn source_stem_for_artifact(source: &str) -> Result<&str> {
     Path::new(source)
         .file_stem()
         .and_then(|value| value.to_str())
@@ -1656,7 +1707,7 @@ fn source_stem_for_artifact(source: &str) -> Result<&str> {
         .ok_or_else(|| anyhow::anyhow!("quality source {source:?} has no UTF-8 file stem"))
 }
 
-fn crop_display_image(
+pub(super) fn crop_display_image(
     image: &DisplayRgbImage<u8>,
     crop: &QualityCropSpec,
 ) -> Result<DisplayRgbImage<u8>> {
@@ -1735,7 +1786,7 @@ fn nearest_neighbor_2x(image: &DisplayRgbImage<u8>) -> Result<DisplayRgbImage<u8
     )?)
 }
 
-fn milliseconds(duration: Duration) -> f64 {
+pub(super) fn milliseconds(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1_000.0
 }
 
@@ -1828,7 +1879,7 @@ fn validate_preview_extension(output: &Path, format: EncodedPreviewFormat) -> Re
     )
 }
 
-fn write_stdout(value: &str) -> Result<()> {
+pub(super) fn write_stdout(value: &str) -> Result<()> {
     let stdout = io::stdout();
     let mut handle = stdout.lock();
     match writeln!(handle, "{value}") {
