@@ -1,8 +1,10 @@
 # Rohditor
 
-Rohditor is a Linux-first Rust RAW photo editor for Sony ILCE-6400 ARW files.
+Rohditor is a Linux-first Rust RAW photo editor.
 It provides a deterministic CPU development pipeline, optional GPU previews,
 and a desktop editor plus headless CLI.
+
+This is an ongoing project with many features still missing.
 
 ## Build and test
 
@@ -33,63 +35,54 @@ quality-crop generation, and LibRaw verification.
 
 Project guidelines live in [AGENTS.md](AGENTS.md); the implementation checklist is below.
 
-# Implementation status
+## What happens when a RAW is opened
 
-Status: MVP implemented and validated on the current Sony ILCE-6400 corpus.
+Opening a file runs on the desktop's background worker thread
+(`apps/desktop/src/coordinator/worker.rs`). The UI shows the embedded JPEG first
+and replaces it once the developed preview arrives. The steps up to `decode`
+run one after another.
 
-## Implemented
+```mermaid
+flowchart TD
+    A["Open file<br/>RawlerDecoder::open: detect format"] --> B["probe<br/>metadata only, no pixel decode"]
+    B --> C["Optics match<br/>Lensfun profile lookup"]
+    C --> D["Embedded JPEG placeholder<br/>extract + decode + orient<br/>shown immediately"]
+    D --> E["decode<br/>full sensor mosaic, u16, ~24 MP<br/>(rawler, Sony ARW decompression)"]
+    E -->|RawReady| F["queue_preview<br/>newest request wins, older ones cancelled"]
 
-- [x] Rust workspace split into RAW, core, GPU, CLI, and desktop crates.
-- [x] Content-based Sony ARW decoding, metadata, embedded JPEG extraction, and
-      typed malformed-input errors.
-- [x] CPU pipeline: crop, black/white normalization, MHC or bilinear Bayer
-      demosaic, white balance, camera color conversion, light/color edits,
-      orientation, histogram analysis, and sRGB output.
-- [x] Antialiased fixed-size previews, cancellable source-scale 1:1 inspection,
-      caching, newest-wins scheduling, undo/redo, and background export.
-- [x] Optional wgpu/WGSL GPU preview with CPU fallback and CPU/GPU parity tests.
-- [x] CLI inspection, preview extraction, development/export, quality crops,
-      and LibRaw verification.
-- [x] Transactional JPEG/PNG export with safe EXIF, sRGB ICC metadata,
-      overwrite protection, 8/16-bit PNG, and optional dithering.
-- [x] Linux desktop UI, XDG file dialogs, diagnostics, `.desktop` entry, and
-      SVG icon.
-- [x] Unit, integration, synthetic-quality, and malformed-input tests.
+    F --> G{"Preview cache hit?<br/>decoded / reconstructed /<br/>demosaiced / adjusted"}
+    G -->|"adjusted hit"| Z["Copy cached image + histogram"]
+    G -->|miss| H{"GPU sensor path<br/>available?"}
 
-## Missing or deliberately deferred
+    subgraph SENSOR["Sensor development, always at full sensor resolution"]
+        direction TB
+        S1["Normalize<br/>crop, black/white level to f32 mosaic"] --> S2["Highlight handling<br/>Clip by default; LocalRatios / Opposed optional"]
+        S2 --> S3["Demosaic<br/>MHC default; RCD / AMaZE optional<br/>mosaic to full-size linear RGB"]
+        S3 --> S4["Capture sharpening<br/>opt-in, masked Richardson-Lucy"]
+    end
 
-### Basic editing controls
+    H -->|"yes: wgpu"| GU["Upload mosaic to GPU<br/>run the same four stages in shaders"]
+    GU --> SENSOR
+    H -->|"no: CPU"| SENSOR
 
-- [x] **Light:** exposure, contrast, highlights, shadows, whites, blacks, auto
-      tone, and a visual four-region tone curve editor.
-- [x] **Color:** temperature/tint and manual white balance, saturation,
-      vibrance, HSL mixer, and three-way color grading.
-- [x] **Histogram:** RGB/luminance display with clipped shadow/highlight counts.
-- [x] **Color:** white-balance picker.
-- [ ] **Presence:** texture, clarity, and dehaze.
-- [x] **Detail:** opt-in capture sharpening (Detail panel; source-resolution masked RL).
-- [ ] **Detail:** output sharpening, luminance and color noise reduction,
-      moiré removal, and defringe.
-- [ ] **Geometry:** user crop and aspect ratios, straighten, rotate/flip, and
-      perspective/transform correction.
-- [ ] **Optics:** lens profiles, distortion, vignetting, and chromatic-aberration
-      correction.
-- [ ] **Local editing:** masks, brush, linear/radial gradients, and selective
-      versions of the light/color/detail controls.
-- [ ] **Retouching/effects:** heal/clone, red-eye removal, vignette, and grain.
+    SENSOR --> O["Optics correction<br/>distortion / vignetting / TCA, if a profile matched"]
+    O --> R["Area-reduce to 2560 px long edge<br/>full-size image to preview size"]
+    R --> CC["White balance + camera color matrix<br/>to Rec.2020 linear<br/>cached as the DemosaicedBase"]
+    CC --> ADJ["Edit adjustments<br/>light, color, HSL, grading, tone curve"]
+    ADJ --> OUT["Output conversion<br/>Rec.2020 to sRGB 8-bit<br/>+ histogram"]
+    OUT --> UI["PreviewReady<br/>texture upload in the UI"]
+    Z --> UI
+```
 
-### Other deferred work
+Everything left of "Area-reduce" runs on the full ~24 MP sensor, not on the
+2560 px preview, so a first open pays for normalize, highlight, demosaic, and
+optics at full size. Once the base is cached, slider edits only re-run the
+steps from "Edit adjustments" onwards on the small image.
 
-- [x] License the project under GNU GPL v3 or any later version; distribution remains disabled.
-- [ ] Catalog/library features: folders, ratings, tags, search, and batch work.
-- [ ] Camera profiles, highlight reconstruction, sensor cleanup, and advanced
-      rendering beyond the basic controls above.
-- [ ] Monitor ICC management and wide-gamut output/display support.
-- [ ] Full-resolution GPU export.
-- [ ] Broader camera, RAW format, and platform support.
-
-The private corpus and hardware-GPU tests are opt-in and are not required for
-the normal check suite. The current target is not arbitrary hostile RAW input.
+The cache is layered (`apps/desktop/src/preview_cache/`) so an edit re-runs only
+what its recipe fields invalidate: changing exposure keeps the demosaiced base;
+changing the highlight method or demosaic algorithm rebuilds from the decoded
+mosaic.
 
 ## License
 

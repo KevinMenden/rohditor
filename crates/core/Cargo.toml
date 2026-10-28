@@ -29,5 +29,9 @@ serde_json.workspace = true
 name = "pipeline_stages"
 harness = false
 
+[[bench]]
+name = "full_preview"
+harness = false
+
 [lints]
 workspace = true

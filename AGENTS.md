@@ -1,6 +1,6 @@
 # Project guidelines
 
-Focus on good maintainabiliy when writing code. Create crates where necessary. 
+Focus on good maintainabiliy when writing code. Create crates or modules where suitable. 
 Make modules if that's a good fit. Split files where they get too long.
 Write multiple functions where it makes sense to split up a bigger one.
 Make things modular where this can benefit in the long term.
