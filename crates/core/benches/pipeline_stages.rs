@@ -1,6 +1,4 @@
-use std::fmt::Display;
 use std::hint::black_box;
-use std::sync::Arc;
 
 use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
 use rohditor_core::{
@@ -8,9 +6,10 @@ use rohditor_core::{
 };
 use rohditor_edit::{EditRecipe, RenderingProfileSelection};
 use rohditor_image::{LinearRgbImage, LinearRgbSpace, Orientation};
-use rohditor_raw::{
-    CaptureMetadata, CfaPattern, LevelPattern, PhotometricInterpretation, RawFileInfo, RawFrame,
-};
+
+mod common;
+
+use common::must;
 
 const SENSOR_WIDTH: usize = 6_048;
 const SENSOR_HEIGHT: usize = 4_024;
@@ -18,7 +17,7 @@ const PREVIEW_WIDTH: usize = 2_560;
 const PREVIEW_HEIGHT: usize = 1_703;
 
 fn benchmark_normalization(criterion: &mut Criterion) {
-    let frame = representative_raw_frame();
+    let frame = common::raw_frame(SENSOR_WIDTH, SENSOR_HEIGHT);
     let mut group = criterion.benchmark_group("normalization");
     group.throughput(Throughput::Elements(
         (PREVIEW_WIDTH * PREVIEW_HEIGHT) as u64,
@@ -113,18 +112,6 @@ fn benchmark_output_conversion(criterion: &mut Criterion) {
     group.finish();
 }
 
-fn representative_raw_frame() -> RawFrame {
-    let samples = SENSOR_WIDTH * SENSOR_HEIGHT;
-    let mosaic = (0..samples)
-        .map(|index| 512_u16.saturating_add((index % 15_000) as u16))
-        .collect::<Vec<_>>();
-    RawFrame {
-        info: raw_info(SENSOR_WIDTH, SENSOR_HEIGHT),
-        row_stride: SENSOR_WIDTH,
-        mosaic: Arc::from(mosaic),
-    }
-}
-
 fn representative_linear_image() -> LinearRgbImage<f32> {
     let row_stride = PREVIEW_WIDTH * 3;
     let data = vec![0.18; row_stride * PREVIEW_HEIGHT];
@@ -135,53 +122,6 @@ fn representative_linear_image() -> LinearRgbImage<f32> {
         LinearRgbSpace::Rec2020D65,
         data,
     ))
-}
-
-fn raw_info(width: usize, height: usize) -> RawFileInfo {
-    RawFileInfo {
-        format: "synthetic benchmark".to_owned(),
-        make: "Rohditor".to_owned(),
-        model: "Representative sensor".to_owned(),
-        clean_make: "Rohditor".to_owned(),
-        clean_model: "Representative sensor".to_owned(),
-        source_size_bytes: 0,
-        source_identity: None,
-        width,
-        height,
-        components_per_pixel: 1,
-        source_bits_per_sample: Some(14),
-        decoded_bits_per_sample: 16,
-        compression: None,
-        active_area: None,
-        crop_area: None,
-        photometric_interpretation: PhotometricInterpretation::Cfa {
-            pattern: CfaPattern {
-                name: "RGGB".to_owned(),
-                width: 2,
-                height: 2,
-            },
-        },
-        black_levels: LevelPattern {
-            values: vec![512.0; 4],
-            repeat_width: 2,
-            repeat_height: 2,
-            components_per_pixel: 1,
-        },
-        white_levels: vec![16_383.0],
-        as_shot_white_balance: [Some(1.0); 4],
-        xyz_to_camera: [[0.0; 3]; 4],
-        color_matrices: Vec::new(),
-        orientation: Orientation::Normal,
-        capture: CaptureMetadata::default(),
-        embedded_preview: None,
-    }
-}
-
-fn must<T, E: Display>(result: Result<T, E>) -> T {
-    match result {
-        Ok(value) => value,
-        Err(error) => panic!("benchmark fixture failed: {error}"),
-    }
 }
 
 criterion_group!(
