@@ -7,3 +7,5 @@ target/
 # Local diagnostics and benchmark output.
 *.trace
 /benchmark-results/
+
+*.idea
