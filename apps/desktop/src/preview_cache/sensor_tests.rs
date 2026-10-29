@@ -174,14 +174,22 @@ fn editor_sensor_cache_reuses_camera_pixels_and_invalidates_upstream_dependencie
     assert!(rcd.sensor_gpu);
     assert_eq!(rcd.uploaded_bytes, 9 * 7 * 2);
     options.render.demosaic = DemosaicAlgorithm::Amaze;
+    let amaze = prepare(&mut cache, &frame, &recipe, options);
+    assert!(amaze.sensor_gpu);
+    assert_eq!(amaze.uploaded_bytes, 9 * 7 * 2);
+    // Highlight reconstruction that has no GPU implementation falls back to the
+    // CPU and records why.
+    let method = recipe.raw.highlights.method;
+    recipe.raw.highlights.method = rohditor_edit::HighlightMethod::LocalRatios;
     assert!(!prepare(&mut cache, &frame, &recipe, options).sensor_gpu);
     assert!(
         cache
             .recovery
             .as_ref()
-            .is_some_and(|reason| reason.contains("amaze"))
+            .is_some_and(|reason| reason.contains("local_ratios"))
     );
     assert!(cache.sensor_source.is_none());
+    recipe.raw.highlights.method = method;
     options.render.demosaic = DemosaicAlgorithm::MalvarHeCutler;
     assert!(prepare(&mut cache, &frame, &recipe, options).sensor_gpu);
     cache.release_gpu_images();

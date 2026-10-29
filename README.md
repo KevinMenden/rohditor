@@ -57,7 +57,7 @@ flowchart TD
     subgraph SENSOR["Sensor development, always at full sensor resolution"]
         direction TB
         S1["Normalize<br/>crop, black/white level to f32 mosaic"] --> S2["Highlight handling<br/>Clip by default; LocalRatios / Opposed optional"]
-        S2 --> S3["Demosaic<br/>MHC default; RCD / AMaZE optional<br/>mosaic to full-size linear RGB"]
+        S2 --> S3["Demosaic<br/>AMaZE default; RCD / MHC optional<br/>mosaic to full-size linear RGB"]
         S3 --> S4["Capture sharpening<br/>opt-in, masked Richardson-Lucy"]
     end
 
