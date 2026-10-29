@@ -12,6 +12,12 @@ use super::GpuSensorProcessor;
 use super::highlight::readback_for_qualification as readback_highlight_for_qualification;
 use super::normalize::readback_for_qualification;
 
+/// Normalized samples can exceed 1.0 (e.g. 72.48), where one f32 ULP is already
+/// ~7.6e-6, so the 1e-6 bound is relative above 1.0 and absolute below it.
+fn within_f32_tolerance(actual: f32, expected: f32) -> bool {
+    (actual - expected).abs() <= 1.0e-6 * expected.abs().max(1.0)
+}
+
 pub(super) fn processor() -> GpuSensorProcessor {
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
@@ -112,7 +118,7 @@ fn u16_tiles_match_cpu_normalization_for_all_cfa_and_white_level_forms() {
             assert_eq!(actual.len(), reference.data().len());
             for (index, (actual, expected)) in actual.iter().zip(reference.data()).enumerate() {
                 assert!(
-                    (actual - expected).abs() <= 1.0e-6,
+                    within_f32_tolerance(*actual, *expected),
                     "{pattern}, sample {index}: GPU {actual}, CPU {expected}"
                 );
             }
@@ -193,7 +199,7 @@ fn off_and_clip_match_cpu_highlight_with_bounded_diagnostics() {
         assert_eq!(actual.len(), expected.mosaic.data().len());
         for (index, (actual, expected)) in actual.iter().zip(expected.mosaic.data()).enumerate() {
             assert!(
-                (actual - expected).abs() <= 1.0e-6,
+                within_f32_tolerance(*actual, *expected),
                 "{pattern}, sample {index}: GPU {actual}, CPU {expected}"
             );
         }
@@ -221,7 +227,7 @@ fn off_and_clip_match_cpu_highlight_with_bounded_diagnostics() {
         .expect("GPU Off qualification readback");
     for (index, (actual, expected)) in actual.iter().zip(expected.data()).enumerate() {
         assert!(
-            (actual - expected).abs() <= 1.0e-6,
+            within_f32_tolerance(*actual, *expected),
             "Off sample {index}: GPU {actual}, CPU {expected}"
         );
     }
