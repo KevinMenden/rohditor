@@ -199,7 +199,7 @@ enum Command {
         crop: CliCropPolicy,
 
         /// CPU demosaic algorithm.
-        #[arg(long, value_enum, default_value_t = CliDemosaic::MalvarHeCutler)]
+        #[arg(long, value_enum, default_value_t = CliDemosaic::Amaze)]
         demosaic: CliDemosaic,
 
         /// Lensfun profile selection: off, auto, or a stable profile ID.
@@ -262,7 +262,7 @@ enum Command {
         output: PathBuf,
 
         /// CPU demosaic algorithm under review.
-        #[arg(long, value_enum, default_value_t = CliDemosaic::MalvarHeCutler)]
+        #[arg(long, value_enum, default_value_t = CliDemosaic::Amaze)]
         demosaic: CliDemosaic,
 
         /// Replace existing generated crops and report.json.
@@ -286,7 +286,7 @@ enum Command {
         output: PathBuf,
 
         /// CPU demosaic algorithm used for every method.
-        #[arg(long, value_enum, default_value_t = CliDemosaic::MalvarHeCutler)]
+        #[arg(long, value_enum, default_value_t = CliDemosaic::Amaze)]
         demosaic: CliDemosaic,
 
         /// Also write each method's full-resolution PNG export.
@@ -2224,7 +2224,7 @@ mod tests {
         else {
             panic!("expected develop command");
         };
-        assert!(matches!(demosaic, CliDemosaic::MalvarHeCutler));
+        assert!(matches!(demosaic, CliDemosaic::Amaze));
         assert!(matches!(highlight_reconstruction, CliHighlightMethod::Clip));
     }
 
@@ -2492,7 +2492,7 @@ mod tests {
     }
 
     #[test]
-    fn quality_crops_default_to_mhc() {
+    fn quality_crops_default_to_amaze() {
         let parsed = Cli::try_parse_from([
             "rohditor-cli",
             "quality-crops",
@@ -2504,7 +2504,7 @@ mod tests {
         let Command::QualityCrops { demosaic, .. } = parsed.command else {
             panic!("expected quality-crops command");
         };
-        assert!(matches!(demosaic, CliDemosaic::MalvarHeCutler));
+        assert!(matches!(demosaic, CliDemosaic::Amaze));
     }
 
     #[test]
