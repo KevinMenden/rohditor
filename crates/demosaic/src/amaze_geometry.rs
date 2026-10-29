@@ -30,8 +30,7 @@ pub struct AmazeWriteWindow {
 
 impl AmazeTileGeometry {
     /// The pixels this tile reconstructs: its core, minus the bilinear border
-    /// ring of the image (see [`core_range`] for the one exception). Empty when
-    /// the ring leaves nothing of the core.
+    /// ring of the image. Empty when the ring leaves nothing of the core.
     #[must_use]
     pub fn write_window(self, width: usize, height: usize) -> AmazeWriteWindow {
         AmazeWriteWindow {
@@ -42,18 +41,9 @@ impl AmazeTileGeometry {
 }
 
 /// Core range along one axis, clipped to the image and its border ring.
-///
-/// Only the tile that reaches the image edge gives up the ring. When the last
-/// tile lies entirely inside the ring (`length % AMAZE_TILE_VALID` in `1..=16`),
-/// it writes nothing and the tile before it keeps its full core, which reaches
-/// up to 15 pixels into the ring. This is the long-standing CPU behaviour and
-/// the GPU executor reproduces it.
 fn core_range(origin: usize, length: usize) -> Range<usize> {
     let start = origin.max(AMAZE_BORDER);
-    let mut end = (origin + AMAZE_TILE_VALID).min(length);
-    if end == length {
-        end = end.saturating_sub(AMAZE_BORDER);
-    }
+    let end = (origin + AMAZE_TILE_VALID).min(length.saturating_sub(AMAZE_BORDER));
     start..end.max(start)
 }
 
@@ -130,17 +120,17 @@ mod tests {
     }
 
     #[test]
-    fn a_last_tile_inside_the_ring_leaves_the_previous_core_unclipped() {
-        // 450 = 2 * 224 + 2: the third column (448..450) is all ring, so the
-        // second keeps its whole core (224..448), 2 pixels short of the edge.
+    fn a_last_tile_inside_the_ring_clips_the_previous_core_to_the_ring() {
+        // 450 = 2 * 224 + 2: the third column (448..450) is all ring, and the
+        // second ends where the ring starts instead of reaching into it.
         let second = amaze_tiles(450, 33).nth(1).expect("second tile");
-        assert_eq!(second.write_window(450, 33).x, 224..448);
+        assert_eq!(second.write_window(450, 33).x, 224..434);
         assert_eq!(tiles(450, 33).len(), 2);
     }
 
     #[test]
     fn every_interior_pixel_is_written_exactly_once() {
-        let (width, height) = (700, 470);
+        let (width, height) = (450, 460);
         let mut written = vec![0_u8; width * height];
         for tile in amaze_tiles(width, height) {
             let window = tile.write_window(width, height);
