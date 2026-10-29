@@ -124,7 +124,12 @@ pub(crate) fn apply_cancellable(
         .enumerate()
         .try_for_each(|(y, row)| {
             cancellation.checkpoint()?;
-            for (x, rgb) in row[..width * 3].chunks_exact_mut(3).enumerate() {
+            for (x, rgb) in row[..width * 3]
+                .as_chunks_mut::<3>()
+                .0
+                .iter_mut()
+                .enumerate()
+            {
                 let i = y * width + x;
                 let gain = 1.0 + settings.amount * mask[i] * (estimate[i] / guide[i] - 1.0);
                 if gain != 1.0 && rgb.iter().all(|v| (v * gain).is_finite()) {
