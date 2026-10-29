@@ -11,7 +11,7 @@ use rohditor_raw::{ImageRect, LevelPattern, RawFrame};
 use super::tests::processor;
 use super::{GpuSensorCameraSource, GpuSensorProcessor};
 
-fn frame(pattern: &str, width: usize, height: usize, kind: usize) -> RawFrame {
+pub(super) fn frame(pattern: &str, width: usize, height: usize, kind: usize) -> RawFrame {
     let mut frame = super::tests::frame(pattern, vec![2048.0]);
     frame.info.width = width + 2;
     frame.info.height = height + 2;
@@ -65,7 +65,7 @@ fn frame(pattern: &str, width: usize, height: usize, kind: usize) -> RawFrame {
     frame
 }
 
-fn description(
+pub(super) fn description(
     frame: &RawFrame,
     algorithm: DemosaicAlgorithm,
     clip: bool,
@@ -89,7 +89,7 @@ fn description(
 }
 
 #[test]
-fn rcd_support_is_limited_to_off_and_clip_highlights() {
+fn rcd_and_amaze_support_is_limited_to_off_and_clip_highlights() {
     let frame = frame("RGGB", 29, 31, 0);
     assert!(GpuSensorProcessor::supports(&description(
         &frame,
@@ -101,7 +101,7 @@ fn rcd_support_is_limited_to_off_and_clip_highlights() {
         DemosaicAlgorithm::Rcd,
         true
     )));
-    assert!(!GpuSensorProcessor::supports(&description(
+    assert!(GpuSensorProcessor::supports(&description(
         &frame,
         DemosaicAlgorithm::Amaze,
         false
@@ -121,7 +121,7 @@ fn rcd_support_is_limited_to_off_and_clip_highlights() {
     assert_eq!(DemosaicAlgorithm::Rcd.contract().algorithm_version(), 3);
 }
 
-fn highlighted(
+pub(super) fn highlighted(
     gpu: &GpuSensorProcessor,
     frame: &RawFrame,
     description: &SensorDevelopmentDescription,
@@ -136,8 +136,15 @@ fn highlighted(
         .0
 }
 
-fn readback(gpu: &GpuSensorProcessor, source: &GpuSensorCameraSource) -> Vec<f32> {
-    let layout = source.planes.layout;
+pub(super) fn readback(gpu: &GpuSensorProcessor, source: &GpuSensorCameraSource) -> Vec<f32> {
+    readback_planes(gpu, &source.planes)
+}
+
+pub(super) fn readback_planes(
+    gpu: &GpuSensorProcessor,
+    planes: &crate::spatial::source::ResidentCameraPlanes,
+) -> Vec<f32> {
+    let layout = planes.layout;
     let mosaic_layout = super::resources::MosaicLayout {
         width: layout.width,
         height: layout.height,
@@ -154,7 +161,7 @@ fn readback(gpu: &GpuSensorProcessor, source: &GpuSensorCameraSource) -> Vec<f32
     for channel in 0..3 {
         let data = super::normalize::readback_texture_for_qualification(
             gpu,
-            &source.planes.textures[channel],
+            &planes.textures[channel],
             mosaic_layout,
             &CancellationToken::new(),
         )
@@ -459,15 +466,13 @@ fn rcd_capture_two_image_floor_exceeds_48mp_budget() {
 }
 
 #[test]
-#[ignore = "requires Vulkan; RCD capture allocation fails before camera publication"]
-fn rcd_capture_budget_failure_releases_all_reservations() {
+#[ignore = "requires Vulkan; RCD/AMaZE capture allocation fails before camera publication"]
+fn rcd_and_amaze_capture_budget_failure_releases_all_reservations() {
     let _guard = crate::preview::processor::tests::gpu_test_guard();
     let mut gpu = processor();
     let before = crate::gpu_memory_reservations().current_bytes;
     gpu.set_budget(before + 1_150_000);
     let frame = frame("RGGB", 81, 67, 6);
-    let description = description(&frame, DemosaicAlgorithm::Rcd, false);
-    let input = highlighted(&gpu, &frame, &description);
     let capture = CaptureSharpeningContract::new(
         CaptureSharpening {
             enabled: true,
@@ -477,55 +482,70 @@ fn rcd_capture_budget_failure_releases_all_reservations() {
         [1.0; 3],
     )
     .expect("active capture fixture");
-    let result = gpu.demosaic(input, &description, &capture, &CancellationToken::new());
-    assert!(matches!(
-        result,
-        Err(crate::GpuPreviewError::Unsupported { .. })
-    ));
-    assert_eq!(crate::gpu_memory_reservations().current_bytes, before);
+    for algorithm in [DemosaicAlgorithm::Rcd, DemosaicAlgorithm::Amaze] {
+        let description = description(&frame, algorithm, false);
+        let input = highlighted(&gpu, &frame, &description);
+        let result = gpu.demosaic(input, &description, &capture, &CancellationToken::new());
+        assert!(
+            matches!(result, Err(crate::GpuPreviewError::Unsupported { .. })),
+            "{algorithm:?}"
+        );
+        assert_eq!(crate::gpu_memory_reservations().current_bytes, before);
+    }
 }
 
 #[test]
-#[ignore = "requires Vulkan; RCD finite flag rejects a bad measured sample and recovers"]
-fn rcd_nonfinite_output_does_not_publish_camera_planes() {
+#[ignore = "requires Vulkan; RCD/AMaZE finite flag rejects a bad measured sample and recovers"]
+fn rcd_and_amaze_nonfinite_output_does_not_publish_camera_planes() {
     let _guard = crate::preview::processor::tests::gpu_test_guard();
     let gpu = processor();
     let before = crate::gpu_memory_reservations().current_bytes;
-    let frame = frame("BGGR", 29, 31, 6);
-    let description = description(&frame, DemosaicAlgorithm::Rcd, false);
-    let input = highlighted(&gpu, &frame, &description);
-    gpu.queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: &input._texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d { x: 12, y: 12, z: 0 },
-            aspect: wgpu::TextureAspect::All,
-        },
-        bytemuck::bytes_of(&f32::NAN),
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(4),
-            rows_per_image: Some(1),
-        },
-        wgpu::Extent3d {
-            width: 1,
-            height: 1,
-            depth_or_array_layers: 1,
-        },
-    );
     let capture = CaptureSharpeningContract::new(CaptureSharpening::default(), [1.0; 3])
         .expect("capture off");
-    assert!(
-        gpu.demosaic(input, &description, &capture, &CancellationToken::new())
-            .is_err()
-    );
-    assert_eq!(crate::gpu_memory_reservations().current_bytes, before);
-    let good = highlighted(&gpu, &frame, &description);
-    let (source, _) = gpu
-        .demosaic(good, &description, &capture, &CancellationToken::new())
-        .expect("RCD recovers after invalid input");
-    drop(source);
-    assert_eq!(crate::gpu_memory_reservations().current_bytes, before);
+    // The bad sample lies inside each algorithm's reconstructed core.
+    for (algorithm, size, bad) in [
+        (DemosaicAlgorithm::Rcd, (29, 31), 12),
+        (DemosaicAlgorithm::Amaze, (45, 47), 24),
+    ] {
+        let frame = frame("BGGR", size.0, size.1, 6);
+        let description = description(&frame, algorithm, false);
+        let input = highlighted(&gpu, &frame, &description);
+        gpu.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &input._texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: bad,
+                    y: bad,
+                    z: 0,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::bytes_of(&f32::NAN),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4),
+                rows_per_image: Some(1),
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+        assert!(
+            gpu.demosaic(input, &description, &capture, &CancellationToken::new())
+                .is_err(),
+            "{algorithm:?}"
+        );
+        assert_eq!(crate::gpu_memory_reservations().current_bytes, before);
+        let good = highlighted(&gpu, &frame, &description);
+        let (source, _) = gpu
+            .demosaic(good, &description, &capture, &CancellationToken::new())
+            .expect("recovers after invalid input");
+        drop(source);
+        assert_eq!(crate::gpu_memory_reservations().current_bytes, before);
+    }
 }
 
 #[test]
@@ -578,7 +598,7 @@ fn rcd_cancellation_between_tiles_keeps_immutable_raw_for_recovery() {
 
 #[test]
 #[ignore = "requires Vulkan; direct demosaic-to-capture with forced halo/tile crossings"]
-fn mhc_and_rcd_feed_capture_without_rgb_upload_or_readback() {
+fn mhc_rcd_and_amaze_feed_capture_without_rgb_upload_or_readback() {
     let _guard = crate::preview::processor::tests::gpu_test_guard();
     let mut gpu = processor();
     gpu.force_maximum_tile_edge(16);
@@ -592,7 +612,11 @@ fn mhc_and_rcd_feed_capture_without_rgb_upload_or_readback() {
         [1.0; 3],
     )
     .expect("capture");
-    for algorithm in [DemosaicAlgorithm::MalvarHeCutler, DemosaicAlgorithm::Rcd] {
+    for algorithm in [
+        DemosaicAlgorithm::MalvarHeCutler,
+        DemosaicAlgorithm::Rcd,
+        DemosaicAlgorithm::Amaze,
+    ] {
         for clip in [false, true] {
             let frame = frame("GRBG", 81, 67, 6);
             let description = description(&frame, algorithm, clip);
@@ -631,18 +655,12 @@ fn mhc_and_rcd_feed_capture_without_rgb_upload_or_readback() {
 
 #[test]
 #[ignore = "requires Vulkan; rejection must never publish invalid camera RGB"]
-fn demosaic_rejects_unsupported_cancelled_overbudget_and_nonfinite_results() {
+fn demosaic_rejects_mismatched_cancelled_overbudget_and_nonfinite_results() {
     let _guard = crate::preview::processor::tests::gpu_test_guard();
     let mut gpu = processor();
     let frame = frame("RGGB", 13, 11, 0);
     let capture =
         CaptureSharpeningContract::new(CaptureSharpening::default(), [1.0; 3]).expect("off");
-    let desc = description(&frame, DemosaicAlgorithm::Amaze, false);
-    let input = highlighted(&gpu, &frame, &desc);
-    assert!(matches!(
-        gpu.demosaic(input, &desc, &capture, &CancellationToken::new()),
-        Err(crate::GpuPreviewError::UnsupportedEdits { .. })
-    ));
     let desc = description(&frame, DemosaicAlgorithm::MalvarHeCutler, false);
     let input = highlighted(&gpu, &frame, &desc);
     let different = description(&frame, DemosaicAlgorithm::MalvarHeCutler, true);
@@ -744,6 +762,13 @@ fn private_rcd_camera_parity_and_full_resolution_timings() -> Result<(), Box<dyn
     private_camera_parity_and_timings(DemosaicAlgorithm::Rcd, 1)
 }
 
+#[test]
+#[ignore = "private 24 MP Sony RAW and Vulkan; AMaZE camera RGB parity, hardware timing"]
+fn private_amaze_camera_parity_and_full_resolution_timings()
+-> Result<(), Box<dyn std::error::Error>> {
+    private_camera_parity_and_timings(DemosaicAlgorithm::Amaze, 3)
+}
+
 fn private_camera_parity_and_timings(
     algorithm: DemosaicAlgorithm,
     iterations: usize,
@@ -786,11 +811,17 @@ fn private_camera_parity_and_timings(
             }
             maximum = maximum.max(error);
         }
-        // A few directional decisions can flip on f32 rounding differences
-        // (DSC00851 has a cluster of 84 samples, max error 1.8e-3, around one
-        // pixel neighbourhood); everything else must match within tolerance.
+        // A few directional decisions can flip on f32 rounding differences;
+        // everything else must match within tolerance. Measured on DSC00851:
+        // RCD has a cluster of 84 samples with max error 1.8e-3. AMaZE makes
+        // many more threshold decisions and has about 1.2k isolated samples
+        // with max error 3.2e-3 (1.6e-5 of all samples).
+        let allowed_fraction = match algorithm {
+            DemosaicAlgorithm::Amaze => 5e-5,
+            _ => 1e-5,
+        };
         assert!(
-            outliers as f64 <= 1e-5 * actual.len() as f64 && maximum <= 5e-3,
+            outliers as f64 <= allowed_fraction * actual.len() as f64 && maximum <= 5e-3,
             "{outliers} samples outside tolerance, max error {maximum}"
         );
         eprintln!(

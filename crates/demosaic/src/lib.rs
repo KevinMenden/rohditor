@@ -6,6 +6,7 @@
 //! camera-native linear RGB rows.
 
 mod amaze;
+mod amaze_geometry;
 mod balance;
 mod bilinear;
 mod malvar_he_cutler;
@@ -13,6 +14,10 @@ mod rcd;
 mod rcd_geometry;
 mod rcd_stages;
 
+pub use amaze_geometry::{
+    AMAZE_BORDER, AMAZE_TILE_SIZE, AMAZE_TILE_VALID, AmazeTileGeometry, AmazeWriteWindow,
+    amaze_tile_count, amaze_tiles, mirror_coordinate,
+};
 pub use balance::ChannelBalance;
 pub use rcd_geometry::{
     RCD_BORDER, RCD_MIN_DIMENSION, RCD_TILE_SIZE, RCD_TILE_STEP, RcdTileGeometry, rcd_tiles,
@@ -92,10 +97,10 @@ pub const RCD_HALO: Halo = Halo {
 
 /// Neighborhood required to reconstruct an AMaZE output region.
 pub const AMAZE_HALO: Halo = Halo {
-    left: 16,
-    right: 16,
-    top: 16,
-    bottom: 16,
+    left: AMAZE_BORDER,
+    right: AMAZE_BORDER,
+    top: AMAZE_BORDER,
+    bottom: AMAZE_BORDER,
 };
 
 /// Selectable CPU Bayer reconstruction algorithms.
