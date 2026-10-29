@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 use rohditor_core::{CancellationToken, CaptureSharpeningContract, SensorDevelopmentDescription};
 use rohditor_demosaic::{ChannelBalance, DemosaicAlgorithm};
 
+use super::amaze::{AmazeExecutor, BATCH_SIZES};
 use super::normalize::{bayer_pattern_code, check_cancel, invalid};
 use super::rcd::RcdExecutor;
 use super::{GpuHighlightedMosaic, GpuSensorProcessor};
@@ -56,13 +57,19 @@ pub struct DemosaicMetrics {
     pub estimated_gpu_bytes: u64,
 }
 
+// Algorithm codes passed to the per-pixel demosaic shader (0 and 1) and used to
+// choose a tiled executor. RCD and AMaZE overwrite a bilinear base (code 0).
+const RCD: u32 = 2;
+const AMAZE: u32 = 3;
+
 // Uniforms, validation flag/readback, bind groups, and bounded dispatch overhead.
 const WORK_BYTES: u64 = 64 * 1024;
 
 impl GpuSensorProcessor {
-    /// Consume a highlighted mosaic with bilinear or MHC. Active capture receives
-    /// each halo-expanded RGB tile directly from demosaic, never a second full RGB
-    /// image. Unsupported algorithms return before allocating camera planes.
+    /// Consume a highlighted mosaic with bilinear, MHC, RCD or AMaZE. Active
+    /// capture receives each halo-expanded RGB tile directly from bilinear/MHC
+    /// demosaic, never a second full RGB image; RCD and AMaZE fill resident
+    /// planes first. Unsupported algorithms return before allocating camera planes.
     pub fn demosaic(
         &self,
         mosaic: GpuHighlightedMosaic,
@@ -79,12 +86,8 @@ impl GpuSensorProcessor {
         let algorithm = match description.demosaic().algorithm() {
             DemosaicAlgorithm::Bilinear => 0,
             DemosaicAlgorithm::MalvarHeCutler => 1,
-            DemosaicAlgorithm::Rcd => 2,
-            other => {
-                return Err(GpuPreviewError::UnsupportedEdits {
-                    reason: format!("GPU demosaic {} is not implemented", other.stable_name()),
-                });
-            }
+            DemosaicAlgorithm::Rcd => RCD,
+            DemosaicAlgorithm::Amaze => AMAZE,
         };
         capture
             .settings()
@@ -115,31 +118,25 @@ impl GpuSensorProcessor {
         let started = Instant::now();
         let (width, height) = mosaic.dimensions();
         let limits = self.device.limits();
-        let rcd_bytes = if algorithm == 2 {
-            RcdExecutor::reserved_bytes()
-        } else {
-            0
+        // RCD and AMaZE run a tiled scratch executor whose memory is reserved
+        // beside the planes; AMaZE picks the largest batch that fits.
+        let (layout, amaze_batch) = self.plan_layout(&mosaic, algorithm, &limits)?;
+        let scratch_bytes = match algorithm {
+            RCD => RcdExecutor::reserved_bytes(),
+            AMAZE => AmazeExecutor::reserved_bytes(amaze_batch),
+            _ => 0,
         };
-        let layout = ResidentLayout::new_generated(
-            width,
-            height,
-            mosaic.estimated_bytes(),
-            WORK_BYTES + rcd_bytes,
-            self.budget,
-            &limits,
-            self.maximum_tile_edge,
-        )?;
         let _work = Reservation::try_new(WORK_BYTES, self.budget)?;
         let planes = ResidentCameraPlanes::with_budget(&self.device, layout, self.budget)?;
-        let rcd = if algorithm == 2 {
-            Some(RcdExecutor::new(
-                self,
-                ChannelBalance::new(description.demosaic_balance()),
-            )?)
-        } else {
-            None
-        };
-        let captured_planes = if algorithm == 2 && capture.settings().is_active() {
+        let balance = ChannelBalance::new(description.demosaic_balance());
+        let rcd = (algorithm == RCD)
+            .then(|| RcdExecutor::new(self, balance))
+            .transpose()?;
+        let amaze = (algorithm == AMAZE)
+            .then(|| AmazeExecutor::new(self, balance, amaze_batch))
+            .transpose()?;
+        let resident_executor = algorithm >= RCD;
+        let captured_planes = if resident_executor && capture.settings().is_active() {
             Some(ResidentCameraPlanes::with_budget(
                 &self.device,
                 layout,
@@ -185,13 +182,13 @@ impl GpuSensorProcessor {
                     &view,
                     &planes,
                     &validation,
-                    if algorithm == 2 { 0 } else { algorithm },
+                    if resident_executor { 0 } else { algorithm },
                     region,
                     target,
                 );
                 metrics.tiles += 1;
             };
-            if capture.settings().is_active() && algorithm != 2 {
+            if capture.settings().is_active() && !resident_executor {
                 let mut processor = GpuCaptureProcessor::new(&self.device, &self.queue)?;
                 processor.set_remaining_budget(remaining);
                 #[cfg(test)]
@@ -247,6 +244,10 @@ impl GpuSensorProcessor {
             metrics.submissions +=
                 rcd.run(self, &mosaic, &view, &planes, &validation, cancellation)? as u32;
         }
+        if let Some(amaze) = &amaze {
+            metrics.submissions +=
+                amaze.run(self, &mosaic, &view, &planes, &validation, cancellation)? as u32;
+        }
         if let Some((processor, reservation)) = prepared_capture.take() {
             metrics.capture = processor.process_resident_from_resident(
                 capture,
@@ -263,7 +264,7 @@ impl GpuSensorProcessor {
         metrics.estimated_gpu_bytes = mosaic.estimated_bytes()
             + layout.resident_bytes
             + WORK_BYTES
-            + rcd_bytes
+            + scratch_bytes
             + captured_planes
                 .as_ref()
                 .map_or(0, |_| layout.resident_bytes)
@@ -290,6 +291,47 @@ impl GpuSensorProcessor {
             },
             metrics,
         ))
+    }
+
+    /// Resident layout for `algorithm`, leaving room for its scratch. Returns
+    /// the AMaZE batch size that fits (0 for other algorithms).
+    fn plan_layout(
+        &self,
+        mosaic: &GpuHighlightedMosaic,
+        algorithm: u32,
+        limits: &wgpu::Limits,
+    ) -> Result<(ResidentLayout, usize), GpuPreviewError> {
+        let (width, height) = mosaic.dimensions();
+        let layout = |scratch_bytes| {
+            ResidentLayout::new_generated(
+                width,
+                height,
+                mosaic.estimated_bytes(),
+                WORK_BYTES + scratch_bytes,
+                self.budget,
+                limits,
+                self.maximum_tile_edge,
+            )
+        };
+        match algorithm {
+            RCD => Ok((layout(RcdExecutor::reserved_bytes())?, 0)),
+            AMAZE => {
+                let mut failure = None;
+                for batch in BATCH_SIZES {
+                    if !AmazeExecutor::batch_fits(limits, batch) {
+                        continue;
+                    }
+                    match layout(AmazeExecutor::reserved_bytes(batch)) {
+                        Ok(layout) => return Ok((layout, batch)),
+                        Err(error) => failure = Some(error),
+                    }
+                }
+                Err(failure.unwrap_or_else(|| GpuPreviewError::Unsupported {
+                    reason: "device limits cannot hold a GPU AMaZE scratch tile".into(),
+                }))
+            }
+            _ => Ok((layout(0)?, 0)),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
