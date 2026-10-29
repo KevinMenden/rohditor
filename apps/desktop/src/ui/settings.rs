@@ -56,10 +56,10 @@ pub(crate) fn show(
             ui.radio_value(
                 &mut selected,
                 DemosaicAlgorithm::MalvarHeCutler,
-                "Malvar-He-Cutler (default)",
+                "Malvar-He-Cutler",
             );
             ui.radio_value(&mut selected, DemosaicAlgorithm::Rcd, "RCD");
-            ui.radio_value(&mut selected, DemosaicAlgorithm::Amaze, "AMaZE");
+            ui.radio_value(&mut selected, DemosaicAlgorithm::Amaze, "AMaZE (default)");
             if model.draft_demosaic == DemosaicAlgorithm::Bilinear {
                 ui.label(
                     egui::RichText::new("Bilinear is active for this command-line override.")

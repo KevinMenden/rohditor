@@ -61,6 +61,7 @@ impl GpuSensorProcessor {
             DemosaicAlgorithm::Bilinear
                 | DemosaicAlgorithm::MalvarHeCutler
                 | DemosaicAlgorithm::Rcd
+                | DemosaicAlgorithm::Amaze
         )
     }
 

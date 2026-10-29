@@ -5,6 +5,9 @@
 //! methods feed bilinear/MHC and optional capture into resident camera planes.
 //! Application backend selection and other reconstruction methods remain separate.
 
+mod amaze;
+#[cfg(test)]
+mod amaze_tests;
 mod demosaic;
 mod develop;
 pub use develop::GpuDevelopedSource;
