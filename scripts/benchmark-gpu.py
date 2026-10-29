@@ -212,7 +212,7 @@ def summarize(samples):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--raw", action="append", type=Path, required=True, help="RAW file; repeat for multiple scenes")
-    parser.add_argument("--algorithms", default="mhc,rcd", help="comma-separated: bilinear,mhc,rcd")
+    parser.add_argument("--algorithms", default="mhc,rcd,amaze", help="comma-separated: bilinear,mhc,rcd,amaze")
     parser.add_argument("--capture", choices=("both", "off", "on"), default="both")
     parser.add_argument("--lens-profile", default="off", help="CLI Lensfun selection, e.g. auto")
     parser.add_argument("--repeats", type=int, default=3)
@@ -223,8 +223,8 @@ def main():
     parser.add_argument("--keep-images", action="store_true", help="save one CPU/GPU PNG pair per case")
     args = parser.parse_args()
     algorithms = [name.strip() for name in args.algorithms.split(",")]
-    if not algorithms or any(name not in {"bilinear", "mhc", "rcd"} for name in algorithms):
-        parser.error("--algorithms must contain bilinear, mhc, or rcd")
+    if not algorithms or any(name not in {"bilinear", "mhc", "rcd", "amaze"} for name in algorithms):
+        parser.error("--algorithms must contain bilinear, mhc, rcd, or amaze")
     if args.repeats < 1 or args.warmups < 0:
         parser.error("--repeats must be positive and --warmups nonnegative")
     raws = [path.resolve() for path in args.raw]
