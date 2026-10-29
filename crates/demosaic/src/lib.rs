@@ -163,10 +163,11 @@ impl DemosaicContract {
             DemosaicAlgorithm::Amaze => AMAZE_HALO,
         };
         // RCD and AMaZE version 2 reconstruct on a channel-balanced mosaic. RCD
-        // version 3 also matches the reference tools' low-pass neighbours.
+        // version 3 also matches the reference tools' low-pass neighbours;
+        // AMaZE version 3 keeps the whole 16 px border ring bilinear.
         let algorithm_version = match algorithm {
             DemosaicAlgorithm::Rcd => 3,
-            DemosaicAlgorithm::Amaze => 2,
+            DemosaicAlgorithm::Amaze => 3,
             DemosaicAlgorithm::Bilinear | DemosaicAlgorithm::MalvarHeCutler => 1,
         };
         Self {
@@ -401,11 +402,11 @@ mod contract_tests {
                 DemosaicBorderPolicy::BilinearReference
             );
             assert_eq!(contract.stable_name(), algorithm.stable_name());
-            // AMaZE is at version 2 (channel-balanced reconstruction), RCD at 3
-            // (also the reference tools' low-pass neighbours).
+            // AMaZE is at version 3 (channel-balanced, whole border ring
+            // bilinear), RCD at 3 (channel-balanced, reference low-pass).
             let expected_version = match algorithm {
                 DemosaicAlgorithm::Rcd => 3,
-                DemosaicAlgorithm::Amaze => 2,
+                DemosaicAlgorithm::Amaze => 3,
                 _ => 1,
             };
             assert_eq!(contract.algorithm_version(), expected_version);

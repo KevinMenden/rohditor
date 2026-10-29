@@ -141,12 +141,10 @@ fn begin_pairs(id: vec3<u32>, lo: i32) -> vec2<i32> {
 }
 
 // Exclusive end of the pixels a tile writes (`AmazeTileGeometry::write_window`):
-// the core ends 224 px after its origin, and a tile that reaches the image edge
-// also gives up the 16 px ring. The start is `max(origin, 16)`.
+// the core ends 224 px after its origin, or where the image's 16 px bilinear
+// ring starts. The start is `max(origin, 16)`.
 fn write_limit(origin: vec2<i32>) -> vec2<i32> {
-    let size = vec2<i32>(params.image.xy);
-    let core = min(origin + vec2<i32>(224), size);
-    return select(core, core - vec2<i32>(16), core == size);
+    return min(origin + vec2<i32>(224), vec2<i32>(params.image.xy) - vec2<i32>(16));
 }
 
 // Bounding box of the Nyquist texture of this tile, clamped like the CPU
