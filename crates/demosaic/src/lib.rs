@@ -109,11 +109,11 @@ pub enum DemosaicAlgorithm {
     /// Fast reference interpolation using nearest same-color neighbors.
     Bilinear,
     /// Malvar-He-Cutler gradient-corrected linear interpolation.
-    #[default]
     MalvarHeCutler,
     /// Ratio-corrected directional interpolation.
     Rcd,
     /// Aliasing Minimization and Zipper Elimination interpolation.
+    #[default]
     Amaze,
 }
 

@@ -28,7 +28,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
-            demosaic: DemosaicAlgorithm::MalvarHeCutler,
+            demosaic: DemosaicAlgorithm::Amaze,
             output_policy: OutputPolicy::ClipToSrgb,
             cpu_only: false,
         }
@@ -158,7 +158,7 @@ fn decode(bytes: &[u8]) -> Result<AppSettings, String> {
             stored.schema_version
         ));
     }
-    let demosaic = match stored.demosaic.as_deref().unwrap_or("mhc") {
+    let demosaic = match stored.demosaic.as_deref().unwrap_or("amaze") {
         "mhc" => DemosaicAlgorithm::MalvarHeCutler,
         "rcd" => DemosaicAlgorithm::Rcd,
         "amaze" => DemosaicAlgorithm::Amaze,
@@ -236,10 +236,10 @@ mod tests {
     }
 
     #[test]
-    fn defaults_are_schema_one_and_mhc() {
+    fn defaults_are_schema_one_and_amaze() {
         let settings = AppSettings::default();
         assert_eq!(settings.schema_version, 1);
-        assert_eq!(settings.demosaic(), DemosaicAlgorithm::MalvarHeCutler);
+        assert_eq!(settings.demosaic(), DemosaicAlgorithm::Amaze);
     }
 
     #[test]
