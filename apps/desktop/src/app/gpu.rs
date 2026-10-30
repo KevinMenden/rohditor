@@ -13,8 +13,8 @@ use std::time::Instant;
 use tracing::info;
 
 use crate::ProcessorPreference;
-use crate::coordinator::PreviewResolution;
-use crate::document::PreviewTicket;
+use rohditor_engine::coordinator::PreviewResolution;
+use rohditor_engine::document::PreviewTicket;
 
 pub(super) enum GpuDocumentSource {
     Reduced(Box<GpuPreviewSource>),

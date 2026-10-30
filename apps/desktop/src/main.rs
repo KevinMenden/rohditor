@@ -1,15 +1,6 @@
 mod app;
-mod camera_profiles;
-mod catalog;
-mod coordinator;
-mod document;
-mod persistence;
-mod preview_cache;
-mod session;
-mod settings;
-mod storage;
+mod config;
 mod ui;
-mod wake;
 
 use clap::{Parser, ValueEnum};
 use eframe::egui;
@@ -19,7 +10,7 @@ use tracing::warn;
 use tracing_subscriber::EnvFilter;
 
 use crate::app::RohditorApp;
-use crate::settings::{AppSettings, SettingsLoad, resolve_startup_settings};
+use rohditor_engine::settings::{self, AppSettings, SettingsLoad, resolve_startup_settings};
 
 /// Stable Freedesktop/Wayland identity. Keep this equal to the installed
 /// desktop-file basename and icon name.
@@ -110,7 +101,7 @@ fn main() -> eframe::Result {
     let SettingsLoad {
         settings: persisted_settings,
         warning: settings_warning,
-    } = settings::load();
+    } = settings::load(config::config_directory().as_deref());
     let processor = resolve_processor(persisted_settings, arguments.processor);
     let effective_settings = resolve_startup_settings(
         persisted_settings,

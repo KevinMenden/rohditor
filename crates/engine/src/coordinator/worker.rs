@@ -34,20 +34,20 @@ use super::scheduler::{PreviewCompletion, PreviewMailbox};
 mod export_worker;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum JobKind {
+pub enum JobKind {
     Open,
     Preview,
     Export,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PreviewBackend {
+pub enum PreviewBackend {
     Cpu,
     GpuBase,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum PreviewResolution {
+pub enum PreviewResolution {
     #[default]
     Fit,
     CropToolFullFrame,
@@ -55,7 +55,7 @@ pub(crate) enum PreviewResolution {
 }
 
 #[derive(Debug)]
-pub(crate) enum PreparedGpuSource {
+pub enum PreparedGpuSource {
     Reduced(GpuSpatialPreview),
     Full {
         source: GpuSpatialFullSource,
@@ -87,7 +87,7 @@ impl PreparedGpuSource {
 }
 
 impl PreviewBackend {
-    pub(crate) const fn label(self) -> &'static str {
+    pub const fn label(self) -> &'static str {
         match self {
             Self::Cpu => "CPU",
             Self::GpuBase => "GPU base",
@@ -96,7 +96,7 @@ impl PreviewBackend {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct PreviewQueueStats {
+pub struct PreviewQueueStats {
     pub requested: u64,
     pub coalesced: u64,
     pub cancellation_requests: u64,
@@ -108,7 +108,7 @@ pub(crate) struct PreviewQueueStats {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct WorkerPreviewDiagnostics {
+pub struct WorkerPreviewDiagnostics {
     pub sensor_gpu: bool,
     pub backend: PreviewBackend,
     pub resolution: PreviewResolution,
@@ -139,7 +139,7 @@ impl fmt::Display for JobKind {
 
 #[derive(Debug, Clone)]
 /// Packed 8-bit display RGB; the frontend converts it to its toolkit's image type.
-pub(crate) struct WorkerImage {
+pub struct WorkerImage {
     pub width: usize,
     pub height: usize,
     pub pixels: Vec<u8>,
@@ -186,7 +186,7 @@ impl WorkerImage {
 }
 
 #[derive(Debug)]
-pub(crate) enum WorkerEvent {
+pub enum WorkerEvent {
     Progress {
         document_id: u64,
         job: JobKind,
@@ -264,8 +264,8 @@ pub(crate) enum WorkerEvent {
 }
 
 #[derive(Debug)]
-pub(crate) struct PreviewJob {
-    pub(crate) ticket: PreviewTicket,
+pub struct PreviewJob {
+    pub ticket: PreviewTicket,
     frame: Arc<RawFrame>,
     recipe: EditRecipe,
     options: PreviewOptions,
@@ -274,7 +274,7 @@ pub(crate) struct PreviewJob {
 }
 
 #[derive(Debug)]
-pub(crate) struct ExportJob {
+pub struct ExportJob {
     document_id: u64,
     export_id: u64,
     recipe_revision: u64,
@@ -287,7 +287,7 @@ pub(crate) struct ExportJob {
 }
 
 #[derive(Debug)]
-pub(crate) struct WhiteBalanceSampleJob {
+pub struct WhiteBalanceSampleJob {
     ticket: PreviewTicket,
     frame: Arc<RawFrame>,
     recipe: EditRecipe,
@@ -296,7 +296,7 @@ pub(crate) struct WhiteBalanceSampleJob {
 }
 
 #[derive(Debug)]
-pub(crate) enum WorkerRequest {
+pub enum WorkerRequest {
     CaptureDevice {
         adapter: wgpu::Adapter,
         device: wgpu::Device,
@@ -314,7 +314,7 @@ pub(crate) enum WorkerRequest {
     Shutdown,
 }
 
-pub(crate) struct RenderCoordinator {
+pub struct RenderCoordinator {
     requests: mpsc::Sender<WorkerRequest>,
     events: mpsc::Receiver<WorkerEvent>,
     previews: Arc<PreviewMailbox>,
@@ -322,7 +322,7 @@ pub(crate) struct RenderCoordinator {
 }
 
 impl RenderCoordinator {
-    pub(crate) fn configure_capture_device(
+    pub fn configure_capture_device(
         &self,
         adapter: wgpu::Adapter,
         device: wgpu::Device,
@@ -336,7 +336,7 @@ impl RenderCoordinator {
             target_format,
         })
     }
-    pub(crate) fn new(wake: WakeFn) -> Result<Self, String> {
+    pub fn new(wake: WakeFn) -> Result<Self, String> {
         Self::new_with_decoder(wake, Arc::new(RawlerDecoder::default()))
     }
 
@@ -381,11 +381,11 @@ impl RenderCoordinator {
         })
     }
 
-    pub(crate) fn open(&self, document_id: u64, path: PathBuf) -> Result<(), String> {
+    pub fn open(&self, document_id: u64, path: PathBuf) -> Result<(), String> {
         self.send(WorkerRequest::Open { document_id, path })
     }
 
-    pub(crate) fn preview(
+    pub fn preview(
         &self,
         ticket: PreviewTicket,
         frame: Arc<RawFrame>,
@@ -405,7 +405,7 @@ impl RenderCoordinator {
         )
     }
 
-    pub(crate) fn source_scale_preview(
+    pub fn source_scale_preview(
         &self,
         ticket: PreviewTicket,
         frame: Arc<RawFrame>,
@@ -433,7 +433,7 @@ impl RenderCoordinator {
     /// Develop a temporary uncropped fit preview for the crop authoring tool.
     /// The caller retains the committed recipe and filters this result by its
     /// presentation state, so it can never become an undoable edit itself.
-    pub(crate) fn crop_tool_preview(
+    pub fn crop_tool_preview(
         &self,
         ticket: PreviewTicket,
         frame: Arc<RawFrame>,
@@ -454,7 +454,7 @@ impl RenderCoordinator {
         )
     }
 
-    pub(crate) fn prepare_gpu_base(
+    pub fn prepare_gpu_base(
         &self,
         ticket: PreviewTicket,
         frame: Arc<RawFrame>,
@@ -474,7 +474,7 @@ impl RenderCoordinator {
         )
     }
 
-    pub(crate) fn sample_white_balance(
+    pub fn sample_white_balance(
         &self,
         ticket: PreviewTicket,
         frame: Arc<RawFrame>,
@@ -494,7 +494,7 @@ impl RenderCoordinator {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn export(
+    pub fn export(
         &self,
         document_id: u64,
         export_id: u64,
@@ -519,7 +519,7 @@ impl RenderCoordinator {
         })))
     }
 
-    pub(crate) fn abandon(&self, document_id: u64) {
+    pub fn abandon(&self, document_id: u64) {
         self.previews.abandon(document_id);
         drop(
             self.requests
@@ -527,15 +527,15 @@ impl RenderCoordinator {
         );
     }
 
-    pub(crate) fn cancel_preview(&self, document_id: u64) {
+    pub fn cancel_preview(&self, document_id: u64) {
         self.previews.abandon(document_id);
     }
 
-    pub(crate) fn try_events(&self) -> impl Iterator<Item = WorkerEvent> + '_ {
+    pub fn try_events(&self) -> impl Iterator<Item = WorkerEvent> + '_ {
         self.events.try_iter()
     }
 
-    pub(crate) fn preview_queue_stats(&self) -> PreviewQueueStats {
+    pub fn preview_queue_stats(&self) -> PreviewQueueStats {
         self.previews.stats()
     }
 

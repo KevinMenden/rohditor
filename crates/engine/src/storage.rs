@@ -1,40 +1,19 @@
-//! Desktop configuration paths and transactional file replacement.
+//! Transactional file replacement for configuration and sidecar files.
+//!
+//! Callers choose the paths; this crate never resolves a config directory.
 
 use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(0);
 
-/// Resolve Rohditor's application configuration directory without coupling
-/// callers to process-global environment access.
-pub(crate) fn config_directory_from(
-    xdg_config_home: Option<&OsStr>,
-    home: Option<&OsStr>,
-) -> Option<PathBuf> {
-    xdg_config_home
-        .filter(|directory| !directory.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            home.filter(|directory| !directory.is_empty())
-                .map(|directory| PathBuf::from(directory).join(".config"))
-        })
-        .map(|base| base.join("rohditor"))
-}
-
-pub(crate) fn config_directory() -> Option<PathBuf> {
-    config_directory_from(
-        std::env::var_os("XDG_CONFIG_HOME").as_deref(),
-        std::env::var_os("HOME").as_deref(),
-    )
-}
-
 /// Replace one complete configuration file with another. The uniquely named
 /// sibling prevents concurrent processes from sharing a partial temporary
 /// file; rename is atomic on the supported Linux filesystem boundary.
-pub(crate) fn write_transactionally(path: &Path, contents: &[u8]) -> io::Result<()> {
+pub fn write_transactionally(path: &Path, contents: &[u8]) -> io::Result<()> {
     write_transactionally_with(path, contents, |from, to| fs::rename(from, to))
 }
 
@@ -81,8 +60,6 @@ fn write_transactionally_with(
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsStr;
-    use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -112,19 +89,6 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
-    }
-
-    #[test]
-    fn xdg_directory_precedes_the_home_fallback() {
-        assert_eq!(
-            config_directory_from(Some(OsStr::new("/xdg")), Some(OsStr::new("/home/me"))),
-            Some(PathBuf::from("/xdg/rohditor"))
-        );
-        assert_eq!(
-            config_directory_from(None, Some(OsStr::new("/home/me"))),
-            Some(PathBuf::from("/home/me/.config/rohditor"))
-        );
-        assert_eq!(config_directory_from(None, None), None);
     }
 
     #[test]

@@ -3,9 +3,9 @@ use std::sync::Arc;
 
 /// Called by workers after they queue an event so the frontend can schedule a
 /// redraw or poll its receiver. Must be cheap and callable from any thread.
-pub(crate) type WakeFn = Arc<dyn Fn() + Send + Sync>;
+pub type WakeFn = Arc<dyn Fn() + Send + Sync>;
 
 #[cfg(test)]
-pub(crate) fn noop() -> WakeFn {
+pub fn noop() -> WakeFn {
     Arc::new(|| {})
 }

@@ -11,16 +11,18 @@ assert_no_dependencies() {
     fi
 }
 
-assert_no_dependencies rohditor-image 'rohditor-(core|demosaic|edit|gpu|raw|cli|desktop)'
-assert_no_dependencies rohditor-edit 'rohditor-(core|demosaic|gpu|raw|cli|desktop)'
-assert_no_dependencies rohditor-demosaic 'rohditor-(core|edit|gpu|raw|cli|desktop)'
-assert_no_dependencies rohditor-highlight 'rohditor-(core|demosaic|edit|gpu|raw|cli|desktop)'
-assert_no_dependencies rohditor-optics 'rohditor-(core|gpu|cli|desktop)'
-assert_no_dependencies rohditor-raw 'rohditor-(core|demosaic|edit|gpu|cli|desktop)'
-assert_no_dependencies rohditor-color 'rohditor-(core|gpu|cli|desktop)'
-assert_no_dependencies rohditor-core 'rohditor-(gpu|cli|desktop)'
-assert_no_dependencies rohditor-gpu 'rohditor-(cli|desktop)'
+assert_no_dependencies rohditor-image 'rohditor-(core|demosaic|edit|gpu|raw|engine|cli|desktop)'
+assert_no_dependencies rohditor-edit 'rohditor-(core|demosaic|gpu|raw|engine|cli|desktop)'
+assert_no_dependencies rohditor-demosaic 'rohditor-(core|edit|gpu|raw|engine|cli|desktop)'
+assert_no_dependencies rohditor-highlight 'rohditor-(core|demosaic|edit|gpu|raw|engine|cli|desktop)'
+assert_no_dependencies rohditor-optics 'rohditor-(core|gpu|engine|cli|desktop)'
+assert_no_dependencies rohditor-raw 'rohditor-(core|demosaic|edit|gpu|engine|cli|desktop)'
+assert_no_dependencies rohditor-color 'rohditor-(core|gpu|engine|cli|desktop)'
+assert_no_dependencies rohditor-core 'rohditor-(gpu|engine|cli|desktop)'
+assert_no_dependencies rohditor-gpu 'rohditor-(engine|cli|desktop)'
 # Headless GPU export is an application-level dependency; core stays GPU-free.
+# The app runtime sits above the processing crates and below the apps.
+assert_no_dependencies rohditor-engine 'rohditor-(cli|desktop)'
 assert_no_dependencies rohditor-cli 'rohditor-desktop'
 
 # Processing crates must stay replaceable-UI friendly: no windowing/toolkit deps.
@@ -39,6 +41,12 @@ fi
 if grep -Eq 'pub use rohditor_(demosaic|edit|image)' \
     crates/core/src/lib.rs crates/raw/src/lib.rs; then
     echo "found a legacy facade re-export for an extracted crate" >&2
+    exit 1
+fi
+
+# The engine builds on the lower crates but must not wrap or re-export them.
+if grep -rEn 'pub use rohditor_' crates/engine/src; then
+    echo "rohditor-engine re-exports a lower crate" >&2
     exit 1
 fi
 

@@ -21,6 +21,7 @@ rohditor-catalog = { path = "../../crates/catalog" }
 rohditor-core = { path = "../../crates/core" }
 rohditor-demosaic = { path = "../../crates/demosaic" }
 rohditor-edit = { path = "../../crates/edit" }
+rohditor-engine = { path = "../../crates/engine" }
 rohditor-gpu = { path = "../../crates/gpu" }
 rohditor-image = { path = "../../crates/image" }
 rohditor-raw = { path = "../../crates/raw" }
