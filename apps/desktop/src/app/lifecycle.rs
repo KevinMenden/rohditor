@@ -98,7 +98,7 @@ impl RohditorApp {
         self.picker_mode = None;
         self.color_mixer_channel = 0;
         self.pending_white_balance_pick = None;
-        self.white_balance_memory = super::WhiteBalanceModeMemory::default();
+        self.white_balance_memory = rohditor_core::WhiteBalanceModeMemory::default();
         self.crop_tool = None;
         if let Some(mut document) = self.document.take() {
             self.release_gpu_preview(&mut document);

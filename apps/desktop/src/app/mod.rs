@@ -11,11 +11,11 @@ use rohditor_core::{
     CameraCalibration, DatabaseProvenance, DitherMode, ExportFormat, ExportMetadataPolicy,
     ExportSettings, HighlightDiagnostics, Histogram, JPEG_QUALITY_DEFAULT, MemoryEstimate,
     OutputPolicy, PngBitDepth, PreviewOptions, ProfileMatch, StageTimings, WhiteBalanceCoordinates,
-    camera_color_transform, coordinates_from_camera_gains_relative_to_as_shot,
+    WhiteBalanceMode, WhiteBalanceModeMemory, auto_tone, camera_color_transform, default_recipe,
     hsl_channel_weights_from_display_rgb, paths_refer_to_same_file, resolve_camera_colour,
-    srgb_to_linear_srgb,
+    sample_rgb_patch,
 };
-use rohditor_demosaic::{DemosaicAlgorithm, WhiteBalanceGains};
+use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_edit::{
     BLACKS_RANGE, COLOR_GRADING_RANGE, CONTRAST_RANGE, EXPOSURE_EV_RANGE, EditRecipe,
     HIGHLIGHT_THRESHOLD_RANGE, HIGHLIGHTS_RANGE, HSL_CHANNEL_COUNT, HSL_HUE_RANGE,
@@ -26,8 +26,6 @@ use rohditor_edit::{
 use rohditor_raw::{RawFileInfo, RawFrame};
 use tracing::{info, warn};
 
-#[cfg(test)]
-use rohditor_core::camera_gains_from_as_shot_coordinates;
 #[cfg(test)]
 use rohditor_edit::HighlightAdjustments;
 
@@ -45,7 +43,7 @@ use crate::settings::{self, AppSettings};
 use crate::ui::adjustment_panel::{
     self, AdjustmentInteraction, AdjustmentRange, AdjustmentRanges, AdjustmentTarget,
     AdjustmentValues, CameraProfileChoice, DocumentPanelModel, ExportKind, ExportUiSettings,
-    PngDepth, WhiteBalanceMode,
+    PngDepth,
 };
 use crate::ui::catalog::{
     self, FilmstripModel, LibraryEntryModel, LibraryEntryState, LibraryModel, LibrarySort,
@@ -55,7 +53,7 @@ use crate::ui::diagnostics::{
     self, CacheModel, CatalogModel, DiagnosticsMessages, DiagnosticsModel, GpuModel,
     HighlightStatsModel, PreviewModel, QueueModel, TimingModel,
 };
-use crate::ui::optics::{OpticsAction, OpticsPanelModel};
+use crate::ui::optics::OpticsPanelModel;
 use crate::ui::settings as settings_ui;
 use crate::ui::theme;
 use crate::ui::toolbar::{self, FilePanelModel, StatusBarModel, ToolbarModel};
@@ -65,7 +63,6 @@ use crate::wake::WakeFn;
 
 const GPU_HISTOGRAM_DEBOUNCE: Duration = Duration::from_millis(75);
 const RECIPE_SAVE_NOTICE_DURATION: Duration = Duration::from_secs(3);
-const AUTO_TONE_EXPOSURE_EPSILON_EV: f32 = 0.01;
 /// Longest grid texture edge; thumbnails decode down to this size.
 const LIBRARY_TEXTURE_LONG_EDGE: u32 = 256;
 /// Maximum resident grid textures before the least recently used are evicted.
@@ -348,16 +345,6 @@ pub(crate) struct RohditorApp {
     filmstrip_active: Option<usize>,
 }
 
-/// Keep the last values for the two editable WB modes while the user switches
-/// through As-shot. This makes the mode selector non-destructive instead of
-/// silently resetting a carefully chosen temperature or manual balance.
-#[derive(Debug, Clone, Copy)]
-struct WhiteBalanceModeMemory {
-    temperature: Option<f32>,
-    tint: Option<f32>,
-    manual: [f32; 3],
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ResidentGpuRender {
     Exact,
@@ -382,66 +369,6 @@ fn white_balance_preview_request(
             && (interaction.drag_stopped
                 || (changed && !interaction.drag_started && !interaction.dragged)),
     )
-}
-
-impl Default for WhiteBalanceModeMemory {
-    fn default() -> Self {
-        Self {
-            temperature: None,
-            tint: None,
-            manual: [WHITE_BALANCE_MULTIPLIER_RANGE.neutral; 3],
-        }
-    }
-}
-
-impl WhiteBalanceModeMemory {
-    fn remember(&mut self, balance: WhiteBalance) {
-        match balance {
-            WhiteBalance::TemperatureTint { temperature, tint } => {
-                self.temperature = Some(temperature);
-                self.tint = Some(tint);
-            }
-            WhiteBalance::ManualMultipliers { red, green, blue } => {
-                self.manual = [red, green, blue];
-            }
-            WhiteBalance::AsShot => {}
-        }
-    }
-
-    fn select(
-        &mut self,
-        current: WhiteBalance,
-        mode: WhiteBalanceMode,
-        as_shot: Option<WhiteBalanceCoordinates>,
-    ) -> WhiteBalance {
-        self.remember(current);
-        let as_shot = as_shot.unwrap_or(WhiteBalanceCoordinates {
-            temperature: TEMPERATURE_RANGE.neutral,
-            tint: TINT_RANGE.neutral,
-        });
-        match mode {
-            WhiteBalanceMode::AsShot => WhiteBalance::AsShot,
-            WhiteBalanceMode::TemperatureTint => match current {
-                WhiteBalance::TemperatureTint { temperature, tint } => {
-                    WhiteBalance::TemperatureTint { temperature, tint }
-                }
-                _ => WhiteBalance::TemperatureTint {
-                    temperature: self.temperature.unwrap_or(as_shot.temperature),
-                    tint: self.tint.unwrap_or(as_shot.tint),
-                },
-            },
-            WhiteBalanceMode::ManualMultipliers => match current {
-                WhiteBalance::ManualMultipliers { red, green, blue } => {
-                    WhiteBalance::ManualMultipliers { red, green, blue }
-                }
-                _ => WhiteBalance::ManualMultipliers {
-                    red: self.manual[0],
-                    green: self.manual[1],
-                    blue: self.manual[2],
-                },
-            },
-        }
-    }
 }
 
 impl RohditorApp {
@@ -1873,12 +1800,13 @@ impl RohditorApp {
             // this document's actual As Shot white point.
             let as_shot_coordinates = document_as_shot_coordinates(document);
             if let Some(mode) = output.white_balance_mode {
-                let mode_changed = set_white_balance_mode(
-                    &mut document.edits,
+                let mut next = document.edits.recipe().clone();
+                next.color.white_balance = white_balance_memory.select(
+                    next.color.white_balance,
                     mode,
-                    &mut white_balance_memory,
                     as_shot_coordinates,
                 );
+                let mode_changed = document.edits.set_discrete(next);
                 changed |= mode_changed;
                 if mode_changed {
                     white_balance_draft = Some(document.id);
@@ -1886,7 +1814,9 @@ impl RohditorApp {
                 }
             }
             if let Some(action) = output.optics_action {
-                changed |= apply_optics_action(&mut document.edits, action);
+                let mut next = document.edits.recipe().clone();
+                next.optics = action.apply(&next.optics);
+                changed |= document.edits.set_discrete(next);
             }
             if let Some(filter) = output.optics_filter {
                 document.optics_profile_filter = filter;
@@ -1895,7 +1825,8 @@ impl RohditorApp {
                 && document.histogram_revision == Some(document.edits.revision())
                 && let Some(histogram) = document.histogram.as_ref()
             {
-                let auto_changed = apply_auto_tone(&mut document.edits, histogram);
+                let auto_changed = auto_tone(document.edits.recipe(), histogram)
+                    .is_some_and(|next| document.edits.set_discrete(next));
                 changed |= auto_changed;
                 auto_tone_applied = auto_changed;
             }
@@ -1916,9 +1847,7 @@ impl RohditorApp {
                 }
             }
             if output.reset_all {
-                changed |= document
-                    .edits
-                    .reset_to(default_recipe_with_white_balance(as_shot_coordinates));
+                changed |= document.edits.reset_to(default_recipe(as_shot_coordinates));
                 // Hidden values are UI state, but reset-all should reset them
                 // too; otherwise switching away from As-shot after a reset
                 // would unexpectedly resurrect an older manual WB choice.
@@ -2131,7 +2060,13 @@ impl RohditorApp {
             return None;
         }
         if let Some(preview) = document.preview_pixels.as_ref() {
-            return sample_rgb_patch(preview.width, preview.height, 3, &preview.rgb, normalized);
+            return sample_rgb_patch(
+                preview.width,
+                preview.height,
+                3,
+                &preview.rgb,
+                [normalized.x, normalized.y],
+            );
         }
         let gpu_preview = document.gpu_preview.as_ref()?;
         let runtime = self.gpu.as_ref()?;
@@ -2144,7 +2079,7 @@ impl RohditorApp {
             usize::try_from(readback.height).ok()?,
             4,
             &readback.rgba,
-            normalized,
+            [normalized.x, normalized.y],
         )
     }
 
@@ -3294,162 +3229,13 @@ fn camera_profile_choice(
     }
 }
 
-fn sample_rgb_patch(
-    width: usize,
-    height: usize,
-    channels: usize,
-    pixels: &[u8],
-    normalized: egui::Pos2,
-) -> Option<[u8; 3]> {
-    if width == 0 || height == 0 || channels < 3 {
-        return None;
-    }
-    let expected = width.checked_mul(height)?.checked_mul(channels)?;
-    if pixels.len() < expected {
-        return None;
-    }
-    let center_x = (normalized.x * (width.saturating_sub(1)) as f32).round() as usize;
-    let center_y = (normalized.y * (height.saturating_sub(1)) as f32).round() as usize;
-    let mut totals = [0_u32; 3];
-    let mut count = 0_u32;
-    for y in center_y.saturating_sub(2)..=(center_y + 2).min(height - 1) {
-        for x in center_x.saturating_sub(2)..=(center_x + 2).min(width - 1) {
-            let offset = y
-                .checked_mul(width)?
-                .checked_add(x)?
-                .checked_mul(channels)?;
-            for (channel, total) in totals.iter_mut().enumerate() {
-                *total += u32::from(*pixels.get(offset + channel)?);
-            }
-            count += 1;
-        }
-    }
-    (count > 0).then(|| totals.map(|total| ((total + count / 2) / count) as u8))
-}
-
-fn white_balance_from_camera_sample(
-    sample: [f32; 3],
-    unbalanced_camera_to_xyz: rohditor_core::Matrix3,
-    as_shot_white_balance: Option<[Option<f32>; 4]>,
-) -> Option<WhiteBalance> {
-    if sample
-        .iter()
-        .any(|value| !value.is_finite() || *value <= 1.0e-5)
-    {
-        return None;
-    }
-    let desired_total = [sample[1] / sample[0], 1.0, sample[1] / sample[2]];
-    let gains = WhiteBalanceGains {
-        red: desired_total[0],
-        green: desired_total[1],
-        blue: desired_total[2],
-    };
-    let [red, green, blue, _] = as_shot_white_balance?;
-    let [Some(red), Some(green), Some(blue)] = [red, green, blue]
-        .map(|value| value.filter(|number| number.is_finite() && *number > 1.0e-5))
-    else {
-        return None;
-    };
-    let as_shot_relative = [red / green, 1.0, blue / green];
-    let as_shot_gains = WhiteBalanceGains {
-        red: as_shot_relative[0],
-        green: as_shot_relative[1],
-        blue: as_shot_relative[2],
-    };
-    if let Ok(coordinates) = coordinates_from_camera_gains_relative_to_as_shot(
-        unbalanced_camera_to_xyz,
-        as_shot_gains,
-        gains,
-    ) {
-        return Some(WhiteBalance::TemperatureTint {
-            temperature: coordinates.temperature,
-            tint: coordinates.tint,
-        });
-    }
-
-    // If the sampled neutral lies outside the calibrated locus, preserve the
-    // exact camera-native result with the existing relative multiplier mode.
-    // This is a bounded fallback for unusual sensors or strongly coloured
-    // patches.
-    let manual = [
-        desired_total[0] / as_shot_relative[0],
-        WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
-        desired_total[2] / as_shot_relative[2],
-    ];
-    manual
-        .iter()
-        .all(|value| WHITE_BALANCE_MULTIPLIER_RANGE.contains(*value))
-        .then_some(WhiteBalance::ManualMultipliers {
-            red: manual[0],
-            green: manual[1],
-            blue: manual[2],
-        })
-}
-
-fn set_white_balance_mode(
-    edits: &mut EditSession,
-    mode: WhiteBalanceMode,
-    memory: &mut WhiteBalanceModeMemory,
-    as_shot: Option<WhiteBalanceCoordinates>,
-) -> bool {
-    let mut next = edits.recipe().clone();
-    next.color.white_balance = memory.select(next.color.white_balance, mode, as_shot);
-    edits.set_discrete(next)
-}
-
 fn default_recipe_for_document(document: &Document) -> EditRecipe {
-    default_recipe_with_white_balance(document_as_shot_coordinates(document))
-}
-
-fn default_recipe_with_white_balance(coordinates: Option<WhiteBalanceCoordinates>) -> EditRecipe {
-    let mut recipe = EditRecipe::default();
-    if let Some(coordinates) = coordinates {
-        recipe.color.white_balance = WhiteBalance::TemperatureTint {
-            temperature: coordinates.temperature,
-            tint: coordinates.tint,
-        };
-    }
-    recipe
+    default_recipe(document_as_shot_coordinates(document))
 }
 
 fn set_highlight_method(edits: &mut EditSession, method: HighlightMethod) -> bool {
     let mut next = edits.recipe().clone();
     next.raw.highlights.method = method;
-    edits.set_discrete(next)
-}
-
-fn apply_auto_tone(edits: &mut EditSession, histogram: &Histogram) -> bool {
-    let midpoint = histogram.luminance_percentile(0.5);
-    let midpoint_linear = srgb_to_linear_srgb(f32::from(midpoint) / 255.0);
-    if midpoint_linear <= 0.0 {
-        return false;
-    }
-    let mut next = edits.recipe().clone();
-    // The histogram already includes the current recipe. Apply a correction
-    // relative to the current exposure; assigning the correction as an
-    // absolute value would make Auto tone move in the wrong direction after a
-    // manual exposure edit.
-    let exposure_correction = (0.18 / midpoint_linear).log2();
-    if exposure_correction.abs() > AUTO_TONE_EXPOSURE_EPSILON_EV {
-        next.light.exposure_ev = (edits.recipe().light.exposure_ev + exposure_correction)
-            .clamp(EXPOSURE_EV_RANGE.minimum, EXPOSURE_EV_RANGE.maximum);
-    }
-    let low = histogram.luminance_percentile(0.01);
-    let high = histogram.luminance_percentile(0.99);
-    next.light.blacks = if low > 24 {
-        -0.1
-    } else if low == 0 {
-        0.1
-    } else {
-        0.0
-    };
-    next.light.highlights = if high > 245 {
-        -0.1
-    } else if high < 220 {
-        0.1
-    } else {
-        0.0
-    };
     edits.set_discrete(next)
 }
 
@@ -3641,20 +3427,6 @@ fn apply_adjustment_interaction(
     changed
 }
 
-fn apply_optics_action(edits: &mut EditSession, action: OpticsAction) -> bool {
-    let mut next = edits.recipe().clone();
-    match action {
-        OpticsAction::SelectProfile(profile) => next.optics.profile = profile,
-        OpticsAction::SetDistortion(value) => next.optics.distortion = value,
-        OpticsAction::SetVignetting(value) => next.optics.vignetting = value,
-        OpticsAction::SetChromaticAberration(value) => next.optics.chromatic_aberration = value,
-        OpticsAction::Reset => next.optics = rohditor_edit::OpticsAdjustments::default(),
-    }
-    // Keep this branch explicit: a profile selection is recipe state and must
-    // participate in the same undo/revision path as every other adjustment.
-    edits.set_discrete(next)
-}
-
 impl eframe::App for RohditorApp {
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
         self.process_worker_events(context);
@@ -3746,7 +3518,6 @@ fn display_file_name(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use image::{Rgb, RgbImage};
-    use rohditor_image::{DisplayRgbImage, DisplayTransfer};
 
     use super::*;
 
@@ -4030,180 +3801,6 @@ mod tests {
     }
 
     #[test]
-    fn white_balance_picker_uses_camera_native_channel_ratios() {
-        let neutral = white_balance_from_camera_sample(
-            [0.5, 0.5, 0.5],
-            rohditor_core::Matrix3::identity(),
-            Some([Some(1.0), Some(1.0), Some(1.0), None]),
-        )
-        .expect("neutral sample");
-        let neutral_gains = match neutral {
-            WhiteBalance::ManualMultipliers { red, green, blue } => {
-                WhiteBalanceGains { red, green, blue }
-            }
-            WhiteBalance::TemperatureTint { temperature, tint } => {
-                camera_gains_from_as_shot_coordinates(
-                    rohditor_core::Matrix3::identity(),
-                    WhiteBalanceGains::identity(),
-                    WhiteBalanceCoordinates { temperature, tint },
-                )
-                .expect("temperature/tint gains")
-            }
-            WhiteBalance::AsShot => panic!("picker should not leave the balance as shot"),
-        };
-        assert!((neutral_gains.red - 1.0).abs() < 0.01);
-        assert!((neutral_gains.green - 1.0).abs() < 0.01);
-        assert!((neutral_gains.blue - 1.0).abs() < 0.01);
-
-        let colored = white_balance_from_camera_sample(
-            [0.8, 0.5, 0.2],
-            rohditor_core::Matrix3::identity(),
-            Some([Some(1.0), Some(1.0), Some(1.0), None]),
-        )
-        .expect("colored sample");
-        let gains = match colored {
-            WhiteBalance::TemperatureTint { temperature, tint } => {
-                camera_gains_from_as_shot_coordinates(
-                    rohditor_core::Matrix3::identity(),
-                    WhiteBalanceGains::identity(),
-                    WhiteBalanceCoordinates { temperature, tint },
-                )
-                .expect("temperature/tint gains")
-            }
-            WhiteBalance::ManualMultipliers { red, green, blue } => {
-                WhiteBalanceGains { red, green, blue }
-            }
-            WhiteBalance::AsShot => panic!("picker should not leave the balance as shot"),
-        };
-        assert!((gains.red - 0.625).abs() < 0.01);
-        assert!((gains.blue - 2.5).abs() < 0.01);
-        assert!(
-            white_balance_from_camera_sample(
-                [0.0, 0.5, 0.5],
-                rohditor_core::Matrix3::identity(),
-                Some([Some(1.0), Some(1.0), Some(1.0), None])
-            )
-            .is_none()
-        );
-    }
-
-    #[test]
-    fn white_balance_picker_accounts_for_as_shot_baseline() {
-        let gains = match white_balance_from_camera_sample(
-            [0.4, 0.5, 0.6],
-            rohditor_core::Matrix3::identity(),
-            Some([Some(2.0), Some(1.0), Some(1.5), None]),
-        )
-        .expect("sample should fit the balance range")
-        {
-            WhiteBalance::TemperatureTint { temperature, tint } => {
-                camera_gains_from_as_shot_coordinates(
-                    rohditor_core::Matrix3::identity(),
-                    WhiteBalanceGains {
-                        red: 2.0,
-                        green: 1.0,
-                        blue: 1.5,
-                    },
-                    WhiteBalanceCoordinates { temperature, tint },
-                )
-                .expect("temperature/tint gains")
-            }
-            WhiteBalance::ManualMultipliers { red, green, blue } => WhiteBalanceGains {
-                red: 2.0 * red,
-                green,
-                blue: 1.5 * blue,
-            },
-            WhiteBalance::AsShot => panic!("picker should not leave the balance as shot"),
-        };
-        assert!((gains.red - 1.25).abs() < 0.01);
-        assert!((gains.blue - (5.0 / 6.0)).abs() < 0.01);
-    }
-
-    #[test]
-    fn white_balance_mode_switch_preserves_last_editable_values() {
-        let mut edits = EditSession::default();
-        let mut memory = WhiteBalanceModeMemory::default();
-        let mut recipe = EditRecipe::default();
-        recipe.color.white_balance = WhiteBalance::TemperatureTint {
-            temperature: 7_400.0,
-            tint: -0.35,
-        };
-        assert!(edits.set_discrete(recipe));
-
-        assert!(set_white_balance_mode(
-            &mut edits,
-            WhiteBalanceMode::ManualMultipliers,
-            &mut memory,
-            None,
-        ));
-        let mut recipe = edits.recipe().clone();
-        recipe.color.white_balance = WhiteBalance::ManualMultipliers {
-            red: 1.6,
-            green: 0.8,
-            blue: 1.2,
-        };
-        assert!(edits.set_discrete(recipe));
-        assert!(set_white_balance_mode(
-            &mut edits,
-            WhiteBalanceMode::AsShot,
-            &mut memory,
-            None,
-        ));
-
-        assert!(set_white_balance_mode(
-            &mut edits,
-            WhiteBalanceMode::TemperatureTint,
-            &mut memory,
-            None,
-        ));
-        assert_eq!(
-            edits.recipe().color.white_balance,
-            WhiteBalance::TemperatureTint {
-                temperature: 7_400.0,
-                tint: -0.35,
-            }
-        );
-        assert!(set_white_balance_mode(
-            &mut edits,
-            WhiteBalanceMode::ManualMultipliers,
-            &mut memory,
-            None,
-        ));
-        assert_eq!(
-            edits.recipe().color.white_balance,
-            WhiteBalance::ManualMultipliers {
-                red: 1.6,
-                green: 0.8,
-                blue: 1.2,
-            }
-        );
-    }
-
-    #[test]
-    fn selecting_temperature_tint_starts_at_the_document_as_shot_coordinates() {
-        let mut recipe = EditRecipe::default();
-        recipe.color.white_balance = WhiteBalance::AsShot;
-        let mut edits = EditSession::from_saved(recipe);
-        let mut memory = WhiteBalanceModeMemory::default();
-        assert!(set_white_balance_mode(
-            &mut edits,
-            WhiteBalanceMode::TemperatureTint,
-            &mut memory,
-            Some(WhiteBalanceCoordinates {
-                temperature: 5_100.0,
-                tint: -0.18,
-            }),
-        ));
-        assert_eq!(
-            edits.recipe().color.white_balance,
-            WhiteBalance::TemperatureTint {
-                temperature: 5_100.0,
-                tint: -0.18,
-            }
-        );
-    }
-
-    #[test]
     fn temperature_edit_starts_from_as_shot_balance() {
         let mut recipe = EditRecipe::default();
         recipe.color.white_balance = WhiteBalance::AsShot;
@@ -4262,22 +3859,6 @@ mod tests {
                 temperature: 5_200.0,
                 tint: 0.25,
             }
-        );
-    }
-
-    #[test]
-    fn color_mixer_picker_averages_a_bounded_display_patch() {
-        let pixels = vec![
-            255, 0, 0, 0, 255, 0, // first row
-            0, 0, 255, 255, 255, 255, // second row
-        ];
-        assert_eq!(
-            sample_rgb_patch(2, 2, 3, &pixels, egui::pos2(0.0, 0.0)),
-            Some([128, 128, 128])
-        );
-        assert_eq!(
-            sample_rgb_patch(2, 2, 3, &pixels[..9], egui::pos2(0.0, 0.0)),
-            None
         );
     }
 
@@ -4363,51 +3944,5 @@ mod tests {
 
         document.source_scale_requested = false;
         assert!(!source_scale_selected(Some(&document)));
-    }
-
-    #[test]
-    fn auto_tone_applies_a_relative_exposure_correction() {
-        let image = DisplayRgbImage::new(4, 1, 12, DisplayTransfer::Srgb, vec![128; 12])
-            .expect("valid histogram fixture");
-        let histogram = Histogram::from_display_rgb8(&image);
-        let mut edits = EditSession::default();
-        edits.set_discrete({
-            let mut recipe = EditRecipe::default();
-            recipe.light.exposure_ev = 1.0;
-            recipe
-        });
-
-        assert!(apply_auto_tone(&mut edits, &histogram));
-        let midpoint = srgb_to_linear_srgb(128.0 / 255.0);
-        let expected = (1.0 + (0.18 / midpoint).log2())
-            .clamp(EXPOSURE_EV_RANGE.minimum, EXPOSURE_EV_RANGE.maximum);
-        assert!((edits.recipe().light.exposure_ev - expected).abs() < 1.0e-6);
-    }
-
-    #[test]
-    fn auto_tone_stays_finite_and_clamped_for_extreme_display_histograms() {
-        for value in [0_u8, 8, 32, 240, 255] {
-            let image = DisplayRgbImage::new(8, 1, 24, DisplayTransfer::Srgb, vec![value; 24])
-                .expect("valid histogram fixture");
-            let histogram = Histogram::from_display_rgb8(&image);
-            let mut edits = EditSession::default();
-            assert!(apply_auto_tone(&mut edits, &histogram) || value == 0);
-            assert!(edits.recipe().light.exposure_ev.is_finite());
-            assert!(EXPOSURE_EV_RANGE.contains(edits.recipe().light.exposure_ev));
-            assert!(HIGHLIGHTS_RANGE.contains(edits.recipe().light.highlights));
-            assert!(BLACKS_RANGE.contains(edits.recipe().light.blacks));
-        }
-    }
-
-    #[test]
-    fn repeated_auto_tone_is_stable_when_the_histogram_is_already_neutral() {
-        let image = DisplayRgbImage::new(4, 1, 12, DisplayTransfer::Srgb, vec![118; 12])
-            .expect("valid histogram fixture");
-        let histogram = Histogram::from_display_rgb8(&image);
-        let mut edits = EditSession::default();
-        assert!(apply_auto_tone(&mut edits, &histogram));
-        let first = edits.recipe().clone();
-        assert!(!apply_auto_tone(&mut edits, &histogram));
-        assert_eq!(edits.recipe(), &first);
     }
 }
