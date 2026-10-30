@@ -174,8 +174,9 @@ enum Command {
         #[arg(long, default_value_t = 0.5)]
         capture_noise_protection: f32,
 
-        /// Base rendering: Standard tone rendering or Neutral identity rendering.
-        #[arg(long, value_enum, default_value_t = CliRenderingProfile::Standard)]
+        /// Base rendering: Matched (tone and colour fitted to the camera JPEG),
+        /// Standard tone rendering, or Neutral identity rendering.
+        #[arg(long, value_enum, default_value_t = CliRenderingProfile::Matched)]
         rendering_profile: CliRenderingProfile,
 
         /// Target sRGB gamut handling after rendering and creative edits.
@@ -379,10 +380,11 @@ enum CliHighlightMethod {
 
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
 enum CliRenderingProfile {
-    #[default]
     Standard,
     Neutral,
-    /// Tone fitted to the camera's embedded JPEG; falls back to Standard.
+    /// Tone and colour fitted to the camera's embedded JPEG; falls back to a
+    /// typical camera look when the fit is not possible.
+    #[default]
     Matched,
 }
 
@@ -2311,7 +2313,7 @@ mod tests {
     }
 
     #[test]
-    fn develop_parses_rendering_profile_and_defaults_to_standard() {
+    fn develop_parses_rendering_profile_and_defaults_to_matched() {
         let defaulted = Cli::try_parse_from(["rohditor-cli", "develop", "input.arw", "output.jpg"])
             .expect("default rendering should parse");
         let Command::Develop {
@@ -2320,7 +2322,7 @@ mod tests {
         else {
             panic!("expected develop command");
         };
-        assert!(matches!(rendering_profile, CliRenderingProfile::Standard));
+        assert!(matches!(rendering_profile, CliRenderingProfile::Matched));
 
         let neutral = Cli::try_parse_from([
             "rohditor-cli",

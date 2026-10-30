@@ -138,13 +138,17 @@ impl EditSession {
 
     /// Apply a change that is derived from the current recipe rather than made
     /// by the user, such as a fitted camera look. It advances the revision (so
-    /// previews and sidecars refresh) but stays out of the undo history: undo
-    /// reverts the user's action, and the derived data follows it.
+    /// previews refresh) but stays out of the undo history: undo reverts the
+    /// user's action, and the derived data follows it. A document with no user
+    /// edits stays clean, so merely opening a photo never creates a sidecar.
     pub fn apply_derived(&mut self, update: impl FnOnce(&mut EditRecipe)) -> bool {
         let mut next = self.recipe.clone();
         update(&mut next);
         if next == self.recipe || next.validate().is_err() {
             return false;
+        }
+        if !self.is_dirty() {
+            self.saved_recipe = next.clone();
         }
         self.recipe = next;
         self.advance_revision();
@@ -323,6 +327,7 @@ mod tests {
         matched.rendering.profile = rohditor_edit::RenderingProfileSelection::MATCHED;
         assert!(edits.set_discrete(matched));
         let revision = edits.revision();
+        assert!(edits.is_dirty(), "the profile choice is a user edit");
 
         assert!(edits.apply_derived(|recipe| {
             recipe.rendering.camera_tone = Some(rohditor_edit::CameraTone::static_fallback());
@@ -347,6 +352,27 @@ mod tests {
             rohditor_edit::RenderingProfileSelection::STANDARD
         );
         assert!(!edits.can_undo());
+    }
+
+    #[test]
+    fn derived_updates_keep_an_untouched_document_clean() {
+        let mut matched = EditRecipe::default();
+        matched.rendering.profile = rohditor_edit::RenderingProfileSelection::MATCHED;
+        let mut edits = EditSession::from_saved(matched);
+        assert!(!edits.is_dirty());
+
+        assert!(edits.apply_derived(|recipe| {
+            recipe.rendering.camera_tone = Some(rohditor_edit::CameraTone::static_fallback());
+        }));
+        assert!(!edits.is_dirty());
+        assert!(!edits.can_undo());
+
+        // Once the user edits, the next derived change travels with the edit.
+        assert!(edits.set_discrete(exposed(0.5)));
+        assert!(edits.apply_derived(|recipe| {
+            recipe.rendering.camera_chroma = Some(rohditor_edit::CameraChroma::STATIC_FALLBACK);
+        }));
+        assert!(edits.is_dirty());
     }
 
     #[test]

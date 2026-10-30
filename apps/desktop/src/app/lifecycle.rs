@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use eframe::egui;
-use rohditor_edit::EditRecipe;
+use rohditor_core::default_recipe;
 
 use super::{Document, RohditorApp};
 use rohditor_engine::persistence::{self, SaveJob, SaveResult};
@@ -57,9 +57,9 @@ impl RohditorApp {
             .unwrap_or_else(|| persistence::load_recipe(&path))
         {
             Ok(Some(recipe)) => (recipe, None, false),
-            Ok(None) => (EditRecipe::default(), None, true),
+            Ok(None) => (default_recipe(None), None, true),
             Err(error) => (
-                EditRecipe::default(),
+                default_recipe(None),
                 Some(format!(
                     "Could not load saved edits for {}: {error}; using the default recipe.",
                     path.display()
