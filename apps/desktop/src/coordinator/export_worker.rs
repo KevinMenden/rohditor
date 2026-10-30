@@ -4,7 +4,7 @@ use super::*;
 pub(super) fn start(
     pipeline: CpuPipeline,
     sender: mpsc::Sender<WorkerEvent>,
-    context: egui::Context,
+    wake: WakeFn,
 ) -> Option<mpsc::SyncSender<Box<ExportJob>>> {
     // One active export and one queued immutable snapshot bound retained work.
     let (requests, receiver) = mpsc::sync_channel::<Box<ExportJob>>(1);
@@ -15,13 +15,13 @@ pub(super) fn start(
             while let Ok(job) = receiver.recv() {
                 let identity = (job.document_id, job.export_id, job.recipe_revision);
                 let result = catch_unwind(AssertUnwindSafe(|| {
-                    process_export(*job, &sender, &context, &pipeline, &mut gpu);
+                    process_export(*job, &sender, &wake, &pipeline, &mut gpu);
                 }));
                 if let Err(payload) = result {
                     gpu = None;
                     send_failure(
                         &sender,
-                        &context,
+                        &wake,
                         identity.0,
                         JobKind::Export,
                         Some(identity.2),
@@ -55,7 +55,7 @@ pub(super) fn submit(
 fn process_export(
     job: ExportJob,
     sender: &mpsc::Sender<WorkerEvent>,
-    context: &egui::Context,
+    wake: &WakeFn,
     pipeline: &CpuPipeline,
     gpu: &mut Option<Result<rohditor_gpu::GpuExportProcessor, String>>,
 ) {
@@ -71,7 +71,7 @@ fn process_export(
     let started = Instant::now();
     send_progress(
         sender,
-        context,
+        wake,
         job.document_id,
         JobKind::Export,
         Some(job.recipe_revision),
@@ -106,7 +106,7 @@ fn process_export(
                 tracing::warn!(%error, "GPU export failed; using CPU reference");
                 send_progress(
                     sender,
-                    context,
+                    wake,
                     job.document_id,
                     JobKind::Export,
                     Some(job.recipe_revision),
@@ -133,7 +133,7 @@ fn process_export(
             Err(error) => {
                 send_failure(
                     sender,
-                    context,
+                    wake,
                     job.document_id,
                     JobKind::Export,
                     Some(job.recipe_revision),
@@ -147,7 +147,7 @@ fn process_export(
 
     send_progress(
         sender,
-        context,
+        wake,
         job.document_id,
         JobKind::Export,
         Some(job.recipe_revision),
@@ -164,7 +164,7 @@ fn process_export(
             );
             send_event(
                 sender,
-                context,
+                wake,
                 WorkerEvent::ExportReady {
                     document_id: job.document_id,
                     export_id: job.export_id,
@@ -177,7 +177,7 @@ fn process_export(
         }
         Err(error) => send_failure(
             sender,
-            context,
+            wake,
             job.document_id,
             JobKind::Export,
             Some(job.recipe_revision),
