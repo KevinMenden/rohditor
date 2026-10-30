@@ -9,6 +9,7 @@ mod session;
 mod settings;
 mod storage;
 mod ui;
+mod wake;
 
 use clap::{Parser, ValueEnum};
 use eframe::egui;

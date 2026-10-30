@@ -61,6 +61,7 @@ use crate::ui::theme;
 use crate::ui::toolbar::{self, FilePanelModel, StatusBarModel, ToolbarModel};
 use crate::ui::viewport::{self, PreviewSource, PreviewTexture, ViewState, ViewportModel};
 use crate::ui::{PickerMode, ViewMode};
+use crate::wake::WakeFn;
 
 const GPU_HISTOGRAM_DEBOUNCE: Duration = Duration::from_millis(75);
 const RECIPE_SAVE_NOTICE_DURATION: Duration = Duration::from_secs(3);
@@ -476,7 +477,7 @@ impl RohditorApp {
             "desktop application started"
         );
         let coordinator =
-            RenderCoordinator::new(context.egui_ctx.clone()).map_err(std::io::Error::other)?;
+            RenderCoordinator::new(wake_from(&context.egui_ctx)).map_err(std::io::Error::other)?;
         if let Some(runtime) = &gpu {
             coordinator
                 .configure_capture_device(
@@ -488,7 +489,7 @@ impl RohditorApp {
                 .map_err(std::io::Error::other)?;
         }
         let catalog_coordinator =
-            CatalogCoordinator::new(context.egui_ctx.clone()).map_err(std::io::Error::other)?;
+            CatalogCoordinator::new(wake_from(&context.egui_ctx)).map_err(std::io::Error::other)?;
         // Restore the last browsed folder when the app was not given a file.
         let mut view_mode = ViewMode::default();
         if initial_path.is_none()
@@ -3688,6 +3689,12 @@ impl eframe::App for RohditorApp {
     }
 }
 
+/// Adapts egui's repaint request to the toolkit-neutral worker wake callback.
+fn wake_from(context: &egui::Context) -> WakeFn {
+    let context = context.clone();
+    Arc::new(move || context.request_repaint())
+}
+
 fn install_texture(
     context: &egui::Context,
     document: &mut Document,
@@ -3698,8 +3705,8 @@ fn install_texture(
         width,
         height,
         pixels,
-        color,
     } = image;
+    let color = egui::ColorImage::from_rgb([width, height], &pixels);
     document.preview_pixels = Some(DisplayPreviewPixels {
         width,
         height,
@@ -4288,7 +4295,6 @@ mod tests {
             WorkerImage {
                 width: 2,
                 height: 1,
-                color: egui::ColorImage::from_rgb([2, 1], &pixels),
                 pixels,
             },
             PreviewSource::FastCpu,
