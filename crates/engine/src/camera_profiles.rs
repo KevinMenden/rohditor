@@ -1,4 +1,4 @@
-//! Installed matrix-only DCP profiles, stored under an app-supplied directory.
+//! Installed DCP profiles, stored under an app-supplied directory.
 
 use std::collections::BTreeSet;
 use std::fs;

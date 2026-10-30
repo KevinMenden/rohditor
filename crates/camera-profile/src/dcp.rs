@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::{
     CAMERA_PROFILE_FORMAT_VERSION, CalibrationIlluminant, CameraProfileError, DCP_MAX_FILE_BYTES,
-    MatrixCalibration, MatrixCameraProfile,
+    MAX_TABLE_ENTRIES, MatrixCalibration, MatrixCameraProfile, ProfileTable,
 };
 
 const TAG_DNG_VERSION: u16 = 50_706;
@@ -65,6 +65,9 @@ const TAG_OPCODE_LIST_1: u16 = 51_008;
 const TAG_OPCODE_LIST_2: u16 = 51_009;
 const TAG_OPCODE_LIST_3: u16 = 51_022;
 
+/// TIFF magic number Adobe uses for DNG camera profiles.
+const DCP_MAGIC: u16 = 0x4352;
+
 const MAX_IFDS: usize = 64;
 const MAX_IFD_ENTRIES: usize = 4_096;
 const MAX_STRING_BYTES: usize = 4_096;
@@ -82,6 +85,13 @@ pub fn parse_dcp_bytes(bytes: &[u8]) -> Result<MatrixCameraProfile, CameraProfil
     let camera_model = tiff.required_ascii(TAG_UNIQUE_CAMERA_MODEL, "UniqueCameraModel")?;
     let copyright = tiff.optional_ascii(TAG_PROFILE_COPYRIGHT, "ProfileCopyright")?;
     let calibrations = parse_calibrations(&tiff)?;
+    let look_table = tiff.profile_table(
+        TAG_PROFILE_LOOK_TABLE_DIMS,
+        TAG_PROFILE_LOOK_TABLE_DATA,
+        TAG_PROFILE_LOOK_TABLE_ENCODING,
+        "ProfileLookTable",
+    )?;
+    let tone_curve = tiff.tone_curve()?;
 
     let profile = MatrixCameraProfile {
         format_version: CAMERA_PROFILE_FORMAT_VERSION,
@@ -90,6 +100,8 @@ pub fn parse_dcp_bytes(bytes: &[u8]) -> Result<MatrixCameraProfile, CameraProfil
         camera_model,
         copyright,
         calibrations,
+        look_table,
+        tone_curve,
     };
     profile.validate()?;
     Ok(profile)
@@ -157,16 +169,39 @@ fn parse_calibrations(tiff: &Tiff<'_>) -> Result<Vec<MatrixCalibration>, CameraP
         } else {
             None
         };
+        let map_data_tag = if label == "1" {
+            TAG_PROFILE_HUE_SAT_MAP_DATA_1
+        } else {
+            TAG_PROFILE_HUE_SAT_MAP_DATA_2
+        };
+        let hue_sat_map = tiff.profile_table(
+            TAG_PROFILE_HUE_SAT_MAP_DIMS,
+            map_data_tag,
+            TAG_PROFILE_HUE_SAT_MAP_ENCODING,
+            "ProfileHueSatMap",
+        )?;
         calibrations.push(MatrixCalibration {
             illuminant,
             xyz_to_camera,
             forward_camera_to_xyz_d50,
+            hue_sat_map,
         });
     }
     if calibrations.is_empty() {
         return Err(CameraProfileError::MissingTag {
             tag: "ColorMatrix1 or ColorMatrix2",
         });
+    }
+    // A table without the illuminant it belongs to would silently be dropped.
+    for (data_tag, illuminant_tag) in [
+        (TAG_PROFILE_HUE_SAT_MAP_DATA_1, TAG_CALIBRATION_ILLUMINANT_1),
+        (TAG_PROFILE_HUE_SAT_MAP_DATA_2, TAG_CALIBRATION_ILLUMINANT_2),
+    ] {
+        if tiff.has_tag(data_tag) && !tiff.has_tag(illuminant_tag) {
+            return Err(invalid_tiff(
+                "ProfileHueSatMapData has no matching calibration illuminant",
+            ));
+        }
     }
     Ok(calibrations)
 }
@@ -225,8 +260,11 @@ impl<'a> Tiff<'a> {
             b"MM" => Endian::Big,
             _ => return Err(invalid_tiff("byte order marker is neither II nor MM")),
         };
-        if endian.u16(&bytes[2..4]) != 42 {
-            return Err(invalid_tiff("classic TIFF magic is not 42"));
+        // Adobe camera profiles use the TIFF layout with magic "RC" (0x4352)
+        // instead of 42.
+        let magic = endian.u16(&bytes[2..4]);
+        if magic != 42 && magic != DCP_MAGIC {
+            return Err(invalid_tiff("TIFF magic is neither 42 nor the DCP magic"));
         }
         let first_ifd = endian.u32(&bytes[4..8]);
         if first_ifd == 0 {
@@ -355,6 +393,117 @@ impl<'a> Tiff<'a> {
             }
         };
         Ok(Some(illuminant))
+    }
+
+    /// Read a `FLOAT` array entry.
+    fn floats(
+        &self,
+        tag: u16,
+        name: &'static str,
+        maximum: usize,
+    ) -> Result<Option<Vec<f32>>, CameraProfileError> {
+        let Some(entry) = self.entry(tag)? else {
+            return Ok(None);
+        };
+        if entry.data_type != 11 || entry.count as usize > maximum {
+            return Err(invalid_tag(name, "expected a bounded TIFF FLOAT array"));
+        }
+        let bytes = self.entry_bytes(entry)?;
+        Ok(Some(
+            bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|chunk| match self.endian {
+                    Endian::Little => f32::from_le_bytes(*chunk),
+                    Endian::Big => f32::from_be_bytes(*chunk),
+                })
+                .collect(),
+        ))
+    }
+
+    /// Read a `LONG` array entry of exactly `count` values.
+    fn longs(
+        &self,
+        tag: u16,
+        name: &'static str,
+        count: usize,
+    ) -> Result<Option<Vec<u32>>, CameraProfileError> {
+        let Some(entry) = self.entry(tag)? else {
+            return Ok(None);
+        };
+        if entry.data_type != 4 || entry.count as usize != count {
+            return Err(invalid_tag(
+                name,
+                "expected a TIFF LONG array of the documented length",
+            ));
+        }
+        let bytes = self.entry_bytes(entry)?;
+        Ok(Some(
+            bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|chunk| self.endian.u32(chunk))
+                .collect(),
+        ))
+    }
+
+    /// Assemble a hue/sat/value table from its dimension, data and encoding
+    /// tags. Returns `None` when the data tag is absent.
+    fn profile_table(
+        &self,
+        dims_tag: u16,
+        data_tag: u16,
+        encoding_tag: u16,
+        name: &'static str,
+    ) -> Result<Option<ProfileTable>, CameraProfileError> {
+        if !self.has_tag(data_tag) {
+            return Ok(None);
+        }
+        let dims = self
+            .longs(dims_tag, name, 3)?
+            .ok_or(CameraProfileError::MissingTag { tag: name })?;
+        let data = self
+            .floats(data_tag, name, MAX_TABLE_ENTRIES * 3)?
+            .ok_or(CameraProfileError::MissingTag { tag: name })?;
+        let srgb_encoded = match self.longs(encoding_tag, name, 1)? {
+            None => false,
+            Some(value) if value[0] == 0 => false,
+            Some(value) if value[0] == 1 => true,
+            Some(value) => {
+                return Err(CameraProfileError::UnsupportedComponent {
+                    component: name,
+                    reason: format!("encoding {} is neither linear (0) nor sRGB (1)", value[0]),
+                });
+            }
+        };
+        if data.len() % 3 != 0 {
+            return Err(invalid_tag(name, "data length is not a multiple of three"));
+        }
+        let table = ProfileTable {
+            hue_divisions: dims[0],
+            sat_divisions: dims[1],
+            val_divisions: dims[2],
+            srgb_encoded,
+            deltas: data.as_chunks::<3>().0.to_vec(),
+        };
+        table.validate(name)?;
+        Ok(Some(table))
+    }
+
+    /// Read `ProfileToneCurve` as `[input, output]` pairs.
+    fn tone_curve(&self) -> Result<Option<Vec<[f32; 2]>>, CameraProfileError> {
+        let Some(data) = self.floats(TAG_PROFILE_TONE_CURVE, "ProfileToneCurve", 2_048)? else {
+            return Ok(None);
+        };
+        if data.len() % 2 != 0 {
+            return Err(invalid_tag(
+                "ProfileToneCurve",
+                "data length is not a multiple of two",
+            ));
+        }
+        Ok(Some(data.as_chunks::<2>().0.to_vec()))
     }
 
     fn required_matrix(
@@ -504,6 +653,17 @@ fn is_allowed_tag(tag: u16) -> bool {
             | TAG_PREVIEW_DATE_TIME
             | TAG_RAW_IMAGE_DIGEST
             | TAG_ORIGINAL_RAW_FILE_DIGEST
+            | TAG_PROFILE_HUE_SAT_MAP_DIMS
+            | TAG_PROFILE_HUE_SAT_MAP_DATA_1
+            | TAG_PROFILE_HUE_SAT_MAP_DATA_2
+            | TAG_PROFILE_HUE_SAT_MAP_ENCODING
+            | TAG_PROFILE_LOOK_TABLE_DIMS
+            | TAG_PROFILE_LOOK_TABLE_DATA
+            | TAG_PROFILE_LOOK_TABLE_ENCODING
+            | TAG_PROFILE_TONE_CURVE
+            // Only steers Adobe's automatic black-point handling, which
+            // Rohditor does not implement; it carries no colour data.
+            | TAG_DEFAULT_BLACK_RENDER
     )
 }
 
@@ -519,7 +679,6 @@ fn unsupported_component(tag: u16) -> Option<&'static str> {
         | TAG_BASELINE_SHARPNESS
         | TAG_LINEAR_RESPONSE_LIMIT
         | TAG_BASELINE_EXPOSURE_OFFSET
-        | TAG_DEFAULT_BLACK_RENDER
         | TAG_RAW_TO_PREVIEW_GAIN => Some("baseline/default exposure data"),
         TAG_DNG_PRIVATE_DATA => Some("DNGPrivateData"),
         TAG_AS_SHOT_ICC_PROFILE
@@ -527,14 +686,6 @@ fn unsupported_component(tag: u16) -> Option<&'static str> {
         | TAG_CURRENT_ICC_PROFILE
         | TAG_CURRENT_PRE_PROFILE_MATRIX => Some("ICC profile data"),
         TAG_EXTRA_CAMERA_PROFILES => Some("ExtraCameraProfiles"),
-        TAG_PROFILE_HUE_SAT_MAP_DIMS
-        | TAG_PROFILE_HUE_SAT_MAP_DATA_1
-        | TAG_PROFILE_HUE_SAT_MAP_DATA_2
-        | TAG_PROFILE_HUE_SAT_MAP_ENCODING => Some("hue/saturation map"),
-        TAG_PROFILE_TONE_CURVE => Some("ProfileToneCurve"),
-        TAG_PROFILE_LOOK_TABLE_DIMS
-        | TAG_PROFILE_LOOK_TABLE_DATA
-        | TAG_PROFILE_LOOK_TABLE_ENCODING => Some("look table"),
         TAG_OPCODE_LIST_1 | TAG_OPCODE_LIST_2 | TAG_OPCODE_LIST_3 => Some("DNG opcode list"),
         _ => None,
     }
@@ -544,7 +695,7 @@ fn tag_error(tag: u16) -> CameraProfileError {
     if let Some(component) = unsupported_component(tag) {
         CameraProfileError::UnsupportedComponent {
             component,
-            reason: format!("tag 0x{tag:04x} is pixel-producing and outside the MVP"),
+            reason: format!("tag 0x{tag:04x} changes pixels in a way Rohditor does not evaluate"),
         }
     } else {
         CameraProfileError::UnsupportedTag {

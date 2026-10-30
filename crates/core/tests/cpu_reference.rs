@@ -335,7 +335,10 @@ fn selected_matrix_profile_is_used_by_preview_split_and_export() -> Result<(), B
             illuminant: CalibrationIlluminant::D65,
             xyz_to_camera: [[1.0, 0.05, 0.0], [0.0, 1.0, 0.1], [0.02, 0.0, 1.0]],
             forward_camera_to_xyz_d50: None,
+            hue_sat_map: None,
         }],
+        look_table: None,
+        tone_curve: None,
     });
     let options = PreviewOptions {
         max_long_edge: 3,

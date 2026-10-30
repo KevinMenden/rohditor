@@ -74,6 +74,7 @@ const LIBRARY_DECODE_BUDGET: usize = 8;
 const LIBRARY_VISIBLE_MARGIN: usize = 24;
 
 mod autosave;
+mod camera_look;
 pub(crate) mod crop;
 #[path = "events.rs"]
 mod events;
@@ -82,6 +83,7 @@ mod gpu;
 #[path = "lifecycle.rs"]
 mod lifecycle;
 
+use camera_look::CameraLookState;
 use crop::CropToolSession;
 use gpu::{
     GpuDocumentPreview, GpuDocumentSource, GpuRuntime, PendingGpuHistogram, gpu_output_size,
@@ -185,6 +187,7 @@ struct Document {
     error: Option<String>,
     notice: Option<String>,
     initialize_white_balance_from_metadata: bool,
+    camera_look: CameraLookState,
 }
 
 #[derive(Debug, Clone)]
@@ -229,6 +232,7 @@ impl Document {
             error: None,
             notice: None,
             initialize_white_balance_from_metadata: false,
+            camera_look: CameraLookState::default(),
         }
     }
 
@@ -2969,7 +2973,7 @@ fn document_panel_model(
         sensor_dimensions: document.info.as_ref().map(|info| (info.width, info.height)),
         revision: document.edits.revision(),
         dirty: document.is_dirty(),
-        has_adjustments: document.edits.recipe() != &default_recipe_for_document(document),
+        has_adjustments: has_user_adjustments(document),
         camera_profile,
         camera_profile_choices,
         rendering_profile: document.edits.recipe().rendering.profile,
@@ -3233,6 +3237,15 @@ fn camera_profile_choice(
     }
 }
 
+/// Whether the recipe differs from the document's defaults. The fitted camera
+/// look is derived from the photo rather than chosen, so it does not count.
+fn has_user_adjustments(document: &Document) -> bool {
+    let mut current = document.edits.recipe().clone();
+    current.rendering.camera_tone = None;
+    current.rendering.camera_chroma = None;
+    current != default_recipe_for_document(document)
+}
+
 fn default_recipe_for_document(document: &Document) -> EditRecipe {
     default_recipe(document_as_shot_coordinates(document))
 }
@@ -3434,6 +3447,7 @@ fn apply_adjustment_interaction(
 impl eframe::App for RohditorApp {
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
         self.process_worker_events(context);
+        self.sync_camera_look(context);
         self.process_recipe_save_events();
         self.update_catalog();
         self.library_frame = self.library_frame.wrapping_add(1);
@@ -3887,6 +3901,27 @@ mod tests {
 
         assert!(!document.view.is_fit());
         assert_eq!(document.view.zoom_label(), "SOURCE 100%");
+    }
+
+    #[test]
+    fn a_fitted_camera_look_is_not_a_user_adjustment() {
+        let mut document =
+            Document::opening(7, PathBuf::from("fixture.arw"), default_recipe(None), None);
+        assert!(!has_user_adjustments(&document));
+
+        document.edits.apply_derived(|recipe| {
+            recipe.rendering.camera_tone = Some(rohditor_edit::CameraTone::static_fallback());
+        });
+        assert!(!has_user_adjustments(&document));
+        assert!(
+            !document.is_dirty(),
+            "opening a photo must not create a sidecar"
+        );
+
+        let mut recipe = document.edits.recipe().clone();
+        recipe.light.exposure_ev = 0.5;
+        assert!(document.edits.set_discrete(recipe));
+        assert!(has_user_adjustments(&document));
     }
 
     #[test]

@@ -329,6 +329,11 @@ impl RohditorApp {
                     ));
                 }
             }
+            WorkerEvent::CameraLookReady {
+                document_id,
+                camera_profile,
+                result,
+            } => self.camera_look_ready(context, document_id, &camera_profile, result),
             WorkerEvent::Warning {
                 document_id,
                 message,

@@ -363,6 +363,7 @@ impl GpuExportProcessor {
             policy,
             resolved.white_balance_gains,
             resolved.camera_to_linear_rec2020,
+            resolved.profile_look.as_ref(),
         );
         let queue = &self.processor.queue;
         queue.write_buffer(
@@ -370,11 +371,8 @@ impl GpuExportProcessor {
             0,
             bytemuck::cast_slice(&parameters),
         );
-        queue.write_buffer(
-            &self.processor.light_tone_lut,
-            0,
-            bytemuck::cast_slice(LightToneLut::new(&recipe.light).values()),
-        );
+        self.processor
+            .upload_recipe_luts(recipe, resolved.profile_look.as_ref());
 
         let band_bytes = width as u64 * u64::from(BAND_ROWS) * 12;
         let output_peak = source
@@ -478,6 +476,10 @@ impl GpuExportProcessor {
                 wgpu::BindGroupEntry {
                     binding: 5,
                     resource: self.processor.base_rendering_lut.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: self.processor.profile_tables.as_entire_binding(),
                 },
             ],
         });
@@ -629,7 +631,7 @@ impl GpuExportProcessor {
                 reason: "export optics differ from prepared source".into(),
             });
         }
-        let (gains, matrix) = source.resolve_recipe_colour(recipe, false)?;
+        let (gains, matrix, profile_look) = source.resolve_recipe_colour(recipe, false)?;
         let orientation = recipe
             .geometry
             .orientation_override
@@ -650,6 +652,7 @@ impl GpuExportProcessor {
             policy,
             gains,
             matrix,
+            profile_look.as_ref(),
         );
         let device = &self.processor.device;
         let queue = &self.processor.queue;
@@ -658,11 +661,8 @@ impl GpuExportProcessor {
             0,
             bytemuck::cast_slice(&parameters),
         );
-        queue.write_buffer(
-            &self.processor.light_tone_lut,
-            0,
-            bytemuck::cast_slice(LightToneLut::new(&recipe.light).values()),
-        );
+        self.processor
+            .upload_recipe_luts(recipe, profile_look.as_ref());
         let band_bytes = width as u64 * u64::from(BAND_ROWS) * 12;
         let output = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("rohditor export integer band"),
@@ -712,6 +712,10 @@ impl GpuExportProcessor {
                 wgpu::BindGroupEntry {
                     binding: 5,
                     resource: self.processor.base_rendering_lut.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: self.processor.profile_tables.as_entire_binding(),
                 },
             ],
         });

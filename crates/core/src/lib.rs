@@ -5,6 +5,7 @@
 //! that later preview and GPU implementations must match.
 
 mod analysis;
+mod camera_look;
 mod cancel;
 mod color;
 mod cpu;
@@ -22,16 +23,17 @@ mod resample;
 mod sharpening;
 mod white_balance;
 
-pub use rohditor_camera_profile::CAMERA_PROFILE_EVALUATOR_VERSION;
+pub use rohditor_camera_profile::{CAMERA_PROFILE_EVALUATOR_VERSION, MAX_TABLE_ENTRIES};
 
 pub use analysis::Histogram;
+pub use camera_look::{CameraLook, CameraLookError, decode_camera_preview, match_camera_look};
 pub use cancel::CancellationToken;
 pub use color::{
     CameraCalibration, CameraColorTransform, CameraProfileKey, CameraProfileProvenance,
-    LINEAR_REC2020_TO_XYZ_D65, Matrix3, ResolvedCameraColour, XYZ_D65_TO_LINEAR_REC2020,
-    XYZ_D65_TO_LINEAR_SRGB, adapt_xyz_to_d65, camera_color_transform, camera_profile_key,
-    clip_linear_srgb_for_output, convert_rec2020_to_display_srgb, linear_srgb_to_srgb,
-    resolve_camera_colour, srgb_to_linear_srgb,
+    LINEAR_REC2020_TO_XYZ_D65, Matrix3, ProfileLook, ResolvedCameraColour,
+    XYZ_D65_TO_LINEAR_REC2020, XYZ_D65_TO_LINEAR_SRGB, adapt_xyz_to_d65, camera_color_transform,
+    camera_profile_key, clip_linear_srgb_for_output, convert_rec2020_to_display_srgb,
+    linear_srgb_to_srgb, resolve_camera_colour, srgb_to_linear_srgb,
 };
 pub use cpu::{
     HSL_CHANNEL_CENTERS, HSL_HUE_SHIFT_PER_FULL_VALUE, apply_adjustments, evaluate_tone_curve,
@@ -63,7 +65,7 @@ pub use pipeline::{
     SensorDevelopmentDescription, SpatialCompletionDescription, SpatialOptics, StageTimings,
 };
 pub use rendering::{
-    BASE_RENDERING_LUT_SIZE, BaseRenderingLut, ROHDITOR_STANDARD_MIDDLE_GRAY,
+    BASE_RENDERING_LUT_SIZE, BaseRenderingLut, ROHDITOR_STANDARD_MIDDLE_GRAY, base_rendering_lut,
     standard_base_rendering_lut,
 };
 pub use resample::{

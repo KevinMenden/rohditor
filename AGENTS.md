@@ -15,7 +15,7 @@ Keep things modular, so they are understandable when regarding on their own: cre
 A frontend can enter the stack at any level; each level only depends on the ones below it.
 
 1. **Building blocks** (`crates/raw`, `image`, `demosaic`, `highlight`, `optics`, `color`,
-   `camera-profile`, `edit`, `catalog`, `gpu`): algorithms and data types. An app can compose
+   `camera-profile`, `edit`, `look`, `catalog`, `gpu`): algorithms and data types. An app can compose
    its own pipeline from these.
 2. **Default pipeline** (`crates/core`): `CpuPipeline`, the public stage functions, and
    recipe-level editing math that needs more than the recipe types (auto tone, white-balance

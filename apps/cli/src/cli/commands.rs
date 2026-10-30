@@ -34,6 +34,7 @@ use serde::{Deserialize, Serialize};
 use tracing_subscriber::EnvFilter;
 
 use super::highlight_compare::highlight_compare;
+use super::look_report::{fit_recipe_camera_tone, look_report};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -156,7 +157,7 @@ enum Command {
         #[arg(long, value_name = "RED,GREEN,BLUE")]
         white_balance: Option<RgbMultipliers>,
 
-        /// Matrix-only DNG Camera Profile to embed in the recipe.
+        /// DNG Camera Profile (DCP) to embed in the recipe: its matrices, hue/saturation map, and look table.
         #[arg(long, value_name = "PROFILE.dcp")]
         camera_profile: Option<PathBuf>,
 
@@ -173,8 +174,9 @@ enum Command {
         #[arg(long, default_value_t = 0.5)]
         capture_noise_protection: f32,
 
-        /// Base rendering: Standard tone rendering or Neutral identity rendering.
-        #[arg(long, value_enum, default_value_t = CliRenderingProfile::Standard)]
+        /// Base rendering: Matched (tone and colour fitted to the camera JPEG),
+        /// Standard tone rendering, or Neutral identity rendering.
+        #[arg(long, value_enum, default_value_t = CliRenderingProfile::Matched)]
         rendering_profile: CliRenderingProfile,
 
         /// Target sRGB gamut handling after rendering and creative edits.
@@ -299,6 +301,22 @@ enum Command {
         force: bool,
     },
 
+    /// Compare Neutral, Standard and camera-matched renderings with each RAW's
+    /// embedded camera JPEG and report the tone and colour error.
+    LookReport {
+        /// RAW files to measure. Each must contain an embedded JPEG preview.
+        #[arg(value_name = "FILE", required = true)]
+        files: Vec<PathBuf>,
+
+        /// Render with this DCP camera profile instead of the built-in matrices.
+        #[arg(long, value_name = "DCP")]
+        camera_profile: Option<PathBuf>,
+
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Compare Rohditor's decoded sensor mosaic with LibRaw unprocessed_raw PGM output.
     VerifyLibraw {
         /// RAW source decoded by Rohditor/rawler.
@@ -362,9 +380,12 @@ enum CliHighlightMethod {
 
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
 enum CliRenderingProfile {
-    #[default]
     Standard,
     Neutral,
+    /// Tone and colour fitted to the camera's embedded JPEG; falls back to a
+    /// typical camera look when the fit is not possible.
+    #[default]
+    Matched,
 }
 
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
@@ -389,6 +410,7 @@ impl From<CliRenderingProfile> for RenderingProfileSelection {
         match value {
             CliRenderingProfile::Standard => Self::STANDARD,
             CliRenderingProfile::Neutral => Self::NEUTRAL,
+            CliRenderingProfile::Matched => Self::MATCHED,
         }
     }
 }
@@ -646,6 +668,11 @@ pub(crate) fn run() -> Result<()> {
             full_exports,
             force,
         ),
+        Command::LookReport {
+            files,
+            camera_profile,
+            json,
+        } => look_report(&files, camera_profile.as_deref(), json),
         Command::VerifyLibraw {
             file,
             libraw_pgm,
@@ -1062,6 +1089,9 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
     recipe
         .validate()
         .context("could not validate the development recipe")?;
+    if recipe.rendering.profile == RenderingProfileSelection::MATCHED {
+        fit_recipe_camera_tone(&decoder, &pipeline, file, &frame, &mut recipe)?;
+    }
     let rendered = FallbackExporter::default()
         .render(
             arguments.processor.into(),
@@ -2283,7 +2313,7 @@ mod tests {
     }
 
     #[test]
-    fn develop_parses_rendering_profile_and_defaults_to_standard() {
+    fn develop_parses_rendering_profile_and_defaults_to_matched() {
         let defaulted = Cli::try_parse_from(["rohditor-cli", "develop", "input.arw", "output.jpg"])
             .expect("default rendering should parse");
         let Command::Develop {
@@ -2292,7 +2322,7 @@ mod tests {
         else {
             panic!("expected develop command");
         };
-        assert!(matches!(rendering_profile, CliRenderingProfile::Standard));
+        assert!(matches!(rendering_profile, CliRenderingProfile::Matched));
 
         let neutral = Cli::try_parse_from([
             "rohditor-cli",

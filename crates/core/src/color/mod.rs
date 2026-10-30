@@ -10,7 +10,8 @@ mod transforms;
 
 pub use calibration::{
     CameraCalibration, CameraColorTransform, CameraProfileKey, CameraProfileProvenance,
-    ResolvedCameraColour, camera_color_transform, camera_profile_key, resolve_camera_colour,
+    ProfileLook, ResolvedCameraColour, camera_color_transform, camera_profile_key,
+    resolve_camera_colour,
 };
 pub use output::{clip_linear_srgb_for_output, convert_rec2020_to_display_srgb};
 pub use rohditor_color::{linear_srgb_to_srgb, srgb_to_linear_srgb};

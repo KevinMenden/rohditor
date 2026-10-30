@@ -27,6 +27,7 @@ fn color_uniform_layout_preserves_all_controls_and_shared_constants() {
         OutputPolicy::ClipToSrgb,
         WhiteBalanceGains::identity(),
         Matrix3::identity(),
+        None,
     );
     for index in 0..8 {
         assert_eq!(
