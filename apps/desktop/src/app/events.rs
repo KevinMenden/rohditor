@@ -5,12 +5,14 @@
 
 use eframe::egui;
 
+use rohditor_core::white_balance_from_camera_sample;
+
 use crate::coordinator::{JobKind, PreviewResolution, WorkerEvent};
 use crate::ui::viewport::PreviewSource;
 
 use super::{
     DocumentPreviewDiagnostics, RohditorApp, default_recipe_for_document, document_as_shot_colour,
-    install_texture, white_balance_from_camera_sample,
+    install_texture,
 };
 
 impl RohditorApp {

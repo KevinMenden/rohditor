@@ -23,6 +23,12 @@ assert_no_dependencies rohditor-gpu 'rohditor-(cli|desktop)'
 # Headless GPU export is an application-level dependency; core stays GPU-free.
 assert_no_dependencies rohditor-cli 'rohditor-desktop'
 
+# Processing crates must stay replaceable-UI friendly: no windowing/toolkit deps.
+if grep -rEn '^(eframe|egui|winit|rfd)[ .=]' --include=Cargo.toml crates; then
+    echo "a crate under crates/ depends on a UI toolkit" >&2
+    exit 1
+fi
+
 # The reference harness is dev-only: no other crate may depend on it.
 if grep -rl 'rohditor-reference' --include=Cargo.toml apps crates \
     | grep -qv '^crates/reference/'; then
