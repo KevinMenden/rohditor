@@ -23,5 +23,6 @@ wgpu.workspace = true
 
 [dev-dependencies]
 image.workspace = true
+rohditor-camera-profile = { path = "../camera-profile" }
 rohditor-highlight = { path = "../highlight" }
 serde_json.workspace = true

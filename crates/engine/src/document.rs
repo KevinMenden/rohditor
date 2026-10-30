@@ -136,6 +136,25 @@ impl EditSession {
         true
     }
 
+    /// Apply a change that is derived from the current recipe rather than made
+    /// by the user, such as a fitted camera look. It advances the revision (so
+    /// previews refresh) but stays out of the undo history: undo reverts the
+    /// user's action, and the derived data follows it. A document with no user
+    /// edits stays clean, so merely opening a photo never creates a sidecar.
+    pub fn apply_derived(&mut self, update: impl FnOnce(&mut EditRecipe)) -> bool {
+        let mut next = self.recipe.clone();
+        update(&mut next);
+        if next == self.recipe || next.validate().is_err() {
+            return false;
+        }
+        if !self.is_dirty() {
+            self.saved_recipe = next.clone();
+        }
+        self.recipe = next;
+        self.advance_revision();
+        true
+    }
+
     pub fn reset_to(&mut self, recipe: EditRecipe) -> bool {
         self.set_discrete(recipe)
     }
@@ -299,6 +318,61 @@ mod tests {
             edits.recipe().rendering.profile,
             rohditor_edit::RenderingProfileSelection::NEUTRAL
         );
+    }
+
+    #[test]
+    fn derived_updates_refresh_the_recipe_without_adding_an_undo_step() {
+        let mut edits = EditSession::default();
+        let mut matched = EditRecipe::default();
+        matched.rendering.profile = rohditor_edit::RenderingProfileSelection::MATCHED;
+        assert!(edits.set_discrete(matched));
+        let revision = edits.revision();
+        assert!(edits.is_dirty(), "the profile choice is a user edit");
+
+        assert!(edits.apply_derived(|recipe| {
+            recipe.rendering.camera_tone = Some(rohditor_edit::CameraTone::static_fallback());
+        }));
+        assert!(edits.revision() > revision);
+        assert!(edits.recipe().rendering.camera_tone.is_some());
+        // Applying the same derived data again changes nothing.
+        let revision = edits.revision();
+        assert!(!edits.apply_derived(|recipe| {
+            recipe.rendering.camera_tone = Some(rohditor_edit::CameraTone::static_fallback());
+        }));
+        assert_eq!(edits.revision(), revision);
+        // Invalid derived data is refused.
+        assert!(!edits.apply_derived(|recipe| {
+            recipe.rendering.camera_tone = Some(rohditor_edit::CameraTone { knots: vec![] });
+        }));
+
+        // One undo reverts the user's profile choice, not just the fit.
+        assert!(edits.undo());
+        assert_eq!(
+            edits.recipe().rendering.profile,
+            rohditor_edit::RenderingProfileSelection::STANDARD
+        );
+        assert!(!edits.can_undo());
+    }
+
+    #[test]
+    fn derived_updates_keep_an_untouched_document_clean() {
+        let mut matched = EditRecipe::default();
+        matched.rendering.profile = rohditor_edit::RenderingProfileSelection::MATCHED;
+        let mut edits = EditSession::from_saved(matched);
+        assert!(!edits.is_dirty());
+
+        assert!(edits.apply_derived(|recipe| {
+            recipe.rendering.camera_tone = Some(rohditor_edit::CameraTone::static_fallback());
+        }));
+        assert!(!edits.is_dirty());
+        assert!(!edits.can_undo());
+
+        // Once the user edits, the next derived change travels with the edit.
+        assert!(edits.set_discrete(exposed(0.5)));
+        assert!(edits.apply_derived(|recipe| {
+            recipe.rendering.camera_chroma = Some(rohditor_edit::CameraChroma::STATIC_FALLBACK);
+        }));
+        assert!(edits.is_dirty());
     }
 
     #[test]

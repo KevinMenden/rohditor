@@ -1,8 +1,9 @@
-//! The deliberately small, matrix-only camera-profile boundary.
+//! The camera-profile boundary: the DCP subset Rohditor evaluates.
 //!
 //! Rohditor does not try to implement the complete DCP specification here.
-//! This crate accepts the subset that can be represented by a pair of camera
-//! matrices and rejects pixel-producing features it cannot evaluate.
+//! This crate accepts camera matrices, the hue/saturation map and look table,
+//! and the tone curve (parsed but not applied), and rejects other
+//! pixel-producing features it cannot evaluate.
 
 use std::fmt;
 use std::path::Path;
@@ -12,8 +13,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 mod dcp;
+mod table;
 
 pub use dcp::{parse_dcp_bytes, parse_dcp_file};
+pub use table::{MAX_TABLE_DIVISIONS, MAX_TABLE_ENTRIES, ProfileTable};
 
 /// Maximum size of an imported profile. This bounds both parsing work and the
 /// amount of data the desktop registry can retain from an untrusted file.
@@ -21,11 +24,11 @@ pub const DCP_MAX_FILE_BYTES: usize = 16 * 1024 * 1024;
 /// Current serialized profile payload version.
 pub const CAMERA_PROFILE_FORMAT_VERSION: u8 = 1;
 /// Version of the matrix evaluator used in cache identities.
-pub const CAMERA_PROFILE_EVALUATOR_VERSION: u8 = 1;
+pub const CAMERA_PROFILE_EVALUATOR_VERSION: u8 = 2;
 /// Maximum number of illuminant-specific matrix pairs supported by the MVP.
 pub const MAX_MATRIX_CALIBRATIONS: usize = 2;
 
-/// Illuminant references supported by the first matrix-only implementation.
+/// Illuminant references supported by the profile evaluator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CalibrationIlluminant {
@@ -64,7 +67,7 @@ impl fmt::Display for CalibrationIlluminant {
     }
 }
 
-/// A validated matrix-only camera profile embedded in an edit recipe or
+/// A validated camera profile embedded in an edit recipe or
 /// installed in the desktop registry.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct MatrixCameraProfile {
@@ -76,6 +79,14 @@ pub struct MatrixCameraProfile {
     #[serde(default)]
     pub copyright: Option<String>,
     pub calibrations: Vec<MatrixCalibration>,
+    /// DCP `ProfileLookTable`: the profile author's colour look, independent
+    /// of the illuminant.
+    #[serde(default)]
+    pub look_table: Option<ProfileTable>,
+    /// DCP `ProfileToneCurve` as `[input, output]` points. Parsed and kept for
+    /// future use; the Matched look is fitted instead and nothing applies this.
+    #[serde(default)]
+    pub tone_curve: Option<Vec<[f32; 2]>>,
 }
 
 impl<'de> Deserialize<'de> for MatrixCameraProfile {
@@ -93,6 +104,10 @@ impl<'de> Deserialize<'de> for MatrixCameraProfile {
             copyright: Option<BoundedText<1024>>,
             #[serde(deserialize_with = "deserialize_calibrations")]
             calibrations: Vec<MatrixCalibration>,
+            #[serde(default)]
+            look_table: Option<ProfileTable>,
+            #[serde(default)]
+            tone_curve: Option<Vec<[f32; 2]>>,
         }
 
         let fields = Fields::deserialize(deserializer)?;
@@ -103,6 +118,8 @@ impl<'de> Deserialize<'de> for MatrixCameraProfile {
             camera_model: fields.camera_model.0,
             copyright: fields.copyright.map(|value| value.0),
             calibrations: fields.calibrations,
+            look_table: fields.look_table,
+            tone_curve: fields.tone_curve,
         };
         profile.validate().map_err(D::Error::custom)?;
         Ok(profile)
@@ -203,6 +220,9 @@ pub struct MatrixCalibration {
     /// Optional DCP ForwardMatrix: camera to XYZ D50, in row-major order.
     #[serde(default)]
     pub forward_camera_to_xyz_d50: Option<[[f32; 3]; 3]>,
+    /// DCP `ProfileHueSatMap` for this illuminant, if the profile has one.
+    #[serde(default)]
+    pub hue_sat_map: Option<ProfileTable>,
 }
 
 impl MatrixCameraProfile {
@@ -235,6 +255,12 @@ impl MatrixCameraProfile {
         }
         for (index, calibration) in self.calibrations.iter().enumerate() {
             calibration.validate(index)?;
+        }
+        if let Some(table) = &self.look_table {
+            table.validate("look_table")?;
+        }
+        if let Some(curve) = &self.tone_curve {
+            validate_tone_curve(curve)?;
         }
         if self
             .calibrations
@@ -297,6 +323,9 @@ impl MatrixCalibration {
                 &format!("calibrations[{index}].forward_camera_to_xyz_d50"),
             )?;
         }
+        if let Some(table) = &self.hue_sat_map {
+            table.validate("calibrations.hue_sat_map")?;
+        }
         Ok(())
     }
 }
@@ -321,6 +350,30 @@ pub enum CameraProfileError {
     MissingTag { tag: &'static str },
     #[error("invalid profile field {field}: {reason}")]
     InvalidProfile { field: &'static str, reason: String },
+}
+
+/// Upper bound on `ProfileToneCurve` points, far above real profiles.
+const MAX_TONE_CURVE_POINTS: usize = 1_024;
+
+fn validate_tone_curve(curve: &[[f32; 2]]) -> Result<(), CameraProfileError> {
+    let invalid = |reason: &str| CameraProfileError::InvalidProfile {
+        field: "tone_curve",
+        reason: reason.to_owned(),
+    };
+    if curve.len() < 2 || curve.len() > MAX_TONE_CURVE_POINTS {
+        return Err(invalid("expected between two and 1024 points"));
+    }
+    if curve
+        .iter()
+        .flatten()
+        .any(|value| !value.is_finite() || !(0.0..=1.0).contains(value))
+    {
+        return Err(invalid("points must be finite values within 0..=1"));
+    }
+    if curve.windows(2).any(|pair| pair[1][0] <= pair[0][0]) {
+        return Err(invalid("inputs must be strictly increasing"));
+    }
+    Ok(())
 }
 
 fn validate_sha256(value: &str) -> Result<(), CameraProfileError> {

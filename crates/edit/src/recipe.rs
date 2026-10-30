@@ -19,7 +19,8 @@ pub use geometry::{GeometryAdjustments, NormalizedCropRect};
 pub use light::{LIGHT_TONE_LUT_SIZE, LightToneLut};
 pub use optics::{LensProfileSelection, OpticsAction, OpticsAdjustments};
 pub use rendering::{
-    ROHDITOR_STANDARD_PROCESS_VERSION, RenderingAdjustments, RenderingProfileSelection,
+    MatchedLook, ROHDITOR_MATCHED_PROCESS_VERSION, ROHDITOR_STANDARD_PROCESS_VERSION,
+    RenderingAdjustments, RenderingProfileSelection,
 };
 
 use crate::CaptureSharpening;
@@ -555,7 +556,7 @@ impl EditRecipe {
                 ),
             });
         }
-        self.rendering.profile.validate()?;
+        self.rendering.validate()?;
         self.capture_sharpening.validate()?;
         if let LensProfileSelection::Lensfun { profile_id } = &self.optics.profile {
             if profile_id.trim().is_empty() {
@@ -930,6 +931,7 @@ mod tests {
             RenderingProfileSelection::RohditorStandard {
                 process_version: ROHDITOR_STANDARD_PROCESS_VERSION,
             },
+            RenderingProfileSelection::MATCHED,
         ] {
             let mut recipe = EditRecipe::default();
             recipe.rendering.profile = profile;
@@ -940,6 +942,10 @@ mod tests {
                 }
                 RenderingProfileSelection::RohditorStandard { process_version } => {
                     assert!(json.contains(r#""profile":"rohditor_standard""#));
+                    assert!(json.contains(&format!(r#""process_version":{process_version}"#)));
+                }
+                RenderingProfileSelection::RohditorMatched { process_version } => {
+                    assert!(json.contains(r#""profile":"rohditor_matched""#));
                     assert!(json.contains(&format!(r#""process_version":{process_version}"#)));
                 }
             }
@@ -956,6 +962,31 @@ mod tests {
             .validate()
             .expect_err("future process version must fail");
         assert_eq!(error.field, "rendering.profile.process_version");
+    }
+
+    #[test]
+    fn camera_tone_round_trips_and_is_validated_with_the_recipe() {
+        let mut recipe = EditRecipe::default();
+        recipe.rendering.profile = RenderingProfileSelection::MATCHED;
+        recipe.rendering.camera_tone = Some(crate::CameraTone {
+            knots: vec![[0.0, 0.0], [0.3, 0.45], [1.0, 1.0]],
+        });
+        recipe.rendering.camera_chroma = Some(crate::CameraChroma {
+            gains: [1.1; crate::CAMERA_CHROMA_KNOTS],
+        });
+        let json = serde_json::to_string(&recipe).expect("serialize camera tone");
+        let round_trip = serde_json::from_str::<EditRecipe>(&json).expect("deserialize");
+        assert_eq!(round_trip.rendering, recipe.rendering);
+
+        // Recipes without a fitted tone omit the field entirely.
+        let plain = serde_json::to_string(&EditRecipe::default()).expect("serialize default");
+        assert!(!plain.contains("camera_tone"));
+
+        recipe.rendering.camera_tone = Some(crate::CameraTone {
+            knots: vec![[0.0, 0.0], [0.6, 0.4], [0.5, 0.5], [1.0, 1.0]],
+        });
+        let error = recipe.validate().expect_err("unordered knots are invalid");
+        assert_eq!(error.field, "rendering.camera_tone.knots");
     }
 
     #[test]

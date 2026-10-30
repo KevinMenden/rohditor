@@ -9,8 +9,8 @@ use rohditor_color::{CHROMA_COMPRESS_EPSILON, CHROMA_COMPRESS_SEARCH_ITERATIONS}
 use rohditor_core::{
     BASE_RENDERING_LUT_SIZE, CameraCalibration, CameraProfileKey, CancellationToken,
     CorrectionComponents, DemosaicedBase, LINEAR_REC2020_TO_XYZ_D65, Matrix3, OpticsProvenance,
-    OutputGeometry, OutputPolicy, ReconstructedPreview, XYZ_D65_TO_LINEAR_SRGB, camera_profile_key,
-    resolve_camera_colour, standard_base_rendering_lut,
+    OutputGeometry, OutputPolicy, ProfileLook, ReconstructedPreview, XYZ_D65_TO_LINEAR_SRGB,
+    base_rendering_lut, camera_profile_key, resolve_camera_colour, standard_base_rendering_lut,
 };
 use rohditor_demosaic::WhiteBalanceGains;
 use rohditor_edit::{
@@ -38,8 +38,15 @@ const FULL_OUTPUT_BAND_ROWS: u32 = 128;
 // Output policy/version occupy words 20 and 21. Words 22 and 23 carry the
 // shared chroma-compression search contract; vec4 values begin at word 24.
 // Words 52..84 hold eight HSL vec4s (controls + shared hue center), 84..96
-// hold grading vec4s, and 96..100 hold flags and shared numerical constants.
-const PARAMETER_WORDS: usize = 100;
+// hold grading vec4s, 96..100 hold flags and shared numerical constants, and
+// 100..112 hold the camera chroma gains (nine) and their active flag, and
+// 112..144 hold the DCP table headers and the ProPhoto matrices.
+const PARAMETER_WORDS: usize = 144;
+
+/// Float capacity of one DCP table in the shared table buffer: the largest
+/// table the profile parser accepts, three floats per entry. The shader
+/// derives its look-table offset from the same number.
+const PROFILE_LOOK_TABLE_OFFSET_FLOATS: usize = rohditor_core::MAX_TABLE_ENTRIES * 3;
 
 /// One uploaded, immutable camera-native preview source. White balance and the
 /// camera transform are applied by the downstream shader when the retained
@@ -167,7 +174,7 @@ impl GpuPreviewSource {
         &self,
         recipe: &EditRecipe,
         allow_stale_clip_white_balance: bool,
-    ) -> Result<(WhiteBalanceGains, Matrix3), GpuPreviewError> {
+    ) -> Result<(WhiteBalanceGains, Matrix3, Option<ProfileLook>), GpuPreviewError> {
         if !self.matches_recipe_with_clip_draft(recipe, allow_stale_clip_white_balance) {
             return Err(GpuPreviewError::BaseMismatch {
                 reason: "the GPU source provenance does not match the requested recipe".to_owned(),
@@ -185,9 +192,16 @@ impl GpuPreviewSource {
             Ok((
                 resolved.white_balance_gains,
                 resolved.camera_to_linear_rec2020,
+                resolved.profile_look,
             ))
         } else {
-            Ok((self.white_balance_gains, self.camera_to_linear_rec2020))
+            // A source built from a CPU base already has its profile tables
+            // applied, so the shader must not apply them again.
+            Ok((
+                self.white_balance_gains,
+                self.camera_to_linear_rec2020,
+                None,
+            ))
         }
     }
 
@@ -566,6 +580,7 @@ pub struct GpuPreviewProcessor {
     bind_group_layout: wgpu::BindGroupLayout,
     parameters: wgpu::Buffer,
     base_rendering_lut: wgpu::Buffer,
+    pub(crate) profile_tables: wgpu::Buffer,
     light_tone_lut: wgpu::Buffer,
 }
 
@@ -638,6 +653,16 @@ impl GpuPreviewProcessor {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 5,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -720,6 +745,12 @@ impl GpuPreviewProcessor {
             0,
             bytemuck::cast_slice(standard_base_rendering_lut().values()),
         );
+        let profile_tables = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("rohditor DCP profile tables"),
+            size: (2 * PROFILE_LOOK_TABLE_OFFSET_FLOATS * size_of::<f32>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         Ok(Self {
             device: device.clone(),
@@ -734,6 +765,7 @@ impl GpuPreviewProcessor {
             bind_group_layout,
             parameters,
             base_rendering_lut,
+            profile_tables,
             light_tone_lut,
         })
     }
@@ -742,6 +774,46 @@ impl GpuPreviewProcessor {
     #[must_use]
     pub const fn capabilities(&self) -> &GpuCapabilities {
         &self.capabilities
+    }
+
+    /// Upload the transfer tables a recipe selects. Both live in buffers shared
+    /// by every render, so they are rewritten before each one: the base
+    /// rendering may be Standard, a fitted camera tone, or unused (Neutral
+    /// skips the table in the shader).
+    pub(crate) fn upload_recipe_luts(&self, recipe: &EditRecipe, look: Option<&ProfileLook>) {
+        if let Some(look) = look {
+            self.upload_profile_tables(look);
+        }
+        self.queue.write_buffer(
+            &self.light_tone_lut,
+            0,
+            bytemuck::cast_slice(LightToneLut::new(&recipe.light).values()),
+        );
+        if let Some(lut) = base_rendering_lut(&recipe.rendering) {
+            self.queue.write_buffer(
+                &self.base_rendering_lut,
+                0,
+                bytemuck::cast_slice(lut.values()),
+            );
+        }
+    }
+
+    /// Upload a DCP profile's tables. The shader reads the header words in the
+    /// parameter block, so stale table data is harmless when a profile without
+    /// tables follows: its headers mark both tables absent.
+    fn upload_profile_tables(&self, look: &ProfileLook) {
+        for (table, float_offset) in [
+            (&look.hue_sat_map, 0),
+            (&look.look_table, PROFILE_LOOK_TABLE_OFFSET_FLOATS),
+        ] {
+            if let Some(table) = table {
+                self.queue.write_buffer(
+                    &self.profile_tables,
+                    (float_offset * size_of::<f32>()) as u64,
+                    bytemuck::cast_slice(&table.deltas),
+                );
+            }
+        }
     }
 
     /// Whether the current shader implements every adjustment in a recipe.
@@ -1068,15 +1140,11 @@ impl GpuPreviewProcessor {
             output_policy,
             resolved.white_balance_gains,
             resolved.camera_to_linear_rec2020,
+            resolved.profile_look.as_ref(),
         );
         self.queue
             .write_buffer(&self.parameters, 0, bytemuck::cast_slice(&parameters));
-        let light_tone_lut = LightToneLut::new(&recipe.light);
-        self.queue.write_buffer(
-            &self.light_tone_lut,
-            0,
-            bytemuck::cast_slice(light_tone_lut.values()),
-        );
+        self.upload_recipe_luts(recipe, resolved.profile_look.as_ref());
         let optics = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1121,6 +1189,10 @@ impl GpuPreviewProcessor {
                 wgpu::BindGroupEntry {
                     binding: 5,
                     resource: self.base_rendering_lut.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: self.profile_tables.as_entire_binding(),
                 },
             ],
         });
@@ -1219,7 +1291,7 @@ impl GpuPreviewProcessor {
                     .to_owned(),
             });
         }
-        let (white_balance_gains, camera_to_linear_rec2020) =
+        let (white_balance_gains, camera_to_linear_rec2020, profile_look) =
             source.resolve_recipe_colour(recipe, allow_stale_clip_white_balance)?;
         let orientation = recipe
             .geometry
@@ -1279,15 +1351,11 @@ impl GpuPreviewProcessor {
             output_policy,
             white_balance_gains,
             camera_to_linear_rec2020,
+            profile_look.as_ref(),
         );
         self.queue
             .write_buffer(&self.parameters, 0, bytemuck::cast_slice(&parameters));
-        let light_tone_lut = LightToneLut::new(&recipe.light);
-        self.queue.write_buffer(
-            &self.light_tone_lut,
-            0,
-            bytemuck::cast_slice(light_tone_lut.values()),
-        );
+        self.upload_recipe_luts(recipe, profile_look.as_ref());
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("rohditor GPU preview bind group"),
             layout: &self.bind_group_layout,
@@ -1320,6 +1388,10 @@ impl GpuPreviewProcessor {
                 wgpu::BindGroupEntry {
                     binding: 5,
                     resource: self.base_rendering_lut.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: self.profile_tables.as_entire_binding(),
                 },
             ],
         });
@@ -1695,6 +1767,7 @@ fn pack_rgba32f(
     Ok(packed)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_parameters(
     source_dimensions: (u32, u32),
     orientation: Orientation,
@@ -1703,6 +1776,7 @@ fn build_parameters(
     output_policy: OutputPolicy,
     white_balance_gains: WhiteBalanceGains,
     camera_to_linear_rec2020: Matrix3,
+    profile_look: Option<&ProfileLook>,
 ) -> [u32; PARAMETER_WORDS] {
     let rec2020_to_srgb = LINEAR_REC2020_TO_XYZ_D65.then(XYZ_D65_TO_LINEAR_SRGB);
     let mut words = [0_u32; PARAMETER_WORDS];
@@ -1780,6 +1854,30 @@ fn build_parameters(
     .to_bits();
     words[98] = rohditor_core::HSL_HUE_SHIFT_PER_FULL_VALUE.to_bits();
     words[99] = f32::EPSILON.to_bits();
+    if let Some(chroma) = recipe.rendering.matched_look().and_then(|look| look.chroma) {
+        for (index, gain) in chroma.gains.iter().enumerate() {
+            words[100 + index] = gain.to_bits();
+        }
+        words[111] = 1.0_f32.to_bits();
+    }
+    if let Some(look) = profile_look {
+        for (slot, table) in [(112, &look.hue_sat_map), (116, &look.look_table)] {
+            if let Some(table) = table {
+                words[slot] = table.hue_divisions;
+                words[slot + 1] = table.sat_divisions;
+                words[slot + 2] = table.val_divisions;
+                words[slot + 3] = u32::from(table.srgb_encoded);
+            }
+        }
+        write_matrix_rows(
+            &mut words[120..132],
+            Matrix3::new(look.to_prophoto.values()),
+        );
+        write_matrix_rows(
+            &mut words[132..144],
+            Matrix3::new(look.from_prophoto.values()),
+        );
+    }
     words
 }
 
@@ -1793,7 +1891,8 @@ fn output_policy_code(output_policy: OutputPolicy) -> u32 {
 fn rendering_profile_code(profile: RenderingProfileSelection) -> u32 {
     match profile {
         RenderingProfileSelection::RohditorNeutral => 0,
-        RenderingProfileSelection::RohditorStandard { .. } => 1,
+        RenderingProfileSelection::RohditorStandard { .. }
+        | RenderingProfileSelection::RohditorMatched { .. } => 1,
     }
 }
 
@@ -1829,7 +1928,7 @@ pub(crate) mod tests {
     use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
     use rohditor_core::{CpuPipeline, DatabaseProvenance, LensProfileSummary, PreviewOptions};
-    use rohditor_edit::{HighlightMethod, NormalizedCropRect, ToneCurve};
+    use rohditor_edit::{CameraProfileSelection, HighlightMethod, NormalizedCropRect, ToneCurve};
     use rohditor_raw::{
         CameraColorMatrix, CaptureMetadata, CfaPattern, LevelPattern, PhotometricInterpretation,
         RawDecoder, RawFileInfo, RawFrame, RawlerDecoder,
@@ -1865,6 +1964,7 @@ pub(crate) mod tests {
                 blue: 1.0,
             },
             Matrix3::identity(),
+            None,
         );
         assert_eq!(parameters[12], 5);
         assert_eq!(parameters[13..17], [7, 5, 5, 7]);
@@ -1909,6 +2009,7 @@ pub(crate) mod tests {
                 blue: 1.0,
             },
             Matrix3::identity(),
+            None,
         );
         assert_eq!(neutral_parameters[1], 0);
         assert_eq!(neutral_parameters[20], 0);
@@ -2162,6 +2263,112 @@ pub(crate) mod tests {
             .render(&source, &recipe, OutputPolicy::ChromaCompressToSrgb, None)
             .expect("GPU chroma-compressed preview should render");
         assert_gpu_reconstructed_frame_matches_cpu(&processor, &frame, options, &recipe, &gpu);
+    }
+
+    /// A matrix profile for the synthetic fixture camera carrying a hue/sat map
+    /// and a look table with deliberately uneven, asymmetric deltas.
+    fn profile_with_tables(
+        hue_sat_encoding: bool,
+        look_value_divisions: u32,
+    ) -> rohditor_camera_profile::MatrixCameraProfile {
+        use rohditor_camera_profile::{
+            CalibrationIlluminant, MatrixCalibration, MatrixCameraProfile, ProfileTable,
+        };
+        let table = |hue: u32, sat: u32, val: u32, srgb_encoded: bool, seed: f32| ProfileTable {
+            hue_divisions: hue,
+            sat_divisions: sat,
+            val_divisions: val,
+            srgb_encoded,
+            deltas: (0..hue * sat * val)
+                .map(|index| {
+                    let phase = index as f32 * 0.7 + seed;
+                    [
+                        18.0 * phase.sin(),
+                        1.0 + 0.35 * (phase * 1.3).cos(),
+                        1.0 + 0.2 * (phase * 0.9).sin(),
+                    ]
+                })
+                .collect(),
+        };
+        MatrixCameraProfile {
+            format_version: 1,
+            source_sha256: "b".repeat(64),
+            name: "GPU table fixture".to_owned(),
+            camera_model: "GPU fixture".to_owned(),
+            copyright: None,
+            calibrations: vec![MatrixCalibration {
+                illuminant: CalibrationIlluminant::D65,
+                xyz_to_camera: [
+                    [3.2406, -1.5372, -0.4986],
+                    [-0.9689, 1.8758, 0.0415],
+                    [0.0557, -0.2040, 1.0570],
+                ],
+                forward_camera_to_xyz_d50: None,
+                hue_sat_map: Some(table(12, 4, 1, hue_sat_encoding, 0.3)),
+            }],
+            look_table: Some(table(6, 3, look_value_divisions, false, 1.1)),
+            tone_curve: None,
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a locally available Vulkan-capable GPU; run cargo test -p rohditor-gpu -- --ignored"]
+    fn gpu_profile_tables_match_cpu_reference_and_do_not_leak_between_renders() {
+        let _gpu_test_guard = gpu_test_guard();
+        let Some(processor) = gpu_test_processor() else {
+            return;
+        };
+        let frame = synthetic_frame(Orientation::Normal);
+        let options = PreviewOptions {
+            max_long_edge: 16,
+            ..PreviewOptions::default()
+        };
+        let plain = standard_dynamic_recipe();
+        let mut recipes = Vec::new();
+        for (hue_sat_encoding, look_value_divisions) in [(false, 1), (true, 3)] {
+            let mut recipe = plain.clone();
+            recipe.color.camera_profile = CameraProfileSelection::Matrix(profile_with_tables(
+                hue_sat_encoding,
+                look_value_divisions,
+            ));
+            recipes.push(recipe);
+        }
+        // The plain recipe is rendered last: stale table data from the earlier
+        // renders must not affect a profile without tables.
+        recipes.push(plain);
+        for recipe in &recipes {
+            let reconstructed = CpuPipeline::default()
+                .prepare_preview_reconstruction(&frame, recipe, options)
+                .expect("synthetic reconstruction should develop");
+            let source = processor
+                .upload_prepared(
+                    GpuPreviewUpload::from_reconstructed_preview(
+                        &reconstructed,
+                        recipe.color.white_balance,
+                    )
+                    .expect("camera-native source upload should work"),
+                )
+                .expect("camera-native source should upload");
+            let gpu = processor
+                .render(&source, recipe, OutputPolicy::ClipToSrgb, None)
+                .expect("GPU preview with profile tables should render");
+            let stats =
+                gpu_reconstructed_frame_parity_stats(&processor, &frame, options, recipe, &gpu);
+            assert!(
+                stats.max_abs <= 2,
+                "max CPU/GPU difference was {} sRGB codes (CPU {}, GPU {})",
+                stats.max_abs,
+                stats.max_cpu,
+                stats.max_gpu
+            );
+        }
+    }
+
+    #[test]
+    fn shader_table_offset_matches_the_rust_buffer_layout() {
+        assert!(include_str!("../preview.wgsl").contains(&format!(
+            "PROFILE_LOOK_TABLE_OFFSET: u32 = {PROFILE_LOOK_TABLE_OFFSET_FLOATS}u"
+        )));
     }
 
     #[test]
@@ -2513,6 +2720,66 @@ pub(crate) mod tests {
             stats.mean_abs(),
             stats.over_two,
         );
+    }
+
+    #[test]
+    #[ignore = "requires the private Sony ARW corpus, the RawTherapee reference DCPs, and a Vulkan-capable GPU"]
+    fn private_arw_gpu_matches_cpu_with_a_real_adobe_dcp() {
+        let _gpu_test_guard = gpu_test_guard();
+        let Some(processor) = gpu_test_processor() else {
+            return;
+        };
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata");
+        let source = root.join("private/DSC00851.ARW");
+        let dcp = root.join(
+            "generated/reference/tools/rawtherapee/squashfs-root/usr/bin/dcpprofiles/SONY ILCE-6400.dcp",
+        );
+        if !source.is_file() || !dcp.is_file() {
+            eprintln!("skipping real-DCP GPU parity: corpus or reference DCP is unavailable");
+            return;
+        }
+        let profile = rohditor_camera_profile::parse_dcp_file(&dcp).expect("real DCP should parse");
+        let decoder = RawlerDecoder::default();
+        let frame = decoder
+            .open(&source)
+            .expect("private ARW should open")
+            .decode()
+            .expect("private ARW should decode");
+        let options = PreviewOptions::default();
+        for (label, selection) in [
+            ("automatic", CameraProfileSelection::Automatic),
+            ("real DCP", CameraProfileSelection::Matrix(profile)),
+        ] {
+            let mut recipe = EditRecipe::default();
+            recipe.color.camera_profile = selection;
+            let reconstructed = CpuPipeline::default()
+                .prepare_preview_reconstruction(&frame, &recipe, options)
+                .expect("private preview reconstruction should develop");
+            let upload = processor
+                .upload_prepared(
+                    GpuPreviewUpload::from_reconstructed_preview(
+                        &reconstructed,
+                        recipe.color.white_balance,
+                    )
+                    .expect("private camera-native source should pack"),
+                )
+                .expect("private camera-native source should upload");
+            let gpu = processor
+                .render(&upload, &recipe, OutputPolicy::ClipToSrgb, None)
+                .expect("private GPU preview should render");
+            let stats =
+                gpu_reconstructed_frame_parity_stats(&processor, &frame, options, &recipe, &gpu);
+            eprintln!(
+                "{label}: max_abs={}, mean_abs={:.3}, over_two={}",
+                stats.max_abs,
+                stats.mean_abs(),
+                stats.over_two
+            );
+            assert!(
+                stats.max_abs <= 2,
+                "{label}: GPU differs from the CPU reference"
+            );
+        }
     }
 
     #[test]
@@ -2881,6 +3148,34 @@ pub(crate) mod tests {
             ("standard", standard_dynamic_recipe()),
             ("neutral", neutral_recipe()),
         ];
+        // The base-rendering table is shared by every render, so Matched must
+        // overwrite it and the following Standard render must restore it.
+        let mut recipe = standard_dynamic_recipe();
+        recipe.rendering.profile = RenderingProfileSelection::MATCHED;
+        recipe.rendering.camera_tone = Some(rohditor_edit::CameraTone {
+            knots: vec![
+                [0.0, 0.0],
+                [0.1, 0.03],
+                [0.4, 0.62],
+                [0.75, 0.9],
+                [1.0, 1.0],
+            ],
+        });
+        controls.push(("matched", recipe));
+        controls.push(("standard_after_matched", standard_dynamic_recipe()));
+        let mut recipe = standard_dynamic_recipe();
+        recipe.rendering.profile = RenderingProfileSelection::MATCHED;
+        recipe.rendering.camera_tone = Some(rohditor_edit::CameraTone::static_fallback());
+        recipe.rendering.camera_chroma = Some(rohditor_edit::CameraChroma {
+            gains: [1.7, 1.5, 1.3, 1.2, 1.0, 0.9, 0.7, 0.6, 0.5],
+        });
+        controls.push(("matched_chroma", recipe));
+        // No fitted look at all: the static fallback pair.
+        let mut recipe = standard_dynamic_recipe();
+        recipe.rendering.profile = RenderingProfileSelection::MATCHED;
+        controls.push(("matched_fallback", recipe));
+        controls.push(("standard_after_chroma", standard_dynamic_recipe()));
+
         let mut recipe = neutral_recipe();
         recipe.light.exposure_ev = 0.8;
         controls.push(("exposure", recipe));

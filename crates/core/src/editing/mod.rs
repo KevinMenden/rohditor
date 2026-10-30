@@ -13,16 +13,22 @@ pub use white_balance::{
     WhiteBalanceMode, WhiteBalanceModeMemory, white_balance_from_camera_sample,
 };
 
-use rohditor_edit::{EditRecipe, WhiteBalance};
+use rohditor_edit::{EditRecipe, RenderingProfileSelection, WhiteBalance};
 
 use crate::WhiteBalanceCoordinates;
 
 /// The recipe a document starts from, or is reset to. When the source's As Shot
 /// coordinates are known the balance is expressed as Temperature/Tint so the
 /// sliders start at the camera's own white point.
+///
+/// New documents start on the Matched rendering: the photo's own camera look
+/// once fitted, and the typical camera look until then. `EditRecipe::default()`
+/// keeps the schema default (Standard) so recipes stored without a profile
+/// render as before.
 #[must_use]
 pub fn default_recipe(as_shot: Option<WhiteBalanceCoordinates>) -> EditRecipe {
     let mut recipe = EditRecipe::default();
+    recipe.rendering.profile = RenderingProfileSelection::MATCHED;
     if let Some(coordinates) = as_shot {
         recipe.color.white_balance = WhiteBalance::TemperatureTint {
             temperature: coordinates.temperature,
@@ -38,7 +44,9 @@ mod tests {
 
     #[test]
     fn default_recipe_uses_as_shot_coordinates_when_known() {
-        assert_eq!(default_recipe(None), EditRecipe::default());
+        let mut expected = EditRecipe::default();
+        expected.rendering.profile = RenderingProfileSelection::MATCHED;
+        assert_eq!(default_recipe(None), expected);
         let recipe = default_recipe(Some(WhiteBalanceCoordinates {
             temperature: 5_200.0,
             tint: -0.2,

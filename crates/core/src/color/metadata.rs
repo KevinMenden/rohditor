@@ -1,6 +1,8 @@
 // RAW/profile adapters are kept behind the shared color facade.
 use rayon::prelude::*;
-use rohditor_camera_profile::{CAMERA_PROFILE_EVALUATOR_VERSION, CalibrationIlluminant};
+use rohditor_camera_profile::{
+    CAMERA_PROFILE_EVALUATOR_VERSION, CalibrationIlluminant, MatrixCameraProfile, ProfileTable,
+};
 use rohditor_color::{
     A_WHITE, D50_WHITE, D65_WHITE, GamutMapResult, clip_linear_srgb, compress_linear_srgb_chroma,
     linear_srgb_to_srgb,
@@ -20,6 +22,65 @@ use crate::white_balance::{
 };
 use crate::{OutputPolicy, PipelineError};
 
+/// The colour look a DCP profile carries beyond its matrices: the hue/saturation
+/// map of the selected calibration and the profile's look table, applied in the
+/// linear ProPhoto RGB space DNG tables are authored in.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProfileLook {
+    pub to_prophoto: rohditor_color::Matrix3,
+    pub from_prophoto: rohditor_color::Matrix3,
+    pub hue_sat_map: Option<ProfileTable>,
+    pub look_table: Option<ProfileTable>,
+}
+
+impl ProfileLook {
+    /// Build the look for a calibration of `profile`, or `None` when the
+    /// profile carries no tables.
+    fn for_calibration(
+        profile: &MatrixCameraProfile,
+        calibration: &rohditor_camera_profile::MatrixCalibration,
+    ) -> Result<Option<Self>, PipelineError> {
+        if calibration.hue_sat_map.is_none() && profile.look_table.is_none() {
+            return Ok(None);
+        }
+        let (to_prophoto, from_prophoto) =
+            rohditor_color::rec2020_prophoto_matrices().map_err(|error| {
+                PipelineError::InvalidMetadata {
+                    field: "camera_profile",
+                    reason: error.to_string(),
+                }
+            })?;
+        Ok(Some(Self {
+            to_prophoto,
+            from_prophoto,
+            hue_sat_map: calibration.hue_sat_map.clone(),
+            look_table: profile.look_table.clone(),
+        }))
+    }
+
+    /// Apply the tables to one linear Rec.2020 pixel, in DNG order: the
+    /// hue/saturation map, then the look table.
+    #[must_use]
+    pub fn apply(&self, rgb: [f32; 3]) -> [f32; 3] {
+        let mut prophoto = self.to_prophoto.transform(rgb);
+        for table in [&self.hue_sat_map, &self.look_table].into_iter().flatten() {
+            prophoto = rohditor_color::apply_delta_table(&delta_table(table), prophoto);
+        }
+        self.from_prophoto.transform(prophoto)
+    }
+}
+
+/// Borrow a profile table as the colour crate's evaluation view.
+pub fn delta_table(table: &ProfileTable) -> rohditor_color::DeltaTable<'_> {
+    rohditor_color::DeltaTable {
+        hue_divisions: table.hue_divisions as usize,
+        sat_divisions: table.sat_divisions as usize,
+        val_divisions: table.val_divisions as usize,
+        srgb_encoded: table.srgb_encoded,
+        deltas: &table.deltas,
+    }
+}
+
 /// Validated transform selected from the decoder's camera calibration metadata.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CameraColorTransform {
@@ -29,6 +90,8 @@ pub struct CameraColorTransform {
     pub unbalanced_camera_to_xyz: Matrix3,
     pub camera_to_xyz_d65: Matrix3,
     pub camera_to_linear_rec2020: Matrix3,
+    /// DCP hue/saturation and look tables, applied after the matrix.
+    pub profile_look: Option<ProfileLook>,
 }
 
 /// Compact camera facts retained after RAW metadata probing. It contains no
@@ -123,6 +186,7 @@ pub struct ResolvedCameraColour {
     /// source gains remain authoritative when projection is unavailable.
     pub as_shot_coordinates: Option<WhiteBalanceCoordinates>,
     pub provenance: CameraProfileProvenance,
+    pub profile_look: Option<ProfileLook>,
 }
 
 impl ResolvedCameraColour {
@@ -133,6 +197,7 @@ impl ResolvedCameraColour {
             unbalanced_camera_to_xyz: self.unbalanced_camera_to_xyz,
             camera_to_xyz_d65: self.camera_to_xyz_d65,
             camera_to_linear_rec2020: self.camera_to_linear_rec2020,
+            profile_look: self.profile_look.clone(),
         }
     }
 }
@@ -142,6 +207,9 @@ enum CameraProfileKeyMode {
     Automatic,
     Matrix {
         calibrations: Vec<ProfileCalibrationKey>,
+        /// Content fingerprints of the tables the pipeline will apply: the
+        /// preferred calibration's hue/saturation map and the look table.
+        tables: [Option<u64>; 2],
     },
 }
 
@@ -157,6 +225,23 @@ struct ProfileCalibrationKey {
 pub struct CameraProfileKey {
     evaluator_version: u8,
     mode: CameraProfileKeyMode,
+}
+
+/// Hash of everything in a table that affects pixels.
+fn table_fingerprint(table: &ProfileTable) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::hash::DefaultHasher::new();
+    (
+        table.hue_divisions,
+        table.sat_divisions,
+        table.val_divisions,
+        table.srgb_encoded,
+    )
+        .hash(&mut hasher);
+    for delta in &table.deltas {
+        delta.map(f32::to_bits).hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 /// Build a cache identity from pixel-producing profile payload, excluding
@@ -193,7 +278,17 @@ pub fn camera_profile_key(selection: &CameraProfileSelection) -> CameraProfileKe
                 })
                 .collect::<Vec<_>>();
             calibrations.sort_by_key(|calibration| calibration.illuminant.priority());
-            CameraProfileKeyMode::Matrix { calibrations }
+            let tables = [
+                profile
+                    .preferred_calibration()
+                    .and_then(|calibration| calibration.hue_sat_map.as_ref()),
+                profile.look_table.as_ref(),
+            ]
+            .map(|table| table.map(table_fingerprint));
+            CameraProfileKeyMode::Matrix {
+                calibrations,
+                tables,
+            }
         }
     };
     CameraProfileKey {
@@ -263,7 +358,7 @@ pub fn resolve_camera_colour(
                         reason: "profile has no supported calibration".to_owned(),
                     })?;
             let forward_matrix_used = selected.forward_camera_to_xyz_d50.is_some();
-            let transform = profile_camera_color(selected, &profile.name)?;
+            let transform = profile_camera_color(profile, selected)?;
             (
                 transform,
                 CameraProfileProvenance::Matrix {
@@ -301,6 +396,7 @@ pub fn resolve_camera_colour(
         unbalanced_camera_to_xyz: transform.unbalanced_camera_to_xyz,
         camera_to_xyz_d65: transform.camera_to_xyz_d65,
         camera_to_linear_rec2020: transform.camera_to_linear_rec2020,
+        profile_look: transform.profile_look,
         white_balance_gains,
         as_shot_coordinates,
         provenance,
@@ -503,9 +599,10 @@ fn fallback_xyz_to_camera(
 }
 
 fn profile_camera_color(
+    profile: &MatrixCameraProfile,
     calibration: &rohditor_camera_profile::MatrixCalibration,
-    source_name: &str,
 ) -> Result<CameraColorTransform, PipelineError> {
+    let source_name = profile.name.as_str();
     let camera_to_xyz_d65 = if let Some(forward) = calibration.forward_camera_to_xyz_d50 {
         Matrix3::new(forward).then(chromatic_adaptation_to_d65(D50_WHITE)?)
     } else {
@@ -519,6 +616,7 @@ fn profile_camera_color(
         unbalanced_camera_to_xyz: Matrix3::new(calibration.xyz_to_camera).inverse()?,
         camera_to_linear_rec2020: camera_to_xyz_d65.then(XYZ_D65_TO_LINEAR_REC2020),
         camera_to_xyz_d65,
+        profile_look: ProfileLook::for_calibration(profile, calibration)?,
     })
 }
 
@@ -533,6 +631,7 @@ fn matrix_camera_color(
         unbalanced_camera_to_xyz: xyz_to_camera.inverse()?,
         camera_to_linear_rec2020: camera_to_xyz_d65.then(XYZ_D65_TO_LINEAR_REC2020),
         camera_to_xyz_d65,
+        profile_look: None,
     })
 }
 
@@ -607,7 +706,9 @@ fn illuminant(name: &str) -> Option<([f32; 3], u8)> {
 
 #[cfg(test)]
 mod tests {
-    use rohditor_camera_profile::{CalibrationIlluminant, MatrixCalibration, MatrixCameraProfile};
+    use rohditor_camera_profile::{
+        CalibrationIlluminant, MatrixCalibration, MatrixCameraProfile, ProfileTable,
+    };
     use rohditor_edit::{CameraProfileSelection, WhiteBalance};
     use rohditor_raw::{CameraColorMatrix, CameraMatrixOrigin};
 
@@ -845,6 +946,61 @@ mod tests {
         assert_ne!(camera_profile_key(&first), camera_profile_key(&second));
     }
 
+    fn profile_with_tables(sat_scale: f32) -> MatrixCameraProfile {
+        let table = |sat_scale: f32| ProfileTable {
+            hue_divisions: 6,
+            sat_divisions: 3,
+            val_divisions: 1,
+            srgb_encoded: false,
+            deltas: vec![[0.0, sat_scale, 1.0]; 18],
+        };
+        let mut profile = profile(None);
+        profile.calibrations[0].hue_sat_map = Some(table(sat_scale));
+        profile.look_table = Some(table(1.0));
+        profile.validate().expect("table profile is valid");
+        profile
+    }
+
+    #[test]
+    fn profile_tables_resolve_into_a_look_that_changes_colour_but_not_grey() {
+        let resolved = resolve_camera_colour(
+            &calibration(),
+            &CameraProfileSelection::Matrix(profile_with_tables(0.5)),
+            WhiteBalance::AsShot,
+        )
+        .expect("table profile should resolve");
+        let look = resolved.profile_look.expect("tables produce a look");
+        // Halving saturation moves a colourful pixel toward its value...
+        let colourful = look.apply([0.6, 0.3, 0.1]);
+        assert!(colourful[0] < 0.6 && colourful[2] > 0.1);
+        // ...and leaves neutral grey exactly where it was.
+        let grey = look.apply([0.4, 0.4, 0.4]);
+        assert!(grey.iter().all(|value| (value - 0.4).abs() < 1.0e-4));
+
+        let matrix_only = resolve_camera_colour(
+            &calibration(),
+            &CameraProfileSelection::Matrix(profile(None)),
+            WhiteBalance::AsShot,
+        )
+        .expect("matrix profile should resolve");
+        assert!(matrix_only.profile_look.is_none());
+    }
+
+    #[test]
+    fn profile_key_distinguishes_table_contents() {
+        let key = |sat_scale| {
+            camera_profile_key(&CameraProfileSelection::Matrix(profile_with_tables(
+                sat_scale,
+            )))
+        };
+        assert_eq!(key(0.5), key(0.5));
+        assert_ne!(key(0.5), key(0.6));
+        assert_ne!(
+            key(1.0),
+            camera_profile_key(&CameraProfileSelection::Matrix(profile(None)))
+        );
+    }
+
     fn calibration() -> CameraCalibration {
         CameraCalibration {
             make: "Sony".to_owned(),
@@ -872,7 +1028,10 @@ mod tests {
                 illuminant: CalibrationIlluminant::D50,
                 xyz_to_camera: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
                 forward_camera_to_xyz_d50: forward,
+                hue_sat_map: None,
             }],
+            look_table: None,
+            tone_curve: None,
         };
         profile.validate().expect("test profile is valid");
         profile
