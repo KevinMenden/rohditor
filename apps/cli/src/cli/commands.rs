@@ -24,6 +24,7 @@ use rohditor_edit::{
     OpticsAdjustments, RenderingProfileSelection, SATURATION_RANGE, SHADOWS_RANGE,
     TEMPERATURE_RANGE, TINT_RANGE, TONE_CURVE_RANGE, VIBRANCE_RANGE, WHITES_RANGE, WhiteBalance,
 };
+use rohditor_gpu::{ExportBackend, ExportRender, FallbackExporter};
 use rohditor_image::{DisplayRgbImage, DisplayTransfer, Orientation};
 use rohditor_raw::{
     EncodedPreviewFormat, ImageRect, PhotometricInterpretation, RawDecoder, RawFileInfo,
@@ -782,6 +783,16 @@ enum ExportProcessor {
     Gpu,
 }
 
+impl From<ExportProcessor> for ExportBackend {
+    fn from(processor: ExportProcessor) -> Self {
+        match processor {
+            ExportProcessor::Auto => Self::PreferGpu,
+            ExportProcessor::Cpu => Self::Cpu,
+            ExportProcessor::Gpu => Self::RequireGpu,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct DevelopArguments {
     processor: ExportProcessor,
@@ -1051,70 +1062,10 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
     recipe
         .validate()
         .context("could not validate the development recipe")?;
-    if arguments.processor != ExportProcessor::Cpu {
-        let gpu_result = rohditor_gpu::GpuExportProcessor::headless().and_then(|mut gpu| {
-            let capabilities = gpu.capabilities().clone();
-            gpu.render(
-                &pipeline,
-                &frame,
-                &recipe,
-                RenderOptions {
-                    raw_crop_policy: arguments.crop.into(),
-                    demosaic: arguments.demosaic.into(),
-                    output_policy: arguments.output_gamut.into(),
-                },
-                export_settings.format.bit_depth(),
-                export_settings.dithering,
-                &rohditor_core::CancellationToken::new(),
-            )
-            .map(|result| (result, capabilities))
-        });
-        match gpu_result {
-            Ok((result, capabilities)) => {
-                let encode_started = Instant::now();
-                let report = export_image(output, &result.image, &frame.info, export_settings)
-                    .with_context(|| {
-                        format!("could not export developed image to {}", output.display())
-                    })?;
-                return write_stdout(&format!(
-                    "Developed {}x{} {}-bit sRGB {} to {} ({} bytes)\nColor processor: GPU, {} ({}, {} {})\nSensor processor: {}\nRAW decode: {:?}; Full-quality preparation: {:?}; GPU upload: {:?}; color and readback: {:?}; encoding: {:?}\nGPU capture: {} tiles of {} pixels, halo {}, compute/wait {:?}, upload {:?}, readback {:?}\nGPU allocation estimate: {} MiB; CPU buffer estimate: {} MiB; uploaded {} bytes; read back {} bytes in {} submissions\nOutput gamut pixel counts: unavailable on GPU",
-                    report.width,
-                    report.height,
-                    report.bit_depth.bits(),
-                    export_settings.format.description(),
-                    output.display(),
-                    report.bytes_written,
-                    capabilities.adapter_name,
-                    capabilities.backend,
-                    capabilities.driver,
-                    capabilities.driver_info,
-                    if result.sensor_gpu { "GPU" } else { "CPU" },
-                    decode_time,
-                    result.preparation,
-                    result.upload_time,
-                    result.color_and_readback_time,
-                    encode_started.elapsed(),
-                    result.capture.tiles,
-                    result.capture.tile_edge,
-                    result.capture.halo,
-                    result.capture.compute_and_wait,
-                    result.capture.upload,
-                    result.capture.readback,
-                    result.estimated_gpu_bytes / (1024 * 1024),
-                    result.estimated_cpu_bytes / (1024 * 1024),
-                    result.uploaded_bytes,
-                    result.readback_bytes,
-                    result.submissions,
-                ));
-            }
-            Err(error) if arguments.processor == ExportProcessor::Gpu => {
-                return Err(error).context("GPU export was required");
-            }
-            Err(error) => eprintln!("GPU export unavailable; using CPU: {error}"),
-        }
-    }
-    let result = pipeline
-        .render_export(
+    let rendered = FallbackExporter::default()
+        .render(
+            arguments.processor.into(),
+            &pipeline,
             &frame,
             &recipe,
             RenderOptions {
@@ -1124,8 +1075,52 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
             },
             export_settings.format.bit_depth(),
             export_settings.dithering,
+            |error| eprintln!("GPU export unavailable; using CPU: {error}"),
         )
         .with_context(|| format!("could not develop {}", file.display()))?;
+    let result = match rendered {
+        ExportRender::Gpu {
+            result,
+            capabilities,
+        } => {
+            let encode_started = Instant::now();
+            let report = export_image(output, &result.image, &frame.info, export_settings)
+                .with_context(|| {
+                    format!("could not export developed image to {}", output.display())
+                })?;
+            return write_stdout(&format!(
+                "Developed {}x{} {}-bit sRGB {} to {} ({} bytes)\nColor processor: GPU, {} ({}, {} {})\nSensor processor: {}\nRAW decode: {:?}; Full-quality preparation: {:?}; GPU upload: {:?}; color and readback: {:?}; encoding: {:?}\nGPU capture: {} tiles of {} pixels, halo {}, compute/wait {:?}, upload {:?}, readback {:?}\nGPU allocation estimate: {} MiB; CPU buffer estimate: {} MiB; uploaded {} bytes; read back {} bytes in {} submissions\nOutput gamut pixel counts: unavailable on GPU",
+                report.width,
+                report.height,
+                report.bit_depth.bits(),
+                export_settings.format.description(),
+                output.display(),
+                report.bytes_written,
+                capabilities.adapter_name,
+                capabilities.backend,
+                capabilities.driver,
+                capabilities.driver_info,
+                if result.sensor_gpu { "GPU" } else { "CPU" },
+                decode_time,
+                result.preparation,
+                result.upload_time,
+                result.color_and_readback_time,
+                encode_started.elapsed(),
+                result.capture.tiles,
+                result.capture.tile_edge,
+                result.capture.halo,
+                result.capture.compute_and_wait,
+                result.capture.upload,
+                result.capture.readback,
+                result.estimated_gpu_bytes / (1024 * 1024),
+                result.estimated_cpu_bytes / (1024 * 1024),
+                result.uploaded_bytes,
+                result.readback_bytes,
+                result.submissions,
+            ));
+        }
+        ExportRender::Cpu { result, .. } => result,
+    };
     let source_info = frame.info.clone();
     drop(frame);
     let encode_started = Instant::now();
