@@ -205,7 +205,9 @@ fn display_error(
         .flat_map(|row| row[..expected.width() * 3].chunks_exact(3));
     for (index, (actual, expected)) in actual
         .rgba
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .zip(expected_samples)
         .enumerate()
     {
