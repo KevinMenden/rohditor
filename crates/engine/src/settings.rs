@@ -15,7 +15,7 @@ const SCHEMA_VERSION: u32 = 1;
 const SETTINGS_FILE_NAME: &str = "settings.json";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct AppSettings {
+pub struct AppSettings {
     schema_version: u32,
     demosaic: DemosaicAlgorithm,
     output_policy: OutputPolicy,
@@ -36,32 +36,32 @@ impl Default for AppSettings {
 }
 
 impl AppSettings {
-    pub(crate) const fn demosaic(self) -> DemosaicAlgorithm {
+    pub const fn demosaic(self) -> DemosaicAlgorithm {
         self.demosaic
     }
 
-    pub(crate) fn set_demosaic(&mut self, demosaic: DemosaicAlgorithm) {
+    pub fn set_demosaic(&mut self, demosaic: DemosaicAlgorithm) {
         debug_assert!(demosaic != DemosaicAlgorithm::Bilinear);
         self.demosaic = demosaic;
     }
 
-    pub(crate) const fn output_policy(self) -> OutputPolicy {
+    pub const fn output_policy(self) -> OutputPolicy {
         self.output_policy
     }
 
-    pub(crate) fn set_output_policy(&mut self, output_policy: OutputPolicy) {
+    pub fn set_output_policy(&mut self, output_policy: OutputPolicy) {
         self.output_policy = output_policy;
     }
 
-    pub(crate) const fn cpu_only(self) -> bool {
+    pub const fn cpu_only(self) -> bool {
         self.cpu_only
     }
 
-    pub(crate) fn set_cpu_only(&mut self, cpu_only: bool) {
+    pub fn set_cpu_only(&mut self, cpu_only: bool) {
         self.cpu_only = cpu_only;
     }
 
-    pub(crate) fn render_options(self) -> RenderOptions {
+    pub fn render_options(self) -> RenderOptions {
         RenderOptions {
             demosaic: self.demosaic,
             output_policy: self.output_policy,
@@ -71,9 +71,9 @@ impl AppSettings {
 }
 
 #[derive(Debug)]
-pub(crate) struct SettingsLoad {
-    pub(crate) settings: AppSettings,
-    pub(crate) warning: Option<String>,
+pub struct SettingsLoad {
+    pub settings: AppSettings,
+    pub warning: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -87,15 +87,17 @@ struct StoredSettings {
     cpu_only: Option<bool>,
 }
 
-pub(crate) fn load() -> SettingsLoad {
-    let Some(directory) = storage::config_directory() else {
+/// Load settings from `config_directory`; `None` means the application could
+/// not determine one, which is reported as a warning with default settings.
+pub fn load(config_directory: Option<&Path>) -> SettingsLoad {
+    let Some(directory) = config_directory else {
         return load_failure("Could not determine the Rohditor configuration directory");
     };
     load_from_path(&directory.join(SETTINGS_FILE_NAME))
 }
 
-pub(crate) fn save(settings: AppSettings) -> io::Result<()> {
-    let directory = storage::config_directory().ok_or_else(|| {
+pub fn save(config_directory: Option<&Path>, settings: AppSettings) -> io::Result<()> {
+    let directory = config_directory.ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
             "could not determine the Rohditor configuration directory",
@@ -104,7 +106,7 @@ pub(crate) fn save(settings: AppSettings) -> io::Result<()> {
     save_to_path(&directory.join(SETTINGS_FILE_NAME), settings)
 }
 
-pub(crate) fn resolve_startup_settings(
+pub fn resolve_startup_settings(
     persisted: AppSettings,
     command_line_override: Option<DemosaicAlgorithm>,
 ) -> AppSettings {

@@ -2912,6 +2912,7 @@ dependencies = [
  "rohditor-core",
  "rohditor-demosaic",
  "rohditor-edit",
+ "rohditor-engine",
  "rohditor-gpu",
  "rohditor-image",
  "rohditor-raw",
@@ -2933,6 +2934,27 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "rohditor-engine"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "pollster",
+ "rohditor-camera-profile",
+ "rohditor-catalog",
+ "rohditor-core",
+ "rohditor-demosaic",
+ "rohditor-edit",
+ "rohditor-gpu",
+ "rohditor-image",
+ "rohditor-raw",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tracing",
+ "wgpu",
 ]
 
 [[package]]

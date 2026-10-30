@@ -1,4 +1,4 @@
-//! Installed matrix-only DCP profiles for the desktop application.
+//! Installed matrix-only DCP profiles, stored under an app-supplied directory.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -16,16 +16,22 @@ const MAX_SCAN_WARNINGS: usize = 4;
 
 /// Validated profiles available to the desktop's current session.
 #[derive(Debug, Default)]
-pub(crate) struct CameraProfileRegistry {
+pub struct CameraProfileRegistry {
+    /// Where imported profiles are installed; `None` when the application
+    /// has no configuration directory.
+    directory: Option<PathBuf>,
     profiles: Vec<MatrixCameraProfile>,
     warning: Option<String>,
     warning_count: usize,
 }
 
 impl CameraProfileRegistry {
-    pub(crate) fn load() -> Self {
-        let mut registry = Self::default();
-        let Some(directory) = profile_directory() else {
+    pub fn load(config_directory: Option<&Path>) -> Self {
+        let mut registry = Self {
+            directory: config_directory.map(|directory| directory.join(PROFILE_DIRECTORY)),
+            ..Self::default()
+        };
+        let Some(directory) = registry.directory.clone() else {
             return registry;
         };
         let mut paths = BTreeSet::new();
@@ -108,11 +114,11 @@ impl CameraProfileRegistry {
         registry
     }
 
-    pub(crate) fn warning(&self) -> Option<&str> {
+    pub fn warning(&self) -> Option<&str> {
         self.warning.as_deref()
     }
 
-    pub(crate) fn compatible_profiles(&self, info: &RawFileInfo) -> Vec<MatrixCameraProfile> {
+    pub fn compatible_profiles(&self, info: &RawFileInfo) -> Vec<MatrixCameraProfile> {
         self.profiles
             .iter()
             .filter(|profile| {
@@ -125,7 +131,7 @@ impl CameraProfileRegistry {
     /// Parse and, when possible, install a profile. A write failure is a
     /// warning rather than an import failure because the validated payload can
     /// still be embedded in the current recipe.
-    pub(crate) fn import(
+    pub fn import(
         &mut self,
         path: &Path,
         info: &RawFileInfo,
@@ -154,7 +160,7 @@ impl CameraProfileRegistry {
                     profile.name
                 ));
             } else {
-                match profile_directory() {
+                match self.directory.as_deref() {
                     Some(directory) => {
                         let destination = directory.join(format!("{}.dcp", profile.source_sha256));
                         if let Err(error) = storage::write_transactionally(&destination, &bytes) {
@@ -198,10 +204,6 @@ impl CameraProfileRegistry {
             None => self.warning = Some(warning),
         }
     }
-}
-
-fn profile_directory() -> Option<PathBuf> {
-    storage::config_directory().map(|directory| directory.join(PROFILE_DIRECTORY))
 }
 
 fn is_dcp_path(path: &Path) -> bool {

@@ -2,7 +2,7 @@ use eframe::egui;
 use rohditor_core::{
     CorrectionComponents, DatabaseProvenance, LensProfileSummary, MetadataField, ProfileMatch,
 };
-use rohditor_edit::LensProfileSelection;
+use rohditor_edit::{LensProfileSelection, OpticsAction};
 
 use super::theme::colors;
 use super::widgets;
@@ -28,15 +28,6 @@ pub(crate) struct OpticsPanelModel {
     pub applied: Option<CorrectionComponents>,
     pub used_infinity_distance_fallback: bool,
     pub scale: Option<f32>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) enum OpticsAction {
-    SelectProfile(LensProfileSelection),
-    SetDistortion(bool),
-    SetVignetting(bool),
-    SetChromaticAberration(bool),
-    Reset,
 }
 
 pub(crate) fn show(

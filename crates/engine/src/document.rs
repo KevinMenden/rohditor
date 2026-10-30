@@ -6,7 +6,7 @@ const HISTORY_LIMIT: usize = 100;
 
 /// Identity attached to every asynchronous preview request and result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct PreviewTicket {
+pub struct PreviewTicket {
     pub document_id: u64,
     pub revision: u64,
     /// Monotonic presentation identity. A crop-tool full-frame request may
@@ -16,14 +16,14 @@ pub(crate) struct PreviewTicket {
 }
 
 impl PreviewTicket {
-    pub(crate) const fn is_current(self, document_id: u64, revision: u64, sequence: u64) -> bool {
+    pub const fn is_current(self, document_id: u64, revision: u64, sequence: u64) -> bool {
         self.document_id == document_id && self.revision == revision && self.sequence == sequence
     }
 }
 
 /// The presentation expected by the viewport for its current preview ticket.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum PreviewIntent {
+pub enum PreviewIntent {
     #[default]
     CommittedFit,
     CropToolFullFrame,
@@ -38,7 +38,7 @@ struct Gesture {
 
 /// Current recipe plus bounded, in-memory undo/redo history.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct EditSession {
+pub struct EditSession {
     recipe: EditRecipe,
     saved_recipe: EditRecipe,
     revision: u64,
@@ -48,7 +48,7 @@ pub(crate) struct EditSession {
 }
 
 impl EditSession {
-    pub(crate) fn from_saved(recipe: EditRecipe) -> Self {
+    pub fn from_saved(recipe: EditRecipe) -> Self {
         Self {
             saved_recipe: recipe.clone(),
             recipe,
@@ -56,21 +56,21 @@ impl EditSession {
         }
     }
 
-    pub(crate) const fn recipe(&self) -> &EditRecipe {
+    pub const fn recipe(&self) -> &EditRecipe {
         &self.recipe
     }
 
-    pub(crate) const fn revision(&self) -> u64 {
+    pub const fn revision(&self) -> u64 {
         self.revision
     }
 
-    pub(crate) fn is_dirty(&self) -> bool {
+    pub fn is_dirty(&self) -> bool {
         self.recipe != self.saved_recipe
     }
 
     /// Mark a background save clean only when it wrote this exact revision.
     /// A completion for an older snapshot must not hide newer edits.
-    pub(crate) fn mark_saved_if_current(&mut self, revision: u64, recipe: &EditRecipe) -> bool {
+    pub fn mark_saved_if_current(&mut self, revision: u64, recipe: &EditRecipe) -> bool {
         if self.revision != revision || self.recipe != *recipe {
             return false;
         }
@@ -78,11 +78,11 @@ impl EditSession {
         true
     }
 
-    pub(crate) const fn gesture_active(&self) -> bool {
+    pub const fn gesture_active(&self) -> bool {
         self.gesture.is_some()
     }
 
-    pub(crate) fn begin_gesture(&mut self) {
+    pub fn begin_gesture(&mut self) {
         if self.gesture.is_none() {
             self.gesture = Some(Gesture {
                 before: self.recipe.clone(),
@@ -93,7 +93,7 @@ impl EditSession {
 
     /// Install an intermediate slider value. Every installed value receives a
     /// revision, while the whole drag becomes one undo command.
-    pub(crate) fn set_during_gesture(&mut self, next: EditRecipe) -> bool {
+    pub fn set_during_gesture(&mut self, next: EditRecipe) -> bool {
         if next == self.recipe {
             return false;
         }
@@ -112,7 +112,7 @@ impl EditSession {
         true
     }
 
-    pub(crate) fn finish_gesture(&mut self) {
+    pub fn finish_gesture(&mut self) {
         let Some(gesture) = self.gesture.take() else {
             return;
         };
@@ -121,7 +121,7 @@ impl EditSession {
         }
     }
 
-    pub(crate) fn set_discrete(&mut self, next: EditRecipe) -> bool {
+    pub fn set_discrete(&mut self, next: EditRecipe) -> bool {
         self.finish_gesture();
         if next == self.recipe {
             return false;
@@ -136,14 +136,14 @@ impl EditSession {
         true
     }
 
-    pub(crate) fn reset_to(&mut self, recipe: EditRecipe) -> bool {
+    pub fn reset_to(&mut self, recipe: EditRecipe) -> bool {
         self.set_discrete(recipe)
     }
 
     /// Replace the untouched initial recipe after RAW metadata establishes
     /// camera-specific defaults. This becomes the clean saved baseline and is
     /// deliberately absent from undo history.
-    pub(crate) fn replace_clean_baseline(&mut self, recipe: EditRecipe) -> bool {
+    pub fn replace_clean_baseline(&mut self, recipe: EditRecipe) -> bool {
         if recipe.validate().is_err() || self.is_dirty() {
             return false;
         }
@@ -160,15 +160,15 @@ impl EditSession {
         true
     }
 
-    pub(crate) fn can_undo(&self) -> bool {
+    pub fn can_undo(&self) -> bool {
         !self.undo.is_empty() || self.gesture.is_some()
     }
 
-    pub(crate) fn can_redo(&self) -> bool {
+    pub fn can_redo(&self) -> bool {
         !self.redo.is_empty()
     }
 
-    pub(crate) fn undo(&mut self) -> bool {
+    pub fn undo(&mut self) -> bool {
         self.finish_gesture();
         let Some(previous) = self.undo.pop_back() else {
             return false;
@@ -179,7 +179,7 @@ impl EditSession {
         true
     }
 
-    pub(crate) fn redo(&mut self) -> bool {
+    pub fn redo(&mut self) -> bool {
         self.finish_gesture();
         let Some(next) = self.redo.pop_back() else {
             return false;

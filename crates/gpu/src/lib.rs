@@ -18,6 +18,8 @@
 //! memory.
 
 mod capabilities;
+mod export_fallback;
+pub use export_fallback::{ExportBackend, ExportRender, ExportRenderError, FallbackExporter};
 mod memory;
 pub use memory::{GpuMemoryReservations, gpu_memory_reservations};
 mod capture;

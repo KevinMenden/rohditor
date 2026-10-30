@@ -1,11 +1,11 @@
 use eframe::egui;
-use rohditor_core::{HSL_CHANNEL_CENTERS, Histogram, evaluate_tone_curve};
+use rohditor_core::{HSL_CHANNEL_CENTERS, Histogram, WhiteBalanceMode, evaluate_tone_curve};
 use rohditor_edit::{
-    CameraProfileSelection, HighlightMethod, RenderingProfileSelection, ToneCurve,
+    CameraProfileSelection, HighlightMethod, OpticsAction, RenderingProfileSelection, ToneCurve,
 };
 
 use super::PickerMode;
-use super::optics::{self, OpticsAction, OpticsPanelModel};
+use super::optics::{self, OpticsPanelModel};
 use super::theme::{self, colors, metrics};
 use super::widgets::{self, AdjustmentSpec, ValueScale};
 
@@ -42,13 +42,6 @@ pub(crate) enum AdjustmentTarget {
     GradingShadows(usize),
     GradingMidtones(usize),
     GradingHighlights(usize),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum WhiteBalanceMode {
-    AsShot,
-    TemperatureTint,
-    ManualMultipliers,
 }
 
 #[derive(Debug, Clone, Copy)]

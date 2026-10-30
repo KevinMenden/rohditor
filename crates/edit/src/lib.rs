@@ -14,8 +14,8 @@ pub use profile::*;
 pub use raw::*;
 pub use recipe::{
     EditError, EditRecipe, GeometryAdjustments, LIGHT_TONE_LUT_SIZE, LensProfileSelection,
-    LightToneLut, NormalizedCropRect, OpticsAdjustments, ROHDITOR_STANDARD_PROCESS_VERSION,
-    RenderingAdjustments, RenderingProfileSelection,
+    LightToneLut, NormalizedCropRect, OpticsAction, OpticsAdjustments,
+    ROHDITOR_STANDARD_PROCESS_VERSION, RenderingAdjustments, RenderingProfileSelection,
 };
 pub use sharpening::*;
 pub use validation::*;

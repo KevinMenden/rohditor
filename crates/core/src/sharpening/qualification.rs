@@ -140,7 +140,9 @@ fn apply_usm_baseline(
     let width = image.width();
     let guide: Vec<f32> = image
         .data()
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|rgb| rgb.iter().map(|v| v.max(0.0) / 3.0).sum::<f32>().max(FLOOR))
         .collect();
     let mut lowpass = vec![0.0; guide.len()];
@@ -152,7 +154,14 @@ fn apply_usm_baseline(
         &gaussian(0.6),
         token,
     )?;
-    for ((rgb, g), b) in image.data_mut().chunks_exact_mut(3).zip(guide).zip(lowpass) {
+    for ((rgb, g), b) in image
+        .data_mut()
+        .as_chunks_mut::<3>()
+        .0
+        .iter_mut()
+        .zip(guide)
+        .zip(lowpass)
+    {
         let gain = ((g + 0.5 * (g - b)) / g).clamp(0.5, 2.0);
         for c in rgb {
             *c *= gain;

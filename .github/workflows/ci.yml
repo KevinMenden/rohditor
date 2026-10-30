@@ -12,8 +12,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install stable Rust with project components
-        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+      - name: Install the Rust version pinned in rust-toolchain.toml
+        run: |
+          version=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$version" --profile minimal --component rustfmt,clippy
       - name: Run the project gate
         run: ./scripts/check.sh
 

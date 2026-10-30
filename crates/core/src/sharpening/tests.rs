@@ -107,7 +107,13 @@ fn known_blur_recovers_detail_with_bounded_overshoot_and_usm_comparison() {
     let mut result = image(53, 37, &observation);
     apply_cancellable(&mut result, enabled(), [1.0; 3], &CancellationToken::new())
         .expect("capture sharpening fixture should succeed");
-    let sharpened: Vec<_> = result.data().chunks_exact(3).map(|p| p[0]).collect();
+    let sharpened: Vec<_> = result
+        .data()
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|p| p[0])
+        .collect();
     let off_error = mse(&observation, &original);
     let rl_error = mse(&sharpened, &original);
     let usm_error = mse(&usm, &original);
@@ -128,7 +134,13 @@ fn mask_protects_flat_noise_and_highlight_boundaries() {
     let mut result = image(53, 37, &noise);
     apply_cancellable(&mut result, enabled(), [1.0; 3], &CancellationToken::new())
         .expect("capture sharpening fixture should succeed");
-    let output: Vec<_> = result.data().chunks_exact(3).map(|p| p[0]).collect();
+    let output: Vec<_> = result
+        .data()
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|p| p[0])
+        .collect();
     let mean = vec![0.15; noise.len()];
     let noise_gain = (mse(&output, &mean) / mse(&noise, &mean)).sqrt();
     eprintln!("capture flat-patch noise gain={noise_gain:.6}");
@@ -142,9 +154,9 @@ fn mask_protects_flat_noise_and_highlight_boundaries() {
     );
     apply_cancellable(&mut clipped, enabled(), [1.0; 3], &CancellationToken::new())
         .expect("capture sharpening fixture should succeed");
-    for (i, rgb) in clipped.data().chunks_exact(3).enumerate() {
+    for (i, rgb) in clipped.data().as_chunks::<3>().0.iter().enumerate() {
         if i % 9 > 3 {
-            assert_eq!(rgb, [1.0; 3]);
+            assert_eq!(rgb, &[1.0; 3]);
         }
     }
 }
@@ -153,7 +165,7 @@ fn mask_protects_flat_noise_and_highlight_boundaries() {
 fn rgb_gain_preserves_signed_channel_ratios_and_is_thread_deterministic() {
     let guide = blurred(&fixture(53, 37), 53);
     let mut input = image(53, 37, &guide);
-    for rgb in input.data_mut().chunks_exact_mut(3) {
+    for rgb in input.data_mut().as_chunks_mut::<3>().0.iter_mut() {
         rgb[0] *= -0.2;
         rgb[2] *= 2.0;
     }
@@ -172,7 +184,7 @@ fn rgb_gain_preserves_signed_channel_ratios_and_is_thread_deterministic() {
     let result = process(1);
     assert_eq!(result.data(), process(3).data());
     assert_ne!(result.data(), input.data());
-    for rgb in result.data().chunks_exact(3) {
+    for rgb in result.data().as_chunks::<3>().0.iter() {
         assert!((rgb[0] / rgb[1] + 0.2).abs() < 1e-6);
         assert!((rgb[2] / rgb[1] - 2.0).abs() < 1e-6);
     }
