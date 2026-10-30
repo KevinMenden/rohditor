@@ -23,10 +23,10 @@ use crate::wake::WakeFn;
 #[path = "catalog/state.rs"]
 mod state;
 
-pub(crate) use state::{CatalogState, ThumbnailSlot};
+pub use state::{CatalogState, ThumbnailSlot};
 
 #[derive(Debug)]
-pub(crate) enum CatalogEvent {
+pub enum CatalogEvent {
     ScanStarted {
         folder: PathBuf,
     },
@@ -52,7 +52,7 @@ pub(crate) enum CatalogEvent {
 
 /// Outcome of one thumbnail attempt, ready for a UI slot.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ThumbnailResult {
+pub enum ThumbnailResult {
     Ready(Thumbnail),
     Placeholder(PlaceholderReason),
     Failed(String),
@@ -75,7 +75,7 @@ impl RawDecoder for SharedDecoder {
     }
 }
 
-pub(crate) struct CatalogCoordinator {
+pub struct CatalogCoordinator {
     requests: mpsc::Sender<CatalogRequest>,
     events: mpsc::Receiver<CatalogEvent>,
     /// Last pause state transmitted to the worker, used to skip duplicate
@@ -85,7 +85,7 @@ pub(crate) struct CatalogCoordinator {
 }
 
 impl CatalogCoordinator {
-    pub(crate) fn new(wake: WakeFn) -> Result<Self, String> {
+    pub fn new(wake: WakeFn) -> Result<Self, String> {
         let cache = match ThumbnailCache::from_default() {
             Ok(cache) => Some(cache),
             Err(error) => {
@@ -136,7 +136,7 @@ impl CatalogCoordinator {
     }
 
     /// Start scanning one folder, replacing any previous catalog fill.
-    pub(crate) fn scan_folder(&self, folder: PathBuf) -> Result<(), String> {
+    pub fn scan_folder(&self, folder: PathBuf) -> Result<(), String> {
         self.requests
             .send(CatalogRequest::ScanFolder(folder))
             .map_err(|_| "the background catalog worker stopped unexpectedly".to_owned())
@@ -144,7 +144,7 @@ impl CatalogCoordinator {
 
     /// Pause or resume background thumbnail generation. Called every frame;
     /// only state changes are transmitted.
-    pub(crate) fn set_paused(&self, paused: bool) {
+    pub fn set_paused(&self, paused: bool) {
         let mut sent = match self.paused_sent.lock() {
             Ok(state) => state,
             Err(poisoned) => poisoned.into_inner(),
@@ -155,7 +155,7 @@ impl CatalogCoordinator {
         }
     }
 
-    pub(crate) fn try_events(&self) -> impl Iterator<Item = CatalogEvent> + '_ {
+    pub fn try_events(&self) -> impl Iterator<Item = CatalogEvent> + '_ {
         self.events.try_iter()
     }
 }

@@ -8,6 +8,7 @@ members = [
     "crates/core",
     "crates/demosaic",
     "crates/edit",
+    "crates/engine",
     "crates/gpu",
     "crates/highlight",
     "crates/image",

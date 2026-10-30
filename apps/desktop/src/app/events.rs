@@ -7,8 +7,8 @@ use eframe::egui;
 
 use rohditor_core::white_balance_from_camera_sample;
 
-use crate::coordinator::{JobKind, PreviewResolution, WorkerEvent};
 use crate::ui::viewport::PreviewSource;
+use rohditor_engine::coordinator::{JobKind, PreviewResolution, WorkerEvent};
 
 use super::{
     DocumentPreviewDiagnostics, RohditorApp, default_recipe_for_document, document_as_shot_colour,
@@ -115,11 +115,15 @@ impl RohditorApp {
                 diagnostics,
             } => {
                 let intent = match resolution {
-                    PreviewResolution::Fit => crate::document::PreviewIntent::CommittedFit,
-                    PreviewResolution::CropToolFullFrame => {
-                        crate::document::PreviewIntent::CropToolFullFrame
+                    PreviewResolution::Fit => {
+                        rohditor_engine::document::PreviewIntent::CommittedFit
                     }
-                    PreviewResolution::SourceScale => crate::document::PreviewIntent::SourceScale,
+                    PreviewResolution::CropToolFullFrame => {
+                        rohditor_engine::document::PreviewIntent::CropToolFullFrame
+                    }
+                    PreviewResolution::SourceScale => {
+                        rohditor_engine::document::PreviewIntent::SourceScale
+                    }
                 };
                 let should_install = self.document.as_ref().is_some_and(|document| {
                     document.accepts_preview(ticket, intent)

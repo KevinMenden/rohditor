@@ -6,7 +6,7 @@ use eframe::egui;
 use rohditor_edit::EditRecipe;
 
 use super::{Document, RohditorApp};
-use crate::persistence::{self, SaveJob, SaveResult};
+use rohditor_engine::persistence::{self, SaveJob, SaveResult};
 
 impl RohditorApp {
     pub(super) fn update_autosave(&mut self, context: &egui::Context) {

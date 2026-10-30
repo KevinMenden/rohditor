@@ -3,4 +3,4 @@
 mod scheduler;
 mod worker;
 
-pub(crate) use worker::*;
+pub use worker::*;

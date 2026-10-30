@@ -30,16 +30,7 @@ use tracing::{info, warn};
 use rohditor_edit::HighlightAdjustments;
 
 use crate::ProcessorPreference;
-use crate::camera_profiles::CameraProfileRegistry;
-use crate::catalog::{CatalogCoordinator, CatalogState, ThumbnailSlot};
-use crate::coordinator::{
-    PreparedGpuSource, PreviewBackend, PreviewResolution, RenderCoordinator, WorkerImage,
-    WorkerPreviewDiagnostics,
-};
-use crate::document::{EditSession, PreviewIntent, PreviewTicket};
-use crate::preview_cache::PreviewCacheHits;
-use crate::session;
-use crate::settings::{self, AppSettings};
+use crate::config;
 use crate::ui::adjustment_panel::{
     self, AdjustmentInteraction, AdjustmentRange, AdjustmentRanges, AdjustmentTarget,
     AdjustmentValues, CameraProfileChoice, DocumentPanelModel, ExportKind, ExportUiSettings,
@@ -59,7 +50,17 @@ use crate::ui::theme;
 use crate::ui::toolbar::{self, FilePanelModel, StatusBarModel, ToolbarModel};
 use crate::ui::viewport::{self, PreviewSource, PreviewTexture, ViewState, ViewportModel};
 use crate::ui::{PickerMode, ViewMode};
-use crate::wake::WakeFn;
+use rohditor_engine::camera_profiles::CameraProfileRegistry;
+use rohditor_engine::catalog::{CatalogCoordinator, CatalogState, ThumbnailSlot};
+use rohditor_engine::coordinator::{
+    PreparedGpuSource, PreviewBackend, PreviewResolution, RenderCoordinator, WorkerImage,
+    WorkerPreviewDiagnostics,
+};
+use rohditor_engine::document::{EditSession, PreviewIntent, PreviewTicket};
+use rohditor_engine::preview_cache::PreviewCacheHits;
+use rohditor_engine::session;
+use rohditor_engine::settings::{self, AppSettings};
+use rohditor_engine::wake::WakeFn;
 
 const GPU_HISTOGRAM_DEBOUNCE: Duration = Duration::from_millis(75);
 const RECIPE_SAVE_NOTICE_DURATION: Duration = Duration::from_secs(3);
@@ -296,7 +297,7 @@ impl ExportUiSettings {
 }
 
 pub(crate) struct RohditorApp {
-    recipe_saves: crate::persistence::SaveWorker,
+    recipe_saves: rohditor_engine::persistence::SaveWorker,
     coordinator: RenderCoordinator,
     catalog_coordinator: CatalogCoordinator,
     catalog: CatalogState,
@@ -420,13 +421,14 @@ impl RohditorApp {
         // Restore the last browsed folder when the app was not given a file.
         let mut view_mode = ViewMode::default();
         if initial_path.is_none()
-            && let Some(folder) = session::load_last_folder()
+            && let Some(directory) = config::config_directory()
+            && let Some(folder) = session::load_last_folder(&directory)
             && catalog_coordinator.scan_folder(folder).is_ok()
         {
             view_mode = ViewMode::Library;
         }
         let mut application = Self {
-            recipe_saves: crate::persistence::SaveWorker::new()?,
+            recipe_saves: rohditor_engine::persistence::SaveWorker::new()?,
             coordinator,
             catalog_coordinator,
             catalog: CatalogState::default(),
@@ -439,7 +441,7 @@ impl RohditorApp {
             recipe_save_status: None,
             recipe_save_error: None,
             queued_recipe_snapshots: HashMap::new(),
-            camera_profiles: CameraProfileRegistry::load(),
+            camera_profiles: CameraProfileRegistry::load(config::config_directory().as_deref()),
             settings_dialog: None,
             ui_renderer,
             processor_preference,
@@ -536,7 +538,9 @@ impl RohditorApp {
             warn!(%error, "could not start the catalog scan");
             return;
         }
-        session::store_last_folder(&folder);
+        if let Some(directory) = config::config_directory() {
+            session::store_last_folder(&directory, &folder);
+        }
         self.view_mode = ViewMode::Library;
     }
 
@@ -793,7 +797,7 @@ impl RohditorApp {
             self.pending_white_balance_pick = None;
             self.refresh_current_presentation(context);
         }
-        match settings::save(next) {
+        match settings::save(config::config_directory().as_deref(), next) {
             Ok(()) => {
                 self.settings_warning = None;
                 self.settings_dialog = None;

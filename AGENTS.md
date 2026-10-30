@@ -21,11 +21,13 @@ A frontend can enter the stack at any level; each level only depends on the ones
    recipe-level editing math that needs more than the recipe types (auto tone, white-balance
    picking, default recipes). `rohditor-gpu` adds GPU rendering plus the shared
    GPU-with-CPU-fallback export (`FallbackExporter`).
-3. **App runtime** (`rohditor-engine`, planned, not yet extracted): scheduling, caches, undo,
-   persistence and export fallback on top of 1 and 2. Until it exists this code lives in
-   `apps/desktop` (`coordinator/`, `preview_cache/`, `document.rs`, `persistence.rs`, `catalog.rs`)
-   and must stay free of UI-toolkit types, using plain callbacks (see `wake.rs`) and plain pixel
-   buffers instead. The engine will not wrap or re-export the lower crates, and nothing below it
+3. **App runtime** (`crates/engine`, `rohditor-engine`): what an interactive frontend needs on top
+   of 1 and 2: render/export workers with preview scheduling (`coordinator/`), preview caches
+   (`preview_cache/`), undo-aware edit sessions (`document.rs`), recipe sidecars
+   (`persistence.rs`), settings, session and camera-profile storage, and the catalog thumbnail
+   worker. It is toolkit-free: frontends are woken through a plain callback (`WakeFn`), receive
+   plain pixel buffers, inject their own wgpu device/adapter, and pass configuration directories
+   in explicitly. The engine does not wrap or re-export the lower crates, and nothing below it
    may depend on it.
 4. **Apps** (`apps/cli`, `apps/desktop`): rendering, widgets, and toolkit glue only.
 
@@ -34,11 +36,13 @@ Placement rules:
   `EditRecipe` (return the new recipe; the caller owns undo and revisions).
 - Frontend-agnostic interactive behaviour (scheduling, caching, undo, persistence) goes in the
   app runtime, not in a UI.
-- Only toolkit-specific code stays in `apps/*`. No pluggable-pipeline abstraction until a real
-  second frontend needs one.
+- Only toolkit-specific code stays in `apps/*` (e.g. egui texture registration in
+  `apps/desktop/src/app/gpu.rs`, the XDG config-directory choice).
+- No pluggable-pipeline abstraction until a real second frontend needs one.
 
 `scripts/check.sh` enforces the dependency direction (lower crates never depend on `core`, `gpu`,
-or an app; no crate under `crates/` depends on `eframe`/`egui`/`winit`/`rfd`; `rohditor-cli`
+`engine` or an app; `rohditor-engine` never depends on an app and has no `pub use rohditor_*`
+re-exports; no crate under `crates/` depends on `eframe`/`egui`/`winit`/`rfd`; `rohditor-cli`
 never depends on `rohditor-desktop`).
 
 ## Rules

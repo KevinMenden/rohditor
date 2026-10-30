@@ -9,26 +9,21 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use crate::storage;
-
 #[derive(Debug, Serialize, Deserialize, Default)]
 struct SessionFile {
     last_folder: Option<PathBuf>,
 }
 
 /// Restore the last browsed folder, if one was recorded and still exists.
-pub(crate) fn load_last_folder() -> Option<PathBuf> {
-    let directory = storage::config_directory()?;
-    let folder = load_folder_from(&directory)?;
+/// `config_directory` is chosen by the application.
+pub fn load_last_folder(config_directory: &Path) -> Option<PathBuf> {
+    let folder = load_folder_from(config_directory)?;
     folder.is_dir().then_some(folder)
 }
 
 /// Record the last browsed folder for the next session.
-pub(crate) fn store_last_folder(folder: &Path) {
-    let Some(directory) = storage::config_directory() else {
-        return;
-    };
-    store_folder_to(&directory, folder);
+pub fn store_last_folder(config_directory: &Path, folder: &Path) {
+    store_folder_to(config_directory, folder);
 }
 
 fn load_folder_from(directory: &Path) -> Option<PathBuf> {

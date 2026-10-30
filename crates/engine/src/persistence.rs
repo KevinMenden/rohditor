@@ -1,8 +1,8 @@
-//! Desktop-local persistence for non-destructive RAW edits.
+//! Sidecar persistence for non-destructive RAW edits.
 //!
 //! Recipes live beside their source file and remain separate from the RAW
 //! bytes. The core recipe owns schema migration and validation; this module
-//! only owns the desktop sidecar format and atomic replacement.
+//! only owns the sidecar format and atomic replacement.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -31,7 +31,7 @@ struct ProjectFile {
 }
 
 #[derive(Debug, Error)]
-pub(crate) enum PersistenceError {
+pub enum PersistenceError {
     #[error("could not derive a sidecar path for source {raw_file}")]
     InvalidSourcePath { raw_file: PathBuf },
 
@@ -79,7 +79,7 @@ pub(crate) enum PersistenceError {
 }
 
 /// Return the recipe sidecar path for one RAW source.
-pub(crate) fn sidecar_path(source: &Path) -> Result<PathBuf, PersistenceError> {
+pub fn sidecar_path(source: &Path) -> Result<PathBuf, PersistenceError> {
     let Some(file_name) = source.file_name() else {
         return Err(PersistenceError::InvalidSourcePath {
             raw_file: source.to_owned(),
@@ -94,7 +94,7 @@ pub(crate) fn sidecar_path(source: &Path) -> Result<PathBuf, PersistenceError> {
 }
 
 /// Load the saved recipe for a source, if its sidecar exists.
-pub(crate) fn load_recipe(source: &Path) -> Result<Option<EditRecipe>, PersistenceError> {
+pub fn load_recipe(source: &Path) -> Result<Option<EditRecipe>, PersistenceError> {
     let path = sidecar_path(source)?;
     let bytes = match fs::read(&path) {
         Ok(bytes) => bytes,
@@ -122,7 +122,7 @@ pub(crate) fn load_recipe(source: &Path) -> Result<Option<EditRecipe>, Persisten
 }
 
 /// Persist the current recipe without touching the source RAW file.
-pub(crate) fn save_recipe(source: &Path, recipe: &EditRecipe) -> Result<PathBuf, PersistenceError> {
+pub fn save_recipe(source: &Path, recipe: &EditRecipe) -> Result<PathBuf, PersistenceError> {
     let path = sidecar_path(source)?;
     recipe
         .validate()
@@ -148,20 +148,20 @@ pub(crate) fn save_recipe(source: &Path, recipe: &EditRecipe) -> Result<PathBuf,
 
 /// A complete, immutable recipe snapshot handed to the persistence thread.
 #[derive(Debug, Clone)]
-pub(crate) struct SaveJob {
-    pub(crate) document_id: u64,
-    pub(crate) revision: u64,
-    pub(crate) source: PathBuf,
-    pub(crate) recipe: EditRecipe,
+pub struct SaveJob {
+    pub document_id: u64,
+    pub revision: u64,
+    pub source: PathBuf,
+    pub recipe: EditRecipe,
 }
 
 #[derive(Debug)]
-pub(crate) struct SaveResult {
-    pub(crate) document_id: u64,
-    pub(crate) revision: u64,
-    pub(crate) source: PathBuf,
-    pub(crate) recipe: EditRecipe,
-    pub(crate) result: Result<PathBuf, String>,
+pub struct SaveResult {
+    pub document_id: u64,
+    pub revision: u64,
+    pub source: PathBuf,
+    pub recipe: EditRecipe,
+    pub result: Result<PathBuf, String>,
 }
 
 enum SaveCommand {
@@ -176,14 +176,14 @@ struct PendingSave {
 
 /// Debounced, newest-wins sidecar writer. It deliberately has no UI or image
 /// processing dependencies; the application polls completed writes each frame.
-pub(crate) struct SaveWorker {
+pub struct SaveWorker {
     requests: Option<Sender<SaveCommand>>,
     results: Receiver<SaveResult>,
     worker: Option<JoinHandle<()>>,
 }
 
 impl SaveWorker {
-    pub(crate) fn new() -> io::Result<Self> {
+    pub fn new() -> io::Result<Self> {
         let (request_sender, request_receiver) = mpsc::channel();
         let (result_sender, result_receiver) = mpsc::channel();
         let worker = thread::Builder::new()
@@ -196,7 +196,7 @@ impl SaveWorker {
         })
     }
 
-    pub(crate) fn enqueue(&self, job: SaveJob, immediate: bool) -> Result<(), String> {
+    pub fn enqueue(&self, job: SaveJob, immediate: bool) -> Result<(), String> {
         self.requests
             .as_ref()
             .ok_or_else(|| "recipe save worker is stopped".to_owned())?
@@ -207,11 +207,11 @@ impl SaveWorker {
             .map_err(|_| "recipe save worker stopped unexpectedly".to_owned())
     }
 
-    pub(crate) fn try_results(&self) -> impl Iterator<Item = SaveResult> + '_ {
+    pub fn try_results(&self) -> impl Iterator<Item = SaveResult> + '_ {
         self.results.try_iter()
     }
 
-    pub(crate) fn shutdown(&mut self) {
+    pub fn shutdown(&mut self) {
         if let Some(requests) = self.requests.take() {
             drop(requests.send(SaveCommand::Shutdown));
         }
