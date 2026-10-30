@@ -1,27 +1,28 @@
 //! Serial export execution, independent of preview/source preparation requests.
 use super::*;
+use rohditor_gpu::{ExportBackend, ExportRender, FallbackExporter};
 
 pub(super) fn start(
     pipeline: CpuPipeline,
     sender: mpsc::Sender<WorkerEvent>,
-    context: egui::Context,
+    wake: WakeFn,
 ) -> Option<mpsc::SyncSender<Box<ExportJob>>> {
     // One active export and one queued immutable snapshot bound retained work.
     let (requests, receiver) = mpsc::sync_channel::<Box<ExportJob>>(1);
     let worker = thread::Builder::new()
         .name("rohditor-export-worker".to_owned())
         .spawn(move || {
-            let mut gpu = None;
+            let mut exporter = FallbackExporter::default();
             while let Ok(job) = receiver.recv() {
                 let identity = (job.document_id, job.export_id, job.recipe_revision);
                 let result = catch_unwind(AssertUnwindSafe(|| {
-                    process_export(*job, &sender, &context, &pipeline, &mut gpu);
+                    process_export(*job, &sender, &wake, &pipeline, &mut exporter);
                 }));
                 if let Err(payload) = result {
-                    gpu = None;
+                    exporter.reset();
                     send_failure(
                         &sender,
-                        &context,
+                        &wake,
                         identity.0,
                         JobKind::Export,
                         Some(identity.2),
@@ -55,9 +56,9 @@ pub(super) fn submit(
 fn process_export(
     job: ExportJob,
     sender: &mpsc::Sender<WorkerEvent>,
-    context: &egui::Context,
+    wake: &WakeFn,
     pipeline: &CpuPipeline,
-    gpu: &mut Option<Result<rohditor_gpu::GpuExportProcessor, String>>,
+    exporter: &mut FallbackExporter,
 ) {
     let file_name = display_file_name(&job.destination);
     let span = info_span!(
@@ -71,22 +72,47 @@ fn process_export(
     let started = Instant::now();
     send_progress(
         sender,
-        context,
+        wake,
         job.document_id,
         JobKind::Export,
         Some(job.recipe_revision),
         Some(job.export_id),
         "Developing full-resolution export",
     );
-    let gpu_image = if job.prefer_gpu {
-        let result = gpu.get_or_insert_with(|| rohditor_gpu::GpuExportProcessor::headless().map_err(|error| error.to_string()))
-            .as_mut().map_err(|error| error.clone()).and_then(|gpu| {
-            info!(adapter = %gpu.capabilities().adapter_name, driver = %gpu.capabilities().driver_info, "GPU export device");
-            gpu.render(pipeline, &job.frame, &job.recipe, job.render_options,
-                job.settings.format.bit_depth(), job.settings.dithering, &CancellationToken::new()).map_err(|error| error.to_string())
-        });
-        match result {
-            Ok(result) => {
+    let backend = if job.prefer_gpu {
+        ExportBackend::PreferGpu
+    } else {
+        ExportBackend::Cpu
+    };
+    let rendered = exporter.render(
+        backend,
+        pipeline,
+        &job.frame,
+        &job.recipe,
+        job.render_options,
+        job.settings.format.bit_depth(),
+        job.settings.dithering,
+        |error| {
+            tracing::warn!(%error, "GPU export failed; using CPU reference");
+            send_progress(
+                sender,
+                wake,
+                job.document_id,
+                JobKind::Export,
+                Some(job.recipe_revision),
+                Some(job.export_id),
+                &format!("GPU unavailable; exporting on CPU: {error}"),
+            );
+        },
+    );
+    let image = match rendered {
+        Ok(rendered) => {
+            if let ExportRender::Gpu {
+                result,
+                capabilities,
+            } = &rendered
+            {
+                info!(adapter = %capabilities.adapter_name, driver = %capabilities.driver_info, "GPU export device");
                 info!(
                     sensor_backend = if result.sensor_gpu { "GPU" } else { "CPU" },
                     upload_ms = result.upload_time.as_millis(),
@@ -97,57 +123,26 @@ fn process_export(
                     bands = result.submissions,
                     "GPU export color processing complete"
                 );
-                Some(result.image)
             }
-            Err(error) => {
-                // A failed device must not poison later exports. Retry device
-                // creation on the next job; this snapshot falls back to CPU.
-                *gpu = None;
-                tracing::warn!(%error, "GPU export failed; using CPU reference");
-                send_progress(
-                    sender,
-                    context,
-                    job.document_id,
-                    JobKind::Export,
-                    Some(job.recipe_revision),
-                    Some(job.export_id),
-                    &format!("GPU unavailable; exporting on CPU: {error}"),
-                );
-                None
-            }
+            rendered.into_image()
         }
-    } else {
-        None
-    };
-    let image = if let Some(image) = gpu_image {
-        image
-    } else {
-        match pipeline.render_export(
-            &job.frame,
-            &job.recipe,
-            job.render_options,
-            job.settings.format.bit_depth(),
-            job.settings.dithering,
-        ) {
-            Ok(rendered) => rendered.image,
-            Err(error) => {
-                send_failure(
-                    sender,
-                    context,
-                    job.document_id,
-                    JobKind::Export,
-                    Some(job.recipe_revision),
-                    Some(job.export_id),
-                    format!("Full-resolution CPU development failed: {error}"),
-                );
-                return;
-            }
+        Err(error) => {
+            send_failure(
+                sender,
+                wake,
+                job.document_id,
+                JobKind::Export,
+                Some(job.recipe_revision),
+                Some(job.export_id),
+                format!("Full-resolution CPU development failed: {error}"),
+            );
+            return;
         }
     };
 
     send_progress(
         sender,
-        context,
+        wake,
         job.document_id,
         JobKind::Export,
         Some(job.recipe_revision),
@@ -164,7 +159,7 @@ fn process_export(
             );
             send_event(
                 sender,
-                context,
+                wake,
                 WorkerEvent::ExportReady {
                     document_id: job.document_id,
                     export_id: job.export_id,
@@ -177,7 +172,7 @@ fn process_export(
         }
         Err(error) => send_failure(
             sender,
-            context,
+            wake,
             job.document_id,
             JobKind::Export,
             Some(job.recipe_revision),

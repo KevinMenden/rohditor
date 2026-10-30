@@ -126,7 +126,7 @@ impl Tools {
 /// as 1 (the convention RawTherapee and darktable use for their multipliers).
 fn balancing_gains(image: &LinearRgbImage<f32>) -> [f64; 3] {
     let mut mean = [0.0_f64; 3];
-    for pixel in image.data().chunks_exact(3) {
+    for pixel in image.data().as_chunks::<3>().0 {
         for (sum, value) in mean.iter_mut().zip(pixel) {
             *sum += f64::from(*value);
         }

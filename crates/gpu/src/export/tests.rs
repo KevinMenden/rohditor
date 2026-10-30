@@ -383,8 +383,10 @@ fn export_bands_precision_geometry_and_cancellation() {
                         };
                         for (a, b) in image
                             .data()
-                            .chunks_exact(3)
-                            .zip(display.rgba.chunks_exact(4))
+                            .as_chunks::<3>()
+                            .0
+                            .iter()
+                            .zip(display.rgba.as_chunks::<4>().0.iter())
                         {
                             assert!(a.iter().zip(b).all(|(a, b)| a.abs_diff(*b) <= 1));
                         }

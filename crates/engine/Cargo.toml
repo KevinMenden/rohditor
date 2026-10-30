@@ -1,0 +1,28 @@
+[package]
+name = "rohditor-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+image.workspace = true
+rohditor-camera-profile = { path = "../camera-profile" }
+rohditor-catalog = { path = "../catalog" }
+rohditor-core = { path = "../core" }
+rohditor-demosaic = { path = "../demosaic" }
+rohditor-edit = { path = "../edit" }
+rohditor-gpu = { path = "../gpu" }
+rohditor-image = { path = "../image" }
+rohditor-raw = { path = "../raw" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+wgpu.workspace = true
+
+[dev-dependencies]
+pollster.workspace = true

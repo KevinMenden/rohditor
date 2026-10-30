@@ -8,7 +8,6 @@ use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use eframe::egui;
 use image::RgbImage;
 use rohditor_core::{
     CancellationToken, CorrectionComponents, CpuPipeline, DatabaseProvenance, ExportReport,
@@ -25,6 +24,7 @@ use tracing::{info, info_span};
 
 use crate::document::PreviewTicket;
 use crate::preview_cache::{PreviewCache, PreviewCacheHits, PreviewCacheKeys};
+use crate::wake::WakeFn;
 
 #[cfg(test)]
 use super::scheduler::should_replace_preview;
@@ -34,20 +34,20 @@ use super::scheduler::{PreviewCompletion, PreviewMailbox};
 mod export_worker;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum JobKind {
+pub enum JobKind {
     Open,
     Preview,
     Export,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PreviewBackend {
+pub enum PreviewBackend {
     Cpu,
     GpuBase,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum PreviewResolution {
+pub enum PreviewResolution {
     #[default]
     Fit,
     CropToolFullFrame,
@@ -55,7 +55,7 @@ pub(crate) enum PreviewResolution {
 }
 
 #[derive(Debug)]
-pub(crate) enum PreparedGpuSource {
+pub enum PreparedGpuSource {
     Reduced(GpuSpatialPreview),
     Full {
         source: GpuSpatialFullSource,
@@ -87,7 +87,7 @@ impl PreparedGpuSource {
 }
 
 impl PreviewBackend {
-    pub(crate) const fn label(self) -> &'static str {
+    pub const fn label(self) -> &'static str {
         match self {
             Self::Cpu => "CPU",
             Self::GpuBase => "GPU base",
@@ -96,7 +96,7 @@ impl PreviewBackend {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct PreviewQueueStats {
+pub struct PreviewQueueStats {
     pub requested: u64,
     pub coalesced: u64,
     pub cancellation_requests: u64,
@@ -108,7 +108,7 @@ pub(crate) struct PreviewQueueStats {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct WorkerPreviewDiagnostics {
+pub struct WorkerPreviewDiagnostics {
     pub sensor_gpu: bool,
     pub backend: PreviewBackend,
     pub resolution: PreviewResolution,
@@ -138,11 +138,11 @@ impl fmt::Display for JobKind {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct WorkerImage {
+/// Packed 8-bit display RGB; the frontend converts it to its toolkit's image type.
+pub struct WorkerImage {
     pub width: usize,
     pub height: usize,
     pub pixels: Vec<u8>,
-    pub color: egui::ColorImage,
 }
 
 impl WorkerImage {
@@ -177,18 +177,16 @@ impl WorkerImage {
                 pixels.len()
             ));
         }
-        let color = egui::ColorImage::from_rgb([width, height], &pixels);
         Ok(Self {
             width,
             height,
             pixels,
-            color,
         })
     }
 }
 
 #[derive(Debug)]
-pub(crate) enum WorkerEvent {
+pub enum WorkerEvent {
     Progress {
         document_id: u64,
         job: JobKind,
@@ -266,8 +264,8 @@ pub(crate) enum WorkerEvent {
 }
 
 #[derive(Debug)]
-pub(crate) struct PreviewJob {
-    pub(crate) ticket: PreviewTicket,
+pub struct PreviewJob {
+    pub ticket: PreviewTicket,
     frame: Arc<RawFrame>,
     recipe: EditRecipe,
     options: PreviewOptions,
@@ -276,7 +274,7 @@ pub(crate) struct PreviewJob {
 }
 
 #[derive(Debug)]
-pub(crate) struct ExportJob {
+pub struct ExportJob {
     document_id: u64,
     export_id: u64,
     recipe_revision: u64,
@@ -289,7 +287,7 @@ pub(crate) struct ExportJob {
 }
 
 #[derive(Debug)]
-pub(crate) struct WhiteBalanceSampleJob {
+pub struct WhiteBalanceSampleJob {
     ticket: PreviewTicket,
     frame: Arc<RawFrame>,
     recipe: EditRecipe,
@@ -298,7 +296,7 @@ pub(crate) struct WhiteBalanceSampleJob {
 }
 
 #[derive(Debug)]
-pub(crate) enum WorkerRequest {
+pub enum WorkerRequest {
     CaptureDevice {
         adapter: wgpu::Adapter,
         device: wgpu::Device,
@@ -316,7 +314,7 @@ pub(crate) enum WorkerRequest {
     Shutdown,
 }
 
-pub(crate) struct RenderCoordinator {
+pub struct RenderCoordinator {
     requests: mpsc::Sender<WorkerRequest>,
     events: mpsc::Receiver<WorkerEvent>,
     previews: Arc<PreviewMailbox>,
@@ -324,7 +322,7 @@ pub(crate) struct RenderCoordinator {
 }
 
 impl RenderCoordinator {
-    pub(crate) fn configure_capture_device(
+    pub fn configure_capture_device(
         &self,
         adapter: wgpu::Adapter,
         device: wgpu::Device,
@@ -338,20 +336,17 @@ impl RenderCoordinator {
             target_format,
         })
     }
-    pub(crate) fn new(context: egui::Context) -> Result<Self, String> {
-        Self::new_with_decoder(context, Arc::new(RawlerDecoder::default()))
+    pub fn new(wake: WakeFn) -> Result<Self, String> {
+        Self::new_with_decoder(wake, Arc::new(RawlerDecoder::default()))
     }
 
-    fn new_with_decoder(
-        context: egui::Context,
-        decoder: Arc<dyn RawDecoder>,
-    ) -> Result<Self, String> {
+    fn new_with_decoder(wake: WakeFn, decoder: Arc<dyn RawDecoder>) -> Result<Self, String> {
         let (request_sender, request_receiver) = mpsc::channel();
         let (event_sender, event_receiver) = mpsc::channel();
         let previews = Arc::new(PreviewMailbox::default());
         let worker_previews = Arc::clone(&previews);
         let stopped_sender = event_sender.clone();
-        let stopped_context = context.clone();
+        let stopped_wake = wake.clone();
         let worker = thread::Builder::new()
             .name("rohditor-cpu-worker".to_owned())
             .spawn(move || {
@@ -359,7 +354,7 @@ impl RenderCoordinator {
                     worker_loop(
                         request_receiver,
                         event_sender,
-                        context,
+                        wake,
                         decoder,
                         worker_previews,
                     );
@@ -367,7 +362,7 @@ impl RenderCoordinator {
                 if let Err(payload) = result {
                     send_event(
                         &stopped_sender,
-                        &stopped_context,
+                        &stopped_wake,
                         WorkerEvent::WorkerStopped {
                             message: format!(
                                 "The background CPU worker stopped unexpectedly: {}",
@@ -386,11 +381,11 @@ impl RenderCoordinator {
         })
     }
 
-    pub(crate) fn open(&self, document_id: u64, path: PathBuf) -> Result<(), String> {
+    pub fn open(&self, document_id: u64, path: PathBuf) -> Result<(), String> {
         self.send(WorkerRequest::Open { document_id, path })
     }
 
-    pub(crate) fn preview(
+    pub fn preview(
         &self,
         ticket: PreviewTicket,
         frame: Arc<RawFrame>,
@@ -410,7 +405,7 @@ impl RenderCoordinator {
         )
     }
 
-    pub(crate) fn source_scale_preview(
+    pub fn source_scale_preview(
         &self,
         ticket: PreviewTicket,
         frame: Arc<RawFrame>,
@@ -438,7 +433,7 @@ impl RenderCoordinator {
     /// Develop a temporary uncropped fit preview for the crop authoring tool.
     /// The caller retains the committed recipe and filters this result by its
     /// presentation state, so it can never become an undoable edit itself.
-    pub(crate) fn crop_tool_preview(
+    pub fn crop_tool_preview(
         &self,
         ticket: PreviewTicket,
         frame: Arc<RawFrame>,
@@ -459,7 +454,7 @@ impl RenderCoordinator {
         )
     }
 
-    pub(crate) fn prepare_gpu_base(
+    pub fn prepare_gpu_base(
         &self,
         ticket: PreviewTicket,
         frame: Arc<RawFrame>,
@@ -479,7 +474,7 @@ impl RenderCoordinator {
         )
     }
 
-    pub(crate) fn sample_white_balance(
+    pub fn sample_white_balance(
         &self,
         ticket: PreviewTicket,
         frame: Arc<RawFrame>,
@@ -499,7 +494,7 @@ impl RenderCoordinator {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn export(
+    pub fn export(
         &self,
         document_id: u64,
         export_id: u64,
@@ -524,7 +519,7 @@ impl RenderCoordinator {
         })))
     }
 
-    pub(crate) fn abandon(&self, document_id: u64) {
+    pub fn abandon(&self, document_id: u64) {
         self.previews.abandon(document_id);
         drop(
             self.requests
@@ -532,15 +527,15 @@ impl RenderCoordinator {
         );
     }
 
-    pub(crate) fn cancel_preview(&self, document_id: u64) {
+    pub fn cancel_preview(&self, document_id: u64) {
         self.previews.abandon(document_id);
     }
 
-    pub(crate) fn try_events(&self) -> impl Iterator<Item = WorkerEvent> + '_ {
+    pub fn try_events(&self) -> impl Iterator<Item = WorkerEvent> + '_ {
         self.events.try_iter()
     }
 
-    pub(crate) fn preview_queue_stats(&self) -> PreviewQueueStats {
+    pub fn preview_queue_stats(&self) -> PreviewQueueStats {
         self.previews.stats()
     }
 
@@ -569,7 +564,7 @@ impl Drop for RenderCoordinator {
 fn worker_loop(
     receiver: mpsc::Receiver<WorkerRequest>,
     sender: mpsc::Sender<WorkerEvent>,
-    context: egui::Context,
+    wake: WakeFn,
     decoder: Arc<dyn RawDecoder>,
     previews: Arc<PreviewMailbox>,
 ) {
@@ -582,7 +577,7 @@ fn worker_loop(
             CpuPipeline::default()
         }
     };
-    let exports = export_worker::start(pipeline.clone(), sender.clone(), context.clone());
+    let exports = export_worker::start(pipeline.clone(), sender.clone(), wake.clone());
 
     while let Ok(request) = receiver.recv() {
         if request_belongs_to_abandoned_document(&request, &abandoned) {
@@ -602,7 +597,7 @@ fn worker_loop(
                     document_id,
                     &path,
                     &sender,
-                    &context,
+                    &wake,
                     decoder.as_ref(),
                     pipeline.optics_service().map(AsRef::as_ref),
                 );
@@ -622,7 +617,7 @@ fn worker_loop(
                         PreviewBackend::Cpu => process_source_scale_preview(
                             scheduled.job,
                             &sender,
-                            &context,
+                            &wake,
                             &scheduled.cancellation,
                             &pipeline,
                             &mut preview_cache,
@@ -630,7 +625,7 @@ fn worker_loop(
                         PreviewBackend::GpuBase => process_gpu_base(
                             scheduled.job,
                             &sender,
-                            &context,
+                            &wake,
                             &scheduled.cancellation,
                             &pipeline,
                             &mut preview_cache,
@@ -641,7 +636,7 @@ fn worker_loop(
                         PreviewBackend::Cpu => process_preview(
                             scheduled.job,
                             &sender,
-                            &context,
+                            &wake,
                             &scheduled.cancellation,
                             &pipeline,
                             &mut preview_cache,
@@ -649,7 +644,7 @@ fn worker_loop(
                         PreviewBackend::GpuBase => process_gpu_base(
                             scheduled.job,
                             &sender,
-                            &context,
+                            &wake,
                             &scheduled.cancellation,
                             &pipeline,
                             &mut preview_cache,
@@ -663,7 +658,7 @@ fn worker_loop(
                     process_white_balance_sample(
                         *job,
                         &sender,
-                        &context,
+                        &wake,
                         &pipeline,
                         &mut preview_cache,
                     );
@@ -675,7 +670,7 @@ fn worker_loop(
                 {
                     send_failure(
                         &sender,
-                        &context,
+                        &wake,
                         job.document_id,
                         JobKind::Export,
                         Some(job.recipe_revision),
@@ -720,7 +715,7 @@ fn process_open(
     document_id: u64,
     path: &Path,
     sender: &mpsc::Sender<WorkerEvent>,
-    context: &egui::Context,
+    wake: &WakeFn,
     decoder: &dyn RawDecoder,
     optics: Option<&OpticsService>,
 ) {
@@ -729,7 +724,7 @@ fn process_open(
     let _guard = span.enter();
     send_progress(
         sender,
-        context,
+        wake,
         document_id,
         JobKind::Open,
         None,
@@ -741,7 +736,7 @@ fn process_open(
         Err(error) => {
             send_failure(
                 sender,
-                context,
+                wake,
                 document_id,
                 JobKind::Open,
                 None,
@@ -756,7 +751,7 @@ fn process_open(
         Err(error) => {
             send_failure(
                 sender,
-                context,
+                wake,
                 document_id,
                 JobKind::Open,
                 None,
@@ -768,7 +763,7 @@ fn process_open(
     };
     send_event(
         sender,
-        context,
+        wake,
         WorkerEvent::MetadataReady {
             document_id,
             info: Box::new(info.clone()),
@@ -792,7 +787,7 @@ fn process_open(
     };
     send_event(
         sender,
-        context,
+        wake,
         WorkerEvent::OpticsMatchReady {
             document_id,
             result,
@@ -807,12 +802,12 @@ fn process_open(
         info.orientation,
         session.as_mut(),
         sender,
-        context,
+        wake,
     );
 
     send_progress(
         sender,
-        context,
+        wake,
         document_id,
         JobKind::Open,
         None,
@@ -828,7 +823,7 @@ fn process_open(
             );
             send_event(
                 sender,
-                context,
+                wake,
                 WorkerEvent::RawReady {
                     document_id,
                     frame: Arc::new(frame),
@@ -837,7 +832,7 @@ fn process_open(
         }
         Err(error) => send_failure(
             sender,
-            context,
+            wake,
             document_id,
             JobKind::Open,
             None,
@@ -852,11 +847,11 @@ fn process_embedded_placeholder(
     orientation: Orientation,
     session: &mut dyn RawSession,
     sender: &mpsc::Sender<WorkerEvent>,
-    context: &egui::Context,
+    wake: &WakeFn,
 ) {
     send_progress(
         sender,
-        context,
+        wake,
         document_id,
         JobKind::Open,
         None,
@@ -867,12 +862,12 @@ fn process_embedded_placeholder(
         Ok(Some(preview)) => match decode_placeholder(&preview.bytes, orientation) {
             Ok(image) => send_event(
                 sender,
-                context,
+                wake,
                 WorkerEvent::PlaceholderReady { document_id, image },
             ),
             Err(error) => send_event(
                 sender,
-                context,
+                wake,
                 WorkerEvent::Warning {
                     document_id,
                     message: format!(
@@ -884,7 +879,7 @@ fn process_embedded_placeholder(
         Ok(None) => {}
         Err(error) => send_event(
             sender,
-            context,
+            wake,
             WorkerEvent::Warning {
                 document_id,
                 message: format!(
@@ -898,7 +893,7 @@ fn process_embedded_placeholder(
 fn process_preview(
     job: PreviewJob,
     sender: &mpsc::Sender<WorkerEvent>,
-    context: &egui::Context,
+    wake: &WakeFn,
     cancellation: &CancellationToken,
     pipeline: &CpuPipeline,
     preview_cache: &mut PreviewCache,
@@ -920,7 +915,7 @@ fn process_preview(
     let cache_hits = preview_cache.prepare(&keys, &job.frame);
     send_preview_progress(
         sender,
-        context,
+        wake,
         job.ticket,
         if cache_hits.adjusted {
             "Restoring cached adjusted CPU preview"
@@ -946,7 +941,7 @@ fn process_preview(
                 log_preview_diagnostics(job.ticket, image.width, image.height, diagnostics);
                 send_event(
                     sender,
-                    context,
+                    wake,
                     WorkerEvent::PreviewReady {
                         ticket: job.ticket,
                         resolution: job.resolution,
@@ -960,7 +955,7 @@ fn process_preview(
             Err(error) => {
                 send_failure(
                     sender,
-                    context,
+                    wake,
                     job.ticket.document_id,
                     JobKind::Preview,
                     Some(job.ticket.revision),
@@ -977,7 +972,7 @@ fn process_preview(
         Err(error) => {
             send_failure(
                 sender,
-                context,
+                wake,
                 job.ticket.document_id,
                 JobKind::Preview,
                 Some(job.ticket.revision),
@@ -992,7 +987,7 @@ fn process_preview(
 fn process_source_scale_preview(
     job: PreviewJob,
     sender: &mpsc::Sender<WorkerEvent>,
-    context: &egui::Context,
+    wake: &WakeFn,
     cancellation: &CancellationToken,
     pipeline: &CpuPipeline,
     preview_cache: &mut PreviewCache,
@@ -1009,7 +1004,7 @@ fn process_source_scale_preview(
     }
     send_preview_progress(
         sender,
-        context,
+        wake,
         job.ticket,
         "Developing full-resolution 1:1 inspection",
     );
@@ -1054,7 +1049,7 @@ fn process_source_scale_preview(
                     log_preview_diagnostics(job.ticket, image.width, image.height, diagnostics);
                     send_event(
                         sender,
-                        context,
+                        wake,
                         WorkerEvent::PreviewReady {
                             ticket: job.ticket,
                             resolution: PreviewResolution::SourceScale,
@@ -1068,7 +1063,7 @@ fn process_source_scale_preview(
                 Err(error) => {
                     send_failure(
                         sender,
-                        context,
+                        wake,
                         job.ticket.document_id,
                         JobKind::Preview,
                         Some(job.ticket.revision),
@@ -1086,7 +1081,7 @@ fn process_source_scale_preview(
         Err(error) => {
             send_failure(
                 sender,
-                context,
+                wake,
                 job.ticket.document_id,
                 JobKind::Preview,
                 Some(job.ticket.revision),
@@ -1152,7 +1147,7 @@ fn render_gpu_capture_source_scale(
 fn process_gpu_base(
     job: PreviewJob,
     sender: &mpsc::Sender<WorkerEvent>,
-    context: &egui::Context,
+    wake: &WakeFn,
     cancellation: &CancellationToken,
     pipeline: &CpuPipeline,
     preview_cache: &mut PreviewCache,
@@ -1181,7 +1176,7 @@ fn process_gpu_base(
     let mut cache_hits = preview_cache.prepare(&keys, &job.frame);
     send_preview_progress(
         sender,
-        context,
+        wake,
         job.ticket,
         "Preparing resident camera source, optics, and exact GPU preview reduction",
     );
@@ -1231,7 +1226,7 @@ fn process_gpu_base(
         Err(error) => {
             send_event(
                 sender,
-                context,
+                wake,
                 WorkerEvent::GpuSpatialFailed {
                     ticket: job.ticket,
                     message: error.to_string(),
@@ -1295,7 +1290,7 @@ fn process_gpu_base(
     log_preview_diagnostics(job.ticket, width, height, diagnostics);
     send_event(
         sender,
-        context,
+        wake,
         WorkerEvent::GpuUploadReady {
             ticket: job.ticket,
             source: Box::new(spatial),
@@ -1478,7 +1473,7 @@ fn ensure_preview_reconstruction(
 fn process_white_balance_sample(
     job: WhiteBalanceSampleJob,
     sender: &mpsc::Sender<WorkerEvent>,
-    context: &egui::Context,
+    wake: &WakeFn,
     pipeline: &CpuPipeline,
     preview_cache: &mut PreviewCache,
 ) {
@@ -1493,7 +1488,7 @@ fn process_white_balance_sample(
             message,
         },
     };
-    send_event(sender, context, event);
+    send_event(sender, wake, event);
 }
 
 fn sample_white_balance_patch(
@@ -1742,7 +1737,7 @@ fn orient_rgb8(source: &RgbImage, orientation: Orientation) -> Result<RgbImage, 
 
 fn send_progress(
     sender: &mpsc::Sender<WorkerEvent>,
-    context: &egui::Context,
+    wake: &WakeFn,
     document_id: u64,
     job: JobKind,
     revision: Option<u64>,
@@ -1751,7 +1746,7 @@ fn send_progress(
 ) {
     send_event(
         sender,
-        context,
+        wake,
         WorkerEvent::Progress {
             document_id,
             job,
@@ -1765,13 +1760,13 @@ fn send_progress(
 
 fn send_preview_progress(
     sender: &mpsc::Sender<WorkerEvent>,
-    context: &egui::Context,
+    wake: &WakeFn,
     ticket: PreviewTicket,
     detail: &str,
 ) {
     send_event(
         sender,
-        context,
+        wake,
         WorkerEvent::Progress {
             document_id: ticket.document_id,
             job: JobKind::Preview,
@@ -1786,7 +1781,7 @@ fn send_preview_progress(
 #[allow(clippy::too_many_arguments)]
 fn send_failure(
     sender: &mpsc::Sender<WorkerEvent>,
-    context: &egui::Context,
+    wake: &WakeFn,
     document_id: u64,
     job: JobKind,
     revision: Option<u64>,
@@ -1795,7 +1790,7 @@ fn send_failure(
 ) {
     send_event(
         sender,
-        context,
+        wake,
         WorkerEvent::Failed {
             document_id,
             job,
@@ -1806,9 +1801,9 @@ fn send_failure(
     );
 }
 
-fn send_event(sender: &mpsc::Sender<WorkerEvent>, context: &egui::Context, event: WorkerEvent) {
+fn send_event(sender: &mpsc::Sender<WorkerEvent>, wake: &WakeFn, event: WorkerEvent) {
     if sender.send(event).is_ok() {
-        context.request_repaint();
+        wake();
     }
 }
 
@@ -2178,7 +2173,7 @@ mod tests {
         let completion = process_gpu_base(
             job,
             &sender,
-            &egui::Context::default(),
+            &crate::wake::noop(),
             &CancellationToken::new(),
             &pipeline,
             &mut cache,
@@ -2230,7 +2225,7 @@ mod tests {
                 resolution: PreviewResolution::SourceScale,
             },
             &sender,
-            &egui::Context::default(),
+            &crate::wake::noop(),
             &CancellationToken::new(),
             &pipeline,
             &mut cache,
@@ -2303,7 +2298,7 @@ mod tests {
         let completion = process_source_scale_preview(
             job,
             &sender,
-            &egui::Context::default(),
+            &crate::wake::noop(),
             &CancellationToken::new(),
             &pipeline,
             &mut PreviewCache::default(),
@@ -2380,7 +2375,7 @@ mod tests {
             41,
             Path::new("fixture.raw"),
             &sender,
-            &egui::Context::default(),
+            &crate::wake::noop(),
             &decoder,
             None,
         );
@@ -2523,7 +2518,7 @@ mod tests {
         }
 
         let coordinator =
-            RenderCoordinator::new(egui::Context::default()).map_err(std::io::Error::other)?;
+            RenderCoordinator::new(crate::wake::noop()).map_err(std::io::Error::other)?;
         coordinator
             .open(17, source)
             .map_err(std::io::Error::other)?;

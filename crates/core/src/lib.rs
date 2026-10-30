@@ -9,6 +9,7 @@ mod cancel;
 mod color;
 mod cpu;
 mod demosaic;
+mod editing;
 mod error;
 mod export;
 mod geometry;
@@ -39,6 +40,10 @@ pub use cpu::{
     render_display_srgb8_dithered, render_display_srgb8_dithered_with_geometry,
     render_display_srgb8_with_geometry, render_display_srgb16, render_display_srgb16_with_geometry,
     white_balance_gains, white_balance_gains_from_calibration,
+};
+pub use editing::{
+    WhiteBalanceMode, WhiteBalanceModeMemory, auto_tone, default_recipe, sample_rgb_patch,
+    white_balance_from_camera_sample,
 };
 pub use error::PipelineError;
 pub use export::{

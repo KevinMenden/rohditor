@@ -99,7 +99,7 @@ fn correction_accepts_non_tight_rows_without_touching_padding() {
     let row_stride = 8 * 3 + 2;
     let mut pixels = vec![0.0_f32; row_stride * 8];
     for row in pixels.chunks_exact_mut(row_stride) {
-        for pixel in row[..8 * 3].chunks_exact_mut(3) {
+        for pixel in row[..8 * 3].as_chunks_mut::<3>().0 {
             pixel.copy_from_slice(&[1.0, 2.0, 3.0]);
         }
         row[8 * 3..].fill(77.0);
@@ -117,7 +117,9 @@ fn correction_accepts_non_tight_rows_without_touching_padding() {
     );
     assert!(result.image.data().chunks_exact(row_stride).all(|row| {
         row[..8 * 3]
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .all(|pixel| (pixel[1] / pixel[0] - 2.0).abs() < 1.0e-5)
     }));
 }

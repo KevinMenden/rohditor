@@ -13,7 +13,7 @@ use rohditor_raw::SourceIdentity;
 use super::{CatalogEvent, ThumbnailResult};
 
 #[derive(Debug, PartialEq)]
-pub(crate) enum ThumbnailSlot {
+pub enum ThumbnailSlot {
     Pending,
     Ready(Thumbnail),
     Placeholder(PlaceholderReason),
@@ -21,7 +21,7 @@ pub(crate) enum ThumbnailSlot {
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct CatalogState {
+pub struct CatalogState {
     folder: Option<PathBuf>,
     entries: Vec<CatalogEntry>,
     slots: Vec<ThumbnailSlot>,
@@ -33,7 +33,7 @@ pub(crate) struct CatalogState {
 }
 
 impl CatalogState {
-    pub(crate) fn apply_event(&mut self, event: CatalogEvent) {
+    pub fn apply_event(&mut self, event: CatalogEvent) {
         match event {
             CatalogEvent::ScanStarted { folder } => {
                 self.folder = Some(folder);
@@ -111,36 +111,36 @@ impl CatalogState {
         self.folder.as_deref() == Some(folder)
     }
 
-    pub(crate) fn folder(&self) -> Option<&Path> {
+    pub fn folder(&self) -> Option<&Path> {
         self.folder.as_deref()
     }
 
-    pub(crate) fn scanning(&self) -> bool {
+    pub fn scanning(&self) -> bool {
         self.scanning
     }
 
-    pub(crate) fn entry_path(&self, index: usize) -> Option<&Path> {
+    pub fn entry_path(&self, index: usize) -> Option<&Path> {
         self.entries.get(index).map(CatalogEntry::path)
     }
 
-    pub(crate) fn entry_name(&self, index: usize) -> Option<&str> {
+    pub fn entry_name(&self, index: usize) -> Option<&str> {
         self.entries.get(index).map(CatalogEntry::file_name)
     }
 
-    pub(crate) fn slot(&self, index: usize) -> Option<&ThumbnailSlot> {
+    pub fn slot(&self, index: usize) -> Option<&ThumbnailSlot> {
         self.slots.get(index)
     }
 
     /// EXIF capture date for one entry, available once its thumbnail resolved.
-    pub(crate) fn capture_date(&self, index: usize) -> Option<&str> {
+    pub fn capture_date(&self, index: usize) -> Option<&str> {
         self.captured_at.get(index).and_then(|date| date.as_deref())
     }
 
-    pub(crate) fn entry_index_for_path(&self, path: &Path) -> Option<usize> {
+    pub fn entry_index_for_path(&self, path: &Path) -> Option<usize> {
         self.index_by_path.get(path).copied()
     }
 
-    pub(crate) fn folder_name(&self) -> Option<String> {
+    pub fn folder_name(&self) -> Option<String> {
         self.folder.as_deref().and_then(|folder| {
             folder
                 .file_name()
@@ -148,46 +148,46 @@ impl CatalogState {
         })
     }
 
-    pub(crate) fn entry_count(&self) -> usize {
+    pub fn entry_count(&self) -> usize {
         self.entries.len()
     }
 
     /// Entries whose thumbnail outcome (ready, placeholder, or failure) is
     /// known.
-    pub(crate) fn resolved_count(&self) -> usize {
+    pub fn resolved_count(&self) -> usize {
         self.slots
             .iter()
             .filter(|slot| !matches!(slot, ThumbnailSlot::Pending))
             .count()
     }
 
-    pub(crate) fn ready_count(&self) -> usize {
+    pub fn ready_count(&self) -> usize {
         self.slots
             .iter()
             .filter(|slot| matches!(slot, ThumbnailSlot::Ready(_)))
             .count()
     }
 
-    pub(crate) fn placeholder_count(&self) -> usize {
+    pub fn placeholder_count(&self) -> usize {
         self.slots
             .iter()
             .filter(|slot| matches!(slot, ThumbnailSlot::Placeholder(_)))
             .count()
     }
 
-    pub(crate) fn failure_count(&self) -> usize {
+    pub fn failure_count(&self) -> usize {
         self.slots
             .iter()
             .filter(|slot| matches!(slot, ThumbnailSlot::Failed(_)))
             .count()
     }
 
-    pub(crate) fn pending_count(&self) -> usize {
+    pub fn pending_count(&self) -> usize {
         self.entry_count() - self.resolved_count()
     }
 
     /// Encoded bytes retained by ready thumbnails.
-    pub(crate) fn resident_thumbnail_bytes(&self) -> usize {
+    pub fn resident_thumbnail_bytes(&self) -> usize {
         self.slots
             .iter()
             .filter_map(|slot| match slot {
@@ -197,7 +197,7 @@ impl CatalogState {
             .sum()
     }
 
-    pub(crate) fn failure(&self) -> Option<&str> {
+    pub fn failure(&self) -> Option<&str> {
         self.failure.as_deref()
     }
 }

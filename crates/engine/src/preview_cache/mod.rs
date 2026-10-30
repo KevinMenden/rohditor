@@ -2,4 +2,4 @@
 
 mod storage;
 
-pub(crate) use storage::*;
+pub use storage::*;

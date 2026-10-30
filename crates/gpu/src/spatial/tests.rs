@@ -165,8 +165,10 @@ fn capture_residency_and_exact_reduction_match_cpu_without_camera_readback() {
     assert_eq!(optics_metrics.readback_bytes, 4);
     let optics_actual = readback(&processor, &optics_preview);
     for (actual, expected) in optics_actual
-        .chunks_exact(4)
-        .zip(optics_reference.image().data().chunks_exact(3))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(optics_reference.image().data().as_chunks::<3>().0.iter())
     {
         for channel in 0..3 {
             let tolerance = 2.0e-4 + 2.0e-4 * expected[channel].abs();
@@ -215,8 +217,10 @@ fn capture_residency_and_exact_reduction_match_cpu_without_camera_readback() {
     assert_eq!(materialized_metrics.submissions, 1);
     let materialized = readback(&processor, &materialized);
     for (actual, expected) in materialized
-        .chunks_exact(4)
-        .zip(camera_reference.image().data().chunks_exact(3))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(camera_reference.image().data().as_chunks::<3>().0.iter())
     {
         for channel in 0..3 {
             let tolerance = 4.0e-5 + 4.0e-5 * expected[channel].abs();
@@ -246,8 +250,10 @@ fn capture_residency_and_exact_reduction_match_cpu_without_camera_readback() {
     );
     for (actual, expected) in actual
         .rgba
-        .chunks_exact(4)
-        .zip(expected.image.data().chunks_exact(3))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(expected.image.data().as_chunks::<3>().0.iter())
     {
         for channel in 0..3 {
             assert!(
@@ -417,8 +423,10 @@ fn every_optics_model_matches_the_cpu_reference_with_fractional_reduction() {
             assert_eq!(metrics.readback_bytes, 4);
             let actual = readback(&processor, &preview);
             for (actual, expected) in actual
-                .chunks_exact(4)
-                .zip(reference.image().data().chunks_exact(3))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(reference.image().data().as_chunks::<3>().0.iter())
             {
                 for channel in 0..3 {
                     let tolerance = 2.0e-4 + 2.0e-4 * expected[channel].abs();
@@ -494,8 +502,10 @@ fn private_full_resolution_optics_and_fractional_preview_parity() {
     let mut maximum = 0.0_f32;
     let mut maximum_allowed = 0.0_f32;
     for (actual, expected) in actual
-        .chunks_exact(4)
-        .zip(reference.image().data().chunks_exact(3))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(reference.image().data().as_chunks::<3>().0.iter())
     {
         for channel in 0..3 {
             let difference = (actual[channel] - expected[channel]).abs();

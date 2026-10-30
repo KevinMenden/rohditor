@@ -199,7 +199,13 @@ fn gpu_hsl_grading_matches_cpu_and_reuses_resident_source() {
             {
                 let display = render_display_srgb8(&cpu, Orientation::Normal, policy)
                     .expect("CPU display reference should render");
-                for (cpu, gpu) in display.data().chunks_exact(3).zip(gpu.rgba.chunks_exact(4)) {
+                for (cpu, gpu) in display
+                    .data()
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .zip(gpu.rgba.as_chunks::<4>().0.iter())
+                {
                     for channel in 0..3 {
                         let error = cpu[channel].abs_diff(gpu[channel]);
                         maximum_code_error = maximum_code_error.max(error);
@@ -268,8 +274,8 @@ fn read_working(processor: &GpuPreviewProcessor, frame: &GpuPreviewFrame) -> Vec
     let bytes = buffer.slice(..).get_mapped_range();
     let mut rgb = Vec::new();
     for row in bytes.chunks_exact(row_bytes as usize) {
-        for pixel in row[..width as usize * 8].chunks_exact(8) {
-            for channel in pixel[..6].chunks_exact(2) {
+        for pixel in row[..width as usize * 8].as_chunks::<8>().0 {
+            for channel in pixel[..6].as_chunks::<2>().0 {
                 rgb.push(f16::from_bits(u16::from_le_bytes([channel[0], channel[1]])).to_f32());
             }
         }
@@ -373,7 +379,9 @@ fn private_hsl_grading_corpus_parity_and_timings() {
                     .expect("diagnostic readback should finish");
                 let gpu_rgb: Vec<u8> = gpu
                     .rgba
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .flat_map(|p| p[..3].iter().copied())
                     .collect();
                 let max_error = cpu

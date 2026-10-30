@@ -23,7 +23,7 @@ mod spatial;
 
 /// Explicit keys for the four preview cache levels defined in the roadmap.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PreviewCacheKeys {
+pub struct PreviewCacheKeys {
     decoded: DecodedRawKey,
     reconstructed: ReconstructedCameraRgbKey,
     demosaiced: DemosaicedBaseKey,
@@ -32,7 +32,7 @@ pub(crate) struct PreviewCacheKeys {
 
 impl PreviewCacheKeys {
     #[cfg(test)]
-    pub(crate) fn new(
+    pub fn new(
         document_id: u64,
         frame: &RawFrame,
         recipe: &EditRecipe,
@@ -41,7 +41,7 @@ impl PreviewCacheKeys {
         Self::new_with_optics(document_id, frame, recipe, options, None, None)
     }
 
-    pub(crate) fn new_for_pipeline(
+    pub fn new_for_pipeline(
         document_id: u64,
         frame: &RawFrame,
         recipe: &EditRecipe,
@@ -411,7 +411,7 @@ impl From<RenderingProfileSelection> for RenderingProfileKey {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct PreviewCacheHits {
+pub struct PreviewCacheHits {
     pub decoded: bool,
     pub reconstructed: bool,
     pub demosaiced: bool,
@@ -437,7 +437,7 @@ struct DemosaicedEntry {
 }
 
 #[derive(Debug)]
-pub(crate) struct AdjustedPreviewEntry {
+pub struct AdjustedPreviewEntry {
     key: AdjustedPreviewKey,
     pub image: DisplayRgbImage<u8>,
     pub memory: MemoryEstimate,
@@ -447,7 +447,7 @@ pub(crate) struct AdjustedPreviewEntry {
 /// Bounded one-document preview cache with deterministic cascading eviction.
 /// Each conceptual level retains at most one value.
 #[derive(Debug, Default)]
-pub(crate) struct PreviewCache {
+pub struct PreviewCache {
     spatial: spatial::SpatialCache,
     decoded: Option<DecodedEntry>,
     reconstructed: Option<ReconstructedEntry>,
@@ -457,7 +457,7 @@ pub(crate) struct PreviewCache {
 }
 
 impl PreviewCache {
-    pub(crate) fn configure_capture_device(
+    pub fn configure_capture_device(
         &mut self,
         adapter: wgpu::Adapter,
         device: wgpu::Device,
@@ -467,16 +467,12 @@ impl PreviewCache {
         self.spatial
             .configure(adapter, device, queue, target_format);
     }
-    pub(crate) fn capture_recovery(&self) -> Option<&str> {
+    pub fn capture_recovery(&self) -> Option<&str> {
         self.spatial.recovery.as_deref()
     }
     /// Install the current decoded source key and evict every downstream level
     /// whose explicit key no longer matches.
-    pub(crate) fn prepare(
-        &mut self,
-        keys: &PreviewCacheKeys,
-        frame: &Arc<RawFrame>,
-    ) -> PreviewCacheHits {
+    pub fn prepare(&mut self, keys: &PreviewCacheKeys, frame: &Arc<RawFrame>) -> PreviewCacheHits {
         let decoded = self
             .decoded
             .as_ref()
@@ -527,7 +523,7 @@ impl PreviewCache {
         }
     }
 
-    pub(crate) fn reconstructed(&self, keys: &PreviewCacheKeys) -> Option<&ReconstructedPreview> {
+    pub fn reconstructed(&self, keys: &PreviewCacheKeys) -> Option<&ReconstructedPreview> {
         self.reconstructed
             .as_ref()
             .filter(|entry| entry.key == keys.reconstructed)
@@ -535,7 +531,7 @@ impl PreviewCache {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn prepare_spatial(
+    pub fn prepare_spatial(
         &mut self,
         pipeline: &CpuPipeline,
         frame: &RawFrame,
@@ -561,7 +557,7 @@ impl PreviewCache {
         )
     }
 
-    pub(crate) fn prepare_gpu_spatial(
+    pub fn prepare_gpu_spatial(
         &mut self,
         pipeline: &CpuPipeline,
         frame: &RawFrame,
@@ -584,7 +580,7 @@ impl PreviewCache {
             .prepare_gpu(pipeline, frame, recipe, options, keys, cancellation)
     }
 
-    pub(crate) fn prepare_gpu_full(
+    pub fn prepare_gpu_full(
         &mut self,
         pipeline: &CpuPipeline,
         frame: &RawFrame,
@@ -607,7 +603,7 @@ impl PreviewCache {
             .prepare_gpu_full(pipeline, frame, recipe, options, keys, cancellation)
     }
 
-    pub(crate) fn render_gpu_full(
+    pub fn render_gpu_full(
         &mut self,
         source: &rohditor_gpu::GpuSpatialFullSource,
         recipe: &EditRecipe,
@@ -618,15 +614,11 @@ impl PreviewCache {
             .render_gpu_full(source, recipe, output_policy, cancellation)
     }
 
-    pub(crate) fn select_cpu(&mut self) {
+    pub fn select_cpu(&mut self) {
         self.spatial.release_gpu_images();
     }
 
-    pub(crate) fn insert_reconstructed(
-        &mut self,
-        keys: &PreviewCacheKeys,
-        preview: ReconstructedPreview,
-    ) {
+    pub fn insert_reconstructed(&mut self, keys: &PreviewCacheKeys, preview: ReconstructedPreview) {
         self.reconstructed = Some(ReconstructedEntry {
             key: keys.reconstructed.clone(),
             preview,
@@ -635,14 +627,14 @@ impl PreviewCache {
         self.adjusted = None;
     }
 
-    pub(crate) fn demosaiced(&self, keys: &PreviewCacheKeys) -> Option<&DemosaicedBase> {
+    pub fn demosaiced(&self, keys: &PreviewCacheKeys) -> Option<&DemosaicedBase> {
         self.demosaiced
             .as_ref()
             .filter(|entry| entry.key == keys.demosaiced)
             .map(|entry| &entry.base)
     }
 
-    pub(crate) fn insert_demosaiced(&mut self, keys: &PreviewCacheKeys, base: DemosaicedBase) {
+    pub fn insert_demosaiced(&mut self, keys: &PreviewCacheKeys, base: DemosaicedBase) {
         self.demosaiced = Some(DemosaicedEntry {
             key: keys.demosaiced.clone(),
             base,
@@ -650,13 +642,13 @@ impl PreviewCache {
         self.adjusted = None;
     }
 
-    pub(crate) fn adjusted(&self, keys: &PreviewCacheKeys) -> Option<&AdjustedPreviewEntry> {
+    pub fn adjusted(&self, keys: &PreviewCacheKeys) -> Option<&AdjustedPreviewEntry> {
         self.adjusted
             .as_ref()
             .filter(|entry| entry.key == keys.adjusted)
     }
 
-    pub(crate) fn insert_adjusted(
+    pub fn insert_adjusted(
         &mut self,
         keys: &PreviewCacheKeys,
         image: DisplayRgbImage<u8>,
@@ -671,7 +663,7 @@ impl PreviewCache {
         });
     }
 
-    pub(crate) fn base_and_workspace(
+    pub fn base_and_workspace(
         &mut self,
         keys: &PreviewCacheKeys,
     ) -> Option<(&DemosaicedBase, &mut CpuPreviewWorkspace)> {
@@ -686,12 +678,12 @@ impl PreviewCache {
             .map(|entry| (&entry.base, workspace))
     }
 
-    pub(crate) fn workspace_reusable(&self, keys: &PreviewCacheKeys) -> bool {
+    pub fn workspace_reusable(&self, keys: &PreviewCacheKeys) -> bool {
         self.demosaiced(keys)
             .is_some_and(|base| self.workspace.can_reuse(base))
     }
 
-    pub(crate) fn clear_document(&mut self, document_id: u64) {
+    pub fn clear_document(&mut self, document_id: u64) {
         if self
             .decoded
             .as_ref()
@@ -708,7 +700,7 @@ impl PreviewCache {
 
     /// Deterministic total of retained CPU image buffers. This is deliberately
     /// distinct from process RSS and may count a decoded `Arc` also held by UI.
-    pub(crate) fn resident_bytes(&self) -> usize {
+    pub fn resident_bytes(&self) -> usize {
         let decoded = self.decoded.as_ref().map_or(0, |entry| {
             entry.frame.mosaic.len().saturating_mul(size_of::<u16>())
         });

@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 
-use eframe::egui;
 use rohditor_catalog::{
     CachedThumbnail, CatalogEntry, GeneratedThumbnail, PlaceholderReason, Thumbnail,
     ThumbnailCache, ThumbnailGenerator, ThumbnailOptions, ThumbnailOutcome, scan_folder,
@@ -19,13 +18,15 @@ use rohditor_catalog::{
 use rohditor_raw::{RawDecoder, RawError, RawSession, RawlerDecoder, SourceIdentity};
 use tracing::{info, warn};
 
+use crate::wake::WakeFn;
+
 #[path = "catalog/state.rs"]
 mod state;
 
-pub(crate) use state::{CatalogState, ThumbnailSlot};
+pub use state::{CatalogState, ThumbnailSlot};
 
 #[derive(Debug)]
-pub(crate) enum CatalogEvent {
+pub enum CatalogEvent {
     ScanStarted {
         folder: PathBuf,
     },
@@ -51,7 +52,7 @@ pub(crate) enum CatalogEvent {
 
 /// Outcome of one thumbnail attempt, ready for a UI slot.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ThumbnailResult {
+pub enum ThumbnailResult {
     Ready(Thumbnail),
     Placeholder(PlaceholderReason),
     Failed(String),
@@ -74,7 +75,7 @@ impl RawDecoder for SharedDecoder {
     }
 }
 
-pub(crate) struct CatalogCoordinator {
+pub struct CatalogCoordinator {
     requests: mpsc::Sender<CatalogRequest>,
     events: mpsc::Receiver<CatalogEvent>,
     /// Last pause state transmitted to the worker, used to skip duplicate
@@ -84,7 +85,7 @@ pub(crate) struct CatalogCoordinator {
 }
 
 impl CatalogCoordinator {
-    pub(crate) fn new(context: egui::Context) -> Result<Self, String> {
+    pub fn new(wake: WakeFn) -> Result<Self, String> {
         let cache = match ThumbnailCache::from_default() {
             Ok(cache) => Some(cache),
             Err(error) => {
@@ -92,30 +93,30 @@ impl CatalogCoordinator {
                 None
             }
         };
-        Self::new_with_parts(context, Arc::new(RawlerDecoder::default()), cache)
+        Self::new_with_parts(wake, Arc::new(RawlerDecoder::default()), cache)
     }
 
     fn new_with_parts(
-        context: egui::Context,
+        wake: WakeFn,
         decoder: Arc<dyn RawDecoder>,
         cache: Option<ThumbnailCache>,
     ) -> Result<Self, String> {
         let (request_sender, request_receiver) = mpsc::channel();
         let (event_sender, event_receiver) = mpsc::channel();
         let stopped_sender = event_sender.clone();
-        let stopped_context = context.clone();
+        let stopped_wake = wake.clone();
         let generator =
             ThumbnailGenerator::new(SharedDecoder(decoder), ThumbnailOptions::default());
         let worker = thread::Builder::new()
             .name("rohditor-catalog-worker".to_owned())
             .spawn(move || {
                 let result = catch_unwind(AssertUnwindSafe(|| {
-                    catalog_worker_loop(request_receiver, event_sender, context, generator, cache);
+                    catalog_worker_loop(request_receiver, event_sender, wake, generator, cache);
                 }));
                 if let Err(payload) = result {
                     send_event(
                         &stopped_sender,
-                        &stopped_context,
+                        &stopped_wake,
                         CatalogEvent::WorkerStopped {
                             message: format!(
                                 "The background catalog worker stopped unexpectedly: {}",
@@ -135,7 +136,7 @@ impl CatalogCoordinator {
     }
 
     /// Start scanning one folder, replacing any previous catalog fill.
-    pub(crate) fn scan_folder(&self, folder: PathBuf) -> Result<(), String> {
+    pub fn scan_folder(&self, folder: PathBuf) -> Result<(), String> {
         self.requests
             .send(CatalogRequest::ScanFolder(folder))
             .map_err(|_| "the background catalog worker stopped unexpectedly".to_owned())
@@ -143,7 +144,7 @@ impl CatalogCoordinator {
 
     /// Pause or resume background thumbnail generation. Called every frame;
     /// only state changes are transmitted.
-    pub(crate) fn set_paused(&self, paused: bool) {
+    pub fn set_paused(&self, paused: bool) {
         let mut sent = match self.paused_sent.lock() {
             Ok(state) => state,
             Err(poisoned) => poisoned.into_inner(),
@@ -154,7 +155,7 @@ impl CatalogCoordinator {
         }
     }
 
-    pub(crate) fn try_events(&self) -> impl Iterator<Item = CatalogEvent> + '_ {
+    pub fn try_events(&self) -> impl Iterator<Item = CatalogEvent> + '_ {
         self.events.try_iter()
     }
 }
@@ -174,7 +175,7 @@ impl Drop for CatalogCoordinator {
 
 struct CatalogWorker {
     sender: mpsc::Sender<CatalogEvent>,
-    context: egui::Context,
+    wake: WakeFn,
     generator: ThumbnailGenerator<SharedDecoder>,
     cache: Option<ThumbnailCache>,
     options: ThumbnailOptions,
@@ -188,13 +189,13 @@ struct CatalogWorker {
 fn catalog_worker_loop(
     requests: mpsc::Receiver<CatalogRequest>,
     events: mpsc::Sender<CatalogEvent>,
-    context: egui::Context,
+    wake: WakeFn,
     generator: ThumbnailGenerator<SharedDecoder>,
     cache: Option<ThumbnailCache>,
 ) {
     let mut worker = CatalogWorker {
         sender: events,
-        context,
+        wake,
         generator,
         cache,
         options: ThumbnailOptions::default(),
@@ -240,7 +241,7 @@ impl CatalogWorker {
         self.cursor = 0;
         send_event(
             &self.sender,
-            &self.context,
+            &self.wake,
             CatalogEvent::ScanStarted {
                 folder: folder.clone(),
             },
@@ -260,7 +261,7 @@ impl CatalogWorker {
                 }
                 send_event(
                     &self.sender,
-                    &self.context,
+                    &self.wake,
                     CatalogEvent::ScanEntries {
                         folder,
                         entries: self.entries.clone(),
@@ -270,7 +271,7 @@ impl CatalogWorker {
             Err(error) => {
                 send_event(
                     &self.sender,
-                    &self.context,
+                    &self.wake,
                     CatalogEvent::ScanFailed {
                         folder,
                         reason: error.to_string(),
@@ -315,7 +316,7 @@ impl CatalogWorker {
         let (outcome, captured_at) = self.generate(entry);
         send_event(
             &self.sender,
-            &self.context,
+            &self.wake,
             CatalogEvent::ThumbnailReady {
                 folder,
                 path: entry.path().to_path_buf(),
@@ -372,9 +373,9 @@ impl CatalogWorker {
     }
 }
 
-fn send_event(sender: &mpsc::Sender<CatalogEvent>, context: &egui::Context, event: CatalogEvent) {
+fn send_event(sender: &mpsc::Sender<CatalogEvent>, wake: &WakeFn, event: CatalogEvent) {
     drop(sender.send(event));
-    context.request_repaint();
+    wake();
 }
 
 fn panic_message(payload: &(dyn Any + Send)) -> String {
@@ -466,7 +467,7 @@ mod tests {
 
     fn coordinator(cache: Option<ThumbnailCache>) -> CatalogCoordinator {
         CatalogCoordinator::new_with_parts(
-            egui::Context::default(),
+            crate::wake::noop(),
             Arc::new(RawlerDecoder::default()),
             cache,
         )
