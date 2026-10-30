@@ -2,6 +2,7 @@
 
 mod gamut;
 mod matrix;
+mod profile_table;
 mod transfer;
 
 pub use gamut::{
@@ -14,4 +15,5 @@ pub use matrix::{
     XYZ_D65_TO_LINEAR_REC2020, XYZ_D65_TO_LINEAR_SRGB, adapt_xyz_to_d65,
     chromatic_adaptation_to_d65,
 };
+pub use profile_table::{DeltaTable, apply_delta_table, rec2020_prophoto_matrices};
 pub use transfer::{linear_srgb_to_srgb, srgb_to_linear_srgb};

@@ -15,6 +15,7 @@ assert_no_dependencies rohditor-image 'rohditor-(core|demosaic|edit|gpu|raw|engi
 assert_no_dependencies rohditor-edit 'rohditor-(core|demosaic|gpu|raw|engine|cli|desktop)'
 assert_no_dependencies rohditor-demosaic 'rohditor-(core|edit|gpu|raw|engine|cli|desktop)'
 assert_no_dependencies rohditor-highlight 'rohditor-(core|demosaic|edit|gpu|raw|engine|cli|desktop)'
+assert_no_dependencies rohditor-look 'rohditor-(core|demosaic|gpu|raw|engine|cli|desktop)'
 assert_no_dependencies rohditor-optics 'rohditor-(core|gpu|engine|cli|desktop)'
 assert_no_dependencies rohditor-raw 'rohditor-(core|demosaic|edit|gpu|engine|cli|desktop)'
 assert_no_dependencies rohditor-color 'rohditor-(core|gpu|engine|cli|desktop)'

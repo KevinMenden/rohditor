@@ -1,10 +1,14 @@
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
-use rohditor_core::{CancellationToken, CpuPipeline, PreviewOptions, RenderOptions};
+use rohditor_core::{
+    CancellationToken, CpuPipeline, PreviewOptions, RenderOptions, decode_camera_preview,
+    match_camera_look,
+};
 use rohditor_demosaic::DemosaicAlgorithm;
-use rohditor_edit::{EditRecipe, RenderingProfileSelection};
+use rohditor_edit::{CameraProfileSelection, EditRecipe, RenderingProfileSelection};
 use rohditor_image::Orientation;
+use rohditor_look::{Proxy, compare_proxies};
 use rohditor_raw::{RawDecoder, RawlerDecoder};
 
 const SAMPLES: [&str; 6] = [
@@ -182,4 +186,57 @@ fn fnv1a64(samples: &[u8]) -> u64 {
 
 fn private_corpus_directory() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/private")
+}
+
+/// The fitted camera tone must bring the render's brightness to the camera
+/// JPEG's, where Standard sits clearly darker on this corpus.
+#[test]
+#[ignore = "requires the ignored Sony ARW corpus in testdata/private"]
+fn fitted_camera_tone_matches_the_embedded_jpeg_brightness() -> Result<(), Box<dyn Error>> {
+    let decoder = RawlerDecoder::default();
+    let pipeline = CpuPipeline::default();
+    let options = PreviewOptions {
+        max_long_edge: 768,
+        ..PreviewOptions::default()
+    };
+
+    for name in SAMPLES {
+        let path = private_corpus_directory().join(name);
+        let frame = decoder.decode(&path)?;
+        let preview = decoder
+            .embedded_preview(&path)?
+            .ok_or_else(|| format!("{name} has no embedded preview"))?;
+        let camera = decode_camera_preview(&preview, frame.info.orientation)?;
+        let look = match_camera_look(
+            &pipeline,
+            &frame,
+            &preview,
+            &CameraProfileSelection::Automatic,
+        )?;
+
+        let mut bias = [0.0_f32; 2];
+        for (slot, profile) in [
+            RenderingProfileSelection::STANDARD,
+            RenderingProfileSelection::MATCHED,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut recipe = EditRecipe::default();
+            recipe.rendering.profile = profile;
+            look.store_in(&mut recipe.rendering);
+            let rendered = pipeline.render_preview(&frame, &recipe, options)?;
+            let (proxy, camera_proxy) = Proxy::pair(&rendered.image, &camera)?;
+            bias[slot] = compare_proxies(&proxy, &camera_proxy)
+                .ok_or("proxy grids differ")?
+                .luminance_bias;
+        }
+        assert!(
+            bias[1].abs() < 0.02 && bias[1].abs() < bias[0].abs() / 3.0,
+            "{name}: Standard bias {:+.3}, Matched bias {:+.3}",
+            bias[0],
+            bias[1]
+        );
+    }
+    Ok(())
 }

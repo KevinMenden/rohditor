@@ -2,5 +2,6 @@
 
 mod commands;
 mod highlight_compare;
+mod look_report;
 
 pub(crate) use commands::run;

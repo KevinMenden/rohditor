@@ -110,9 +110,22 @@ impl PreviewCacheKeys {
             white_balance: WhiteBalanceKey::from(recipe.color.white_balance),
             camera_profile: camera_profile_key(&recipe.color.camera_profile),
         };
+        let matched_look = recipe.rendering.matched_look();
         let adjusted = AdjustedPreviewKey {
             demosaiced: demosaiced.clone(),
             rendering_profile: RenderingProfileKey::from(recipe.rendering.profile),
+            camera_tone_bits: matched_look.as_ref().map(|look| {
+                look.tone
+                    .knots
+                    .iter()
+                    .flatten()
+                    .map(|value| value.to_bits())
+                    .collect()
+            }),
+            camera_chroma_bits: matched_look
+                .as_ref()
+                .and_then(|look| look.chroma)
+                .map(|chroma| chroma.gains.iter().map(|gain| gain.to_bits()).collect()),
             exposure_bits: recipe.light.exposure_ev.to_bits(),
             contrast_bits: recipe.light.contrast.to_bits(),
             highlights_bits: recipe.light.highlights.to_bits(),
@@ -373,6 +386,9 @@ impl From<WhiteBalance> for WhiteBalanceKey {
 struct AdjustedPreviewKey {
     demosaiced: DemosaicedBaseKey,
     rendering_profile: RenderingProfileKey,
+    /// Fitted look, present only when the Matched profile will consume it.
+    camera_tone_bits: Option<Vec<u32>>,
+    camera_chroma_bits: Option<Vec<u32>>,
     exposure_bits: u32,
     contrast_bits: u32,
     highlights_bits: u32,
@@ -397,6 +413,7 @@ struct AdjustedPreviewKey {
 enum RenderingProfileKey {
     Neutral,
     Standard { process_version: u16 },
+    Matched { process_version: u16 },
 }
 
 impl From<RenderingProfileSelection> for RenderingProfileKey {
@@ -405,6 +422,9 @@ impl From<RenderingProfileSelection> for RenderingProfileKey {
             RenderingProfileSelection::RohditorNeutral => Self::Neutral,
             RenderingProfileSelection::RohditorStandard { process_version } => {
                 Self::Standard { process_version }
+            }
+            RenderingProfileSelection::RohditorMatched { process_version } => {
+                Self::Matched { process_version }
             }
         }
     }
@@ -1033,6 +1053,35 @@ mod tests {
     }
 
     #[test]
+    fn fitted_camera_look_invalidates_adjusted_pixels_only_for_the_matched_profile() {
+        let mut matched = EditRecipe::default();
+        matched.rendering.profile = RenderingProfileSelection::MATCHED;
+        let unfitted = keys(&matched);
+
+        let mut fitted = matched.clone();
+        fitted.rendering.camera_tone = Some(rohditor_edit::CameraTone {
+            knots: vec![[0.0, 0.0], [0.5, 0.6], [1.0, 1.0]],
+        });
+        let fitted_keys = keys(&fitted);
+        assert_eq!(unfitted.demosaiced, fitted_keys.demosaiced);
+        assert_ne!(unfitted.adjusted, fitted_keys.adjusted);
+
+        let mut colored = fitted.clone();
+        colored.rendering.camera_chroma = Some(rohditor_edit::CameraChroma {
+            gains: [1.2; rohditor_edit::CAMERA_CHROMA_KNOTS],
+        });
+        assert_ne!(fitted_keys.adjusted, keys(&colored).adjusted);
+
+        // Standard ignores a stored look, so it must keep sharing its entry.
+        let mut standard = colored.clone();
+        standard.rendering.profile = RenderingProfileSelection::STANDARD;
+        assert_eq!(
+            keys(&standard).adjusted,
+            keys(&EditRecipe::default()).adjusted
+        );
+    }
+
+    #[test]
     fn output_gamut_policy_invalidates_only_adjusted_pixels_and_keys_version() {
         let recipe = EditRecipe::default();
         let clip = keys_with_output_policy(&recipe, OutputPolicy::ClipToSrgb);
@@ -1285,7 +1334,10 @@ mod tests {
                     [0.0, 0.0, 1.0],
                 ],
                 forward_camera_to_xyz_d50: None,
+                hue_sat_map: None,
             }],
+            look_table: None,
+            tone_curve: None,
         }
     }
 }

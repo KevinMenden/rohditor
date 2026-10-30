@@ -30,8 +30,12 @@ use crate::wake::WakeFn;
 use super::scheduler::should_replace_preview;
 use super::scheduler::{PreviewCompletion, PreviewMailbox};
 
+#[path = "camera_look_worker.rs"]
+mod camera_look_worker;
 #[path = "export_worker.rs"]
 mod export_worker;
+
+pub use camera_look_worker::CameraLookJob;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobKind {
@@ -239,6 +243,14 @@ pub enum WorkerEvent {
         ticket: PreviewTicket,
         message: String,
     },
+    /// The fitted camera look for a document, or why it could not be fitted.
+    CameraLookReady {
+        document_id: u64,
+        /// The camera profile the fit was made against, so a frontend can drop
+        /// a result that the user has since invalidated.
+        camera_profile: rohditor_edit::CameraProfileSelection,
+        result: Result<Box<rohditor_core::CameraLook>, String>,
+    },
     ExportReady {
         document_id: u64,
         export_id: u64,
@@ -309,6 +321,7 @@ pub enum WorkerRequest {
     },
     PreviewAvailable,
     SampleWhiteBalance(Box<WhiteBalanceSampleJob>),
+    FitCameraLook(Box<CameraLookJob>),
     Export(Box<ExportJob>),
     AbandonDocument(u64),
     Shutdown,
@@ -493,6 +506,23 @@ impl RenderCoordinator {
         )))
     }
 
+    /// Fit the photo's camera look (tone and colour) to its embedded JPEG in
+    /// the background. The result arrives as [`WorkerEvent::CameraLookReady`].
+    pub fn fit_camera_look(
+        &self,
+        document_id: u64,
+        path: PathBuf,
+        frame: Arc<RawFrame>,
+        camera_profile: rohditor_edit::CameraProfileSelection,
+    ) -> Result<(), String> {
+        self.send(WorkerRequest::FitCameraLook(Box::new(CameraLookJob {
+            document_id,
+            path,
+            frame,
+            camera_profile,
+        })))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn export(
         &self,
@@ -578,6 +608,12 @@ fn worker_loop(
         }
     };
     let exports = export_worker::start(pipeline.clone(), sender.clone(), wake.clone());
+    let camera_looks = camera_look_worker::start(
+        pipeline.clone(),
+        decoder.clone(),
+        sender.clone(),
+        wake.clone(),
+    );
 
     while let Ok(request) = receiver.recv() {
         if request_belongs_to_abandoned_document(&request, &abandoned) {
@@ -664,6 +700,23 @@ fn worker_loop(
                     );
                 }
             }
+            WorkerRequest::FitCameraLook(job) => {
+                let (document_id, camera_profile) = (job.document_id, job.camera_profile.clone());
+                let submitted = camera_looks
+                    .as_ref()
+                    .is_some_and(|worker| worker.send(job).is_ok());
+                if !submitted {
+                    send_event(
+                        &sender,
+                        &wake,
+                        WorkerEvent::CameraLookReady {
+                            document_id,
+                            camera_profile,
+                            result: Err("The camera look worker is unavailable".to_owned()),
+                        },
+                    );
+                }
+            }
             WorkerRequest::Export(job) => {
                 if !abandoned.contains(&job.document_id)
                     && let Err(job) = export_worker::submit(&exports, job)
@@ -705,6 +758,7 @@ impl WorkerRequest {
                 Some(*document_id)
             }
             Self::Export(job) => Some(job.document_id),
+            Self::FitCameraLook(job) => Some(job.document_id),
             Self::SampleWhiteBalance(job) => Some(job.ticket.document_id),
             Self::PreviewAvailable | Self::Shutdown | Self::CaptureDevice { .. } => None,
         }
@@ -2408,6 +2462,80 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, WorkerEvent::Failed { .. }))
         );
+    }
+
+    #[test]
+    fn camera_look_fit_reports_an_unreadable_preview_with_the_requested_profile() {
+        let decoder = FailingPreviewDecoder {
+            opens: Arc::new(AtomicUsize::new(0)),
+            frame: fake_frame(),
+        };
+        let coordinator =
+            RenderCoordinator::new_with_decoder(crate::wake::noop(), Arc::new(decoder))
+                .expect("worker starts");
+        coordinator
+            .fit_camera_look(
+                52,
+                PathBuf::from("fixture.raw"),
+                Arc::new(fake_frame()),
+                rohditor_edit::CameraProfileSelection::Automatic,
+            )
+            .expect("request is accepted");
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            for event in coordinator.try_events() {
+                if let WorkerEvent::CameraLookReady {
+                    document_id,
+                    camera_profile,
+                    result,
+                } = event
+                {
+                    assert_eq!(document_id, 52);
+                    assert_eq!(
+                        camera_profile,
+                        rohditor_edit::CameraProfileSelection::Automatic
+                    );
+                    let message = result.expect_err("a damaged preview cannot be matched");
+                    assert!(message.contains("embedded preview"), "{message}");
+                    return;
+                }
+            }
+            assert!(Instant::now() < deadline, "no camera look result arrived");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the ignored Sony ARW corpus in testdata/private"]
+    fn private_camera_look_fit_runs_in_the_background() -> Result<(), Box<dyn Error>> {
+        let source =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/private/DSC00851.ARW");
+        let frame = Arc::new(RawlerDecoder::default().decode(&source)?);
+        let coordinator =
+            RenderCoordinator::new(crate::wake::noop()).map_err(std::io::Error::other)?;
+        coordinator
+            .fit_camera_look(
+                60,
+                source,
+                frame,
+                rohditor_edit::CameraProfileSelection::Automatic,
+            )
+            .map_err(std::io::Error::other)?;
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            for event in coordinator.try_events() {
+                if let WorkerEvent::CameraLookReady { result, .. } = event {
+                    let look = result.map_err(std::io::Error::other)?;
+                    assert!(look.tone.tone.validate().is_ok());
+                    return Ok(());
+                }
+            }
+            if Instant::now() >= deadline {
+                return Err("timed out waiting for the camera look".into());
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
     }
 
     #[derive(Debug)]
