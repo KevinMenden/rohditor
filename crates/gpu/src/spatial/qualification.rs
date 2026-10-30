@@ -202,7 +202,7 @@ fn display_error(
     let expected_samples = expected
         .data()
         .chunks(expected.row_stride())
-        .flat_map(|row| row[..expected.width() * 3].chunks_exact(3));
+        .flat_map(|row| row[..expected.width() * 3].as_chunks::<3>().0.iter());
     for (index, (actual, expected)) in actual
         .rgba
         .as_chunks::<4>()

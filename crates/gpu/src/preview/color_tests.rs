@@ -204,7 +204,7 @@ fn gpu_hsl_grading_matches_cpu_and_reuses_resident_source() {
                     .as_chunks::<3>()
                     .0
                     .iter()
-                    .zip(gpu.rgba.chunks_exact(4))
+                    .zip(gpu.rgba.as_chunks::<4>().0.iter())
                 {
                     for channel in 0..3 {
                         let error = cpu[channel].abs_diff(gpu[channel]);
