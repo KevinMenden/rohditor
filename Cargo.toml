@@ -12,6 +12,7 @@ members = [
     "crates/gpu",
     "crates/highlight",
     "crates/image",
+    "crates/look",
     "crates/optics",
     "crates/raw",
     "crates/reference",

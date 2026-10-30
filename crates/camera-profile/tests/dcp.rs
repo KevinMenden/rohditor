@@ -50,8 +50,89 @@ fn parses_big_endian_signed_rationals() {
 #[test]
 fn rejects_pixel_producing_profile_components() {
     let bytes = dcp(Endian::Little, true, false);
-    let error = parse_dcp_bytes(&bytes).expect_err("hue/sat maps are outside the MVP");
-    assert!(error.to_string().contains("hue/saturation map"));
+    let error = parse_dcp_bytes(&bytes).expect_err("baseline exposure is not evaluated");
+    assert!(error.to_string().contains("baseline/default exposure"));
+}
+
+#[test]
+fn parses_adobe_magic_with_hue_sat_map_look_table_and_tone_curve() {
+    // 2 hue x 3 saturation x 1 value; deltas are numbered so the layout shows.
+    let deltas: Vec<f32> = (0..6)
+        .flat_map(|entry| [entry as f32, 1.0 + entry as f32 * 0.1, 0.5])
+        .collect();
+    let tags = vec![
+        ascii(50_936, "Adobe-style Profile"),
+        ascii(50_708, "Sony ILCE-6400"),
+        short(50_778, 21, Endian::Little),
+        srational_matrix(50_721, Endian::Little),
+        longs(50_937, &[2, 3, 1], Endian::Little),
+        floats(50_938, &deltas, Endian::Little),
+        longs(51_107, &[1], Endian::Little),
+        longs(50_981, &[1, 2, 2], Endian::Little),
+        floats(
+            50_982,
+            &[0.0, 1.0, 1.0, 10.0, 0.9, 1.1, 0.0, 1.0, 1.0, 20.0, 1.0, 1.0],
+            Endian::Little,
+        ),
+        floats(50_940, &[0.0, 0.0, 0.5, 0.7, 1.0, 1.0], Endian::Little),
+        longs(51_110, &[1], Endian::Little),
+    ];
+    let bytes = assemble(Endian::Little, 0x4352, tags);
+    let profile = parse_dcp_bytes(&bytes).expect("Adobe-style DCP should parse");
+
+    let map = profile.calibrations[0]
+        .hue_sat_map
+        .as_ref()
+        .expect("hue/sat map");
+    assert_eq!(
+        (map.hue_divisions, map.sat_divisions, map.val_divisions),
+        (2, 3, 1)
+    );
+    assert!(map.srgb_encoded);
+    assert_eq!(map.deltas.len(), 6);
+    // Entry 4 is hue 1, saturation 1 (saturation varies fastest).
+    assert_eq!(map.deltas[4], [4.0, 1.4, 0.5]);
+
+    let look = profile.look_table.as_ref().expect("look table");
+    assert!(!look.srgb_encoded);
+    assert_eq!(look.deltas[1], [10.0, 0.9, 1.1]);
+    assert_eq!(
+        profile.tone_curve,
+        Some(vec![[0.0, 0.0], [0.5, 0.7], [1.0, 1.0]])
+    );
+
+    let json = serde_json::to_string(&profile).expect("serialize");
+    let round_trip: rohditor_camera_profile::MatrixCameraProfile =
+        serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(round_trip, profile);
+}
+
+#[test]
+fn rejects_tables_whose_size_disagrees_with_their_dimensions() {
+    let tags = vec![
+        ascii(50_936, "Broken"),
+        ascii(50_708, "Sony ILCE-6400"),
+        short(50_778, 21, Endian::Little),
+        srational_matrix(50_721, Endian::Little),
+        longs(50_937, &[2, 3, 1], Endian::Little),
+        floats(50_938, &[0.0, 1.0, 1.0], Endian::Little),
+    ];
+    let bytes = assemble(Endian::Little, 42, tags);
+    assert!(parse_dcp_bytes(&bytes).is_err());
+}
+
+#[test]
+fn rejects_a_hue_sat_map_without_its_illuminant() {
+    let tags = vec![
+        ascii(50_936, "Orphan"),
+        ascii(50_708, "Sony ILCE-6400"),
+        short(50_778, 21, Endian::Little),
+        srational_matrix(50_721, Endian::Little),
+        longs(50_937, &[1, 2, 1], Endian::Little),
+        floats(50_939, &[0.0, 1.0, 1.0, 0.0, 1.0, 1.0], Endian::Little),
+    ];
+    let bytes = assemble(Endian::Little, 42, tags);
+    assert!(parse_dcp_bytes(&bytes).is_err());
 }
 
 #[test]
@@ -113,19 +194,24 @@ fn dcp(endian: Endian, unsupported: bool, include_d65: bool) -> Vec<u8> {
         tags.push(srational_matrix(50_965, endian));
     }
     if unsupported {
+        // BaselineExposure changes pixels in a way Rohditor does not evaluate.
         tags.push(Tag {
-            tag: 50_937,
+            tag: 50_730,
             data_type: 3,
-            data: vec![1, 0, 1, 0, 1, 0],
+            data: vec![1, 0],
         });
     }
 
+    assemble(endian, 42, tags)
+}
+
+fn assemble(endian: Endian, magic: u16, tags: Vec<Tag>) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(match endian {
         Endian::Little => b"II",
         Endian::Big => b"MM",
     });
-    push_u16(&mut bytes, 42, endian);
+    push_u16(&mut bytes, magic, endian);
     push_u32(&mut bytes, 8, endian);
     push_u16(&mut bytes, tags.len() as u16, endian);
     let data_start = 8 + 2 + tags.len() * 12 + 4;
@@ -136,6 +222,7 @@ fn dcp(endian: Endian, unsupported: bool, include_d65: bool) -> Vec<u8> {
         let element_size = match tag.data_type {
             2 | 7 => 1,
             3 => 2,
+            4 | 11 => 4,
             10 => 8,
             _ => panic!("test tag type needs a size"),
         };
@@ -161,6 +248,30 @@ fn ascii(tag: u16, value: &str) -> Tag {
     Tag {
         tag,
         data_type: 2,
+        data,
+    }
+}
+
+fn longs(tag: u16, values: &[u32], endian: Endian) -> Tag {
+    let mut data = Vec::new();
+    for value in values {
+        push_u32(&mut data, *value, endian);
+    }
+    Tag {
+        tag,
+        data_type: 4,
+        data,
+    }
+}
+
+fn floats(tag: u16, values: &[f32], endian: Endian) -> Tag {
+    let mut data = Vec::new();
+    for value in values {
+        push_u32(&mut data, value.to_bits(), endian);
+    }
+    Tag {
+        tag,
+        data_type: 11,
         data,
     }
 }

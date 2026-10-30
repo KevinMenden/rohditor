@@ -1,10 +1,11 @@
 // The public CPU facade re-exports these processing stages.
 use rayon::prelude::*;
+use rohditor_color::linear_srgb_to_srgb;
 use rohditor_demosaic::WhiteBalanceGains;
 use rohditor_edit::{
-    ColorGradingAdjustments, EditRecipe, HSL_CHANNEL_COUNT, HslAdjustments, LightToneLut,
-    RenderingProfileSelection, TEMPERATURE_RANGE, TINT_RANGE, ToneCurve,
-    WHITE_BALANCE_MULTIPLIER_RANGE, WhiteBalance,
+    CameraChroma, ColorGradingAdjustments, EditRecipe, HSL_CHANNEL_COUNT, HslAdjustments,
+    LightToneLut, TEMPERATURE_RANGE, TINT_RANGE, ToneCurve, WHITE_BALANCE_MULTIPLIER_RANGE,
+    WhiteBalance,
 };
 use rohditor_image::{
     DisplayRgbImage, DisplayTransfer, LinearRgbImage, LinearRgbSpace, MosaicImage, Orientation,
@@ -19,7 +20,7 @@ use crate::color::{
 use crate::white_balance::camera_gains_from_as_shot_coordinates;
 use crate::{
     CancellationToken, DitherMode, GamutMappingDiagnostics, OutputGeometry, OutputPolicy,
-    PipelineError, RawCropPolicy, standard_base_rendering_lut,
+    PipelineError, RawCropPolicy, base_rendering_lut,
 };
 
 const REC2020_LUMINANCE: [f32; 3] = [0.2627, 0.6780, 0.0593];
@@ -265,9 +266,12 @@ pub(super) mod white_balance {
             |row| -> Result<(), PipelineError> {
                 cancellation.checkpoint()?;
                 for pixel in row[..width_samples].as_chunks_mut::<3>().0 {
-                    let converted = transform
+                    let mut converted = transform
                         .camera_to_linear_rec2020
                         .transform([pixel[0], pixel[1], pixel[2]]);
+                    if let Some(look) = &transform.profile_look {
+                        converted = look.apply(converted);
+                    }
                     pixel.copy_from_slice(&converted);
                 }
                 Ok(())
@@ -348,12 +352,8 @@ pub(super) mod adjustments {
         let row_stride = image.row_stride();
         let light = recipe.light.clone();
         let color = recipe.color.clone();
-        let base_rendering_lut = match recipe.rendering.profile {
-            RenderingProfileSelection::RohditorNeutral => None,
-            RenderingProfileSelection::RohditorStandard { .. } => {
-                Some(standard_base_rendering_lut())
-            }
-        };
+        let base_rendering_lut = base_rendering_lut(&recipe.rendering);
+        let camera_chroma = recipe.rendering.matched_look().and_then(|look| look.chroma);
         // Resolve stage participation once per recipe instead of repeatedly
         // checking all neutral controls for every pixel. This is especially
         // useful for the common global-adjustment path, where HSL and grading are
@@ -384,8 +384,11 @@ pub(super) mod adjustments {
                             *value *= exposure_gain;
                         }
                     }
-                    if let Some(base_rendering_lut) = base_rendering_lut {
+                    if let Some(base_rendering_lut) = &base_rendering_lut {
                         apply_base_rendering(pixel, base_rendering_lut);
+                    }
+                    if let Some(camera_chroma) = &camera_chroma {
+                        apply_camera_chroma(pixel, camera_chroma);
                     }
                     if let Some(light_tone_lut) = &light_tone_lut {
                         apply_light_tone(pixel, light_tone_lut);
@@ -424,6 +427,23 @@ pub(super) mod adjustments {
             return;
         }
         apply_luminance_delta(pixel, current, target);
+    }
+
+    /// Camera colourfulness as a saturation gain that depends on the pixel's
+    /// brightness after the base tone. Works like the global Saturation
+    /// control: channels move away from (or toward) the pixel's luminance.
+    fn apply_camera_chroma(pixel: &mut [f32], chroma: &CameraChroma) {
+        let current = luminance(pixel);
+        if !current.is_finite() || current <= 0.0 {
+            return;
+        }
+        let gain = chroma.evaluate(linear_srgb_to_srgb(current.min(1.0)));
+        if (gain - 1.0).abs() <= f32::EPSILON {
+            return;
+        }
+        for value in pixel.iter_mut() {
+            *value = current + gain * (*value - current);
+        }
     }
 
     fn apply_light_tone(pixel: &mut [f32], light_tone_lut: &LightToneLut) {
@@ -1079,6 +1099,7 @@ use white_balance::{white_balance_gains, white_balance_gains_from_calibration};
 mod tests {
     use std::sync::Arc;
 
+    use rohditor_edit::{CameraTone, RenderingProfileSelection};
     use rohditor_image::{BayerPattern, CfaColor, OrientationMap};
     use rohditor_raw::{
         CameraColorMatrix, CaptureMetadata, CfaPattern, ImageRect, LevelPattern,
@@ -1086,6 +1107,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::standard_base_rendering_lut;
     use rohditor_demosaic::{DemosaicAlgorithm, demosaic};
 
     fn neutral_recipe() -> EditRecipe {
@@ -1497,6 +1519,93 @@ mod tests {
         for value in exposed.data() {
             assert!((*value - crate::ROHDITOR_STANDARD_MIDDLE_GRAY).abs() < 2.0e-6);
         }
+    }
+
+    #[test]
+    fn matched_replaces_the_base_rendering_instead_of_stacking_on_standard() {
+        let source = vec![0.09, 0.09, 0.09, 0.4, 0.2, 0.1];
+        let render = |recipe: &EditRecipe| {
+            let mut image =
+                LinearRgbImage::new(2, 1, 6, LinearRgbSpace::Rec2020D65, source.clone())
+                    .expect("valid image");
+            apply_adjustments(&mut image, recipe).expect("render");
+            image
+        };
+
+        // An identity camera tone leaves the neutral values alone. If Standard
+        // were still applied underneath, the luminance would be compressed
+        // a second time and differ from the source.
+        let mut matched = EditRecipe::default();
+        matched.rendering.profile = RenderingProfileSelection::MATCHED;
+        matched.rendering.camera_tone = Some(CameraTone {
+            knots: vec![[0.0, 0.0], [0.5, 0.5], [1.0, 1.0]],
+        });
+        for (value, expected) in render(&matched).data().iter().zip(&source) {
+            assert!(
+                (value - expected).abs() < 1.0e-3,
+                "identity tone changed {expected} to {value}"
+            );
+        }
+
+        // Without a fitted look Matched uses the static fallback tone and
+        // colour as a pair, and differs from Standard.
+        matched.rendering.camera_tone = None;
+        matched.rendering.camera_chroma = None;
+        assert_ne!(
+            render(&matched).data(),
+            render(&EditRecipe::default()).data()
+        );
+        let mut fallback_pair = matched.clone();
+        fallback_pair.rendering.camera_tone = Some(CameraTone::static_fallback());
+        fallback_pair.rendering.camera_chroma = Some(rohditor_edit::CameraChroma::STATIC_FALLBACK);
+        assert_eq!(render(&matched).data(), render(&fallback_pair).data());
+    }
+
+    #[test]
+    fn camera_chroma_scales_colour_by_brightness_without_moving_luminance_or_grey() {
+        let mut recipe = EditRecipe::default();
+        recipe.rendering.profile = RenderingProfileSelection::MATCHED;
+        // Identity tone isolates the chroma stage; gains fall from 2.0 in the
+        // shadows to 0.5 in the highlights.
+        recipe.rendering.camera_tone = Some(CameraTone {
+            knots: vec![[0.0, 0.0], [0.5, 0.5], [1.0, 1.0]],
+        });
+        recipe.rendering.camera_chroma = Some(rohditor_edit::CameraChroma {
+            gains: [2.0, 1.8, 1.6, 1.4, 1.2, 1.0, 0.8, 0.6, 0.5],
+        });
+        let source = vec![0.30, 0.10, 0.05, 0.18, 0.18, 0.18, 0.55, 0.45, 0.40];
+        let render = |recipe: &EditRecipe| {
+            let mut image =
+                LinearRgbImage::new(3, 1, 9, LinearRgbSpace::Rec2020D65, source.clone())
+                    .expect("valid image");
+            apply_adjustments(&mut image, recipe).expect("render");
+            image
+        };
+        let output = render(&recipe);
+        let (colored, grey, bright) = (
+            output.pixel(0, 0).expect("pixel"),
+            output.pixel(1, 0).expect("pixel"),
+            output.pixel(2, 0).expect("pixel"),
+        );
+        // Grey stays grey and keeps its (identity-toned) value.
+        assert!(grey.iter().all(|value| (value - 0.18).abs() < 1.0e-3));
+        // Luminance is preserved while the colourful pixel's channels spread out.
+        let before = luminance(&source[0..3]);
+        assert!((luminance(colored) - before).abs() < 1.0e-3);
+        assert!(colored[0] - colored[2] > source[0] - source[2]);
+        // The same relative colour at higher brightness gets a smaller gain, so
+        // it ends up with less relative chroma than the shadow pixel's gain.
+        let relative = |pixel: &[f32], reference: &[f32]| {
+            (pixel[0] - pixel[2]) / (reference[0] - reference[2])
+        };
+        assert!(relative(colored, &source[0..3]) > 1.0);
+        assert!(relative(bright, &source[6..9]) < 1.0);
+
+        // Other profiles ignore a stored chroma curve.
+        recipe.rendering.profile = RenderingProfileSelection::STANDARD;
+        let mut plain = recipe.clone();
+        plain.rendering.camera_chroma = None;
+        assert_eq!(render(&recipe).data(), render(&plain).data());
     }
 
     #[test]

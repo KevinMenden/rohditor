@@ -1,4 +1,8 @@
+use std::borrow::Cow;
 use std::sync::OnceLock;
+
+use rohditor_color::{linear_srgb_to_srgb, srgb_to_linear_srgb};
+use rohditor_edit::{CameraTone, RenderingAdjustments, RenderingProfileSelection};
 
 /// Number of samples in the shared Rohditor Standard transfer function.
 pub const BASE_RENDERING_LUT_SIZE: usize = 4_096;
@@ -32,6 +36,30 @@ impl BaseRenderingLut {
         Self { values }
     }
 
+    /// Sample a fitted camera tone into the same companded table as Standard.
+    ///
+    /// The tone is defined on sRGB-encoded luminance, so each table input is
+    /// encoded, mapped, and decoded back to scene-linear. The curve ends at
+    /// `(1, 1)`, so everything at or above linear 1.0 maps to 1.0: unlike
+    /// Standard there is no soft asymptote, because the camera JPEG that the
+    /// curve was fitted to clips there too.
+    #[must_use]
+    pub fn from_camera_tone(tone: &CameraTone) -> Self {
+        let mut values = [0.0; BASE_RENDERING_LUT_SIZE];
+        let denominator = (BASE_RENDERING_LUT_SIZE - 1) as f32;
+        for (index, value) in values.iter_mut().enumerate() {
+            if index == BASE_RENDERING_LUT_SIZE - 1 {
+                *value = 1.0;
+                continue;
+            }
+            let coordinate = index as f32 / denominator;
+            let input = coordinate / (1.0 - coordinate);
+            let encoded = linear_srgb_to_srgb(input.min(1.0));
+            *value = srgb_to_linear_srgb(tone.evaluate(encoded));
+        }
+        Self { values }
+    }
+
     /// Evaluate the table using the frozen positive-luminance companding and
     /// linear-interpolation contract. Finite negative samples and non-finite
     /// inputs are preserved rather than converted into new invalid values.
@@ -60,6 +88,26 @@ impl BaseRenderingLut {
 pub fn standard_base_rendering_lut() -> &'static BaseRenderingLut {
     static LUT: OnceLock<BaseRenderingLut> = OnceLock::new();
     LUT.get_or_init(BaseRenderingLut::standard_v1)
+}
+
+/// Base-rendering table selected by a recipe, or `None` for the identity
+/// Neutral rendering.
+///
+/// Matched without a fitted tone uses the static fallback tone, so a recipe
+/// whose camera fit failed (or has not run yet) still gets a camera-like look.
+#[must_use]
+pub fn base_rendering_lut(
+    rendering: &RenderingAdjustments,
+) -> Option<Cow<'static, BaseRenderingLut>> {
+    match rendering.profile {
+        RenderingProfileSelection::RohditorNeutral => None,
+        RenderingProfileSelection::RohditorStandard { .. } => {
+            Some(Cow::Borrowed(standard_base_rendering_lut()))
+        }
+        RenderingProfileSelection::RohditorMatched { .. } => rendering
+            .matched_look()
+            .map(|look| Cow::Owned(BaseRenderingLut::from_camera_tone(&look.tone))),
+    }
 }
 
 fn evaluate_standard_v1(input: f32) -> f32 {
@@ -134,6 +182,61 @@ mod tests {
         let values = [1.0, 2.0, 4.0, 16.0, 256.0].map(|input| lut.sample(input));
         assert!(values.windows(2).all(|pair| pair[1] > pair[0]));
         assert!(values.into_iter().all(|value| value < 1.0));
+    }
+
+    #[test]
+    fn identity_camera_tone_reproduces_the_neutral_transfer() {
+        let identity = CameraTone {
+            knots: vec![[0.0, 0.0], [0.5, 0.5], [1.0, 1.0]],
+        };
+        let lut = BaseRenderingLut::from_camera_tone(&identity);
+        for input in [0.001, 0.01, 0.18, 0.5, 0.9] {
+            assert!(
+                (lut.sample(input) - input).abs() < 2.0e-4 + input * 2.0e-3,
+                "identity tone moved {input} to {}",
+                lut.sample(input)
+            );
+        }
+        assert_eq!(lut.sample(4.0), 1.0);
+    }
+
+    #[test]
+    fn camera_tone_lut_follows_the_curve_in_the_encoded_domain() {
+        // Lift the encoded midtone from 0.5 to 0.7.
+        let lift = CameraTone {
+            knots: vec![[0.0, 0.0], [0.5, 0.7], [1.0, 1.0]],
+        };
+        let lut = BaseRenderingLut::from_camera_tone(&lift);
+        let input = srgb_to_linear_srgb(0.5);
+        let expected = srgb_to_linear_srgb(0.7);
+        assert!((lut.sample(input) - expected).abs() < 2.0e-3);
+        assert!(lut.values().windows(2).all(|pair| pair[1] >= pair[0]));
+    }
+
+    #[test]
+    fn recipe_selects_the_lut_without_stacking_profiles() {
+        let tone = CameraTone {
+            knots: vec![[0.0, 0.0], [0.5, 0.7], [1.0, 1.0]],
+        };
+        let mut rendering = RenderingAdjustments::NEUTRAL;
+        assert!(base_rendering_lut(&rendering).is_none());
+
+        rendering.profile = RenderingProfileSelection::MATCHED;
+        let fallback = base_rendering_lut(&rendering).expect("Matched renders");
+        assert_eq!(
+            *fallback,
+            BaseRenderingLut::from_camera_tone(&CameraTone::static_fallback())
+        );
+        assert_ne!(*fallback, *standard_base_rendering_lut());
+
+        rendering.camera_tone = Some(tone.clone());
+        let fitted = base_rendering_lut(&rendering).expect("Matched renders");
+        assert_eq!(*fitted, BaseRenderingLut::from_camera_tone(&tone));
+
+        // A stored tone is ignored by the other profiles.
+        rendering.profile = RenderingProfileSelection::STANDARD;
+        let standard = base_rendering_lut(&rendering).expect("Standard renders");
+        assert_eq!(*standard, *standard_base_rendering_lut());
     }
 
     #[test]

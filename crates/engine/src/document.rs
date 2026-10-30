@@ -136,6 +136,21 @@ impl EditSession {
         true
     }
 
+    /// Apply a change that is derived from the current recipe rather than made
+    /// by the user, such as a fitted camera look. It advances the revision (so
+    /// previews and sidecars refresh) but stays out of the undo history: undo
+    /// reverts the user's action, and the derived data follows it.
+    pub fn apply_derived(&mut self, update: impl FnOnce(&mut EditRecipe)) -> bool {
+        let mut next = self.recipe.clone();
+        update(&mut next);
+        if next == self.recipe || next.validate().is_err() {
+            return false;
+        }
+        self.recipe = next;
+        self.advance_revision();
+        true
+    }
+
     pub fn reset_to(&mut self, recipe: EditRecipe) -> bool {
         self.set_discrete(recipe)
     }
@@ -299,6 +314,39 @@ mod tests {
             edits.recipe().rendering.profile,
             rohditor_edit::RenderingProfileSelection::NEUTRAL
         );
+    }
+
+    #[test]
+    fn derived_updates_refresh_the_recipe_without_adding_an_undo_step() {
+        let mut edits = EditSession::default();
+        let mut matched = EditRecipe::default();
+        matched.rendering.profile = rohditor_edit::RenderingProfileSelection::MATCHED;
+        assert!(edits.set_discrete(matched));
+        let revision = edits.revision();
+
+        assert!(edits.apply_derived(|recipe| {
+            recipe.rendering.camera_tone = Some(rohditor_edit::CameraTone::static_fallback());
+        }));
+        assert!(edits.revision() > revision);
+        assert!(edits.recipe().rendering.camera_tone.is_some());
+        // Applying the same derived data again changes nothing.
+        let revision = edits.revision();
+        assert!(!edits.apply_derived(|recipe| {
+            recipe.rendering.camera_tone = Some(rohditor_edit::CameraTone::static_fallback());
+        }));
+        assert_eq!(edits.revision(), revision);
+        // Invalid derived data is refused.
+        assert!(!edits.apply_derived(|recipe| {
+            recipe.rendering.camera_tone = Some(rohditor_edit::CameraTone { knots: vec![] });
+        }));
+
+        // One undo reverts the user's profile choice, not just the fit.
+        assert!(edits.undo());
+        assert_eq!(
+            edits.recipe().rendering.profile,
+            rohditor_edit::RenderingProfileSelection::STANDARD
+        );
+        assert!(!edits.can_undo());
     }
 
     #[test]

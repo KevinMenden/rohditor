@@ -786,7 +786,7 @@ fn show_color_controls(
     }
     if ui
         .small_button("Import DCP…")
-        .on_hover_text("Validate and install a compatible matrix-only DCP camera profile")
+        .on_hover_text("Validate and install a compatible DCP camera profile (matrices, hue/saturation map, and look table)")
         .clicked()
     {
         output.import_camera_profile = true;
@@ -808,6 +808,14 @@ fn show_color_controls(
             .on_hover_text("Balanced tone and highlight rolloff for a finished starting point");
             ui.selectable_value(
                 &mut rendering,
+                RenderingProfileSelection::MATCHED,
+                "Rohditor Matched",
+            )
+            .on_hover_text(
+                "Tone and colour fitted to this photo's own camera JPEG; a typical camera look is used until the fit finishes",
+            );
+            ui.selectable_value(
+                &mut rendering,
                 RenderingProfileSelection::NEUTRAL,
                 "Rohditor Neutral",
             )
@@ -823,6 +831,9 @@ fn show_color_controls(
             }
             RenderingProfileSelection::RohditorNeutral => {
                 "No base tone or color rendering; useful for manual development and comparison"
+            }
+            RenderingProfileSelection::RohditorMatched { .. } => {
+                "Tone and colour fitted to this photo's camera JPEG preview"
             }
         })
         .small()

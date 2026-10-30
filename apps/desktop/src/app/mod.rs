@@ -74,6 +74,7 @@ const LIBRARY_DECODE_BUDGET: usize = 8;
 const LIBRARY_VISIBLE_MARGIN: usize = 24;
 
 mod autosave;
+mod camera_look;
 pub(crate) mod crop;
 #[path = "events.rs"]
 mod events;
@@ -82,6 +83,7 @@ mod gpu;
 #[path = "lifecycle.rs"]
 mod lifecycle;
 
+use camera_look::CameraLookState;
 use crop::CropToolSession;
 use gpu::{
     GpuDocumentPreview, GpuDocumentSource, GpuRuntime, PendingGpuHistogram, gpu_output_size,
@@ -185,6 +187,7 @@ struct Document {
     error: Option<String>,
     notice: Option<String>,
     initialize_white_balance_from_metadata: bool,
+    camera_look: CameraLookState,
 }
 
 #[derive(Debug, Clone)]
@@ -229,6 +232,7 @@ impl Document {
             error: None,
             notice: None,
             initialize_white_balance_from_metadata: false,
+            camera_look: CameraLookState::default(),
         }
     }
 
@@ -3434,6 +3438,7 @@ fn apply_adjustment_interaction(
 impl eframe::App for RohditorApp {
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
         self.process_worker_events(context);
+        self.sync_camera_look(context);
         self.process_recipe_save_events();
         self.update_catalog();
         self.library_frame = self.library_frame.wrapping_add(1);

@@ -34,6 +34,16 @@ struct PreviewParameters {
     grading_highlights: vec4<f32>,
     // HSL active, grading active, shared hue shift, f32 epsilon.
     color_options: vec4<f32>,
+    // Camera chroma gains at nine evenly spaced encoded luminances (slots
+    // 0..9); slot 11 is 1.0 when the Matched profile carries a fitted curve.
+    camera_chroma: array<vec4<f32>, 3>,
+    // DCP tables as [hue divisions, saturation divisions, value divisions,
+    // sRGB-encoded flag]; zero hue divisions means the table is absent.
+    profile_hue_sat_map: vec4<u32>,
+    profile_look_table: vec4<u32>,
+    // Linear Rec.2020 <-> linear ProPhoto RGB, the space DNG tables use.
+    to_prophoto: array<vec4<f32>, 3>,
+    from_prophoto: array<vec4<f32>, 3>,
 };
 
 @group(0) @binding(0)
@@ -47,6 +57,11 @@ var<storage, read> light_tone_lut: array<f32, 4096>;
 
 @group(0) @binding(5)
 var<storage, read> base_rendering_lut: array<f32, 4096>;
+
+// Hue/saturation map deltas first, then the look table's, three floats per
+// entry; the look table starts at PROFILE_LOOK_TABLE_OFFSET.
+@group(0) @binding(6)
+var<storage, read> profile_tables: array<f32>;
 
 const LUMINANCE_RATIO_TRANSITION: f32 = 0.02;
 
@@ -84,6 +99,22 @@ fn linear_srgb_to_srgb(value: f32) -> f32 {
         return 12.92 * clipped;
     }
     return 1.055 * pow(clipped, 1.0 / 2.4) - 0.055;
+}
+
+// The sRGB curve without the clamp of linear_srgb_to_srgb, so over-range
+// scene-linear values survive the encoded table lookup like on the CPU.
+fn srgb_encode_extended(value: f32) -> f32 {
+    if value <= 0.0031308 {
+        return 12.92 * value;
+    }
+    return 1.055 * pow(value, 1.0 / 2.4) - 0.055;
+}
+
+fn srgb_to_linear_srgb(value: f32) -> f32 {
+    if value <= 0.04045 {
+        return value / 12.92;
+    }
+    return pow((value + 0.055) / 1.055, 2.4);
 }
 
 fn finite_value(value: f32) -> bool {
@@ -204,6 +235,28 @@ fn apply_luminance_delta(pixel: vec3<f32>, current: f32, desired: f32) -> vec3<f
     return mix(additive, scaled, ratio_weight);
 }
 
+fn camera_chroma_gain(encoded_luminance: f32) -> f32 {
+    let position = clamp(encoded_luminance, 0.0, 1.0) * 8.0;
+    let lower = min(u32(floor(position)), 7u);
+    let upper = lower + 1u;
+    let fraction = position - f32(lower);
+    let low = parameters.camera_chroma[lower / 4u][lower % 4u];
+    let high = parameters.camera_chroma[upper / 4u][upper % 4u];
+    return mix(low, high, fraction);
+}
+
+fn apply_camera_chroma(pixel: vec3<f32>) -> vec3<f32> {
+    if parameters.camera_chroma[2].w == 0.0 {
+        return pixel;
+    }
+    let current = dot(pixel, vec3<f32>(0.2627, 0.6780, 0.0593));
+    if !(current > 0.0) {
+        return pixel;
+    }
+    let gain = camera_chroma_gain(linear_srgb_to_srgb(min(current, 1.0)));
+    return vec3<f32>(current) + gain * (pixel - vec3<f32>(current));
+}
+
 fn apply_light_tone(pixel: vec3<f32>) -> vec3<f32> {
     let current = dot(pixel, vec3<f32>(0.2627, 0.6780, 0.0593));
     if current < 0.0 || current > 1.0 {
@@ -286,6 +339,164 @@ fn color_saturation(pixel: vec3<f32>, luminance: f32) -> f32 {
     return clamp(chroma / max(abs(luminance), 0.000001), 0.0, 1.0);
 }
 
+const PROFILE_LOOK_TABLE_OFFSET: u32 = 393216u;
+
+fn profile_delta(offset: u32, index: u32) -> vec3<f32> {
+    let base = offset + index * 3u;
+    return vec3<f32>(profile_tables[base], profile_tables[base + 1u], profile_tables[base + 2u]);
+}
+
+fn rgb_to_hsv(rgb: vec3<f32>) -> vec3<f32> {
+    let maximum = max(rgb.r, max(rgb.g, rgb.b));
+    let minimum = min(rgb.r, min(rgb.g, rgb.b));
+    if maximum <= 0.0 {
+        return vec3<f32>(0.0);
+    }
+    let delta = maximum - minimum;
+    let saturation = delta / maximum;
+    if delta <= 0.0 {
+        return vec3<f32>(0.0, saturation, maximum);
+    }
+    var hue: f32;
+    if maximum == rgb.r {
+        hue = (rgb.g - rgb.b) / delta;
+    } else if maximum == rgb.g {
+        hue = 2.0 + (rgb.b - rgb.r) / delta;
+    } else {
+        hue = 4.0 + (rgb.r - rgb.g) / delta;
+    }
+    hue = hue - 6.0 * floor(hue / 6.0);
+    if hue >= 6.0 {
+        hue = 0.0;
+    }
+    return vec3<f32>(hue, saturation, maximum);
+}
+
+fn hsv_to_rgb(hsv: vec3<f32>) -> vec3<f32> {
+    let sector = floor(hsv.x);
+    let fraction = hsv.x - sector;
+    let p = hsv.z * (1.0 - hsv.y);
+    let q = hsv.z * (1.0 - hsv.y * fraction);
+    let t = hsv.z * (1.0 - hsv.y * (1.0 - fraction));
+    switch i32(sector) {
+        case 0: { return vec3<f32>(hsv.z, t, p); }
+        case 1: { return vec3<f32>(q, hsv.z, p); }
+        case 2: { return vec3<f32>(p, hsv.z, t); }
+        case 3: { return vec3<f32>(p, q, hsv.z); }
+        case 4: { return vec3<f32>(t, p, hsv.z); }
+        default: { return vec3<f32>(hsv.z, p, q); }
+    }
+}
+
+// Mirrors rohditor_color::apply_delta_table, the CPU reference.
+fn apply_delta_table(header: vec4<u32>, offset: u32, rgb: vec3<f32>) -> vec3<f32> {
+    if header.x == 0u || !finite_rgb(rgb) || min(rgb.r, min(rgb.g, rgb.b)) < 0.0 {
+        return rgb;
+    }
+    let hue_divisions = header.x;
+    let sat_divisions = header.y;
+    let val_divisions = header.z;
+    var encoded = rgb;
+    if header.w != 0u {
+        encoded = vec3<f32>(
+            srgb_encode_extended(rgb.r),
+            srgb_encode_extended(rgb.g),
+            srgb_encode_extended(rgb.b),
+        );
+    }
+    let hsv = rgb_to_hsv(encoded);
+    let value = min(hsv.z, 1.0);
+
+    var hue_scale = 0.0;
+    if hue_divisions >= 2u {
+        hue_scale = f32(hue_divisions) / 6.0;
+    }
+    let hue_scaled = hsv.x * hue_scale;
+    let sat_scaled = hsv.y * f32(sat_divisions - 1u);
+    let max_hue = hue_divisions - 1u;
+    let max_sat = sat_divisions - 2u;
+    var hue0 = u32(hue_scaled);
+    let sat0 = min(u32(sat_scaled), max_sat);
+    var hue1 = hue0 + 1u;
+    if hue0 >= max_hue {
+        hue0 = max_hue;
+        hue1 = 0u;
+    }
+    let hue_fraction = hue_scaled - f32(hue0);
+    let sat_fraction = sat_scaled - f32(sat0);
+
+    var val0 = 0u;
+    var val1 = 0u;
+    var val_fraction = 0.0;
+    if val_divisions >= 2u {
+        let max_val = val_divisions - 1u;
+        let val_scaled = value * f32(max_val);
+        val0 = min(u32(val_scaled), max_val);
+        val1 = val0;
+        if val0 < max_val {
+            val1 = val0 + 1u;
+        }
+        val_fraction = val_scaled - f32(val0);
+    }
+
+    let hue_step = sat_divisions;
+    let val_step = sat_divisions * hue_divisions;
+    var lower = vec3<f32>(0.0);
+    var upper = vec3<f32>(0.0);
+    for (var plane = 0u; plane < 2u; plane = plane + 1u) {
+        var val = val0;
+        if plane == 1u {
+            val = val1;
+        }
+        let base = val * val_step;
+        let low = profile_delta(offset, base + hue0 * hue_step + sat0) * (1.0 - sat_fraction)
+            + profile_delta(offset, base + hue0 * hue_step + sat0 + 1u) * sat_fraction;
+        let high = profile_delta(offset, base + hue1 * hue_step + sat0) * (1.0 - sat_fraction)
+            + profile_delta(offset, base + hue1 * hue_step + sat0 + 1u) * sat_fraction;
+        let blended = low * (1.0 - hue_fraction) + high * hue_fraction;
+        if plane == 0u {
+            lower = blended;
+        } else {
+            upper = blended;
+        }
+    }
+    let delta = lower * (1.0 - val_fraction) + upper * val_fraction;
+
+    var hue = hsv.x + delta.x * (6.0 / 360.0);
+    hue = hue - 6.0 * floor(hue / 6.0);
+    if hue >= 6.0 {
+        hue = 0.0;
+    }
+    let saturation = min(hsv.y * delta.y, 1.0);
+    var mapped = hsv_to_rgb(vec3<f32>(hue, saturation, hsv.z * delta.z));
+    if header.w != 0u {
+        mapped = vec3<f32>(
+            srgb_to_linear_srgb(mapped.r),
+            srgb_to_linear_srgb(mapped.g),
+            srgb_to_linear_srgb(mapped.b),
+        );
+    }
+    return mapped;
+}
+
+fn apply_profile_look(rgb: vec3<f32>) -> vec3<f32> {
+    if parameters.profile_hue_sat_map.x == 0u && parameters.profile_look_table.x == 0u {
+        return rgb;
+    }
+    var prophoto = vec3<f32>(
+        dot(parameters.to_prophoto[0].xyz, rgb),
+        dot(parameters.to_prophoto[1].xyz, rgb),
+        dot(parameters.to_prophoto[2].xyz, rgb),
+    );
+    prophoto = apply_delta_table(parameters.profile_hue_sat_map, 0u, prophoto);
+    prophoto = apply_delta_table(parameters.profile_look_table, PROFILE_LOOK_TABLE_OFFSET, prophoto);
+    return vec3<f32>(
+        dot(parameters.from_prophoto[0].xyz, prophoto),
+        dot(parameters.from_prophoto[1].xyz, prophoto),
+        dot(parameters.from_prophoto[2].xyz, prophoto),
+    );
+}
+
 fn develop_camera_color(camera_native: vec3<f32>) -> vec3<f32> {
     let balanced = camera_native * parameters.white_balance.xyz;
     let base = vec3<f32>(
@@ -293,8 +504,8 @@ fn develop_camera_color(camera_native: vec3<f32>) -> vec3<f32> {
         dot(parameters.camera_to_rec2020_row1.xyz, balanced),
         dot(parameters.camera_to_rec2020_row2.xyz, balanced),
     );
-    let exposed = base * parameters.exposure_gain;
-    let rendered = apply_base_rendering(exposed);
+    let exposed = apply_profile_look(base) * parameters.exposure_gain;
+    let rendered = apply_camera_chroma(apply_base_rendering(exposed));
     let toned = apply_tone_curve(apply_light_tone(rendered));
     let luminance = dot(toned, vec3<f32>(0.2627, 0.6780, 0.0593));
     let saturation = parameters.saturation
