@@ -168,7 +168,7 @@ fn capture_residency_and_exact_reduction_match_cpu_without_camera_readback() {
         .as_chunks::<4>()
         .0
         .iter()
-        .zip(optics_reference.image().data().chunks_exact(3))
+        .zip(optics_reference.image().data().as_chunks::<3>().0.iter())
     {
         for channel in 0..3 {
             let tolerance = 2.0e-4 + 2.0e-4 * expected[channel].abs();
@@ -220,7 +220,7 @@ fn capture_residency_and_exact_reduction_match_cpu_without_camera_readback() {
         .as_chunks::<4>()
         .0
         .iter()
-        .zip(camera_reference.image().data().chunks_exact(3))
+        .zip(camera_reference.image().data().as_chunks::<3>().0.iter())
     {
         for channel in 0..3 {
             let tolerance = 4.0e-5 + 4.0e-5 * expected[channel].abs();
@@ -253,7 +253,7 @@ fn capture_residency_and_exact_reduction_match_cpu_without_camera_readback() {
         .as_chunks::<4>()
         .0
         .iter()
-        .zip(expected.image.data().chunks_exact(3))
+        .zip(expected.image.data().as_chunks::<3>().0.iter())
     {
         for channel in 0..3 {
             assert!(
@@ -426,7 +426,7 @@ fn every_optics_model_matches_the_cpu_reference_with_fractional_reduction() {
                 .as_chunks::<4>()
                 .0
                 .iter()
-                .zip(reference.image().data().chunks_exact(3))
+                .zip(reference.image().data().as_chunks::<3>().0.iter())
             {
                 for channel in 0..3 {
                     let tolerance = 2.0e-4 + 2.0e-4 * expected[channel].abs();
@@ -505,7 +505,7 @@ fn private_full_resolution_optics_and_fractional_preview_parity() {
         .as_chunks::<4>()
         .0
         .iter()
-        .zip(reference.image().data().chunks_exact(3))
+        .zip(reference.image().data().as_chunks::<3>().0.iter())
     {
         for channel in 0..3 {
             let difference = (actual[channel] - expected[channel]).abs();
