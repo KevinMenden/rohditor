@@ -15,6 +15,7 @@ assert_no_dependencies rohditor-image 'rohditor-(core|demosaic|edit|gpu|raw|engi
 assert_no_dependencies rohditor-edit 'rohditor-(core|demosaic|gpu|raw|engine|cli|desktop)'
 assert_no_dependencies rohditor-demosaic 'rohditor-(core|edit|gpu|raw|engine|cli|desktop)'
 assert_no_dependencies rohditor-highlight 'rohditor-(core|demosaic|edit|gpu|raw|engine|cli|desktop)'
+assert_no_dependencies rohditor-detail 'rohditor-(core|demosaic|edit|gpu|raw|engine|cli|desktop|highlight|optics|color)'
 assert_no_dependencies rohditor-look 'rohditor-(core|demosaic|gpu|raw|engine|cli|desktop)'
 assert_no_dependencies rohditor-optics 'rohditor-(core|gpu|engine|cli|desktop)'
 assert_no_dependencies rohditor-raw 'rohditor-(core|demosaic|edit|gpu|engine|cli|desktop)'
@@ -32,9 +33,10 @@ if grep -rEn '^(eframe|egui|winit|rfd)[ .=]' --include=Cargo.toml crates; then
     exit 1
 fi
 
-# The reference harness is dev-only: no other crate may depend on it.
+# The reference harness is dev-only: only the CLI's developer commands
+# (e.g. detail-compare) may depend on it.
 if grep -rl 'rohditor-reference' --include=Cargo.toml apps crates \
-    | grep -qv '^crates/reference/'; then
+    | grep -Evq '^(crates/reference|apps/cli)/'; then
     echo "a crate depends on the dev-only rohditor-reference harness" >&2
     exit 1
 fi

@@ -33,6 +33,7 @@ use rohditor_raw::{
 use serde::{Deserialize, Serialize};
 use tracing_subscriber::EnvFilter;
 
+use super::detail_compare::{DetailStage, detail_compare};
 use super::highlight_compare::highlight_compare;
 use super::look_report::{fit_recipe_camera_tone, look_report};
 
@@ -271,6 +272,18 @@ enum Command {
         /// Replace existing generated crops and report.json.
         #[arg(long)]
         force: bool,
+    },
+
+    /// Score a detail stage (default: no-op baseline) on the synthetic
+    /// ground-truth scenes at several noise levels, and print a score table.
+    DetailCompare {
+        /// Stage to evaluate.
+        #[arg(long, value_enum, default_value_t = DetailStage::Noop)]
+        stage: DetailStage,
+
+        /// Also score every readable RAW file in this directory.
+        #[arg(long, value_name = "RAW_DIR")]
+        raw_dir: Option<PathBuf>,
     },
 
     /// Render every highlight method on the quality-crop manifest and report
@@ -653,6 +666,7 @@ pub(crate) fn run() -> Result<()> {
             demosaic,
             force,
         } => quality_crops(&manifest, &corpus, &output, demosaic, force),
+        Command::DetailCompare { stage, raw_dir } => detail_compare(stage, raw_dir.as_deref()),
         Command::HighlightCompare {
             manifest,
             corpus,

@@ -3,6 +3,7 @@
 //! A common bounded RGB gain preserves chromaticity and signed scene-linear data.
 
 use rayon::prelude::*;
+use rohditor_detail::gaussian_kernel as gaussian;
 use rohditor_edit::CaptureSharpening;
 use rohditor_image::LinearRgbImage;
 
@@ -328,16 +329,6 @@ fn solve(
 fn smoothstep(low: f32, high: f32, value: f32) -> f32 {
     let t = ((value - low) / (high - low)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
-}
-
-fn gaussian(sigma: f32) -> Vec<f32> {
-    let radius = (3.0 * sigma).ceil() as i32;
-    let mut kernel: Vec<_> = (-radius..=radius)
-        .map(|x| (-0.5 * (x as f32 / sigma).powi(2)).exp())
-        .collect();
-    let sum: f32 = kernel.iter().sum();
-    kernel.iter_mut().for_each(|v| *v /= sum);
-    kernel
 }
 
 /// Reflect about the outer pixel boundary, including for 1-pixel images.
