@@ -1,6 +1,5 @@
 use rohditor_edit::NormalizedCropRect;
 
-
 const MINIMUM_NORMALIZED_EDGE: f64 = 0.002;
 
 /// Which part of the crop rectangle a pointer gesture grabbed.
@@ -341,7 +340,7 @@ fn fit_rect(center_x: f64, center_y: f64, width: f64, height: f64) -> Normalized
 #[cfg(test)]
 mod tests {
     use super::{CropAspect, CropHandle, CropToolSession};
-    
+
     #[test]
     fn moving_and_free_resizing_stay_in_bounds_without_inversion() {
         let mut session = CropToolSession::new(None, 6000, 4000);
