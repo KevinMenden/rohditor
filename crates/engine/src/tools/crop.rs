@@ -1,13 +1,26 @@
 use rohditor_edit::NormalizedCropRect;
 
-use crate::ui::crop::CropHandle;
 
 const MINIMUM_NORMALIZED_EDGE: f64 = 0.002;
+
+/// Which part of the crop rectangle a pointer gesture grabbed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CropHandle {
+    NorthWest,
+    North,
+    NorthEast,
+    East,
+    SouthEast,
+    South,
+    SouthWest,
+    West,
+    Move,
+}
 
 /// The aspect constraint chosen by the crop authoring UI. It is intentionally
 /// not stored in the recipe: only the resulting rectangle changes pixels.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum CropAspect {
+pub enum CropAspect {
     #[default]
     Free,
     Original,
@@ -20,7 +33,7 @@ pub(crate) enum CropAspect {
 }
 
 impl CropAspect {
-    pub(crate) const ALL: [Self; 8] = [
+    pub const ALL: [Self; 8] = [
         Self::Free,
         Self::Original,
         Self::Square,
@@ -31,7 +44,7 @@ impl CropAspect {
         Self::SixteenNine,
     ];
 
-    pub(crate) const fn label(self) -> &'static str {
+    pub const fn label(self) -> &'static str {
         match self {
             Self::Free => "Free",
             Self::Original => "Original",
@@ -66,9 +79,10 @@ struct CropDrag {
     rect: NormalizedCropRect,
 }
 
-/// UI-only crop state. The committed recipe is never mutated until Apply.
+/// Crop authoring state. The committed recipe is never mutated until the
+/// tool is left with a commit (see `ActiveTool::leave`).
 #[derive(Debug, Clone)]
-pub(crate) struct CropToolSession {
+pub struct CropToolSession {
     original: Option<NormalizedCropRect>,
     draft: NormalizedCropRect,
     aspect: CropAspect,
@@ -81,7 +95,7 @@ pub(crate) struct CropToolSession {
 }
 
 impl CropToolSession {
-    pub(crate) fn new(
+    pub fn new(
         committed: Option<NormalizedCropRect>,
         full_width: usize,
         full_height: usize,
@@ -99,72 +113,72 @@ impl CropToolSession {
         }
     }
 
-    pub(crate) const fn draft(&self) -> NormalizedCropRect {
+    pub const fn draft(&self) -> NormalizedCropRect {
         self.draft
     }
 
-    pub(crate) const fn aspect(&self) -> CropAspect {
+    pub const fn aspect(&self) -> CropAspect {
         self.aspect
     }
 
-    pub(crate) const fn locked(&self) -> bool {
+    pub const fn locked(&self) -> bool {
         self.locked
     }
 
-    pub(crate) const fn portrait(&self) -> bool {
+    pub const fn portrait(&self) -> bool {
         self.portrait
     }
 
-    pub(crate) const fn full_frame_ready(&self) -> bool {
+    pub const fn full_frame_ready(&self) -> bool {
         self.full_frame_ready
     }
 
-    pub(crate) fn set_full_dimensions(&mut self, width: usize, height: usize) {
+    pub fn set_full_dimensions(&mut self, width: usize, height: usize) {
         self.full_width = width.max(1);
         self.full_height = height.max(1);
         self.constrain_draft();
         self.full_frame_ready = true;
     }
 
-    pub(crate) fn set_aspect(&mut self, aspect: CropAspect) {
+    pub fn set_aspect(&mut self, aspect: CropAspect) {
         self.aspect = aspect;
         self.locked = aspect != CropAspect::Free;
         self.constrain_draft();
     }
 
-    pub(crate) fn set_locked(&mut self, locked: bool) {
+    pub fn set_locked(&mut self, locked: bool) {
         self.locked = locked;
         self.constrain_draft();
     }
 
-    pub(crate) fn toggle_orientation(&mut self) {
+    pub fn toggle_orientation(&mut self) {
         self.portrait = !self.portrait;
         self.constrain_draft();
     }
 
-    pub(crate) fn reset(&mut self) {
+    pub fn reset(&mut self) {
         self.draft = NormalizedCropRect::FULL_FRAME;
         self.drag = None;
     }
 
     /// The recipe value to commit. Full frame is canonicalized to `None`.
     #[must_use]
-    pub(crate) fn committed_crop(&self) -> Option<NormalizedCropRect> {
+    pub fn committed_crop(&self) -> Option<NormalizedCropRect> {
         self.draft.canonicalized()
     }
 
     #[must_use]
-    pub(crate) fn is_modified(&self) -> bool {
+    pub fn is_modified(&self) -> bool {
         self.committed_crop() != self.original
     }
 
-    pub(crate) fn output_dimensions(&self) -> (usize, usize) {
+    pub fn output_dimensions(&self) -> (usize, usize) {
         let width = ((self.draft.right - self.draft.left) * self.full_width as f64).round();
         let height = ((self.draft.bottom - self.draft.top) * self.full_height as f64).round();
         (width.max(1.0) as usize, height.max(1.0) as usize)
     }
 
-    pub(crate) fn begin_drag(&mut self, handle: CropHandle, point: (f64, f64)) {
+    pub fn begin_drag(&mut self, handle: CropHandle, point: (f64, f64)) {
         self.drag = Some(CropDrag {
             handle,
             start: point,
@@ -172,7 +186,7 @@ impl CropToolSession {
         });
     }
 
-    pub(crate) fn drag_to(&mut self, point: (f64, f64)) {
+    pub fn drag_to(&mut self, point: (f64, f64)) {
         let Some(drag) = self.drag else {
             return;
         };
@@ -187,11 +201,11 @@ impl CropToolSession {
         };
     }
 
-    pub(crate) fn finish_drag(&mut self) {
+    pub fn finish_drag(&mut self) {
         self.drag = None;
     }
 
-    pub(crate) fn active_handle(&self) -> Option<CropHandle> {
+    pub fn active_handle(&self) -> Option<CropHandle> {
         self.drag.map(|drag| drag.handle)
     }
 
@@ -326,9 +340,8 @@ fn fit_rect(center_x: f64, center_y: f64, width: f64, height: f64) -> Normalized
 
 #[cfg(test)]
 mod tests {
-    use super::{CropAspect, CropToolSession};
-    use crate::ui::crop::CropHandle;
-
+    use super::{CropAspect, CropHandle, CropToolSession};
+    
     #[test]
     fn moving_and_free_resizing_stay_in_bounds_without_inversion() {
         let mut session = CropToolSession::new(None, 6000, 4000);
