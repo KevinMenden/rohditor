@@ -6,6 +6,7 @@ members = [
     "crates/camera-profile",
     "crates/color",
     "crates/core",
+    "crates/detail",
     "crates/demosaic",
     "crates/edit",
     "crates/engine",

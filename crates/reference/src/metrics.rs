@@ -131,6 +131,101 @@ pub fn cfa_site_rmse(
     (squared / count.max(1) as f64).sqrt()
 }
 
+/// Scores for a detail stage (noise reduction, false colour, defringe,
+/// sharpening) against ground truth. All are computed over the interior.
+#[derive(Debug, Clone, Copy)]
+pub struct DetailScores {
+    /// PSNR (dB) of balanced luma `(r + 2g + b) / 4`; peak 1.0.
+    pub luma_psnr_db: f64,
+    /// RMS of the `r - g` / `b - g` difference between test and truth.
+    pub chroma_rmse: f64,
+    /// Largest increase of chroma magnitude over the truth at any pixel;
+    /// catches tinting that RMSE averages away.
+    pub colour_added: f64,
+}
+
+/// Score `test` against `truth`, ignoring `margin` pixels on each side.
+///
+/// # Panics
+/// Panics if the images differ in size or the margin leaves no interior.
+#[must_use]
+pub fn detail_scores(
+    truth: &LinearRgbImage<f32>,
+    test: &LinearRgbImage<f32>,
+    margin: usize,
+) -> DetailScores {
+    assert_eq!(
+        (truth.width(), truth.height()),
+        (test.width(), test.height()),
+        "compared images must have equal dimensions"
+    );
+    assert!(2 * margin < truth.width().min(truth.height()));
+    let opponent = |px: &[f32]| {
+        let luma = f64::from(px[0] + 2.0 * px[1] + px[2]) / 4.0;
+        (luma, f64::from(px[0] - px[1]), f64::from(px[2] - px[1]))
+    };
+    let (mut luma_sq, mut chroma_sq, mut added, mut count) = (0.0_f64, 0.0_f64, 0.0_f64, 0_usize);
+    for y in margin..truth.height() - margin {
+        for x in margin..truth.width() - margin {
+            let (Some(a), Some(b)) = (truth.pixel(x, y), test.pixel(x, y)) else {
+                continue;
+            };
+            let ((ay, a1, a2), (by, b1, b2)) = (opponent(a), opponent(b));
+            luma_sq += (ay - by).powi(2);
+            chroma_sq += (a1 - b1).powi(2) + (a2 - b2).powi(2);
+            added = added.max(b1.hypot(b2) - a1.hypot(a2));
+            count += 1;
+        }
+    }
+    let n = count as f64;
+    let luma_mse = luma_sq / n;
+    DetailScores {
+        luma_psnr_db: if luma_mse == 0.0 {
+            f64::INFINITY
+        } else {
+            -10.0 * luma_mse.log10()
+        },
+        // Mean over the two chroma planes.
+        chroma_rmse: (chroma_sq / (2.0 * n)).sqrt(),
+        colour_added: added.max(0.0),
+    }
+}
+
+/// 10–90% rise distance (pixels) of a vertical edge between columns `x0`
+/// and `x1`, measured on the row-averaged balanced luma profile. Smaller is
+/// sharper; a perfect step scores ~0.8 (the 10–90% span of a one-pixel step).
+/// Returns `None` if the profile has no rising edge in the window.
+#[must_use]
+pub fn edge_rise_distance(image: &LinearRgbImage<f32>, x0: usize, x1: usize) -> Option<f64> {
+    let (w, h) = (image.width(), image.height());
+    let x1 = x1.min(w);
+    if x0 + 2 > x1 || h == 0 {
+        return None;
+    }
+    let profile: Vec<f64> = (x0..x1)
+        .map(|x| {
+            (0..h)
+                .filter_map(|y| image.pixel(x, y))
+                .map(|p| f64::from(p[0] + 2.0 * p[1] + p[2]) / 4.0)
+                .sum::<f64>()
+                / h as f64
+        })
+        .collect();
+    let (low, high) = (profile[0], profile[profile.len() - 1]);
+    if high - low < 1e-6 {
+        return None;
+    }
+    // Fractional position where the profile first reaches `level`.
+    let crossing = |fraction: f64| -> Option<f64> {
+        let level = low + fraction * (high - low);
+        profile.windows(2).enumerate().find_map(|(i, pair)| {
+            (pair[0] < level && pair[1] >= level)
+                .then(|| i as f64 + (level - pair[0]) / (pair[1] - pair[0]))
+        })
+    };
+    Some(crossing(0.9)? - crossing(0.1)?)
+}
+
 #[cfg(test)]
 mod tests {
     use rohditor_image::{BayerPattern, LinearRgbSpace, MosaicImage};
@@ -194,5 +289,31 @@ mod tests {
         assert_eq!(cfa_site_rmse(&mosaic, &exact, 1, 1.0), 0.0);
         let wrong = rgb(2, 2, |_, _, _| 0.0);
         assert!(cfa_site_rmse(&mosaic, &wrong, 1, 1.0) > 0.0);
+    }
+
+    #[test]
+    fn detail_scores_report_luma_chroma_and_added_colour() {
+        let truth = rgb(8, 6, |_, _, _| 0.5);
+        let same = detail_scores(&truth, &truth, 0);
+        assert!(same.luma_psnr_db.is_infinite());
+        assert_eq!((same.chroma_rmse, same.colour_added), (0.0, 0.0));
+
+        // Red tint of 0.1 on every pixel: chroma added = 0.1, luma error 0.025.
+        let tinted = rgb(8, 6, |_, _, c| if c == 0 { 0.6 } else { 0.5 });
+        let scores = detail_scores(&truth, &tinted, 0);
+        assert!((scores.colour_added - 0.1).abs() < 1e-6);
+        assert!((scores.luma_psnr_db - (-20.0 * 0.025_f64.log10())).abs() < 1e-3);
+        assert!((scores.chroma_rmse - (0.005_f64).sqrt()).abs() < 1e-6);
+    }
+
+    #[test]
+    fn edge_rise_distance_measures_ramp_width() {
+        // Linear ramp over 10 pixels between two plateaus: 10-90% is 8 px.
+        let ramp = |x: usize, _, _| ((x as f32 - 10.0) / 10.0).clamp(0.0, 1.0);
+        let image = rgb(30, 3, ramp);
+        let rise = edge_rise_distance(&image, 0, 30).unwrap();
+        assert!((rise - 8.0).abs() < 1e-4, "{rise}");
+        let flat = rgb(30, 3, |_, _, _| 0.3);
+        assert!(edge_rise_distance(&flat, 0, 30).is_none());
     }
 }
