@@ -3,8 +3,8 @@ use rohditor_core::{HSL_CHANNEL_CENTERS, Histogram, WhiteBalanceMode, evaluate_t
 use rohditor_edit::{
     CameraProfileSelection, HighlightMethod, OpticsAction, RenderingProfileSelection, ToneCurve,
 };
+use rohditor_engine::tools::Picker;
 
-use super::PickerMode;
 use super::optics::{self, OpticsPanelModel};
 use super::theme::{self, colors, metrics};
 use super::widgets::{self, AdjustmentSpec, ValueScale};
@@ -121,9 +121,8 @@ pub(crate) struct DocumentPanelModel {
     pub ranges: AdjustmentRanges,
     pub export_ready: bool,
     pub export_in_progress: bool,
-    pub histogram: Option<Histogram>,
     pub auto_tone_available: bool,
-    pub picker_mode: Option<PickerMode>,
+    pub picker_mode: Option<Picker>,
     pub color_mixer_channel: usize,
     pub optics: OpticsPanelModel,
     pub capture_sharpening: rohditor_edit::CaptureSharpening,
@@ -148,7 +147,7 @@ pub(crate) struct AdjustmentPanelOutput {
     pub white_balance_mode: Option<WhiteBalanceMode>,
     pub highlight_method: Option<HighlightMethod>,
     pub capture_enabled: Option<bool>,
-    pub picker_mode: Option<Option<PickerMode>>,
+    pub picker_mode: Option<Option<Picker>>,
     pub color_mixer_channel: Option<usize>,
     pub optics_action: Option<OpticsAction>,
     pub optics_filter: Option<String>,
@@ -195,86 +194,67 @@ impl ExportUiSettings {
     }
 }
 
-pub(crate) fn show(
-    context: &egui::Context,
+/// The Edit tool's panel body. The surrounding panel, heading and histogram
+/// are owned by `tool_panel`.
+pub(crate) fn show_body(
+    ui: &mut egui::Ui,
     document: Option<DocumentPanelModel>,
     export_settings: &mut ExportUiSettings,
 ) -> AdjustmentPanelOutput {
     let mut output = AdjustmentPanelOutput::default();
-    egui::SidePanel::right("adjustments")
-        .default_width(metrics::ADJUSTMENT_PANEL_WIDTH)
-        .min_width(280.0)
-        .max_width(350.0)
-        .resizable(true)
-        .frame(theme::side_panel_frame())
-        .show(context, |ui| {
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    ui.heading("Develop");
-                    ui.label(
-                        egui::RichText::new("NON-DESTRUCTIVE RAW ADJUSTMENTS")
-                            .size(10.0)
-                            .color(colors::TEXT_MUTED),
-                    );
-                    ui.add_space(7.0);
+    let Some(mut document) = document else {
+        empty_panel(ui);
+        return output;
+    };
 
-                    let Some(mut document) = document else {
-                        empty_panel(ui);
-                        return;
-                    };
+    document_summary(ui, &document);
 
-                    document_summary(ui, &document);
-                    histogram_panel(ui, document.histogram.as_ref());
-
-                    widgets::adjustment_section(ui, "Light", |ui| {
-                        show_light_controls(ui, &mut document, &mut output);
-                        show_tone_curve_controls(ui, &mut document, &mut output);
-                    });
-                    widgets::adjustment_section(ui, "Detail", |ui| {
-                        super::capture_sharpening::show(ui, &mut document, &mut output);
-                    });
-                    widgets::adjustment_section(ui, "Color", |ui| {
-                        show_color_controls(ui, &mut document, &mut output);
-                        ui.separator();
-                        show_color_mixer_controls(ui, &mut document, &mut output);
-                        ui.separator();
-                        show_color_grading_controls(ui, &mut document, &mut output);
-                        output.reset_all = ui
-                            .add_enabled(
-                                document.has_adjustments,
-                                egui::Button::new("Reset all adjustments").frame(false),
-                            )
-                            .on_hover_text("Restore Rohditor Standard defaults")
-                            .clicked();
-                    });
-                    output.optics_filter = widgets::adjustment_section(ui, "Optics", |ui| {
-                        optics::show(ui, &mut document.optics, &mut output.optics_action)
-                    });
-                    widgets::adjustment_section(ui, "Export", |ui| {
-                        show_export_settings(ui, export_settings);
-                        let export_label = if document.export_in_progress {
-                            "Exporting…"
-                        } else {
-                            "Export image…"
-                        };
-                        output.export = widgets::primary_button(
-                            ui,
-                            export_label,
-                            document.export_ready && !document.export_in_progress,
-                        )
-                        .on_hover_text("Export the full-resolution CPU-developed image")
-                        .clicked();
-                        if !document.export_ready && !document.export_in_progress {
-                            ui.label(
-                                egui::RichText::new("Available after RAW decoding completes")
-                                    .small()
-                                    .color(colors::TEXT_MUTED),
-                            );
-                        }
-                    });
-                });
-        });
+    widgets::adjustment_section(ui, "Light", |ui| {
+        show_light_controls(ui, &mut document, &mut output);
+        show_tone_curve_controls(ui, &mut document, &mut output);
+    });
+    widgets::adjustment_section(ui, "Detail", |ui| {
+        super::capture_sharpening::show(ui, &mut document, &mut output);
+    });
+    widgets::adjustment_section(ui, "Color", |ui| {
+        show_color_controls(ui, &mut document, &mut output);
+        ui.separator();
+        show_color_mixer_controls(ui, &mut document, &mut output);
+        ui.separator();
+        show_color_grading_controls(ui, &mut document, &mut output);
+        output.reset_all = ui
+            .add_enabled(
+                document.has_adjustments,
+                egui::Button::new("Reset all adjustments").frame(false),
+            )
+            .on_hover_text("Restore Rohditor Standard defaults")
+            .clicked();
+    });
+    output.optics_filter = widgets::adjustment_section(ui, "Optics", |ui| {
+        optics::show(ui, &mut document.optics, &mut output.optics_action)
+    });
+    widgets::adjustment_section(ui, "Export", |ui| {
+        show_export_settings(ui, export_settings);
+        let export_label = if document.export_in_progress {
+            "Exporting…"
+        } else {
+            "Export image…"
+        };
+        output.export = widgets::primary_button(
+            ui,
+            export_label,
+            document.export_ready && !document.export_in_progress,
+        )
+        .on_hover_text("Export the full-resolution CPU-developed image")
+        .clicked();
+        if !document.export_ready && !document.export_in_progress {
+            ui.label(
+                egui::RichText::new("Available after RAW decoding completes")
+                    .small()
+                    .color(colors::TEXT_MUTED),
+            );
+        }
+    });
     output
 }
 
@@ -418,8 +398,6 @@ fn empty_panel(ui: &mut egui::Ui) {
                 .color(colors::TEXT_MUTED),
         );
     });
-    widgets::section_header(ui, "Histogram");
-    histogram_canvas(ui, "WAITING FOR A PHOTO");
 }
 
 fn document_summary(ui: &mut egui::Ui, document: &DocumentPanelModel) {
@@ -447,7 +425,8 @@ fn document_summary(ui: &mut egui::Ui, document: &DocumentPanelModel) {
     }
 }
 
-fn histogram_panel(ui: &mut egui::Ui, histogram: Option<&Histogram>) {
+/// Histogram header shared by every tool; `None` means analysis is pending.
+pub(crate) fn histogram_panel(ui: &mut egui::Ui, histogram: Option<&Histogram>) {
     widgets::section_header(ui, "Histogram");
     let Some(histogram) = histogram else {
         histogram_canvas(ui, "ANALYZING");
@@ -472,7 +451,7 @@ fn histogram_panel(ui: &mut egui::Ui, histogram: Option<&Histogram>) {
     });
 }
 
-fn histogram_canvas(ui: &mut egui::Ui, caption: &str) {
+pub(crate) fn histogram_canvas(ui: &mut egui::Ui, caption: &str) {
     let (rect, _) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 74.0), egui::Sense::hover());
     ui.painter().rect(
@@ -887,7 +866,7 @@ fn show_color_controls(
             .small()
             .color(colors::TEXT_MUTED),
     );
-    let picker_active = document.picker_mode == Some(PickerMode::WhiteBalance);
+    let picker_active = document.picker_mode == Some(Picker::WhiteBalance);
     let picker_label = if picker_active {
         "Cancel picker"
     } else {
@@ -901,7 +880,7 @@ fn show_color_controls(
         output.picker_mode = Some(if picker_active {
             None
         } else {
-            Some(PickerMode::WhiteBalance)
+            Some(Picker::WhiteBalance)
         });
     }
     ui.add_space(4.0);
@@ -1044,12 +1023,12 @@ fn show_color_mixer_controls(
                     }
                 }
                 ui.add_space(2.0);
-                let picker_active = document.picker_mode == Some(PickerMode::ColorMixer);
+                let picker_active = document.picker_mode == Some(Picker::ColorMixer);
                 if color_picker_swatch(ui, picker_active, CHANNEL_COLORS).clicked() {
                     output.picker_mode = Some(if picker_active {
                         None
                     } else {
-                        Some(PickerMode::ColorMixer)
+                        Some(Picker::ColorMixer)
                     });
                 }
             });

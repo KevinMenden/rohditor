@@ -36,6 +36,7 @@ pub(crate) mod metrics {
     pub(crate) const TOOLBAR_HEIGHT: f32 = 48.0;
     pub(crate) const STATUS_HEIGHT: f32 = 27.0;
     pub(crate) const ADJUSTMENT_PANEL_WIDTH: f32 = 312.0;
+    pub(crate) const TOOL_RAIL_WIDTH: f32 = 44.0;
     pub(crate) const ADJUSTMENT_SECTION_GAP: f32 = 9.0;
     pub(crate) const FILE_PANEL_WIDTH: f32 = 190.0;
     pub(crate) const FILE_PANEL_BREAKPOINT: f32 = 1_120.0;

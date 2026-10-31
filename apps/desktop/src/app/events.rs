@@ -129,9 +129,9 @@ impl RohditorApp {
                     document.accepts_preview(ticket, intent)
                         && match resolution {
                             PreviewResolution::Fit => {
-                                !document.source_scale_requested && self.crop_tool.is_none()
+                                !document.source_scale_requested && self.tool.crop().is_none()
                             }
-                            PreviewResolution::CropToolFullFrame => self.crop_tool.is_some(),
+                            PreviewResolution::CropToolFullFrame => self.tool.crop().is_some(),
                             PreviewResolution::SourceScale => document.source_scale_requested,
                         }
                         && (matches!(
@@ -147,7 +147,7 @@ impl RohditorApp {
                     // CPU frame during one update, so an unsupported edit such
                     // as HSL never exposes an empty viewport between backends.
                     // A crop-tool frame is a temporary CPU presentation. Keep
-                    // the resident uncropped GPU source so Apply/Cancel can
+                    // the resident uncropped GPU source so leaving the crop tool can
                     // return to an interactive GPU crop without another upload.
                     if resolution != PreviewResolution::CropToolFullFrame {
                         self.release_document_gpu_preview(ticket.document_id);
@@ -178,7 +178,7 @@ impl RohditorApp {
                         Some(DocumentPreviewDiagnostics::cpu(diagnostics));
                     document.error = None;
                     if resolution == PreviewResolution::CropToolFullFrame
-                        && let Some(session) = self.crop_tool.as_mut()
+                        && let Some(session) = self.tool.crop_mut()
                     {
                         session.set_full_dimensions(
                             document

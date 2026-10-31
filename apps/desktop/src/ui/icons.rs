@@ -11,6 +11,8 @@ pub(crate) enum Icon {
     File,
     Folder,
     Photo,
+    Sliders,
+    Crop,
 }
 
 pub(crate) fn paint(painter: &egui::Painter, rect: egui::Rect, icon: Icon, color: egui::Color32) {
@@ -153,6 +155,38 @@ pub(crate) fn paint(painter: &egui::Painter, rect: egui::Rect, icon: Icon, color
                 ],
                 stroke,
             );
+        }
+        Icon::Sliders => {
+            // Two slider tracks with knobs at different positions.
+            for (y, knob) in [(rect.top() + 4.5, 0.35), (rect.bottom() - 4.5, 0.7)] {
+                painter.line_segment(
+                    [
+                        egui::pos2(rect.left() + 1.0, y),
+                        egui::pos2(rect.right() - 1.0, y),
+                    ],
+                    stroke,
+                );
+                let x = egui::lerp(rect.left() + 1.0..=rect.right() - 1.0, knob);
+                painter.circle_filled(egui::pos2(x, y), 2.4, color);
+            }
+        }
+        Icon::Crop => {
+            // Two overlapping corner brackets, as in the usual crop glyph.
+            let (l, r, t, b) = (
+                rect.left() + 4.0,
+                rect.right() - 4.0,
+                rect.top() + 4.0,
+                rect.bottom() - 4.0,
+            );
+            let points = [
+                [egui::pos2(l, rect.top() + 1.0), egui::pos2(l, b)],
+                [egui::pos2(l, b), egui::pos2(rect.right() - 1.0, b)],
+                [egui::pos2(rect.left() + 1.0, t), egui::pos2(r, t)],
+                [egui::pos2(r, t), egui::pos2(r, rect.bottom() - 1.0)],
+            ];
+            for segment in points {
+                painter.line_segment(segment, stroke);
+            }
         }
     }
 }
