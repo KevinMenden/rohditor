@@ -7,6 +7,7 @@ use rohditor_core::default_recipe;
 
 use super::{Document, RohditorApp};
 use rohditor_engine::persistence::{self, SaveJob, SaveResult};
+use rohditor_engine::tools::ActiveTool;
 
 impl RohditorApp {
     pub(super) fn update_autosave(&mut self, context: &egui::Context) {
@@ -95,11 +96,10 @@ impl RohditorApp {
     }
 
     fn close_document_now(&mut self, context: &egui::Context) {
-        self.picker_mode = None;
         self.color_mixer_channel = 0;
         self.pending_white_balance_pick = None;
         self.white_balance_memory = rohditor_core::WhiteBalanceModeMemory::default();
-        self.crop_tool = None;
+        self.tool = ActiveTool::default();
         if let Some(mut document) = self.document.take() {
             self.release_gpu_preview(&mut document);
             self.coordinator.abandon(document.id);

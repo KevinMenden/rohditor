@@ -18,6 +18,7 @@ pub mod preview_cache;
 pub mod session;
 pub mod settings;
 pub mod storage;
+pub mod tools;
 pub mod wake;
 
 pub use wake::WakeFn;

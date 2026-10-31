@@ -1,25 +1,11 @@
 use eframe::egui;
 use rohditor_edit::NormalizedCropRect;
+use rohditor_engine::tools::{CropAspect, CropHandle};
 
 use super::theme::colors;
-use super::widgets;
-use crate::app::crop::CropAspect;
 
 const HANDLE_RADIUS: f32 = 5.0;
 const HIT_RADIUS: f32 = 12.0;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CropHandle {
-    NorthWest,
-    North,
-    NorthEast,
-    East,
-    SouthEast,
-    South,
-    SouthWest,
-    West,
-    Move,
-}
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct CropOverlayModel {
@@ -150,68 +136,66 @@ pub(crate) struct CropPanelOutput {
     pub toggle_orientation: bool,
     pub reset: bool,
     pub cancel: bool,
-    pub apply: bool,
 }
 
-pub(crate) fn show_panel(context: &egui::Context, model: &CropPanelModel) -> CropPanelOutput {
+/// Crop controls for the tool panel body. Leaving the tool commits the draft,
+/// so there is no Apply button; Cancel (also Esc) discards it.
+pub(crate) fn show_controls(ui: &mut egui::Ui, model: &CropPanelModel) -> CropPanelOutput {
     let mut output = CropPanelOutput::default();
-    egui::Window::new("Geometry · Crop")
-        .default_width(230.0)
-        .resizable(false)
-        .collapsible(false)
-        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-18.0, 64.0))
-        .show(context, |ui| {
-            ui.label(
-                egui::RichText::new("CROP")
-                    .small()
-                    .color(colors::TEXT_MUTED),
-            );
-            ui.horizontal_wrapped(|ui| {
-                for aspect in CropAspect::ALL {
-                    if ui
-                        .selectable_label(model.aspect == aspect, aspect.label())
-                        .clicked()
-                    {
-                        output.aspect = Some(aspect);
-                    }
-                }
-            });
-            ui.add_space(6.0);
-            let mut locked = model.locked;
-            if ui.checkbox(&mut locked, "Lock aspect ratio").changed() {
-                output.locked = Some(locked);
-            }
+    ui.label(
+        egui::RichText::new("CROP")
+            .small()
+            .color(colors::TEXT_MUTED),
+    );
+    ui.horizontal_wrapped(|ui| {
+        for aspect in CropAspect::ALL {
             if ui
-                .button(if model.portrait {
-                    "Landscape ratio"
-                } else {
-                    "Portrait ratio"
-                })
+                .selectable_label(model.aspect == aspect, aspect.label())
                 .clicked()
             {
-                output.toggle_orientation = true;
+                output.aspect = Some(aspect);
             }
-            ui.label(
-                egui::RichText::new(format!(
-                    "{} × {} px",
-                    model.dimensions.0, model.dimensions.1
-                ))
-                .monospace()
-                .color(colors::TEXT_MUTED),
-            );
-            if !model.ready {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(egui::RichText::new("Preparing full image…").small());
-                });
-            }
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                output.reset = ui.button("Reset").clicked();
-                output.cancel = ui.button("Cancel").clicked();
-                output.apply = widgets::primary_button(ui, "Apply", model.ready).clicked();
-            });
+        }
+    });
+    ui.add_space(6.0);
+    let mut locked = model.locked;
+    if ui.checkbox(&mut locked, "Lock aspect ratio").changed() {
+        output.locked = Some(locked);
+    }
+    if ui
+        .button(if model.portrait {
+            "Landscape ratio"
+        } else {
+            "Portrait ratio"
+        })
+        .clicked()
+    {
+        output.toggle_orientation = true;
+    }
+    ui.label(
+        egui::RichText::new(format!(
+            "{} × {} px",
+            model.dimensions.0, model.dimensions.1
+        ))
+        .monospace()
+        .color(colors::TEXT_MUTED),
+    );
+    if !model.ready {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label(egui::RichText::new("Preparing full image…").small());
         });
+    }
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        output.reset = ui.button("Reset").clicked();
+        output.cancel = ui.button("Cancel").clicked();
+    });
+    ui.label(
+        egui::RichText::new("Enter or switching tools applies · Esc cancels")
+            .small()
+            .color(colors::TEXT_MUTED),
+    );
     output
 }
 

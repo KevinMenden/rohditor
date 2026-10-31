@@ -31,6 +31,7 @@ use rohditor_edit::HighlightAdjustments;
 
 use crate::ProcessorPreference;
 use crate::config;
+use crate::ui::ViewMode;
 use crate::ui::adjustment_panel::{
     self, AdjustmentInteraction, AdjustmentRange, AdjustmentRanges, AdjustmentTarget,
     AdjustmentValues, CameraProfileChoice, DocumentPanelModel, ExportKind, ExportUiSettings,
@@ -39,7 +40,7 @@ use crate::ui::adjustment_panel::{
 use crate::ui::catalog::{
     self, FilmstripModel, LibraryEntryModel, LibraryEntryState, LibraryModel, LibrarySort,
 };
-use crate::ui::crop::{CropOverlayModel, CropPanelModel};
+use crate::ui::crop::CropOverlayModel;
 use crate::ui::diagnostics::{
     self, CacheModel, CatalogModel, DiagnosticsMessages, DiagnosticsModel, GpuModel,
     HighlightStatsModel, PreviewModel, QueueModel, TimingModel,
@@ -47,9 +48,9 @@ use crate::ui::diagnostics::{
 use crate::ui::optics::OpticsPanelModel;
 use crate::ui::settings as settings_ui;
 use crate::ui::theme;
+use crate::ui::tool_panel;
 use crate::ui::toolbar::{self, FilePanelModel, StatusBarModel, ToolbarModel};
 use crate::ui::viewport::{self, PreviewSource, PreviewTexture, ViewState, ViewportModel};
-use crate::ui::{PickerMode, ViewMode};
 use rohditor_engine::camera_profiles::CameraProfileRegistry;
 use rohditor_engine::catalog::{CatalogCoordinator, CatalogState, ThumbnailSlot};
 use rohditor_engine::coordinator::{
@@ -60,6 +61,7 @@ use rohditor_engine::document::{EditSession, PreviewIntent, PreviewTicket};
 use rohditor_engine::preview_cache::PreviewCacheHits;
 use rohditor_engine::session;
 use rohditor_engine::settings::{self, AppSettings};
+use rohditor_engine::tools::{ActiveTool, Picker, ToolKind};
 use rohditor_engine::wake::WakeFn;
 
 const GPU_HISTOGRAM_DEBOUNCE: Duration = Duration::from_millis(75);
@@ -75,16 +77,15 @@ const LIBRARY_VISIBLE_MARGIN: usize = 24;
 
 mod autosave;
 mod camera_look;
-pub(crate) mod crop;
 #[path = "events.rs"]
 mod events;
 #[path = "gpu.rs"]
 mod gpu;
 #[path = "lifecycle.rs"]
 mod lifecycle;
+mod tools;
 
 use camera_look::CameraLookState;
-use crop::CropToolSession;
 use gpu::{
     GpuDocumentPreview, GpuDocumentSource, GpuRuntime, PendingGpuHistogram, gpu_output_size,
     initialize_gpu_runtime, register_or_update_gpu_texture,
@@ -322,11 +323,11 @@ pub(crate) struct RohditorApp {
     processor_note: Option<String>,
     startup_error: Option<String>,
     show_diagnostics: bool,
-    picker_mode: Option<PickerMode>,
+    /// The active tool and its transient state (pickers, crop draft).
+    tool: ActiveTool,
     color_mixer_channel: usize,
     pending_white_balance_pick: Option<PreviewTicket>,
     white_balance_memory: WhiteBalanceModeMemory,
-    crop_tool: Option<CropToolSession>,
     view_mode: ViewMode,
     /// Folder of the last applied scan, used to reset library selection when
     /// the catalog switches folders.
@@ -453,11 +454,10 @@ impl RohditorApp {
             processor_note,
             startup_error,
             show_diagnostics,
-            picker_mode: None,
+            tool: ActiveTool::default(),
             color_mixer_channel: 0,
             pending_white_balance_pick: None,
             white_balance_memory: WhiteBalanceModeMemory::default(),
-            crop_tool: None,
             view_mode,
             library_folder: None,
             library_selection: None,
@@ -705,7 +705,7 @@ impl RohditorApp {
         let Some(document_id) = self.document.as_ref().map(|document| document.id) else {
             return;
         };
-        if self.crop_tool.is_none() {
+        if self.tool.crop().is_none() {
             self.queue_preview(context, document_id);
             return;
         }
@@ -816,108 +816,6 @@ impl RohditorApp {
                     dialog.draft = next;
                 }
             }
-        }
-    }
-
-    fn enter_crop_tool(&mut self, context: &egui::Context) {
-        if self.crop_tool.is_some() {
-            return;
-        }
-        let request = self.document.as_mut().and_then(|document| {
-            let frame = document.frame.as_ref().map(Arc::clone)?;
-            document.source_scale_requested = false;
-            document.view.fit(context.input(|input| input.time));
-            let (width, height) = document
-                .texture
-                .as_ref()
-                .map(PreviewTexture::dimensions)
-                .unwrap_or((frame.info.width, frame.info.height));
-            let session =
-                CropToolSession::new(document.edits.recipe().geometry.crop, width, height);
-            let ticket = document.begin_preview_request(PreviewIntent::CropToolFullFrame);
-            let recipe = document.edits.recipe().clone();
-            document.preview_status =
-                Some((ticket.revision, "Preparing full image for crop".to_owned()));
-            Some((document.id, ticket, frame, recipe, session))
-        });
-        let Some((document_id, ticket, frame, recipe, session)) = request else {
-            return;
-        };
-        self.picker_mode = None;
-        self.pending_white_balance_pick = None;
-        self.crop_tool = Some(session);
-        let options = self.preview_options();
-        if let Err(error) = self
-            .coordinator
-            .crop_tool_preview(ticket, frame, recipe, options)
-        {
-            self.crop_tool = None;
-            if let Some(document) = self
-                .document
-                .as_mut()
-                .filter(|document| document.id == document_id)
-            {
-                document.preview_status = None;
-                document.error = Some(error);
-            }
-        }
-    }
-
-    fn finish_crop_tool(&mut self, context: &egui::Context, apply: bool) {
-        let Some(session) = self.crop_tool.take() else {
-            return;
-        };
-        let mut changed_document = None;
-        if apply
-            && session.full_frame_ready()
-            && let Some(document) = self.document.as_mut()
-        {
-            let mut next = document.edits.recipe().clone();
-            next.geometry.crop = session.committed_crop();
-            if session.is_modified() && document.edits.set_discrete(next) {
-                document.notice = None;
-                changed_document = Some(document.id);
-            }
-        }
-        let document_id =
-            changed_document.or_else(|| self.document.as_ref().map(|document| document.id));
-        if let Some(document_id) = document_id {
-            self.queue_preview(context, document_id);
-        }
-    }
-
-    fn show_crop_tool(&mut self, context: &egui::Context) {
-        let panel = self.crop_tool.as_ref().map(|session| CropPanelModel {
-            aspect: session.aspect(),
-            locked: session.locked(),
-            portrait: session.portrait(),
-            dimensions: session.output_dimensions(),
-            ready: session.full_frame_ready(),
-        });
-        let Some(panel) = panel else {
-            return;
-        };
-        let output = crate::ui::crop::show_panel(context, &panel);
-        if let Some(session) = self.crop_tool.as_mut() {
-            if let Some(aspect) = output.aspect {
-                session.set_aspect(aspect);
-            }
-            if let Some(locked) = output.locked {
-                session.set_locked(locked);
-            }
-            if output.toggle_orientation {
-                session.toggle_orientation();
-            }
-            if output.reset {
-                session.reset();
-            }
-        }
-        let keyboard_apply = context.input(|input| input.key_pressed(egui::Key::Enter));
-        let keyboard_cancel = context.input(|input| input.key_pressed(egui::Key::Escape));
-        if output.cancel || keyboard_cancel {
-            self.finish_crop_tool(context, false);
-        } else if output.apply || keyboard_apply {
-            self.finish_crop_tool(context, true);
         }
     }
 
@@ -1641,7 +1539,6 @@ impl RohditorApp {
                 .as_ref()
                 .is_none_or(|document| document.view.is_fit()),
             source_scale_selected: source_scale_selected(self.document.as_ref()),
-            crop_active: self.crop_tool.is_some(),
             zoom_label: self
                 .document
                 .as_ref()
@@ -1659,8 +1556,7 @@ impl RohditorApp {
         {
             if mode == ViewMode::Library {
                 // The crop overlay and pickers belong to the develop viewport.
-                self.crop_tool = None;
-                self.picker_mode = None;
+                self.tool = ActiveTool::default();
                 self.pending_white_balance_pick = None;
             }
             self.view_mode = mode;
@@ -1682,8 +1578,9 @@ impl RohditorApp {
         if actions.open_folder {
             self.open_folder_dialog();
         }
-        if actions.crop {
-            self.enter_crop_tool(context);
+        if actions.undo || actions.redo || actions.reset {
+            // History moves under the draft, so the draft is discarded first.
+            self.leave_tool(context, false);
         }
 
         let now = context.input(|input| input.time);
@@ -1713,7 +1610,7 @@ impl RohditorApp {
                     view_changed_document = Some(document.id);
                 }
             }
-            if actions.actual_size && self.crop_tool.is_none() {
+            if actions.actual_size && self.tool.crop().is_none() {
                 let changed_mode = !document.source_scale_requested;
                 document.source_scale_requested = true;
                 let preview_is_source_scale = document
@@ -1770,12 +1667,15 @@ impl RohditorApp {
         let model = self.document.as_ref().map(|document| {
             document_panel_model(
                 document,
-                self.picker_mode,
+                self.tool.picker(),
                 self.color_mixer_channel,
                 &self.camera_profiles,
             )
         });
-        let output = adjustment_panel::show(context, model, &mut self.export_settings);
+        let panel = tools::tool_panel_model(self.document.as_ref(), ToolKind::Edit);
+        let output = tool_panel::show(context, &panel, |ui| {
+            adjustment_panel::show_body(ui, model, &mut self.export_settings)
+        });
         let picker_mode = output.picker_mode;
         let mut changed_document = None;
         let mut white_balance_draft = None;
@@ -1885,8 +1785,8 @@ impl RohditorApp {
         if output.import_camera_profile {
             self.import_camera_profile(context);
         }
-        if let Some(mode) = picker_mode {
-            self.picker_mode = mode;
+        if let Some(picker) = picker_mode {
+            self.tool.set_picker(picker);
         }
         if let Some(channel) = output.color_mixer_channel {
             self.color_mixer_channel = channel.min(HSL_CHANNEL_COUNT - 1);
@@ -1898,8 +1798,8 @@ impl RohditorApp {
 
     fn show_viewport(&mut self, context: &egui::Context) {
         let crop_overlay = self
-            .crop_tool
-            .as_ref()
+            .tool
+            .crop()
             .filter(|session| session.full_frame_ready())
             .map(|session| CropOverlayModel {
                 crop: session.draft(),
@@ -1914,7 +1814,7 @@ impl RohditorApp {
                     preparing,
                     texture: document.texture.as_ref(),
                     source: document.preview_source,
-                    picker_mode: self.picker_mode,
+                    picker_mode: self.tool.picker(),
                     crop: crop_overlay,
                 },
                 &mut document.view,
@@ -1936,29 +1836,29 @@ impl RohditorApp {
         };
         if let Some((mode, normalized)) = output.picker_sample {
             match mode {
-                PickerMode::WhiteBalance => self.apply_white_balance_pick(context, normalized),
-                PickerMode::ColorMixer => self.apply_color_mixer_pick(normalized),
+                Picker::WhiteBalance => self.apply_white_balance_pick(context, normalized),
+                Picker::ColorMixer => self.apply_color_mixer_pick(normalized),
             }
         }
         if let Some((handle, point)) = output.crop.drag_started
-            && let Some(session) = self.crop_tool.as_mut()
+            && let Some(session) = self.tool.crop_mut()
         {
             session.begin_drag(handle, point);
         }
         if let Some(point) = output.crop.dragged_to
-            && let Some(session) = self.crop_tool.as_mut()
+            && let Some(session) = self.tool.crop_mut()
         {
             session.drag_to(point);
         }
         if output.crop.drag_stopped
-            && let Some(session) = self.crop_tool.as_mut()
+            && let Some(session) = self.tool.crop_mut()
         {
             session.finish_drag();
         }
     }
 
     fn apply_white_balance_pick(&mut self, context: &egui::Context, normalized: egui::Pos2) {
-        self.picker_mode = None;
+        self.tool.set_picker(None);
         if self.pending_white_balance_pick.is_some() {
             return;
         }
@@ -2022,7 +1922,7 @@ impl RohditorApp {
     }
 
     fn apply_color_mixer_pick(&mut self, normalized: egui::Pos2) {
-        self.picker_mode = None;
+        self.tool.set_picker(None);
         let sample = self.sample_display_pixel(normalized);
         let Some(sample) = sample else {
             if let Some(document) = self.document.as_mut() {
@@ -2900,7 +2800,7 @@ fn evict_least_recently_used(
 
 fn document_panel_model(
     document: &Document,
-    picker_mode: Option<PickerMode>,
+    picker_mode: Option<Picker>,
     color_mixer_channel: usize,
     camera_profiles: &CameraProfileRegistry,
 ) -> DocumentPanelModel {
@@ -3121,7 +3021,6 @@ fn document_panel_model(
         },
         export_ready: document.frame.is_some(),
         export_in_progress: document.export_status.is_some(),
-        histogram: document.histogram,
         auto_tone_available: document.histogram_revision == Some(document.edits.revision()),
         picker_mode,
         color_mixer_channel,
@@ -3458,8 +3357,8 @@ impl eframe::App for RohditorApp {
         match self.view_mode {
             ViewMode::Develop => {
                 self.show_file_panel(context);
-                self.show_adjustment_panel(context);
-                self.show_crop_tool(context);
+                self.show_tool_rail(context);
+                self.show_tool_panel(context);
                 self.show_filmstrip(context);
                 self.show_viewport(context);
             }
