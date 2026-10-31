@@ -2849,11 +2849,13 @@ dependencies = [
  "rohditor-camera-profile",
  "rohditor-core",
  "rohditor-demosaic",
+ "rohditor-detail",
  "rohditor-edit",
  "rohditor-gpu",
  "rohditor-image",
  "rohditor-look",
  "rohditor-raw",
+ "rohditor-reference",
  "serde",
  "serde_json",
  "tracing",
@@ -2878,6 +2880,7 @@ dependencies = [
  "rohditor-camera-profile",
  "rohditor-color",
  "rohditor-demosaic",
+ "rohditor-detail",
  "rohditor-edit",
  "rohditor-highlight",
  "rohditor-image",
@@ -2925,6 +2928,16 @@ dependencies = [
  "tracing-subscriber",
  "wgpu",
  "winit",
+]
+
+[[package]]
+name = "rohditor-detail"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "rayon",
+ "rohditor-image",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -3039,6 +3052,7 @@ name = "rohditor-reference"
 version = "0.1.0"
 dependencies = [
  "rohditor-demosaic",
+ "rohditor-detail",
  "rohditor-image",
  "rohditor-raw",
  "thiserror 2.0.20",
