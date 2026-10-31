@@ -1,10 +1,16 @@
 //! Dev-only harness that scores Rohditor's demosaicing against ground truth
-//! and against RawTherapee/darktable. Nothing else may depend on this crate.
+//! and against RawTherapee/darktable, and scores detail stages (noise
+//! reduction, false colour, defringe, sharpening) on synthetic scenes.
+//! Nothing but developer tooling (the CLI's compare commands) may depend on it.
 
+#![cfg_attr(test, allow(clippy::unwrap_used))]
+
+pub mod detail_scenes;
 pub mod dng;
 pub mod external;
 pub mod fixtures;
 pub mod metrics;
+pub mod noise;
 pub mod tiff_read;
 pub mod truth;
 

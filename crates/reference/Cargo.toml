@@ -8,6 +8,7 @@ description = "Dev-only harness comparing Rohditor demosaicing with RawTherapee 
 
 [dependencies]
 rohditor-demosaic = { path = "../demosaic" }
+rohditor-detail = { path = "../detail" }
 rohditor-image = { path = "../image" }
 rohditor-raw = { path = "../raw" }
 thiserror.workspace = true
