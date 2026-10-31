@@ -3,7 +3,8 @@ use std::time::Duration;
 use eframe::egui;
 use rohditor_demosaic::DemosaicAlgorithm;
 
-use super::PickerMode;
+use rohditor_engine::tools::Picker;
+
 use super::crop::{CropOverlayModel, CropOverlayOutput, interact_and_paint};
 use super::theme::{self, colors};
 
@@ -230,13 +231,13 @@ pub(crate) struct ViewportModel<'a> {
     pub preparing: bool,
     pub texture: Option<&'a PreviewTexture>,
     pub source: Option<PreviewSource>,
-    pub picker_mode: Option<PickerMode>,
+    pub picker_mode: Option<Picker>,
     pub crop: Option<CropOverlayModel>,
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct ViewportOutput {
-    pub picker_sample: Option<(PickerMode, egui::Pos2)>,
+    pub picker_sample: Option<(Picker, egui::Pos2)>,
     pub crop: CropOverlayOutput,
 }
 
