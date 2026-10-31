@@ -23,7 +23,7 @@ struct PreCaptureKey {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CaptureKey {
     source: PreCaptureKey,
-    settings: Option<([u32; 3], u16)>,
+    settings: DetailKey,
     ceilings: [u32; 3],
     gpu: bool,
 }
@@ -123,7 +123,7 @@ impl SpatialCache {
         let contract = source.capture_contract()?;
         let capture_key = CaptureKey {
             source: key.clone(),
-            settings: keys.reconstructed.capture_sharpening,
+            settings: keys.reconstructed.detail.clone(),
             ceilings: contract.ceilings().map(f32::to_bits),
             gpu: false,
         };
@@ -309,7 +309,7 @@ impl SpatialCache {
         let contract = source.capture_contract().map_err(gpu_error)?;
         let capture_key = CaptureKey {
             source: key.clone(),
-            settings: keys.reconstructed.capture_sharpening,
+            settings: keys.reconstructed.detail.clone(),
             ceilings: contract.ceilings().map(f32::to_bits),
             gpu: true,
         };
@@ -416,7 +416,7 @@ impl SpatialCache {
         let contract = metadata.capture_contract().map_err(gpu_error)?;
         let key = CaptureKey {
             source: key,
-            settings: keys.reconstructed.capture_sharpening,
+            settings: keys.reconstructed.detail.clone(),
             ceilings: contract.ceilings().map(f32::to_bits),
             gpu: true,
         };

@@ -4,6 +4,7 @@ mod camera_chroma;
 mod camera_tone;
 mod color;
 mod light_settings;
+mod noise_reduction;
 mod profile;
 mod raw;
 mod recipe;
@@ -14,6 +15,7 @@ pub use camera_chroma::*;
 pub use camera_tone::*;
 pub use color::*;
 pub use light_settings::*;
+pub use noise_reduction::*;
 pub use profile::*;
 pub use raw::*;
 pub use recipe::{

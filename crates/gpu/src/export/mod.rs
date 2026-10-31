@@ -192,6 +192,11 @@ impl GpuExportProcessor {
         cancellation: &CancellationToken,
     ) -> Result<GpuExportResult, GpuPreviewError> {
         check_cancel(cancellation)?;
+        if let Some(reason) = rohditor_core::cpu_only_stage_reason(recipe) {
+            return Err(GpuPreviewError::UnsupportedEdits {
+                reason: reason.to_owned(),
+            });
+        }
         let (width, height) =
             rohditor_core::raw_crop_dimensions(&frame.info, options.raw_crop_policy)
                 .map_err(input_error)?;
@@ -314,8 +319,7 @@ impl GpuExportProcessor {
         spatial_metrics: crate::SpatialMetrics,
     ) -> Result<GpuExportResult, GpuPreviewError> {
         let description = &source.description;
-        if description.capture_sharpening()
-            != rohditor_core::CaptureSharpeningProvenance::for_settings(recipe.capture_sharpening)
+        if description.detail() != rohditor_core::DetailProvenance::for_recipe(recipe)
             || !highlight_adjustments_match(
                 description.highlight_adjustments(),
                 recipe.raw.highlights,

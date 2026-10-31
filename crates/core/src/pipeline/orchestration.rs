@@ -105,6 +105,7 @@ pub struct StageTimings {
     /// pipeline. New code should use [`Self::highlight_processing`].
     pub highlight_clipping: Duration,
     pub demosaic: Duration,
+    pub noise_reduction: Duration,
     pub capture_sharpening: Duration,
     pub optics: Duration,
     pub resampling: Duration,
@@ -163,7 +164,7 @@ pub struct SpatialCompletionDescription {
     highlight_adjustments: HighlightAdjustments,
     highlight_white_balance: WhiteBalance,
     highlight_diagnostics: HighlightDiagnostics,
-    capture_sharpening: Option<crate::CaptureSharpeningProvenance>,
+    detail: Option<crate::DetailProvenance>,
     preparation_timings: StageTimings,
     decoded_raw_bytes: usize,
     normalized_mosaic_bytes: usize,
@@ -234,8 +235,8 @@ impl SpatialCompletionDescription {
     }
 
     #[must_use]
-    pub const fn capture_sharpening(&self) -> Option<crate::CaptureSharpeningProvenance> {
-        self.capture_sharpening
+    pub const fn detail(&self) -> Option<crate::DetailProvenance> {
+        self.detail
     }
 
     #[must_use]
@@ -265,7 +266,7 @@ pub struct MemoryEstimate {
     pub decoded_raw_bytes: usize,
     pub normalized_mosaic_bytes: usize,
     pub highlight_scratch_bytes: usize,
-    pub capture_sharpening_scratch_bytes: usize,
+    pub detail_scratch_bytes: usize,
     pub optics_output_bytes: usize,
     pub optics_scratch_bytes: usize,
     pub resample_intermediate_bytes: usize,
@@ -289,8 +290,8 @@ pub struct ReconstructedPreview {
     highlight_adjustments: HighlightAdjustments,
     highlight_white_balance: WhiteBalance,
     highlight_diagnostics: HighlightDiagnostics,
-    capture_sharpening: Option<crate::CaptureSharpeningProvenance>,
-    capture_sharpening_scratch_bytes: usize,
+    detail: Option<crate::DetailProvenance>,
+    detail_scratch_bytes: usize,
     optics_provenance: Option<OpticsProvenance>,
     optics_output_bytes: usize,
     optics_scratch_bytes: usize,
@@ -361,17 +362,16 @@ impl ReconstructedPreview {
     }
 
     #[must_use]
-    pub const fn capture_sharpening(&self) -> Option<crate::CaptureSharpeningProvenance> {
-        self.capture_sharpening
+    pub const fn detail(&self) -> Option<crate::DetailProvenance> {
+        self.detail
     }
 
-    pub const fn capture_sharpening_scratch_bytes(&self) -> usize {
-        self.capture_sharpening_scratch_bytes
+    pub const fn detail_scratch_bytes(&self) -> usize {
+        self.detail_scratch_bytes
     }
 
     pub fn matches_capture_recipe(&self, recipe: &EditRecipe) -> bool {
-        self.capture_sharpening
-            == crate::CaptureSharpeningProvenance::for_settings(recipe.capture_sharpening)
+        self.detail == crate::DetailProvenance::for_recipe(recipe)
     }
 
     pub const fn highlight_diagnostics(&self) -> HighlightDiagnostics {
@@ -470,7 +470,7 @@ pub struct RenderResult {
     pub histogram: Histogram,
     pub timings: StageTimings,
     pub highlight_diagnostics: HighlightDiagnostics,
-    pub capture_sharpening: Option<crate::CaptureSharpeningProvenance>,
+    pub detail: Option<crate::DetailProvenance>,
     pub output_gamut_diagnostics: GamutMappingDiagnostics,
     /// Compatibility projection for Clip-only callers.
     pub highlight_stats: crate::ClipStats,
@@ -484,7 +484,7 @@ pub struct ExportRenderResult {
     pub image: ExportImage,
     pub timings: StageTimings,
     pub highlight_diagnostics: HighlightDiagnostics,
-    pub capture_sharpening: Option<crate::CaptureSharpeningProvenance>,
+    pub detail: Option<crate::DetailProvenance>,
     pub output_gamut_diagnostics: GamutMappingDiagnostics,
     /// Compatibility projection for Clip-only callers.
     pub highlight_stats: crate::ClipStats,
@@ -508,8 +508,8 @@ pub struct DemosaicedBase {
     highlight_adjustments: HighlightAdjustments,
     highlight_white_balance: WhiteBalance,
     highlight_diagnostics: HighlightDiagnostics,
-    capture_sharpening: Option<crate::CaptureSharpeningProvenance>,
-    capture_sharpening_scratch_bytes: usize,
+    detail: Option<crate::DetailProvenance>,
+    detail_scratch_bytes: usize,
     optics_provenance: Option<OpticsProvenance>,
     optics_output_bytes: usize,
     optics_scratch_bytes: usize,
@@ -549,17 +549,16 @@ impl DemosaicedBase {
     }
 
     #[must_use]
-    pub const fn capture_sharpening(&self) -> Option<crate::CaptureSharpeningProvenance> {
-        self.capture_sharpening
+    pub const fn detail(&self) -> Option<crate::DetailProvenance> {
+        self.detail
     }
 
-    pub const fn capture_sharpening_scratch_bytes(&self) -> usize {
-        self.capture_sharpening_scratch_bytes
+    pub const fn detail_scratch_bytes(&self) -> usize {
+        self.detail_scratch_bytes
     }
 
     pub fn matches_capture_recipe(&self, recipe: &EditRecipe) -> bool {
-        self.capture_sharpening
-            == crate::CaptureSharpeningProvenance::for_settings(recipe.capture_sharpening)
+        self.detail == crate::DetailProvenance::for_recipe(recipe)
     }
 
     pub const fn highlight_diagnostics(&self) -> HighlightDiagnostics {
@@ -769,6 +768,7 @@ pub(super) mod render {
             base.timings.highlight_processing = reconstructed.timings.highlight_processing;
             base.timings.highlight_clipping = reconstructed.timings.highlight_clipping;
             base.timings.demosaic = reconstructed.timings.demosaic;
+            base.timings.noise_reduction = reconstructed.timings.noise_reduction;
             base.timings.capture_sharpening = reconstructed.timings.capture_sharpening;
             base.timings.optics = reconstructed.timings.optics;
             base.timings.resampling = reconstructed.timings.resampling;
@@ -923,7 +923,7 @@ pub(super) mod render {
                 histogram,
                 timings,
                 highlight_diagnostics: base.highlight_diagnostics,
-                capture_sharpening: base.capture_sharpening,
+                detail: base.detail,
                 output_gamut_diagnostics,
                 highlight_stats: base.highlight_stats(),
                 optics_provenance: base.optics_provenance.clone(),
@@ -988,7 +988,7 @@ pub(super) mod render {
                 histogram,
                 timings: base.timings,
                 highlight_diagnostics: base.highlight_diagnostics,
-                capture_sharpening: base.capture_sharpening,
+                detail: base.detail,
                 output_gamut_diagnostics,
                 highlight_stats: base.highlight_stats(),
                 optics_provenance: base.optics_provenance.clone(),
@@ -1062,7 +1062,7 @@ pub(super) mod render {
                 image,
                 timings: base.timings,
                 highlight_diagnostics: base.highlight_diagnostics,
-                capture_sharpening: base.capture_sharpening,
+                detail: base.detail,
                 output_gamut_diagnostics,
                 highlight_stats: base.highlight_stats(),
                 optics_provenance: base.optics_provenance,
@@ -1107,8 +1107,8 @@ fn prepare_demosaiced_preview_owned(
     recipe.validate()?;
     if !reconstructed.matches_capture_recipe(recipe) {
         return Err(PipelineError::InvalidRecipe {
-            field: "capture_sharpening",
-            reason: "capture sharpening does not match the prepared source".to_owned(),
+            field: "detail",
+            reason: "detail settings do not match the prepared source".to_owned(),
         });
     }
     if !reconstructed.matches_highlight_recipe(recipe) {
@@ -1158,8 +1158,8 @@ fn prepare_demosaiced_preview_owned(
         highlight_adjustments: reconstructed.highlight_adjustments,
         highlight_white_balance: reconstructed.highlight_white_balance,
         highlight_diagnostics: reconstructed.highlight_diagnostics,
-        capture_sharpening: reconstructed.capture_sharpening,
-        capture_sharpening_scratch_bytes: reconstructed.capture_sharpening_scratch_bytes,
+        detail: reconstructed.detail,
+        detail_scratch_bytes: reconstructed.detail_scratch_bytes,
         optics_provenance: reconstructed.optics_provenance.clone(),
         optics_output_bytes: reconstructed.optics_output_bytes,
         optics_scratch_bytes: reconstructed.optics_scratch_bytes,
@@ -1188,7 +1188,7 @@ fn prepare_base_cancellable(
     options: RenderOptions,
     cancellation: &CancellationToken,
 ) -> Result<DemosaicedBase, PipelineError> {
-    if recipe.capture_sharpening.is_active() {
+    if super::detail::detail_is_active(recipe) {
         return camera_source::prepare_full_capture_base(
             optics,
             frame,
@@ -1199,7 +1199,7 @@ fn prepare_base_cancellable(
     }
     let total_started = Instant::now();
     cancellation.checkpoint()?;
-    super::capture::validate_working_set(frame, recipe)?;
+    super::detail::validate_working_set(frame, recipe)?;
     validate_base_working_set(
         frame,
         recipe.raw.highlights.method,
@@ -1248,7 +1248,13 @@ fn prepare_base_cancellable(
     )?;
     let demosaic = demosaic_started.elapsed();
     drop(normalized);
-    let capture = super::capture::apply(&mut linear, recipe, gains, cancellation)?;
+    let capture = super::detail::apply(
+        &mut linear,
+        recipe,
+        sensor.demosaic_balance(),
+        gains,
+        cancellation,
+    )?;
 
     let optics_started = Instant::now();
     let optics_result = crate::optics::apply_cancellable(
@@ -1307,7 +1313,8 @@ fn prepare_base_cancellable(
         highlight_processing,
         highlight_clipping: highlight_processing,
         demosaic,
-        capture_sharpening: capture.elapsed,
+        noise_reduction: capture.noise_reduction,
+        capture_sharpening: capture.capture_sharpening,
         optics: optics_timing,
         color_conversion,
         ..StageTimings::default()
@@ -1322,8 +1329,8 @@ fn prepare_base_cancellable(
         highlight_adjustments: recipe.raw.highlights,
         highlight_white_balance: recipe.color.white_balance,
         highlight_diagnostics,
-        capture_sharpening: capture.provenance,
-        capture_sharpening_scratch_bytes: capture.scratch_bytes,
+        detail: capture.provenance,
+        detail_scratch_bytes: capture.scratch_bytes,
         optics_provenance,
         optics_output_bytes,
         optics_scratch_bytes,
@@ -1339,8 +1346,8 @@ fn prepare_base_cancellable(
 fn validate_base_recipe(base: &DemosaicedBase, recipe: &EditRecipe) -> Result<(), PipelineError> {
     if !base.matches_capture_recipe(recipe) {
         return Err(PipelineError::InvalidRecipe {
-            field: "capture_sharpening",
-            reason: "capture sharpening does not match the prepared base".to_owned(),
+            field: "detail",
+            reason: "detail settings do not match the prepared base".to_owned(),
         });
     }
     recipe.validate()?;
@@ -1450,6 +1457,7 @@ fn render_base(
     base.timings.total = base.timings.metadata
         + base.timings.normalization
         + base.timings.highlight_processing
+        + base.timings.noise_reduction
         + base.timings.capture_sharpening
         + base.timings.demosaic
         + base.timings.optics
@@ -1463,7 +1471,7 @@ fn render_base(
         image,
         timings: base.timings,
         highlight_diagnostics: base.highlight_diagnostics,
-        capture_sharpening: base.capture_sharpening,
+        detail: base.detail,
         output_gamut_diagnostics,
         highlight_stats: base.highlight_stats(),
         optics_provenance: base.optics_provenance.clone(),
@@ -1505,7 +1513,7 @@ fn memory_estimate(
         decoded_raw_bytes,
         normalized_mosaic_bytes,
         highlight_scratch_bytes: base.highlight_scratch_bytes,
-        capture_sharpening_scratch_bytes: base.capture_sharpening_scratch_bytes,
+        detail_scratch_bytes: base.detail_scratch_bytes,
         optics_output_bytes: base.optics_output_bytes,
         optics_scratch_bytes: base.optics_scratch_bytes,
         resample_intermediate_bytes,

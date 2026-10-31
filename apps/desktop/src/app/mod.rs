@@ -573,6 +573,25 @@ impl RohditorApp {
         }
     }
 
+    /// Show why the CPU renders this recipe although the GPU is available.
+    /// This is a routing choice, not a GPU failure: the GPU stays enabled.
+    fn note_cpu_only_stage(&mut self, recipe: &EditRecipe) {
+        const PREFIX: &str = "CPU-only stage: ";
+        match rohditor_core::cpu_only_stage_reason(recipe) {
+            Some(reason) if self.gpu.is_some() => {
+                self.processor_note = Some(format!("{PREFIX}{reason}"));
+            }
+            None if self
+                .processor_note
+                .as_deref()
+                .is_some_and(|note| note.starts_with(PREFIX)) =>
+            {
+                self.processor_note = None;
+            }
+            _ => {}
+        }
+    }
+
     fn queue_preview(&mut self, context: &egui::Context, document_id: u64) {
         if self.gpu_required_but_unavailable() {
             if let Some(document) = self.document.as_mut().filter(|doc| doc.id == document_id) {
@@ -641,6 +660,7 @@ impl RohditorApp {
             }
             return;
         }
+        self.note_cpu_only_stage(&recipe);
         if self.gpu.is_some() && gpu_supports_recipe(&recipe) {
             let gpu_base_is_current = self
                 .document
@@ -1081,7 +1101,7 @@ impl RohditorApp {
                     timings: StageTimings::default(),
                     highlight_diagnostics: HighlightDiagnostics::Off,
                     capture_cpu_recovery: false,
-                    capture_sharpening: None,
+                    detail: None,
                     output_gamut_diagnostics: None,
                     memory: MemoryEstimate::default(),
                     cache_resident_bytes: 0,
@@ -2428,18 +2448,35 @@ impl RohditorApp {
                     .to_owned(),
                     algorithm: preview.worker.algorithm.stable_name().to_owned(),
                     profile: camera_profile_diagnostic(document),
-                    capture_sharpening: preview.worker.capture_sharpening.map_or_else(
-                        || "Off".to_owned(),
-                        |p| {
-                            format!(
-                                "RL v{}, amount {:.2}, sigma {:.2} px, noise protection {:.2}",
-                                p.algorithm_version,
-                                p.settings.amount,
-                                p.settings.radius,
-                                p.settings.noise_protection
-                            )
-                        },
-                    ),
+                    capture_sharpening: preview
+                        .worker
+                        .detail
+                        .and_then(|p| p.capture_sharpening.map(|s| (p, s)))
+                        .map_or_else(
+                            || "Off".to_owned(),
+                            |(p, s)| {
+                                format!(
+                                    "RL v{}, amount {:.2}, sigma {:.2} px, noise protection {:.2}",
+                                    p.capture_sharpening_version,
+                                    s.amount,
+                                    s.radius,
+                                    s.noise_protection
+                                )
+                            },
+                        ),
+                    noise_reduction: preview
+                        .worker
+                        .detail
+                        .and_then(|p| p.noise_reduction.map(|n| (p, n)))
+                        .map_or_else(
+                            || "Off".to_owned(),
+                            |(p, n)| {
+                                format!(
+                                    "chroma v{}, strength {:.2}",
+                                    p.noise_reduction_version, n.chroma
+                                )
+                            },
+                        ),
                     rendering: rendering_profile_diagnostic(
                         document.edits.recipe().rendering.profile,
                     ),
@@ -2473,6 +2510,7 @@ impl RohditorApp {
                         normalization: preview.worker.timings.normalization,
                         highlight_processing: preview.worker.timings.highlight_processing,
                         demosaic: preview.worker.timings.demosaic,
+                        noise_reduction: preview.worker.timings.noise_reduction,
                         capture_sharpening: preview.worker.timings.capture_sharpening,
                         optics: preview.worker.timings.optics,
                         resampling: preview.worker.timings.resampling,
@@ -3025,6 +3063,7 @@ fn document_panel_model(
         picker_mode,
         color_mixer_channel,
         optics: optics_panel_model(document),
+        noise_reduction: document.edits.recipe().noise_reduction,
         capture_sharpening: document.edits.recipe().capture_sharpening,
     }
 }
@@ -3247,6 +3286,7 @@ fn apply_adjustment_interaction(
                 | AdjustmentTarget::GradingMidtones(_)
                 | AdjustmentTarget::GradingHighlights(_)
                 | AdjustmentTarget::HighlightThreshold
+                | AdjustmentTarget::ChromaNoiseReduction
                 | AdjustmentTarget::CaptureAmount
                 | AdjustmentTarget::CaptureRadius
                 | AdjustmentTarget::CaptureNoise => {}
@@ -3277,6 +3317,7 @@ fn apply_adjustment_interaction(
             }
             next.color.white_balance = WhiteBalance::TemperatureTint { temperature, tint };
         }
+        AdjustmentTarget::ChromaNoiseReduction => next.noise_reduction.chroma = interaction.value,
         AdjustmentTarget::CaptureAmount => next.capture_sharpening.amount = interaction.value,
         AdjustmentTarget::CaptureRadius => next.capture_sharpening.radius = interaction.value,
         AdjustmentTarget::CaptureNoise => {

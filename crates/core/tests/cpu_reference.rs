@@ -118,7 +118,7 @@ fn capture_sharpening_is_shared_by_source_scale_preview_and_export() -> Result<(
         recipe.capture_sharpening.enabled = true;
         recipe.capture_sharpening.noise_protection = 0.0;
         let reconstruction = pipeline.prepare_preview_reconstruction(&frame, &recipe, options)?;
-        assert!(reconstruction.capture_sharpening().is_some());
+        assert!(reconstruction.detail().is_some());
         let reduced = pipeline.prepare_preview_reconstruction(
             &frame,
             &recipe,
@@ -159,18 +159,12 @@ fn capture_sharpening_is_shared_by_source_scale_preview_and_export() -> Result<(
             &CancellationToken::new(),
         )?;
         assert_eq!(full.image.data(), source_scale.image.data());
-        assert_eq!(
-            source_scale.capture_sharpening,
-            reconstruction.capture_sharpening()
-        );
+        assert_eq!(source_scale.detail, reconstruction.detail());
         let cached =
             pipeline.render_preview_from_base(&base, &recipe, options.render.output_policy)?;
-        assert_eq!(
-            cached.capture_sharpening,
-            reconstruction.capture_sharpening()
-        );
+        assert_eq!(cached.detail, reconstruction.detail());
         assert_eq!(cached.timings.capture_sharpening, Duration::ZERO);
-        assert!(full.memory.capture_sharpening_scratch_bytes > 0);
+        assert!(full.memory.detail_scratch_bytes > 0);
         assert!(full.timings.capture_sharpening > Duration::ZERO);
         let export = pipeline.render_export(
             &frame,

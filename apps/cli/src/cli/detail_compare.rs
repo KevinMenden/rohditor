@@ -12,7 +12,9 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use clap::ValueEnum;
-use rohditor_detail::{NeverCancelled, estimate_noise, split_opponent};
+use rohditor_detail::{
+    ChromaDenoise, NeverCancelled, denoise_chroma, estimate_noise, split_opponent,
+};
 use rohditor_image::LinearRgbImage;
 use rohditor_reference::detail_scenes::{self, DetailScene, EDGE_PERIOD, Scene};
 use rohditor_reference::metrics::{detail_scores, edge_rise_distance};
@@ -32,12 +34,27 @@ pub(super) enum DetailStage {
     /// Returns the input unchanged: the baseline every stage must beat.
     #[default]
     Noop,
+    /// Chroma noise reduction at `--strength`.
+    ChromaNr,
 }
 
 impl DetailStage {
-    fn apply(self, input: &LinearRgbImage<f32>) -> Result<LinearRgbImage<f32>> {
+    fn apply(self, input: &LinearRgbImage<f32>, strength: f32) -> Result<LinearRgbImage<f32>> {
         match self {
             Self::Noop => Ok(input.clone()),
+            Self::ChromaNr => {
+                let mut output = input.clone();
+                denoise_chroma(
+                    &mut output,
+                    ChromaDenoise {
+                        strength,
+                        balance: [1.0; 3],
+                        ceilings: [f32::INFINITY; 3],
+                    },
+                    &NeverCancelled,
+                )?;
+                Ok(output)
+            }
         }
     }
 }
@@ -55,7 +72,11 @@ struct Row {
     sigma_ratio: Option<f64>,
 }
 
-pub(super) fn detail_compare(stage: DetailStage, raw_dir: Option<&Path>) -> Result<()> {
+pub(super) fn detail_compare(
+    stage: DetailStage,
+    strength: f32,
+    raw_dir: Option<&Path>,
+) -> Result<()> {
     let mut scenes = detail_scenes::synthetic_set(WIDTH, HEIGHT)?;
     if let Some(dir) = raw_dir {
         scenes.extend(load_raw_scenes(dir)?);
@@ -72,21 +93,22 @@ pub(super) fn detail_compare(stage: DetailStage, raw_dir: Option<&Path>) -> Resu
     for (scene_index, scene) in scenes.iter().enumerate() {
         for (level_index, (level, noise)) in levels.iter().enumerate() {
             let seed = (scene_index * 16 + level_index) as u64 + 1;
-            rows.push(score(stage, scene, level, *noise, seed)?);
+            rows.push(score(stage, strength, scene, level, *noise, seed)?);
         }
     }
-    write_stdout(&format_table(stage, &rows))
+    write_stdout(&format_table(stage, strength, &rows))
 }
 
 fn score(
     stage: DetailStage,
+    strength: f32,
     scene: &Scene,
     level: &'static str,
     noise: Option<NoiseModel>,
     seed: u64,
 ) -> Result<Row> {
     let input = scene.noisy_input(noise, seed)?;
-    let output = stage.apply(&input)?;
+    let output = stage.apply(&input, strength)?;
     let scores = detail_scores(&scene.truth, &output, MARGIN);
 
     let edge_rise_px = (scene.kind == Some(DetailScene::FringedEdges))
@@ -138,12 +160,12 @@ fn load_raw_scenes(dir: &Path) -> Result<Vec<Scene>> {
     Ok(scenes)
 }
 
-fn format_table(stage: DetailStage, rows: &[Row]) -> String {
+fn format_table(stage: DetailStage, strength: f32, rows: &[Row]) -> String {
     let optional = |value: Option<f64>, precision: usize| {
         value.map_or_else(|| "-".to_owned(), |v| format!("{v:.precision$}"))
     };
     let mut out = format!(
-        "detail-compare stage={stage:?} size={WIDTH}x{HEIGHT} margin={MARGIN}\n\
+        "detail-compare stage={stage:?} strength={strength} size={WIDTH}x{HEIGHT} margin={MARGIN}\n\
          {:<16} {:<9} {:>10} {:>11} {:>12} {:>9} {:>9}\n",
         "scene", "noise", "luma PSNR", "chroma RMSE", "colour added", "rise px", "σ ratio"
     );

@@ -23,7 +23,7 @@ pub use rendering::{
     RenderingAdjustments, RenderingProfileSelection,
 };
 
-use crate::CaptureSharpening;
+use crate::{CaptureSharpening, NoiseReduction};
 use color_adjustments::*;
 use color_settings::WhiteBalance;
 use light_settings::*;
@@ -39,7 +39,7 @@ pub struct EditError {
 }
 
 /// Schema version of the current non-destructive edit recipe.
-pub const EDIT_RECIPE_SCHEMA_VERSION: u32 = 11;
+pub const EDIT_RECIPE_SCHEMA_VERSION: u32 = 12;
 const LEGACY_EDIT_RECIPE_SCHEMA_VERSION: u32 = 1;
 const PREVIOUS_EDIT_RECIPE_SCHEMA_VERSION: u32 = 2;
 const PREVIOUS_RAW_EDIT_RECIPE_SCHEMA_VERSION: u32 = 3;
@@ -524,6 +524,7 @@ pub struct EditRecipe {
     #[serde(default)]
     pub optics: OpticsAdjustments,
     pub rendering: RenderingAdjustments,
+    pub noise_reduction: NoiseReduction,
     pub capture_sharpening: CaptureSharpening,
     pub light: LightAdjustments,
     pub color: ColorAdjustments,
@@ -537,6 +538,7 @@ impl Default for EditRecipe {
             raw: RawAdjustments::default(),
             optics: OpticsAdjustments::default(),
             rendering: RenderingAdjustments::default(),
+            noise_reduction: NoiseReduction::default(),
             capture_sharpening: CaptureSharpening::default(),
             light: LightAdjustments::default(),
             color: ColorAdjustments::default(),
@@ -557,6 +559,7 @@ impl EditRecipe {
             });
         }
         self.rendering.validate()?;
+        self.noise_reduction.validate()?;
         self.capture_sharpening.validate()?;
         if let LensProfileSelection::Lensfun { profile_id } = &self.optics.profile {
             if profile_id.trim().is_empty() {
@@ -687,6 +690,8 @@ struct RecipeFields {
     #[serde(default)]
     rendering: Option<RenderingAdjustments>,
     #[serde(default)]
+    noise_reduction: NoiseReduction,
+    #[serde(default)]
     capture_sharpening: CaptureSharpening,
     #[serde(default)]
     light: LightAdjustments,
@@ -725,6 +730,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
                 raw: legacy_raw_adjustments(),
                 optics: OpticsAdjustments::default(),
                 rendering: RenderingAdjustments::NEUTRAL,
+                noise_reduction: NoiseReduction::default(),
                 capture_sharpening: CaptureSharpening::default(),
                 light,
                 color,
@@ -742,6 +748,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
                 raw: legacy_raw_adjustments(),
                 optics: OpticsAdjustments::default(),
                 rendering: RenderingAdjustments::NEUTRAL,
+                noise_reduction: NoiseReduction::default(),
                 capture_sharpening: CaptureSharpening::default(),
                 light: fields.light,
                 color: fields.color,
@@ -758,6 +765,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
                 raw: fields.raw,
                 optics: OpticsAdjustments::default(),
                 rendering: RenderingAdjustments::NEUTRAL,
+                noise_reduction: NoiseReduction::default(),
                 capture_sharpening: CaptureSharpening::default(),
                 light: fields.light,
                 color: fields.color,
@@ -773,6 +781,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
                 raw: fields.raw,
                 optics: fields.optics,
                 rendering: RenderingAdjustments::NEUTRAL,
+                noise_reduction: NoiseReduction::default(),
                 capture_sharpening: CaptureSharpening::default(),
                 light: fields.light,
                 color: fields.color,
@@ -792,6 +801,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
                 raw: fields.raw,
                 optics: fields.optics,
                 rendering: fields.rendering.unwrap_or_default(),
+                noise_reduction: NoiseReduction::default(),
                 capture_sharpening: CaptureSharpening::default(),
                 light: fields.light,
                 color: fields.color,
@@ -799,7 +809,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
             }
         } else {
             Self {
-                schema_version: if fields.schema_version == 10 {
+                schema_version: if matches!(fields.schema_version, 10 | 11) {
                     EDIT_RECIPE_SCHEMA_VERSION
                 } else {
                     fields.schema_version
@@ -807,6 +817,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
                 raw: fields.raw,
                 optics: fields.optics,
                 rendering: fields.rendering.unwrap_or_default(),
+                noise_reduction: fields.noise_reduction,
                 capture_sharpening: fields.capture_sharpening,
                 light: fields.light,
                 color: fields.color,
