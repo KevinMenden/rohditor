@@ -64,7 +64,7 @@ pub struct GpuPreviewSource {
     source_orientation: Orientation,
     white_balance: WhiteBalance,
     highlight_adjustments: HighlightAdjustments,
-    capture_sharpening: Option<rohditor_core::CaptureSharpeningProvenance>,
+    detail: Option<rohditor_core::DetailProvenance>,
     optics_provenance: Option<OpticsProvenance>,
     white_balance_dynamic: bool,
     white_balance_gains: WhiteBalanceGains,
@@ -135,9 +135,7 @@ impl GpuPreviewSource {
         recipe: &EditRecipe,
         allow_stale_clip_white_balance: bool,
     ) -> bool {
-        if self.capture_sharpening
-            != rohditor_core::CaptureSharpeningProvenance::for_settings(recipe.capture_sharpening)
-        {
+        if self.detail != rohditor_core::DetailProvenance::for_recipe(recipe) {
             return false;
         }
         if !highlight_adjustments_match(self.highlight_adjustments, recipe.raw.highlights) {
@@ -226,7 +224,7 @@ pub struct GpuPreviewUpload {
     source_orientation: Orientation,
     white_balance: WhiteBalance,
     highlight_adjustments: HighlightAdjustments,
-    capture_sharpening: Option<rohditor_core::CaptureSharpeningProvenance>,
+    detail: Option<rohditor_core::DetailProvenance>,
     optics_provenance: Option<OpticsProvenance>,
     white_balance_dynamic: bool,
     white_balance_gains: WhiteBalanceGains,
@@ -267,7 +265,7 @@ impl GpuPreviewUpload {
             source_orientation: base.source_orientation(),
             white_balance: base.white_balance(),
             highlight_adjustments: base.highlight_adjustments(),
-            capture_sharpening: base.capture_sharpening(),
+            detail: base.detail(),
             optics_provenance: base.optics_provenance().cloned(),
             white_balance_dynamic: false,
             white_balance_gains: WhiteBalanceGains::identity(),
@@ -285,10 +283,7 @@ impl GpuPreviewUpload {
     ) -> Result<Self, GpuPreviewError> {
         let mut recipe = EditRecipe::default();
         recipe.raw.highlights = reconstructed.highlight_adjustments();
-        recipe.capture_sharpening = reconstructed
-            .capture_sharpening()
-            .map(|p| p.settings)
-            .unwrap_or_default();
+        rohditor_core::DetailProvenance::write_settings(reconstructed.detail(), &mut recipe);
         recipe.color.camera_profile = reconstructed.profile_selection().clone();
         recipe.color.white_balance = white_balance;
         Self::from_reconstructed_preview_for_recipe(
@@ -306,10 +301,7 @@ impl GpuPreviewUpload {
     ) -> Result<Self, GpuPreviewError> {
         let mut recipe = EditRecipe::default();
         recipe.raw.highlights = reconstructed.highlight_adjustments();
-        recipe.capture_sharpening = reconstructed
-            .capture_sharpening()
-            .map(|p| p.settings)
-            .unwrap_or_default();
+        rohditor_core::DetailProvenance::write_settings(reconstructed.detail(), &mut recipe);
         recipe.color.camera_profile = reconstructed.profile_selection().clone();
         recipe.color.white_balance = white_balance;
         Self::from_reconstructed_preview_for_recipe(reconstructed, &recipe, cancellation)
@@ -373,7 +365,7 @@ impl GpuPreviewUpload {
             source_orientation: reconstructed.source_orientation(),
             white_balance,
             highlight_adjustments: reconstructed.highlight_adjustments(),
-            capture_sharpening: reconstructed.capture_sharpening(),
+            detail: reconstructed.detail(),
             optics_provenance: reconstructed.optics_provenance().cloned(),
             white_balance_dynamic,
             white_balance_gains: gains,
@@ -816,12 +808,13 @@ impl GpuPreviewProcessor {
         }
     }
 
-    /// Whether the current shader implements every adjustment in a recipe.
-    /// All current downstream adjustments are implemented. Source provenance
-    /// and device capabilities are checked separately when rendering.
+    /// Whether the GPU implements every stage of a recipe. Downstream
+    /// adjustments all have shaders; the source-resolution detail stage may
+    /// be CPU-only (see [`rohditor_core::cpu_only_stage_reason`]). Source
+    /// provenance and device capabilities are checked separately when rendering.
     #[must_use]
-    pub fn supports_recipe(_recipe: &EditRecipe) -> bool {
-        true
+    pub fn supports_recipe(recipe: &EditRecipe) -> bool {
+        rohditor_core::cpu_only_stage_reason(recipe).is_none()
     }
 
     /// Poll callbacks for non-blocking GPU work, including asynchronous
@@ -905,7 +898,7 @@ impl GpuPreviewProcessor {
             source_orientation: upload.source_orientation,
             white_balance: upload.white_balance,
             highlight_adjustments: upload.highlight_adjustments,
-            capture_sharpening: upload.capture_sharpening,
+            detail: upload.detail,
             optics_provenance: upload.optics_provenance,
             white_balance_dynamic: upload.white_balance_dynamic,
             white_balance_gains: upload.white_balance_gains,
@@ -923,8 +916,7 @@ impl GpuPreviewProcessor {
         recipe: &EditRecipe,
     ) -> Result<GpuPreviewSource, GpuPreviewError> {
         let description = &preview.description;
-        if description.capture_sharpening()
-            != rohditor_core::CaptureSharpeningProvenance::for_settings(recipe.capture_sharpening)
+        if description.detail() != rohditor_core::DetailProvenance::for_recipe(recipe)
             || !highlight_adjustments_match(
                 description.highlight_adjustments(),
                 recipe.raw.highlights,
@@ -956,7 +948,7 @@ impl GpuPreviewProcessor {
             source_orientation: description.source_orientation(),
             white_balance: recipe.color.white_balance,
             highlight_adjustments: description.highlight_adjustments(),
-            capture_sharpening: description.capture_sharpening(),
+            detail: description.detail(),
             optics_provenance: description.optics().provenance().cloned(),
             white_balance_dynamic,
             white_balance_gains: resolved.white_balance_gains,
@@ -1055,8 +1047,7 @@ impl GpuPreviewProcessor {
                 reason: error.to_string(),
             })?;
         let description = &source.description;
-        if description.capture_sharpening()
-            != rohditor_core::CaptureSharpeningProvenance::for_settings(recipe.capture_sharpening)
+        if description.detail() != rohditor_core::DetailProvenance::for_recipe(recipe)
             || !highlight_adjustments_match(
                 description.highlight_adjustments(),
                 recipe.raw.highlights,

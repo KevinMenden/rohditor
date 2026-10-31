@@ -162,6 +162,10 @@ enum Command {
         #[arg(long, value_name = "PROFILE.dcp")]
         camera_profile: Option<PathBuf>,
 
+        /// Chroma noise reduction strength (0 to 1; 0 is off). Runs on the CPU.
+        #[arg(long, default_value_t = 0.0)]
+        chroma_nr: f32,
+
         /// Enable source-resolution capture sharpening (eight RL iterations).
         #[arg(long)]
         capture_sharpening: bool,
@@ -280,6 +284,10 @@ enum Command {
         /// Stage to evaluate.
         #[arg(long, value_enum, default_value_t = DetailStage::Noop)]
         stage: DetailStage,
+
+        /// Stage strength in 0..=1, for stages that have one.
+        #[arg(long, default_value_t = 0.5)]
+        strength: f32,
 
         /// Also score every readable RAW file in this directory.
         #[arg(long, value_name = "RAW_DIR")]
@@ -595,6 +603,7 @@ pub(crate) fn run() -> Result<()> {
             white_balance,
             camera_profile,
             rendering_profile,
+            chroma_nr,
             capture_sharpening,
             capture_amount,
             capture_radius,
@@ -637,6 +646,7 @@ pub(crate) fn run() -> Result<()> {
                 white_balance,
                 camera_profile,
                 rendering_profile,
+                chroma_nr,
                 capture_sharpening,
                 capture_amount,
                 capture_radius,
@@ -666,7 +676,11 @@ pub(crate) fn run() -> Result<()> {
             demosaic,
             force,
         } => quality_crops(&manifest, &corpus, &output, demosaic, force),
-        Command::DetailCompare { stage, raw_dir } => detail_compare(stage, raw_dir.as_deref()),
+        Command::DetailCompare {
+            stage,
+            strength,
+            raw_dir,
+        } => detail_compare(stage, strength, raw_dir.as_deref()),
         Command::HighlightCompare {
             manifest,
             corpus,
@@ -748,6 +762,7 @@ struct QualityTimingReport {
     normalization: f64,
     highlight_processing: f64,
     demosaic: f64,
+    noise_reduction: f64,
     capture_sharpening: f64,
     optics: f64,
     resampling: f64,
@@ -764,6 +779,7 @@ impl From<StageTimings> for QualityTimingReport {
             normalization: milliseconds(value.normalization),
             highlight_processing: milliseconds(value.highlight_processing),
             demosaic: milliseconds(value.demosaic),
+            noise_reduction: milliseconds(value.noise_reduction),
             capture_sharpening: milliseconds(value.capture_sharpening),
             optics: milliseconds(value.optics),
             resampling: milliseconds(value.resampling),
@@ -855,6 +871,7 @@ struct DevelopArguments {
     white_balance: Option<RgbMultipliers>,
     camera_profile: Option<PathBuf>,
     rendering_profile: CliRenderingProfile,
+    chroma_nr: f32,
     capture_sharpening: bool,
     capture_amount: f32,
     capture_radius: f32,
@@ -1035,6 +1052,9 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
     if let Some(profile) = camera_profile {
         recipe.color.camera_profile = CameraProfileSelection::Matrix(profile);
     }
+    recipe.noise_reduction = rohditor_edit::NoiseReduction {
+        chroma: arguments.chroma_nr,
+    };
     recipe.capture_sharpening = rohditor_edit::CaptureSharpening {
         enabled: arguments.capture_sharpening,
         amount: arguments.capture_amount,
@@ -1207,8 +1227,10 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
         ),
     };
     let optics_report = format!(
-        "{}\nCapture sharpening: {:?} (algorithm v{}, {} iterations)",
+        "{}\nNoise reduction: {:?} (algorithm v{})\nCapture sharpening: {:?} (algorithm v{}, {} iterations)",
         format_optics_report(&recipe.optics, result.optics_provenance.as_ref()),
+        recipe.noise_reduction,
+        rohditor_core::NOISE_REDUCTION_ALGORITHM_VERSION,
         recipe.capture_sharpening,
         rohditor_core::CAPTURE_SHARPENING_ALGORITHM_VERSION,
         rohditor_core::CAPTURE_SHARPENING_ITERATIONS
@@ -1883,12 +1905,13 @@ fn format_quality(format: ExportFormat) -> String {
 
 fn format_stage_timings(decode: Duration, timings: StageTimings, encode: Duration) -> String {
     format!(
-        "CPU stages: decode {:.1} ms, metadata {:.1} ms, normalize {:.1} ms, highlight processing {:.1} ms, demosaic {:.1} ms, capture sharpening {:.1} ms, optics {:.1} ms, area resize {:.1} ms, color {:.1} ms, adjustments {:.1} ms, output {:.1} ms, pipeline total {:.1} ms, export encode/commit {:.1} ms",
+        "CPU stages: decode {:.1} ms, metadata {:.1} ms, normalize {:.1} ms, highlight processing {:.1} ms, demosaic {:.1} ms, noise reduction {:.1} ms, capture sharpening {:.1} ms, optics {:.1} ms, area resize {:.1} ms, color {:.1} ms, adjustments {:.1} ms, output {:.1} ms, pipeline total {:.1} ms, export encode/commit {:.1} ms",
         decode.as_secs_f64() * 1_000.0,
         timings.metadata.as_secs_f64() * 1_000.0,
         timings.normalization.as_secs_f64() * 1_000.0,
         timings.highlight_processing.as_secs_f64() * 1_000.0,
         timings.demosaic.as_secs_f64() * 1_000.0,
+        timings.noise_reduction.as_secs_f64() * 1_000.0,
         timings.capture_sharpening.as_secs_f64() * 1_000.0,
         timings.optics.as_secs_f64() * 1_000.0,
         timings.resampling.as_secs_f64() * 1_000.0,
@@ -2147,6 +2170,7 @@ mod tests {
             white_balance: None,
             camera_profile: None,
             rendering_profile: CliRenderingProfile::Standard,
+            chroma_nr: 0.0,
             capture_sharpening: false,
             capture_amount: 0.5,
             capture_radius: 0.6,

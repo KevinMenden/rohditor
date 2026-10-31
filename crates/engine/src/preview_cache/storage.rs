@@ -95,14 +95,7 @@ impl PreviewCacheKeys {
             // camera-converted base.
             reconstruction_version: 8,
             resampling_version: AREA_REDUCTION_ALGORITHM_VERSION,
-            capture_sharpening: recipe.capture_sharpening.is_active().then_some((
-                [
-                    recipe.capture_sharpening.amount.to_bits(),
-                    recipe.capture_sharpening.radius.to_bits(),
-                    recipe.capture_sharpening.noise_protection.to_bits(),
-                ],
-                rohditor_core::CAPTURE_SHARPENING_ALGORITHM_VERSION,
-            )),
+            detail: DetailKey::from_recipe(recipe),
         };
         let demosaiced = DemosaicedBaseKey {
             reconstructed: reconstructed.clone(),
@@ -199,7 +192,36 @@ struct ReconstructedCameraRgbKey {
     optics: OpticsKey,
     reconstruction_version: u8,
     resampling_version: u16,
+    detail: DetailKey,
+}
+
+/// Settings and algorithm versions of the source-resolution detail steps.
+/// Inactive steps are `None`, so their parked values never change a key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct DetailKey {
+    noise_reduction: Option<(u32, u16)>,
     capture_sharpening: Option<([u32; 3], u16)>,
+}
+
+impl DetailKey {
+    fn from_recipe(recipe: &EditRecipe) -> Self {
+        let nr = recipe.noise_reduction;
+        let sharpening = recipe.capture_sharpening;
+        Self {
+            noise_reduction: nr.is_active().then_some((
+                nr.chroma.to_bits(),
+                rohditor_core::NOISE_REDUCTION_ALGORITHM_VERSION,
+            )),
+            capture_sharpening: sharpening.is_active().then_some((
+                [
+                    sharpening.amount.to_bits(),
+                    sharpening.radius.to_bits(),
+                    sharpening.noise_protection.to_bits(),
+                ],
+                rohditor_core::CAPTURE_SHARPENING_ALGORITHM_VERSION,
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -886,6 +908,69 @@ mod tests {
         assert_eq!(creative.reconstructed, on.reconstructed);
         assert_eq!(creative.demosaiced, on.demosaiced);
         assert_ne!(creative.adjusted, on.adjusted);
+    }
+
+    #[test]
+    fn chroma_noise_reduction_invalidates_reconstruction_and_downstream_but_retain_raw() {
+        let frame = frame();
+        let options = PreviewOptions::default();
+        let mut recipe = EditRecipe::default();
+        let off = PreviewCacheKeys::new(1, &frame, &recipe, options);
+        let on = {
+            recipe.noise_reduction.chroma = 0.4;
+            PreviewCacheKeys::new(1, &frame, &recipe, options)
+        };
+        assert_eq!(off.decoded, on.decoded);
+        assert_ne!(off.reconstructed, on.reconstructed);
+        assert_ne!(off.demosaiced, on.demosaiced);
+        assert_ne!(off.adjusted, on.adjusted);
+        recipe.noise_reduction.chroma = 0.6;
+        let stronger = PreviewCacheKeys::new(1, &frame, &recipe, options);
+        assert_ne!(on.reconstructed, stronger.reconstructed);
+        // Downstream-only edits keep the captured source.
+        recipe.light.exposure_ev = 1.0;
+        let creative = PreviewCacheKeys::new(1, &frame, &recipe, options);
+        assert_eq!(creative.reconstructed, stronger.reconstructed);
+        assert_eq!(creative.demosaiced, stronger.demosaiced);
+        assert_ne!(creative.adjusted, stronger.adjusted);
+    }
+
+    #[test]
+    fn noise_reduction_recomputes_only_the_detail_stage() {
+        let mut frame = frame();
+        frame.info.color_matrices = vec![rohditor_raw::CameraColorMatrix {
+            illuminant: "D65".into(),
+            values: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            origin: rohditor_raw::CameraMatrixOrigin::DecoderDatabase,
+        }];
+        let frame = Arc::new(frame);
+        let pipeline = CpuPipeline::default();
+        let token = rohditor_core::CancellationToken::new();
+        let options = PreviewOptions::default();
+        let mut cache = PreviewCache::default();
+        let mut recipe = EditRecipe::default();
+        let prepare = |recipe: &EditRecipe, cache: &mut PreviewCache| {
+            let keys = PreviewCacheKeys::new(1, &frame, recipe, options);
+            cache.prepare(&keys, &frame);
+            cache
+                .prepare_spatial(&pipeline, &frame, recipe, options, &keys, false, &token)
+                .expect("spatial source")
+        };
+        let off = prepare(&recipe, &mut cache);
+        assert!(off.timings().noise_reduction.is_zero());
+        recipe.noise_reduction.chroma = 0.5;
+        let on = prepare(&recipe, &mut cache);
+        assert!(on.timings().demosaic.is_zero(), "demosaic is reused");
+        assert!(!on.timings().noise_reduction.is_zero(), "NR ran");
+        assert!(on.detail().is_some_and(|d| d.noise_reduction.is_some()));
+        // Same settings again, and a downstream edit: the captured source stays.
+        recipe.light.exposure_ev = 0.5;
+        let creative = prepare(&recipe, &mut cache);
+        assert!(creative.timings().demosaic.is_zero());
+        assert!(creative.timings().noise_reduction.is_zero());
+        recipe.noise_reduction.chroma = 0.7;
+        let stronger = prepare(&recipe, &mut cache);
+        assert!(!stronger.timings().noise_reduction.is_zero());
     }
 
     pub(super) fn frame() -> RawFrame {

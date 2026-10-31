@@ -1,7 +1,7 @@
 //! Typed full-resolution camera-native preparation, capture, and CPU completion.
 use super::super::sensor::SensorDevelopmentDescription;
 use super::*;
-use crate::{CaptureSharpeningContract, CaptureSharpeningProvenance};
+use crate::{CaptureSharpeningContract, DetailProvenance};
 use rohditor_raw::RawFileInfo;
 
 /// Immutable unsharpened camera RGB. No WB, optics, or reduction has run.
@@ -19,13 +19,16 @@ pub struct DemosaicedCameraSource {
     highlight_scratch_bytes: usize,
     timings: StageTimings,
     gains: WhiteBalanceGains,
+    /// As-shot balance; fixed by the calibration, so noise reduction never
+    /// depends on white-balance edits.
+    demosaic_balance: WhiteBalanceGains,
 }
 
 /// Capture-completed source; only this state can enter optics/reduction.
 #[derive(Debug, Clone)]
 pub struct CapturedCameraSource {
     source: DemosaicedCameraSource,
-    stage: super::super::capture::CaptureStage,
+    stage: super::super::detail::DetailStage,
 }
 
 impl DemosaicedCameraSource {
@@ -67,13 +70,17 @@ impl DemosaicedCameraSource {
     pub fn image(&self) -> &LinearRgbImage<f32> {
         &self.image
     }
+    /// The recipe this source was prepared for.
+    pub fn recipe(&self) -> &EditRecipe {
+        &self.recipe
+    }
     pub fn decoded_raw_bytes(&self) -> usize {
         self.decoded_raw_bytes
     }
     pub fn capture_contract(&self) -> Result<CaptureSharpeningContract, PipelineError> {
         CaptureSharpeningContract::new(
             self.recipe.capture_sharpening,
-            super::super::capture::ceilings(&self.recipe, self.gains),
+            super::super::detail::ceilings(&self.recipe, self.gains),
         )
     }
 
@@ -81,40 +88,41 @@ impl DemosaicedCameraSource {
         mut self,
         cancellation: &CancellationToken,
     ) -> Result<CapturedCameraSource, PipelineError> {
-        let bytes = self
-            .decoded_raw_bytes
-            .checked_add(
-                self.buffer_bytes()
-                    * if Arc::strong_count(&self.image) > 1 {
-                        2
-                    } else {
-                        1
-                    },
-            )
-            .and_then(|n| {
-                n.checked_add(
-                    crate::sharpening::scratch_bytes(self.image.width(), self.image.height())
-                        .ok()?,
+        if super::super::detail::detail_is_active(&self.recipe) {
+            let bytes = self
+                .decoded_raw_bytes
+                .checked_add(
+                    self.buffer_bytes()
+                        * if Arc::strong_count(&self.image) > 1 {
+                            2
+                        } else {
+                            1
+                        },
                 )
-            })
-            .ok_or_else(|| dimension_overflow(self.image.width(), self.image.height()))?;
-        if self.recipe.capture_sharpening.is_active() {
+                .and_then(|n| {
+                    n.checked_add(
+                        super::super::detail::scratch_bytes(
+                            &self.recipe,
+                            self.image.width(),
+                            self.image.height(),
+                        )
+                        .ok()?,
+                    )
+                })
+                .ok_or_else(|| dimension_overflow(self.image.width(), self.image.height()))?;
             validate_working_set(bytes)?;
         }
-        let stage = if self.recipe.capture_sharpening.is_active() {
-            super::super::capture::apply(
+        let stage = if super::super::detail::detail_is_active(&self.recipe) {
+            super::super::detail::apply(
                 Arc::make_mut(&mut self.image),
                 &self.recipe,
+                self.demosaic_balance,
                 self.gains,
                 cancellation,
             )?
         } else {
             cancellation.checkpoint()?;
-            super::super::capture::CaptureStage {
-                provenance: None,
-                elapsed: Duration::ZERO,
-                scratch_bytes: 0,
-            }
+            super::super::detail::DetailStage::skipped()
         };
         Ok(CapturedCameraSource {
             source: self,
@@ -127,30 +135,32 @@ impl DemosaicedCameraSource {
     pub fn with_capture_result(
         mut self,
         image: LinearRgbImage<f32>,
-        provenance: Option<CaptureSharpeningProvenance>,
+        provenance: Option<DetailProvenance>,
         elapsed: Duration,
         scratch_bytes: usize,
         cancellation: &CancellationToken,
     ) -> Result<CapturedCameraSource, PipelineError> {
         cancellation.checkpoint()?;
-        if provenance != CaptureSharpeningProvenance::for_settings(self.recipe.capture_sharpening)
+        if provenance != DetailProvenance::for_recipe(&self.recipe)
             || image.width() != self.image.width()
             || image.height() != self.image.height()
             || image.row_stride() != self.image.row_stride()
             || image.space() != rohditor_image::LinearRgbSpace::CameraNative
         {
             return Err(PipelineError::InvalidRecipe {
-                field: "capture_sharpening",
+                field: "detail",
                 reason: "capture result does not match its camera source".into(),
             });
         }
         self.image = Arc::new(image);
         Ok(CapturedCameraSource {
             source: self,
-            stage: super::super::capture::CaptureStage {
+            // Executors outside the CPU only implement capture sharpening.
+            stage: super::super::detail::DetailStage {
                 provenance,
-                elapsed,
                 scratch_bytes,
+                noise_reduction: Duration::ZERO,
+                capture_sharpening: elapsed,
             },
         })
     }
@@ -168,15 +178,16 @@ impl CapturedCameraSource {
         let previous = self.source.capture_contract()?;
         self.source = self.source.with_recipe(recipe, options)?;
         let next = self.source.capture_contract()?;
-        if self.stage.provenance != CaptureSharpeningProvenance::for_settings(next.settings())
+        if self.stage.provenance != DetailProvenance::for_recipe(recipe)
             || previous.ceilings() != next.ceilings()
         {
             return Err(PipelineError::InvalidRecipe {
-                field: "capture_sharpening",
-                reason: "capture settings or ceilings changed".into(),
+                field: "detail",
+                reason: "detail settings or ceilings changed".into(),
             });
         }
-        self.stage.elapsed = Duration::ZERO;
+        self.stage.noise_reduction = Duration::ZERO;
+        self.stage.capture_sharpening = Duration::ZERO;
         Ok(self)
     }
 }
@@ -272,9 +283,7 @@ fn describe_spatial_completion(
         highlight_adjustments: source.recipe.raw.highlights,
         highlight_white_balance: source.recipe.color.white_balance,
         highlight_diagnostics: source.highlight_diagnostics,
-        capture_sharpening: CaptureSharpeningProvenance::for_settings(
-            source.recipe.capture_sharpening,
-        ),
+        detail: DetailProvenance::for_recipe(&source.recipe),
         preparation_timings: source.timings,
         decoded_raw_bytes: source.decoded_raw_bytes,
         normalized_mosaic_bytes: source.normalized_mosaic_bytes,
@@ -359,6 +368,7 @@ fn prepare_camera_source(
         normalized_mosaic_bytes,
         highlight_scratch_bytes,
         gains,
+        demosaic_balance: sensor.demosaic_balance(),
         timings: StageTimings {
             metadata,
             normalization,
@@ -404,7 +414,7 @@ pub(super) fn prepare_reconstructed_preview(
     options: PreviewOptions,
     cancellation: &CancellationToken,
 ) -> Result<ReconstructedPreview, PipelineError> {
-    super::super::capture::validate_working_set(frame, recipe)?;
+    super::super::detail::validate_working_set(frame, recipe)?;
     let source = prepare_camera_source(frame, recipe, options, cancellation)?;
     complete_camera_source(optics, source.capture_cpu(cancellation)?, cancellation)
 }
@@ -542,10 +552,14 @@ fn complete_camera_source(
         highlight_processing,
         highlight_clipping: highlight_processing,
         demosaic,
-        capture_sharpening: capture.elapsed,
+        noise_reduction: capture.noise_reduction,
+        capture_sharpening: capture.capture_sharpening,
         optics: optics_timing,
         resampling,
-        total: prior_total + capture.elapsed + total_started.elapsed(),
+        total: prior_total
+            + capture.noise_reduction
+            + capture.capture_sharpening
+            + total_started.elapsed(),
         ..StageTimings::default()
     };
 
@@ -558,8 +572,8 @@ fn complete_camera_source(
         highlight_adjustments: recipe.raw.highlights,
         highlight_white_balance: recipe.color.white_balance,
         highlight_diagnostics,
-        capture_sharpening: capture.provenance,
-        capture_sharpening_scratch_bytes: capture.scratch_bytes,
+        detail: capture.provenance,
+        detail_scratch_bytes: capture.scratch_bytes,
         optics_provenance,
         optics_output_bytes,
         optics_scratch_bytes,

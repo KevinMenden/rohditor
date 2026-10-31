@@ -18,5 +18,9 @@ criterion.workspace = true
 name = "atrous"
 harness = false
 
+[[bench]]
+name = "chroma"
+harness = false
+
 [lints]
 workspace = true
