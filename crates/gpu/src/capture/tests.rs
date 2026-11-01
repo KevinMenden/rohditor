@@ -40,8 +40,13 @@ fn destroyed_device_returns_recoverable_error() {
     .expect("contract");
     gpu.device.destroy();
     assert!(
-        gpu.process(&input, &contract, 0, &CancellationToken::new())
-            .is_err()
+        gpu.process(
+            &input,
+            &DetailContract::capture_only(contract.clone()),
+            0,
+            &CancellationToken::new()
+        )
+        .is_err()
     );
     let mut reference = input.clone();
     contract
@@ -83,19 +88,34 @@ fn cancellation_and_constrained_budget_recovery() {
         other.cancel();
     });
     assert!(matches!(
-        gpu.process(&input, &contract, 0, &token),
+        gpu.process(
+            &input,
+            &DetailContract::capture_only(contract.clone()),
+            0,
+            &token
+        ),
         Err(GpuPreviewError::Cancelled)
     ));
     cancel.join().expect("cancellation thread");
     assert_eq!(input.data(), original);
     gpu.set_remaining_budget(1);
     assert!(
-        gpu.process(&input, &contract, 0, &CancellationToken::new())
-            .is_err()
+        gpu.process(
+            &input,
+            &DetailContract::capture_only(contract.clone()),
+            0,
+            &CancellationToken::new()
+        )
+        .is_err()
     );
     gpu.set_remaining_budget(2 * 1024 * 1024);
     let result = gpu
-        .process(&input, &contract, 0, &CancellationToken::new())
+        .process(
+            &input,
+            &DetailContract::capture_only(contract.clone()),
+            0,
+            &CancellationToken::new(),
+        )
         .expect("recovered processor")
         .expect("active capture");
     assert!(result.metrics.tile_edge < 512);
@@ -141,7 +161,12 @@ fn intermediate_guide_mask_and_every_iteration_match() {
         .reference_stages(&input, &token)
         .expect("CPU reference stages");
     assert_eq!(reference.len(), 10);
-    let resources = Resources::new(&gpu.device, &gpu.queue, w * h, &contract);
+    let resources = Resources::new(
+        &gpu.device,
+        &gpu.queue,
+        w * h,
+        &DetailContract::capture_only(contract.clone()),
+    );
     gpu.queue
         .write_buffer(&resources.rgb, 0, bytemuck::cast_slice(input.data()));
     let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -243,7 +268,12 @@ fn asymmetric_tiled_camera_rgb_parity_and_bypass() {
                 for edge in [512, 31] {
                     gpu.maximum_tile_edge = edge;
                     let result = gpu
-                        .process(&input, &contract, 0, &token)
+                        .process(
+                            &input,
+                            &DetailContract::capture_only(contract.clone()),
+                            0,
+                            &token,
+                        )
                         .expect("capture fixture")
                         .expect("capture fixture");
                     for (i, (a, b)) in cpu.data().iter().zip(result.image.data()).enumerate() {
@@ -259,9 +289,14 @@ fn asymmetric_tiled_camera_rgb_parity_and_bypass() {
             .expect("capture fixture");
         gpu.set_remaining_budget(0);
         assert!(
-            gpu.process(&input, &bypass, usize::MAX, &token)
-                .expect("capture fixture")
-                .is_none()
+            gpu.process(
+                &input,
+                &DetailContract::capture_only(bypass.clone()),
+                usize::MAX,
+                &token
+            )
+            .expect("capture fixture")
+            .is_none()
         );
         gpu.set_remaining_budget(resources::DEFAULT_BUDGET);
     }
@@ -281,10 +316,23 @@ fn asymmetric_tiled_camera_rgb_parity_and_bypass() {
         vec![f32::NAN, 0.0, 1.0],
     )
     .expect("capture fixture");
-    assert!(gpu.process(&invalid, &contract, 0, &token).is_err());
+    assert!(
+        gpu.process(
+            &invalid,
+            &DetailContract::capture_only(contract.clone()),
+            0,
+            &token
+        )
+        .is_err()
+    );
     token.cancel();
     assert!(matches!(
-        gpu.process(&invalid, &contract, 0, &token),
+        gpu.process(
+            &invalid,
+            &DetailContract::capture_only(contract.clone()),
+            0,
+            &token
+        ),
         Err(GpuPreviewError::Cancelled)
     ));
 }

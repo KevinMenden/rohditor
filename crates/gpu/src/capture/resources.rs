@@ -14,50 +14,56 @@ impl TilePlan {
     pub fn new(
         width: usize,
         height: usize,
-        halo: usize,
+        contract: &DetailContract,
         budget: u64,
         limits: &wgpu::Limits,
         maximum: usize,
     ) -> Result<Self, GpuPreviewError> {
-        Self::new_with_cost(width, height, halo, budget, limits, maximum, 60, 24)
+        // RGB input/output, upload and readback staging, plus the planes.
+        Self::new_with_cost(width, height, contract, budget, limits, maximum, 36, 24)
     }
 
     pub(crate) fn new_resident(
         width: usize,
         height: usize,
-        halo: usize,
+        contract: &DetailContract,
         budget: u64,
         limits: &wgpu::Limits,
         maximum: usize,
     ) -> Result<Self, GpuPreviewError> {
-        // RGB input/output, six working planes, and the queue's upload staging.
-        Self::new_with_cost(width, height, halo, budget, limits, maximum, 48, 12)
+        // RGB input/output, working planes, and the queue's upload staging.
+        Self::new_with_cost(width, height, contract, budget, limits, maximum, 24, 12)
     }
 
     pub(crate) fn new_generated(
         width: usize,
         height: usize,
-        halo: usize,
+        contract: &DetailContract,
         budget: u64,
         limits: &wgpu::Limits,
         maximum: usize,
     ) -> Result<Self, GpuPreviewError> {
-        // GPU demosaic fills RGB input/output directly: six working planes,
+        // GPU demosaic fills RGB input/output directly: working planes,
         // three RGB channels, and no host packing or upload staging.
-        Self::new_with_cost(width, height, halo, budget, limits, maximum, 36, 0)
+        Self::new_with_cost(width, height, contract, budget, limits, maximum, 12, 0)
     }
 
+    /// `gpu_bytes_per_pixel` excludes the scratch planes, which depend on
+    /// the contract.
     #[allow(clippy::too_many_arguments)]
     fn new_with_cost(
         width: usize,
         height: usize,
-        halo: usize,
+        contract: &DetailContract,
         budget: u64,
         limits: &wgpu::Limits,
         maximum: usize,
         gpu_bytes_per_pixel: u64,
         host_bytes_per_pixel: usize,
     ) -> Result<Self, GpuPreviewError> {
+        let halo = contract.halo();
+        let plane_bytes = contract.scratch_planes() as u64 * 4;
+        let gpu_bytes_per_pixel = gpu_bytes_per_pixel + plane_bytes;
         if width == 0
             || height == 0
             || width > i32::MAX as usize / 2
@@ -72,12 +78,12 @@ impl TilePlan {
             let pixels = w
                 .checked_mul(h)
                 .ok_or_else(|| error("capture tile size overflow"))?;
-            // Six planes, RGB input/output, upload staging, readback staging.
+            // Scratch planes, RGB input/output, upload staging, readback staging.
             let gpu_bytes = (pixels as u64)
                 .checked_mul(gpu_bytes_per_pixel)
                 .and_then(|n| n.checked_add(OVERHEAD))
                 .ok_or_else(|| error("capture allocation overflow"))?;
-            let binding = pixels as u64 * 24;
+            let binding = pixels as u64 * plane_bytes.max(12);
             if gpu_bytes <= budget
                 && binding <= limits.max_buffer_size
                 && binding <= u64::from(limits.max_storage_buffer_binding_size)
@@ -117,7 +123,7 @@ impl Resources {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         pixels: usize,
-        contract: &CaptureSharpeningContract,
+        contract: &DetailContract,
     ) -> Self {
         Self::with_readback(device, queue, pixels, contract, true)
     }
@@ -126,7 +132,7 @@ impl Resources {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         pixels: usize,
-        contract: &CaptureSharpeningContract,
+        contract: &DetailContract,
     ) -> Self {
         Self::with_readback(device, queue, pixels, contract, false)
     }
@@ -135,7 +141,7 @@ impl Resources {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         pixels: usize,
-        contract: &CaptureSharpeningContract,
+        contract: &DetailContract,
         readback: bool,
     ) -> Self {
         let buffer = |label, size, usage| {
@@ -146,12 +152,16 @@ impl Resources {
                 mapped_at_creation: false,
             })
         };
+        let capture = contract.capture();
+        // Not bound by any pass without capture sharpening, but kept non-empty.
         let weights = buffer(
             "capture CPU Gaussian",
-            std::mem::size_of_val(contract.weights()) as u64,
+            (std::mem::size_of_val(capture.weights()) as u64).max(4),
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         );
-        queue.write_buffer(&weights, 0, bytemuck::cast_slice(contract.weights()));
+        if !capture.weights().is_empty() {
+            queue.write_buffer(&weights, 0, bytemuck::cast_slice(capture.weights()));
+        }
         Self {
             rgb: buffer(
                 "capture RGB",
@@ -161,8 +171,8 @@ impl Resources {
                     | wgpu::BufferUsages::COPY_SRC,
             ),
             planes: buffer(
-                "capture six f32 planes",
-                pixels as u64 * 24,
+                "capture scratch f32 planes",
+                pixels as u64 * contract.scratch_planes() as u64 * 4,
                 wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             ),
             weights,
@@ -180,20 +190,48 @@ impl Resources {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rohditor_demosaic::WhiteBalanceGains;
+    use rohditor_edit::EditRecipe;
+
     #[test]
     fn budgets_and_limits_bound_tiles() {
         let limits = wgpu::Limits::default();
-        let full =
-            TilePlan::new(6000, 4000, 64, DEFAULT_BUDGET, &limits, 512).expect("capture fixture");
+        let contract = sharpening_contract(true);
+        let full = TilePlan::new(6000, 4000, &contract, DEFAULT_BUDGET, &limits, 512)
+            .expect("capture fixture");
         assert_eq!(full.edge, 512);
         assert!(full.gpu_bytes < 26 * 1024 * 1024);
-        let small =
-            TilePlan::new(6000, 4000, 64, 2 * 1024 * 1024, &limits, 512).expect("capture fixture");
+        let small = TilePlan::new(6000, 4000, &contract, 2 * 1024 * 1024, &limits, 512)
+            .expect("capture fixture");
         assert!(small.edge < full.edge);
-        assert!(TilePlan::new(6000, 4000, 64, 64 * 1024, &limits, 512).is_err());
-        assert!(TilePlan::new(usize::MAX, 2, 64, DEFAULT_BUDGET, &limits, 512).is_err());
+        assert!(TilePlan::new(6000, 4000, &contract, 64 * 1024, &limits, 512).is_err());
+        assert!(TilePlan::new(usize::MAX, 2, &contract, DEFAULT_BUDGET, &limits, 512).is_err());
         let mut limits = limits;
         limits.max_storage_buffer_binding_size = 4;
-        assert!(TilePlan::new(100, 100, 64, DEFAULT_BUDGET, &limits, 512).is_err());
+        assert!(TilePlan::new(100, 100, &contract, DEFAULT_BUDGET, &limits, 512).is_err());
+    }
+
+    #[test]
+    fn chroma_noise_reduction_adds_a_plane_and_its_halo() {
+        let limits = wgpu::Limits::default();
+        let sharpened = sharpening_contract(false);
+        let mut recipe = EditRecipe::default();
+        recipe.noise_reduction.chroma = 0.5;
+        let one = WhiteBalanceGains::identity();
+        let denoised = DetailContract::new(&recipe, one, one).expect("contract");
+        assert_eq!(sharpened.scratch_planes(), 6);
+        assert_eq!(denoised.scratch_planes(), 7);
+        let a = TilePlan::new(6000, 4000, &denoised, DEFAULT_BUDGET, &limits, 512).expect("plan");
+        let b = TilePlan::new(6000, 4000, &sharpened, DEFAULT_BUDGET, &limits, 512).expect("plan");
+        assert!(a.gpu_bytes > b.gpu_bytes);
+    }
+
+    /// A contract with only capture sharpening, on or off.
+    fn sharpening_contract(enabled: bool) -> DetailContract {
+        let mut recipe = EditRecipe::default();
+        recipe.capture_sharpening.enabled = enabled;
+        recipe.capture_sharpening.radius = 0.8;
+        let one = WhiteBalanceGains::identity();
+        DetailContract::new(&recipe, one, one).expect("contract")
     }
 }

@@ -6,18 +6,18 @@
 //! pixel is preserved up to float rounding. `C1` and `C2` go through a
 //! five-level edge-avoiding à-trous decomposition. Each detail band is
 //! soft-thresholded against the colour noise expected at that pixel's
-//! brightness (a Poisson–Gaussian fit from [`estimate_noise`]) and summed
-//! back together with the residual.
+//! brightness (a Poisson–Gaussian fit from [`estimate_noise`](crate::estimate_noise))
+//! and summed back together with the residual.
 
 use rayon::prelude::*;
 use rohditor_image::LinearRgbImage;
 
-use super::sample_bands;
-use crate::{
-    CancellationCheck, DetailError, NoiseProfile, Plane, estimate_noise, mirror, split_opponent,
-};
+use super::NoiseProfiles;
+use crate::{CancellationCheck, DetailError, NoiseProfile, Plane, mirror, split_opponent};
 
-const LEVELS: usize = 5;
+/// Number of à-trous levels.
+pub const CHROMA_LEVELS: usize = 5;
+const LEVELS: usize = CHROMA_LEVELS;
 /// Threshold multiplier per level (finer bands are noisier relative to the
 /// colour signal they hide).
 const LEVEL_WEIGHTS: [f32; LEVELS] = [1.0, 0.8, 0.6, 0.4, 0.3];
@@ -25,7 +25,8 @@ const LEVEL_WEIGHTS: [f32; LEVELS] = [1.0, 0.8, 0.6, 0.4, 0.3];
 const THRESHOLD_SIGMAS: f32 = 5.0;
 /// Luma differences up to this many luma-noise sigmas count as "same
 /// surface" and are averaged; larger ones are treated as edges.
-const RANGE_SIGMAS: f32 = 4.0;
+pub const CHROMA_RANGE_SIGMAS: f32 = 4.0;
+const RANGE_SIGMAS: f32 = CHROMA_RANGE_SIGMAS;
 /// Binomial taps. A 3x3 support (9 taps) instead of the B3 spline's 5x5 (25)
 /// keeps the guided filter affordable at full resolution; the dilation per
 /// level still doubles, so the five levels cover the same scales.
@@ -44,11 +45,36 @@ pub struct ChromaDenoise {
     /// Per-channel values at or above which a pixel counts as blown and
     /// keeps its chroma (same ceilings capture sharpening masks with).
     pub ceilings: [f32; 3],
-    /// Luma noise of `image` for the same `balance` (see
-    /// [`estimate_luma_noise`](super::estimate_luma_noise)). It sets how
-    /// strongly luma edges stop the colour averaging.
-    pub luma_noise: NoiseProfile,
+    /// Noise of `image` for the same `balance` (see
+    /// [`estimate_noise_profiles`](super::estimate_noise_profiles)). The luma
+    /// profile sets how strongly luma edges stop the colour averaging, the
+    /// chroma ones how much colour is noise.
+    pub noise: NoiseProfiles,
 }
+
+/// One level of the chroma filter, for executors that run it elsewhere.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChromaLevel {
+    /// Tap spacing of the 3x3 binomial kernel.
+    pub step: usize,
+    /// Multiplier of the local colour-noise sigma: the soft threshold.
+    pub threshold_scale: f32,
+}
+
+/// The levels of a pass with `strength`, finest first. The kernel is
+/// `[1, 2, 1] / 4` in both directions, weighted by similarity of luma within
+/// [`CHROMA_RANGE_SIGMAS`] luma-noise sigmas.
+#[must_use]
+pub fn chroma_levels(strength: f32) -> [ChromaLevel; CHROMA_LEVELS] {
+    std::array::from_fn(|level| ChromaLevel {
+        step: 1 << level,
+        threshold_scale: LEVEL_WEIGHTS[level] * strength * THRESHOLD_SIGMAS,
+    })
+}
+
+/// Source pixels a pass reads beyond an output pixel (per side): each level
+/// reaches one dilated tap further.
+pub const CHROMA_HALO: usize = (1 << LEVELS) - 1;
 
 /// Heap bytes the filter allocates on top of the image itself.
 #[must_use]
@@ -61,8 +87,7 @@ pub fn chroma_scratch_bytes(width: usize, height: usize) -> Option<usize> {
 /// Reduce colour noise in `image` in place.
 ///
 /// Pixels with a non-finite channel are copied through, as are pixels at or
-/// above `ceilings`. Images too small to profile the colour noise are left
-/// alone.
+/// above `ceilings`.
 pub fn denoise_chroma(
     image: &mut LinearRgbImage<f32>,
     params: ChromaDenoise,
@@ -89,24 +114,10 @@ pub fn denoise_chroma(
             .for_each(|v| *v = 0.0);
     }
     let (w, h) = (luma.width(), luma.height());
-    // Profile only a subset of row bands: the estimate needs flat tiles
-    // across the brightness range, not every pixel.
-    let sampled_luma = sample_bands(&luma)?;
-    let (Ok(noise1), Ok(noise2)) = (
-        sample_bands(&c1).and_then(|c| estimate_noise(&c, &sampled_luma, cancellation)),
-        sample_bands(&c2).and_then(|c| estimate_noise(&c, &sampled_luma, cancellation)),
-    ) else {
-        // Too small to profile (or cancelled; the next checkpoint reports it).
-        return if cancellation.is_cancelled() {
-            Err(DetailError::Cancelled)
-        } else {
-            Ok(())
-        };
-    };
     let shrink = Shrinkage {
         strength: params.strength,
-        luma_noise: params.luma_noise,
-        noise: [noise1, noise2],
+        luma_noise: params.noise.luma,
+        noise: params.noise.chroma,
     };
     let mut pair = Pair::new(c1, c2)?;
     let mut accumulated = Pair::zeros(w, h)?;
@@ -418,7 +429,7 @@ fn write_back(
 mod tests {
     use super::*;
     use crate::test_support::Gauss;
-    use crate::{NeverCancelled, estimate_luma_noise};
+    use crate::{NeverCancelled, estimate_noise_profiles};
     use rohditor_image::LinearRgbSpace;
 
     const BALANCE: [f32; 3] = [2.0, 1.0, 1.5];
@@ -429,19 +440,24 @@ mod tests {
             strength,
             balance: BALANCE,
             ceilings: NO_CEILING,
-            luma_noise: luma_noise(image, BALANCE),
+            noise: noise(image, BALANCE),
         }
     }
 
-    /// Luma profile of `image`; tiny images get an arbitrary one (the
-    /// filter then declines to run on its own).
-    fn luma_noise(image: &LinearRgbImage<f32>, balance: [f32; 3]) -> NoiseProfile {
-        estimate_luma_noise(image, balance, &NeverCancelled)
+    /// Profiles of `image`; tiny images get arbitrary ones.
+    fn noise(image: &LinearRgbImage<f32>, balance: [f32; 3]) -> NoiseProfiles {
+        estimate_noise_profiles(image, balance, &NeverCancelled)
             .unwrap()
-            .unwrap_or(NoiseProfile {
-                a: 0.0,
-                b: 1e-4,
-                bins: 0,
+            .unwrap_or_else(|| {
+                let flat = NoiseProfile {
+                    a: 0.0,
+                    b: 1e-4,
+                    bins: 0,
+                };
+                NoiseProfiles {
+                    luma: flat,
+                    chroma: [flat; 2],
+                }
             })
     }
 
@@ -546,7 +562,7 @@ mod tests {
                 strength: 1.0,
                 balance,
                 ceilings: NO_CEILING,
-                luma_noise: luma_noise(&before, balance),
+                noise: noise(&before, balance),
             },
             &NeverCancelled,
         )
@@ -578,7 +594,7 @@ mod tests {
                 strength: 0.8,
                 balance: BALANCE,
                 ceilings,
-                luma_noise: luma_noise(&before, BALANCE),
+                noise: noise(&before, BALANCE),
             },
             &NeverCancelled,
         )
@@ -598,12 +614,12 @@ mod tests {
     }
 
     #[test]
-    fn images_smaller_than_the_estimator_tile_are_left_alone() {
-        let mut image = colour_noise_image(10, 10, 30, 0.05);
-        let before = image.clone();
-        let p = params(&image, 1.0);
-        denoise_chroma(&mut image, p, &NeverCancelled).unwrap();
-        assert_eq!(image, before);
+    fn images_smaller_than_the_estimator_tile_have_no_profile() {
+        let image = colour_noise_image(10, 10, 30, 0.05);
+        assert_eq!(
+            estimate_noise_profiles(&image, BALANCE, &NeverCancelled).unwrap(),
+            None
+        );
     }
 
     #[test]

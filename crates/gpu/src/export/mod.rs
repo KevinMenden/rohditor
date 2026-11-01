@@ -153,12 +153,7 @@ impl GpuExportProcessor {
         source: rohditor_core::DemosaicedCameraSource,
         cancellation: &CancellationToken,
     ) -> Result<(rohditor_core::CapturedCameraSource, crate::CaptureMetrics), GpuPreviewError> {
-        if !source
-            .capture_contract()
-            .map_err(input_error)?
-            .settings()
-            .is_active()
-        {
+        if !source.detail_contract().map_err(input_error)?.is_active() {
             return Ok((
                 source.capture_cpu(cancellation).map_err(input_error)?,
                 crate::CaptureMetrics::default(),

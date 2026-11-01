@@ -1,11 +1,13 @@
 use super::*;
 
 impl GpuCaptureProcessor {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn process_resident_inner(
         &self,
         image: &LinearRgbImage<f32>,
-        contract: &CaptureSharpeningContract,
+        contract: &DetailContract,
         plan: &TilePlan,
+        noise: Option<NoiseProfiles>,
         resident: &crate::spatial::source::ResidentCameraPlanes,
         scatter: &crate::spatial::CaptureScatter,
         cancellation: &CancellationToken,
@@ -16,6 +18,7 @@ impl GpuCaptureProcessor {
             (image.width(), image.height()),
             contract,
             plan,
+            noise,
             resident,
             scatter,
             cancellation,
@@ -43,8 +46,9 @@ impl GpuCaptureProcessor {
     fn process_resident_tiles(
         &self,
         dimensions: (usize, usize),
-        contract: &CaptureSharpeningContract,
+        contract: &DetailContract,
         plan: &TilePlan,
+        noise: Option<NoiseProfiles>,
         resident: &crate::spatial::source::ResidentCameraPlanes,
         scatter: &crate::spatial::CaptureScatter,
         cancellation: &CancellationToken,
@@ -98,12 +102,12 @@ impl GpuCaptureProcessor {
                     metrics.upload += produced;
                 }
                 let compute_started = Instant::now();
-                self.encode_ops(
+                self.encode_tile(
                     &mut encoder,
                     &resources,
                     contract,
+                    noise.as_ref(),
                     (width, height),
-                    tile_schedule(),
                 );
                 scatter.encode(
                     &self.device,
@@ -133,7 +137,7 @@ impl GpuCaptureProcessor {
 
     pub(crate) fn process_generated_to_resident(
         &self,
-        contract: &CaptureSharpeningContract,
+        contract: &DetailContract,
         resident: &crate::spatial::source::ResidentCameraPlanes,
         cancellation: &CancellationToken,
         fill: impl FnMut(
@@ -145,6 +149,13 @@ impl GpuCaptureProcessor {
             usize,
         ) -> Result<u64, GpuPreviewError>,
     ) -> Result<CaptureMetrics, GpuPreviewError> {
+        // Tiles are produced one at a time, so there is no image to profile
+        // before the first one is filtered.
+        if contract.noise_reduction().is_active() {
+            return Err(error(
+                "noise reduction needs the whole image before tiles are generated",
+            ));
+        }
         let dimensions = (
             resident.layout.width as usize,
             resident.layout.height as usize,
@@ -152,7 +163,7 @@ impl GpuCaptureProcessor {
         let plan = TilePlan::new_generated(
             dimensions.0,
             dimensions.1,
-            contract.halo(),
+            contract,
             self.budget,
             &self.device.limits(),
             self.maximum_tile_edge,
@@ -162,6 +173,7 @@ impl GpuCaptureProcessor {
             dimensions,
             contract,
             &plan,
+            None,
             resident,
             &scatter,
             cancellation,
@@ -173,13 +185,13 @@ impl GpuCaptureProcessor {
     /// Hold capture's bounded scratch before the preceding RCD work begins.
     pub(crate) fn reserve_generated(
         &self,
-        contract: &CaptureSharpeningContract,
+        contract: &DetailContract,
         dimensions: (usize, usize),
     ) -> Result<crate::memory::Reservation, GpuPreviewError> {
         let plan = TilePlan::new_generated(
             dimensions.0,
             dimensions.1,
-            contract.halo(),
+            contract,
             self.budget,
             &self.device.limits(),
             self.maximum_tile_edge,
@@ -194,7 +206,7 @@ impl GpuCaptureProcessor {
     /// No camera RGB crosses the CPU boundary.
     pub(crate) fn process_resident_from_resident(
         &self,
-        contract: &CaptureSharpeningContract,
+        contract: &DetailContract,
         source: &crate::spatial::source::ResidentCameraPlanes,
         destination: &crate::spatial::source::ResidentCameraPlanes,
         reservation: crate::memory::Reservation,
@@ -204,81 +216,31 @@ impl GpuCaptureProcessor {
         let plan = TilePlan::new_generated(
             dimensions.0,
             dimensions.1,
-            contract.halo(),
+            contract,
             self.budget,
             &self.device.limits(),
             self.maximum_tile_edge,
         )?;
-        let shader = self
-            .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("resident camera capture input"),
-                source: wgpu::ShaderSource::Wgsl(include_str!("resident_load.wgsl").into()),
-            });
-        let pipeline = self
-            .device
-            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("load resident capture tile"),
-                layout: None,
-                module: &shader,
-                entry_point: Some("load_resident"),
-                compilation_options: Default::default(),
-                cache: None,
-            });
+        let noise = self.estimate_noise_from_resident(source, contract, cancellation)?;
+        let loader = ResidentLoader::new(&self.device);
         let scatter = crate::spatial::CaptureScatter::new(&self.device);
         self.process_resident_tiles(
             dimensions,
             contract,
             &plan,
+            noise,
             destination,
             &scatter,
             cancellation,
             Some(reservation),
             |encoder, buffer, x, y, width, height| {
-                let layout = source.layout;
-                let words = [
-                    layout.tile_width,
-                    layout.tile_height,
-                    layout.columns,
-                    0,
-                    x as u32,
-                    y as u32,
-                    width as u32,
-                    height as u32,
-                ];
-                let uniform = crate::memory::initialized_buffer(
+                loader.encode(
                     &self.device,
                     &self.queue,
-                    &wgpu::util::BufferInitDescriptor {
-                        label: Some("resident capture region"),
-                        contents: bytemuck::cast_slice(&words),
-                        usage: wgpu::BufferUsages::UNIFORM,
-                    },
-                );
-                let mut entries = source.sampled_entries().to_vec();
-                entries.push(wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: buffer.as_entire_binding(),
-                });
-                entries.push(wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: uniform.as_entire_binding(),
-                });
-                let bindings = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("resident capture input bindings"),
-                    layout: &pipeline.get_bind_group_layout(0),
-                    entries: &entries,
-                });
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("load resident capture input"),
-                    timestamp_writes: None,
-                });
-                pass.set_pipeline(&pipeline);
-                pass.set_bind_group(0, &bindings, &[]);
-                pass.dispatch_workgroups(
-                    (width as u32).div_ceil(8),
-                    (height as u32).div_ceil(8),
-                    1,
+                    encoder,
+                    source,
+                    buffer,
+                    [x, y, width, height],
                 );
                 Ok(0)
             },
@@ -288,8 +250,9 @@ impl GpuCaptureProcessor {
     pub(super) fn process_inner(
         &self,
         image: &LinearRgbImage<f32>,
-        contract: &CaptureSharpeningContract,
+        contract: &DetailContract,
         plan: &TilePlan,
+        noise: Option<NoiseProfiles>,
         cancellation: &CancellationToken,
     ) -> Result<GpuCaptureResult, GpuPreviewError> {
         let started = Instant::now();
@@ -349,12 +312,12 @@ impl GpuCaptureProcessor {
                 // At artificial edges the halo prevents their mirrored samples
                 // from influencing a retained core in any of the eight iterations.
                 let mut encoder = self.encoder();
-                self.encode_ops(
+                self.encode_tile(
                     &mut encoder,
                     &resources,
                     contract,
+                    noise.as_ref(),
                     (width, height),
-                    tile_schedule(),
                 );
                 let staging = resources
                     .staging
@@ -406,6 +369,36 @@ impl GpuCaptureProcessor {
         })
     }
 
+    /// Every pass for one tile, in one submission's worth of encoding: the
+    /// detail steps, then capture sharpening if it is on.
+    fn encode_tile(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        resources: &Resources,
+        contract: &DetailContract,
+        noise: Option<&NoiseProfiles>,
+        dimensions: (usize, usize),
+    ) {
+        self.detail.encode(
+            &self.device,
+            &self.queue,
+            encoder,
+            resources,
+            contract,
+            noise,
+            dimensions,
+        );
+        if contract.capture().settings().is_active() {
+            self.encode_ops(
+                encoder,
+                resources,
+                contract.capture(),
+                dimensions,
+                tile_schedule(),
+            );
+        }
+    }
+
     pub(super) fn encoder(&self) -> wgpu::CommandEncoder {
         self.device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -427,7 +420,7 @@ impl GpuCaptureProcessor {
         self.wait(&receiver, cancellation)
     }
 
-    fn wait<E: std::fmt::Display>(
+    pub(super) fn wait<E: std::fmt::Display>(
         &self,
         receiver: &mpsc::Receiver<Result<(), E>>,
         cancellation: &CancellationToken,

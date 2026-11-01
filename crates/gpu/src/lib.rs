@@ -85,3 +85,13 @@ pub enum GpuPreviewError {
     #[error("GPU readback failed: {reason}")]
     Readback { reason: String },
 }
+
+/// Detail contract with only capture sharpening, for tests of that step.
+#[cfg(test)]
+pub(crate) fn capture_only_contract(
+    settings: rohditor_edit::CaptureSharpening,
+    ceilings: [f32; 3],
+) -> Result<rohditor_core::DetailContract, rohditor_core::PipelineError> {
+    rohditor_core::CaptureSharpeningContract::new(settings, ceilings)
+        .map(rohditor_core::DetailContract::capture_only)
+}

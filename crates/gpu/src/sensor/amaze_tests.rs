@@ -8,7 +8,7 @@
 //! isolated flipped samples; they are bounded by a small outlier fraction and a
 //! maximum error (measured on a 24 MP photo: 1.6e-5 of samples, 3.2e-3 max).
 
-use rohditor_core::{CancellationToken, CaptureSharpeningContract, RawCropPolicy, normalize_raw};
+use rohditor_core::{CancellationToken, DetailContract, RawCropPolicy, normalize_raw};
 use rohditor_demosaic::{
     ChannelBalance, DemosaicAlgorithm, WhiteBalanceGains, amaze_tiles, demosaic,
 };
@@ -29,8 +29,8 @@ fn close(actual: f32, expected: f32, slack: f32) -> bool {
     (actual - expected).abs() <= slack * (2e-5 + 2e-5 * expected.abs())
 }
 
-fn capture_off() -> CaptureSharpeningContract {
-    CaptureSharpeningContract::new(CaptureSharpening::default(), [1.0; 3]).expect("capture off")
+fn capture_off() -> DetailContract {
+    crate::capture_only_contract(CaptureSharpening::default(), [1.0; 3]).expect("capture off")
 }
 
 /// Compare a full image; `exact` kinds must all be close, noisy ones may have a

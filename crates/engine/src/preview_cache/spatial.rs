@@ -120,7 +120,7 @@ impl SpatialCache {
         } else {
             cpu.prepare_camera_source(frame, recipe, options, cancellation)?
         };
-        let contract = source.capture_contract()?;
+        let contract = source.detail_contract()?;
         let capture_key = CaptureKey {
             source: key.clone(),
             settings: keys.reconstructed.detail.clone(),
@@ -306,7 +306,7 @@ impl SpatialCache {
             cpu.prepare_camera_source(frame, recipe, options, cancellation)
                 .map_err(gpu_error)?
         };
-        let contract = source.capture_contract().map_err(gpu_error)?;
+        let contract = source.detail_contract().map_err(gpu_error)?;
         let capture_key = CaptureKey {
             source: key.clone(),
             settings: keys.reconstructed.detail.clone(),
@@ -413,7 +413,7 @@ impl SpatialCache {
                 ),
             });
         }
-        let contract = metadata.capture_contract().map_err(gpu_error)?;
+        let contract = metadata.detail_contract().map_err(gpu_error)?;
         let key = CaptureKey {
             source: key,
             settings: keys.reconstructed.detail.clone(),
