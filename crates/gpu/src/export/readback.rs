@@ -42,6 +42,55 @@ impl GpuExportProcessor {
         pipeline: &wgpu::ComputePipeline,
         bindings: &[(u32, &wgpu::BindGroup)],
     ) -> Result<ExportImage, GpuPreviewError> {
+        self.read_bands_with(
+            width,
+            height,
+            depth,
+            cancellation,
+            output,
+            staging,
+            |encoder, first, rows, maximum| {
+                let words = [
+                    first,
+                    rows,
+                    maximum,
+                    u32::from(dithering == DitherMode::Ordered8x8),
+                ];
+                self.processor
+                    .queue
+                    .write_buffer(band_parameters, 0, bytemuck::cast_slice(&words));
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("rohditor export color band"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(pipeline);
+                for (index, bindings) in bindings {
+                    pass.set_bind_group(*index, *bindings, &[]);
+                }
+                pass.dispatch_workgroups(
+                    (width as u32).div_ceil(WORKGROUP_EDGE),
+                    rows.div_ceil(WORKGROUP_EDGE),
+                    1,
+                );
+                Ok(())
+            },
+        )
+    }
+
+    /// Run `record` for each band of output rows to fill `output` with the
+    /// band's integer samples, read them back through `staging`, and
+    /// assemble the image. Only one band is in flight at a time.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn read_bands_with(
+        &self,
+        width: usize,
+        height: usize,
+        depth: OutputBitDepth,
+        cancellation: &CancellationToken,
+        output: &wgpu::Buffer,
+        staging: &wgpu::Buffer,
+        mut record: impl FnMut(&mut wgpu::CommandEncoder, u32, u32, u32) -> Result<(), GpuPreviewError>,
+    ) -> Result<ExportImage, GpuPreviewError> {
         let count = width
             .checked_mul(height)
             .and_then(|n| n.checked_mul(3))
@@ -63,32 +112,11 @@ impl GpuExportProcessor {
         for first in (0..height as u32).step_by(BAND_ROWS as usize) {
             check_cancel(cancellation)?;
             let rows = BAND_ROWS.min(height as u32 - first);
-            let words = [
-                first,
-                rows,
-                maximum,
-                u32::from(dithering == DitherMode::Ordered8x8),
-            ];
-            queue.write_buffer(band_parameters, 0, bytemuck::cast_slice(&words));
             let bytes = width as u64 * u64::from(rows) * 12;
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("rohditor export band"),
             });
-            {
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("rohditor export color band"),
-                    timestamp_writes: None,
-                });
-                pass.set_pipeline(pipeline);
-                for (index, bindings) in bindings {
-                    pass.set_bind_group(*index, *bindings, &[]);
-                }
-                pass.dispatch_workgroups(
-                    (width as u32).div_ceil(WORKGROUP_EDGE),
-                    rows.div_ceil(WORKGROUP_EDGE),
-                    1,
-                );
-            }
+            record(&mut encoder, first, rows, maximum)?;
             encoder.copy_buffer_to_buffer(output, 0, staging, 0, bytes);
             queue.submit([encoder.finish()]);
             let (sender, receiver) = mpsc::sync_channel(1);

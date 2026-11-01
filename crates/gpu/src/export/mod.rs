@@ -5,11 +5,15 @@
 //! for the codec. There is no half-float or display-texture export intermediate.
 
 use super::*;
-use rohditor_core::{CpuPipeline, DitherMode, ExportImage, OutputBitDepth, RenderOptions};
+use rohditor_core::{
+    CpuPipeline, DitherMode, ExportImage, OutputBitDepth, OutputSharpening, OutputSize,
+    RenderOptions,
+};
 use rohditor_image::{DisplayRgbImage, DisplayTransfer};
 use rohditor_raw::RawFrame;
 
 mod readback;
+mod staged;
 #[cfg(test)]
 mod tests;
 
@@ -46,6 +50,7 @@ pub struct GpuExportProcessor {
     pipeline: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
     spatial_pipeline: wgpu::ComputePipeline,
+    staged_pipeline: wgpu::ComputePipeline,
 }
 
 impl GpuExportProcessor {
@@ -102,6 +107,29 @@ impl GpuExportProcessor {
             compilation_options: Default::default(),
             cache: None,
         });
+        let staged_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("rohditor staged resize and sharpening export shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                concat!(
+                    include_str!("../preview.wgsl"),
+                    "\n",
+                    include_str!("../color_adjustments.wgsl"),
+                    "\n",
+                    include_str!("../spatial/spatial.wgsl"),
+                    "\n",
+                    include_str!("staged_output.wgsl")
+                )
+                .into(),
+            ),
+        });
+        let staged_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("rohditor staged resident GPU export"),
+            layout: None,
+            module: &staged_shader,
+            entry_point: Some("staged_export"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
         let spatial = crate::GpuSpatialProcessor::new(device, queue)?;
         Ok(Self {
             sensor: None,
@@ -112,6 +140,7 @@ impl GpuExportProcessor {
             pipeline,
             layout,
             spatial_pipeline,
+            staged_pipeline,
         })
     }
 
@@ -184,9 +213,12 @@ impl GpuExportProcessor {
         options: RenderOptions,
         bit_depth: OutputBitDepth,
         dithering: DitherMode,
+        size: OutputSize,
+        sharpening: Option<OutputSharpening>,
         cancellation: &CancellationToken,
     ) -> Result<GpuExportResult, GpuPreviewError> {
         check_cancel(cancellation)?;
+        size.validate().map_err(input_error)?;
         if let Some(reason) = rohditor_core::cpu_only_stage_reason(recipe) {
             return Err(GpuPreviewError::UnsupportedEdits {
                 reason: reason.to_owned(),
@@ -225,6 +257,7 @@ impl GpuExportProcessor {
             options.output_policy,
             bit_depth,
             dithering,
+            (size, sharpening),
             cancellation,
             metrics,
         )
@@ -275,6 +308,7 @@ impl GpuExportProcessor {
         policy: OutputPolicy,
         depth: OutputBitDepth,
         dithering: DitherMode,
+        output: (OutputSize, Option<OutputSharpening>),
         cancellation: &CancellationToken,
         spatial_metrics: crate::SpatialMetrics,
     ) -> Result<GpuExportResult, GpuPreviewError> {
@@ -290,6 +324,7 @@ impl GpuExportProcessor {
             policy,
             depth,
             dithering,
+            output,
             cancellation,
             spatial_metrics,
         );
@@ -310,6 +345,7 @@ impl GpuExportProcessor {
         policy: OutputPolicy,
         depth: OutputBitDepth,
         dithering: DitherMode,
+        (size, sharpening): (OutputSize, Option<OutputSharpening>),
         cancellation: &CancellationToken,
         spatial_metrics: crate::SpatialMetrics,
     ) -> Result<GpuExportResult, GpuPreviewError> {
@@ -373,6 +409,19 @@ impl GpuExportProcessor {
         );
         self.processor
             .upload_recipe_luts(recipe, resolved.profile_look.as_ref());
+        let target = size.resolve(width, height);
+        if target != (width, height) || sharpening.is_some() {
+            return self.render_staged(
+                source,
+                (width, height),
+                target,
+                depth,
+                dithering,
+                sharpening,
+                cancellation,
+                spatial_metrics,
+            );
+        }
 
         let band_bytes = width as u64 * u64::from(BAND_ROWS) * 12;
         let output_peak = source
@@ -434,55 +483,7 @@ impl GpuExportProcessor {
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             },
         );
-        let optics = crate::memory::initialized_buffer(
-            device,
-            queue,
-            &wgpu::util::BufferInitDescriptor {
-                label: Some("resident export optics parameters"),
-                contents: bytemuck::cast_slice(&crate::spatial::reduction::pack_optics_parameters(
-                    &source.planes.layout,
-                    description.optics().execution(),
-                )),
-                usage: wgpu::BufferUsages::UNIFORM,
-            },
-        );
-        let failure = crate::memory::initialized_buffer(
-            device,
-            queue,
-            &wgpu::util::BufferInitDescriptor {
-                label: Some("resident export spatial failure"),
-                contents: &[0; 4],
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            },
-        );
-        let failure_staging = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("resident export spatial failure readback"),
-            size: 4,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let colour_bindings = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("resident export colour bindings"),
-            layout: &self.spatial_pipeline.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: self.processor.parameters.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: self.processor.light_tone_lut.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: self.processor.base_rendering_lut.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 6,
-                    resource: self.processor.profile_tables.as_entire_binding(),
-                },
-            ],
-        });
+        let shared = self.shared_bindings(&self.spatial_pipeline, source);
         let output_bindings = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("resident export output bindings"),
             layout: &self.spatial_pipeline.get_bind_group_layout(1),
@@ -494,24 +495,6 @@ impl GpuExportProcessor {
                 wgpu::BindGroupEntry {
                     binding: 9,
                     resource: band_parameters.as_entire_binding(),
-                },
-            ],
-        });
-        let plane_entries = source.planes.sampled_entries();
-        let spatial_bindings = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("resident export camera bindings"),
-            layout: &self.spatial_pipeline.get_bind_group_layout(2),
-            entries: &[
-                plane_entries[0].clone(),
-                plane_entries[1].clone(),
-                plane_entries[2].clone(),
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: optics.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: failure.as_entire_binding(),
                 },
             ],
         });
@@ -527,17 +510,17 @@ impl GpuExportProcessor {
             &band_parameters,
             &self.spatial_pipeline,
             &[
-                (0, &colour_bindings),
+                (0, &shared.colour),
                 (1, &output_bindings),
-                (2, &spatial_bindings),
+                (2, &shared.camera),
             ],
         )?;
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("resident export failure readback"),
         });
-        encoder.copy_buffer_to_buffer(&failure, 0, &failure_staging, 0, 4);
+        encoder.copy_buffer_to_buffer(&shared.failure, 0, &shared.failure_staging, 0, 4);
         queue.submit([encoder.finish()]);
-        crate::spatial::reduction::read_failure(device, &failure_staging, cancellation)?;
+        crate::spatial::reduction::read_failure(device, &shared.failure_staging, cancellation)?;
         let mut preparation = description.preparation_timings();
         preparation.capture_sharpening = spatial_metrics.capture.total;
         preparation.total += spatial_metrics.capture.total;
@@ -558,6 +541,91 @@ impl GpuExportProcessor {
             readback_bytes: output_pixels * 12 + 4 + spatial_metrics.readback_bytes,
             submissions: spatial_metrics.submissions + (height as u32).div_ceil(BAND_ROWS) + 1,
         })
+    }
+
+    /// Colour and camera-source bindings shared by the resident export
+    /// pipelines, built against the layouts of `pipeline`.
+    fn shared_bindings(
+        &self,
+        pipeline: &wgpu::ComputePipeline,
+        source: &crate::GpuSpatialFullSource,
+    ) -> SharedBindings {
+        let device = &self.processor.device;
+        let queue = &self.processor.queue;
+        let optics = crate::memory::initialized_buffer(
+            device,
+            queue,
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("resident export optics parameters"),
+                contents: bytemuck::cast_slice(&crate::spatial::reduction::pack_optics_parameters(
+                    &source.planes.layout,
+                    source.description.optics().execution(),
+                )),
+                usage: wgpu::BufferUsages::UNIFORM,
+            },
+        );
+        let failure = crate::memory::initialized_buffer(
+            device,
+            queue,
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("resident export spatial failure"),
+                contents: &[0; 4],
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            },
+        );
+        let failure_staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("resident export spatial failure readback"),
+            size: 4,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let colour = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("resident export colour bindings"),
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.processor.parameters.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: self.processor.light_tone_lut.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: self.processor.base_rendering_lut.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: self.processor.profile_tables.as_entire_binding(),
+                },
+            ],
+        });
+        let plane_entries = source.planes.sampled_entries();
+        let camera = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("resident export camera bindings"),
+            layout: &pipeline.get_bind_group_layout(2),
+            entries: &[
+                plane_entries[0].clone(),
+                plane_entries[1].clone(),
+                plane_entries[2].clone(),
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: optics.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: failure.as_entire_binding(),
+                },
+            ],
+        });
+        SharedBindings {
+            colour,
+            camera,
+            failure,
+            failure_staging,
+            _optics: optics,
+        }
     }
 
     fn validate_memory(&self, width: usize, height: usize) -> Result<u64, GpuPreviewError> {
@@ -745,6 +813,16 @@ impl GpuExportProcessor {
             submissions: (height as u32).div_ceil(BAND_ROWS),
         })
     }
+}
+
+/// Bind groups of the colour and camera-source groups, plus the failure flag
+/// the optics sampling raises.
+struct SharedBindings {
+    colour: wgpu::BindGroup,
+    camera: wgpu::BindGroup,
+    failure: wgpu::Buffer,
+    failure_staging: wgpu::Buffer,
+    _optics: wgpu::Buffer,
 }
 
 fn input_error(error: impl std::fmt::Display) -> GpuPreviewError {
