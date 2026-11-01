@@ -326,35 +326,43 @@ mod tests {
         data[speck] += 0.4;
         data[speck + 2] += 0.4;
         let input =
-            LinearRgbImage::new(w, h, w * 3, LinearRgbSpace::CameraNative, data).unwrap();
+            LinearRgbImage::new(w, h, w * 3, LinearRgbSpace::CameraNative, data).expect("image");
         let balance = WhiteBalanceGains::identity();
         let token = CancellationToken::new();
 
         // Steps = 0 does no work and leaves the image bit-identical.
         let mut image = input.clone();
-        let stage = apply(&mut image, &EditRecipe::default(), balance, balance, &token).unwrap();
+        let stage =
+            apply(&mut image, &EditRecipe::default(), balance, balance, &token).expect("apply");
         assert!(stage.provenance.is_none());
         assert_eq!(image, input);
 
         let mut recipe = EditRecipe::default();
         recipe.false_color.steps = 1;
-        let stage = apply(&mut image, &recipe, balance, balance, &token).unwrap();
+        let stage = apply(&mut image, &recipe, balance, balance, &token).expect("apply");
         assert_eq!(
             stage.provenance.and_then(|p| p.false_color),
             Some(recipe.false_color)
         );
-        assert!(stage.provenance.is_some_and(|p| p.noise_reduction.is_none()));
+        assert!(
+            stage
+                .provenance
+                .is_some_and(|p| p.noise_reduction.is_none())
+        );
         assert!(stage.scratch_bytes > 0);
         assert!(stage.chroma_noise_reduction.is_zero() && stage.capture_sharpening.is_zero());
         assert_ne!(image, input);
         for y in 0..h {
             for x in 0..w {
-                let (a, b) = (image.pixel(x, y).unwrap(), input.pixel(x, y).unwrap());
+                let (a, b) = (
+                    image.pixel(x, y).expect("pixel"),
+                    input.pixel(x, y).expect("pixel"),
+                );
                 assert_eq!(a[1], b[1], "green is kept at ({x},{y})");
             }
         }
         // The speck is gone: red and blue are back on the green ramp.
-        let fixed = image.pixel(4, 3).unwrap();
+        let fixed = image.pixel(4, 3).expect("pixel");
         assert!((fixed[0] - fixed[1]).abs() < 1e-5 && (fixed[2] - fixed[1]).abs() < 1e-5);
     }
 
