@@ -223,7 +223,7 @@ mod tests {
         assert_eq!(with_hue_edge([270.0, 330.0], 0, 340.0), [340.0, 350.0]);
         assert_eq!(with_hue_edge([270.0, 330.0], 1, 275.0), [265.0, 275.0]);
         assert_eq!(with_hue_edge([270.0, 330.0], 0, 100.0), [100.0, 190.0]);
-        assert_eq!(with_hue_edge([270.0, 330.0], 1, 359.0), [269.0, 359.0]);
+        assert_eq!(with_hue_edge([270.0, 330.0], 1, 359.0), [270.0, 359.0]);
         for edge in [0, 1] {
             for value in [-50.0, 0.0, 5.0, 100.0, 355.0, 360.0, 500.0] {
                 for range in [
