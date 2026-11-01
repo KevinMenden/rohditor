@@ -84,7 +84,18 @@ impl FallbackExporter {
         on_fallback: impl FnOnce(&str),
     ) -> Result<ExportRender, ExportRenderError> {
         let mut gpu_error = None;
-        if backend != ExportBackend::Cpu {
+        // A CPU-only stage is a routing choice, not a GPU failure: skip the
+        // GPU without touching (or discarding) its device.
+        let cpu_only = rohditor_core::cpu_only_stage_reason(recipe);
+        if let Some(reason) = cpu_only
+            && backend != ExportBackend::Cpu
+        {
+            if backend == ExportBackend::RequireGpu {
+                return Err(ExportRenderError::GpuRequired(reason.to_owned()));
+            }
+            on_fallback(reason);
+            gpu_error = Some(reason.to_owned());
+        } else if backend != ExportBackend::Cpu {
             match self.render_gpu(pipeline, frame, recipe, options, bit_depth, dithering) {
                 Ok(rendered) => return Ok(rendered),
                 Err(error) if backend == ExportBackend::RequireGpu => {

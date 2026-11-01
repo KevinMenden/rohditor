@@ -35,7 +35,7 @@ impl SensorCameraMetadata {
     pub fn capture_contract(&self) -> Result<crate::CaptureSharpeningContract, PipelineError> {
         crate::CaptureSharpeningContract::new(
             self.recipe.capture_sharpening,
-            super::super::capture::ceilings(&self.recipe, self.sensor.white_balance_gains()),
+            super::super::detail::ceilings(&self.recipe, self.sensor.white_balance_gains()),
         )
     }
 
@@ -109,9 +109,7 @@ impl CpuPipeline {
             highlight_adjustments: source.sensor.highlight_adjustments(),
             highlight_white_balance: source.sensor.white_balance(),
             highlight_diagnostics: diagnostics,
-            capture_sharpening: crate::CaptureSharpeningProvenance::for_settings(
-                source.recipe.capture_sharpening,
-            ),
+            detail: crate::DetailProvenance::for_recipe(&source.recipe),
             preparation_timings: timings,
             decoded_raw_bytes: source
                 .frame

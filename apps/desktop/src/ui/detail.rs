@@ -1,12 +1,52 @@
 use eframe::egui;
-use rohditor_edit::{CAPTURE_AMOUNT_RANGE, CAPTURE_NOISE_RANGE, CAPTURE_RADIUS_RANGE};
+use rohditor_edit::{
+    CAPTURE_AMOUNT_RANGE, CAPTURE_NOISE_RANGE, CAPTURE_RADIUS_RANGE, CHROMA_NOISE_REDUCTION_RANGE,
+};
 
 use super::adjustment_panel::{
     AdjustmentPanelOutput, AdjustmentTarget, DocumentPanelModel, record_slider,
 };
 use super::widgets::{AdjustmentSpec, ValueScale};
 
+/// The Detail section: source-resolution steps in pipeline order.
 pub(super) fn show(
+    ui: &mut egui::Ui,
+    document: &mut DocumentPanelModel,
+    output: &mut AdjustmentPanelOutput,
+) {
+    noise_reduction(ui, document, output);
+    ui.separator();
+    capture_sharpening(ui, document, output);
+}
+
+fn noise_reduction(
+    ui: &mut egui::Ui,
+    document: &mut DocumentPanelModel,
+    output: &mut AdjustmentPanelOutput,
+) {
+    ui.label("Noise reduction").on_hover_text(
+        "Removes colour noise at source resolution, before sharpening. Inspect at Source 1:1. \
+         Runs on the CPU, so the preview and export use the CPU path while it is on.",
+    );
+    record_slider(
+        ui,
+        &mut output.interactions,
+        AdjustmentTarget::ChromaNoiseReduction,
+        &mut document.noise_reduction.chroma,
+        AdjustmentSpec {
+            label: "Colour",
+            minimum: CHROMA_NOISE_REDUCTION_RANGE.minimum,
+            maximum: CHROMA_NOISE_REDUCTION_RANGE.maximum,
+            neutral: CHROMA_NOISE_REDUCTION_RANGE.neutral,
+            decimals: 2,
+            step: 0.01,
+            suffix: "",
+            scale: ValueScale::Raw,
+        },
+    );
+}
+
+fn capture_sharpening(
     ui: &mut egui::Ui,
     document: &mut DocumentPanelModel,
     output: &mut AdjustmentPanelOutput,

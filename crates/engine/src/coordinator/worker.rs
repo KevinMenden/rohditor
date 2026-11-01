@@ -120,7 +120,7 @@ pub struct WorkerPreviewDiagnostics {
     pub cache_hits: PreviewCacheHits,
     pub timings: StageTimings,
     pub highlight_diagnostics: HighlightDiagnostics,
-    pub capture_sharpening: Option<rohditor_core::CaptureSharpeningProvenance>,
+    pub detail: Option<rohditor_core::DetailProvenance>,
     pub capture_cpu_recovery: bool,
     pub output_gamut_diagnostics: Option<GamutMappingDiagnostics>,
     pub memory: MemoryEstimate,
@@ -426,13 +426,15 @@ impl RenderCoordinator {
         options: PreviewOptions,
         prefer_gpu: bool,
     ) -> Result<(), String> {
+        // CPU-only stages are routed to the CPU, not treated as GPU failures.
+        let gpu = prefer_gpu && rohditor_core::cpu_only_stage_reason(&recipe).is_none();
         self.previews.queue(
             PreviewJob {
                 ticket,
                 frame,
                 recipe,
                 options,
-                backend: if prefer_gpu {
+                backend: if gpu {
                     PreviewBackend::GpuBase
                 } else {
                     PreviewBackend::Cpu
@@ -1089,7 +1091,7 @@ fn process_source_scale_preview(
                 timings: result.timings,
                 highlight_diagnostics: result.highlight_diagnostics,
                 capture_cpu_recovery: preview_cache.capture_recovery().is_some(),
-                capture_sharpening: result.capture_sharpening,
+                detail: result.detail,
                 output_gamut_diagnostics: Some(result.output_gamut_diagnostics),
                 memory: result.memory,
                 cache_resident_bytes: preview_cache.resident_bytes(),
@@ -1308,7 +1310,7 @@ fn process_gpu_base(
         decoded_raw_bytes: description.decoded_raw_bytes(),
         normalized_mosaic_bytes: description.normalized_mosaic_bytes(),
         highlight_scratch_bytes: description.highlight_scratch_bytes(),
-        capture_sharpening_scratch_bytes: metrics.capture.estimated_host_bytes,
+        detail_scratch_bytes: metrics.capture.estimated_host_bytes,
         optics_output_bytes: 0,
         optics_scratch_bytes: 0,
         resample_intermediate_bytes: 0,
@@ -1332,7 +1334,7 @@ fn process_gpu_base(
         timings,
         highlight_diagnostics: description.highlight_diagnostics(),
         capture_cpu_recovery: preview_cache.capture_recovery().is_some(),
-        capture_sharpening: description.capture_sharpening(),
+        detail: description.detail(),
         output_gamut_diagnostics: None,
         memory,
         cache_resident_bytes,
@@ -1394,9 +1396,9 @@ fn develop_preview(
                 timings,
                 highlight_diagnostics,
                 capture_cpu_recovery: false,
-                capture_sharpening: preview_cache
+                detail: preview_cache
                     .demosaiced(keys)
-                    .and_then(|base| base.capture_sharpening()),
+                    .and_then(|base| base.detail()),
                 output_gamut_diagnostics: Some(cached.output_gamut_diagnostics),
                 memory,
                 cache_resident_bytes: preview_cache.resident_bytes(),
@@ -1451,7 +1453,7 @@ fn develop_preview(
         timings,
         highlight_diagnostics,
         capture_cpu_recovery: false,
-        capture_sharpening: result.capture_sharpening,
+        detail: result.detail,
         output_gamut_diagnostics: Some(result.output_gamut_diagnostics),
         memory,
         cache_resident_bytes: preview_cache.resident_bytes(),
@@ -1676,6 +1678,7 @@ fn add_stage_timings(target: &mut StageTimings, additional: StageTimings) {
     target.highlight_processing += additional.highlight_processing;
     target.highlight_clipping += additional.highlight_clipping;
     target.demosaic += additional.demosaic;
+    target.noise_reduction += additional.noise_reduction;
     target.capture_sharpening += additional.capture_sharpening;
     target.optics += additional.optics;
     target.resampling += additional.resampling;
@@ -1719,8 +1722,9 @@ fn log_preview_diagnostics(
         metadata_us = diagnostics.timings.metadata.as_micros(),
         normalization_us = diagnostics.timings.normalization.as_micros(),
         demosaic_us = diagnostics.timings.demosaic.as_micros(),
+        noise_reduction_us = diagnostics.timings.noise_reduction.as_micros(),
         capture_sharpening_us = diagnostics.timings.capture_sharpening.as_micros(),
-        capture_sharpening = ?diagnostics.capture_sharpening,
+        detail = ?diagnostics.detail,
         optics_us = diagnostics.timings.optics.as_micros(),
         resampling_us = diagnostics.timings.resampling.as_micros(),
         color_us = diagnostics.timings.color_conversion.as_micros(),
@@ -2087,9 +2091,9 @@ mod tests {
         .expect("downstream edit should reuse its base");
 
         assert_ne!(first.0, second.0);
-        assert!(first.2.capture_sharpening.is_some());
+        assert!(first.2.detail.is_some());
         assert!(first.2.timings.capture_sharpening > Duration::ZERO);
-        assert_eq!(first.2.capture_sharpening, second.2.capture_sharpening);
+        assert_eq!(first.2.detail, second.2.detail);
         assert_eq!(second.2.timings.capture_sharpening, Duration::ZERO);
         assert_eq!(second.2.timings.normalization, Duration::ZERO);
         assert_eq!(second.2.timings.demosaic, Duration::ZERO);
@@ -2160,10 +2164,7 @@ mod tests {
         .expect("white balance should reuse reconstructed camera RGB");
         assert_eq!(white_balanced.2.timings.normalization, Duration::ZERO);
         assert_eq!(white_balanced.2.timings.capture_sharpening, Duration::ZERO);
-        assert_eq!(
-            white_balanced.2.capture_sharpening,
-            first.2.capture_sharpening
-        );
+        assert_eq!(white_balanced.2.detail, first.2.detail);
         assert_eq!(white_balanced.2.timings.demosaic, Duration::ZERO);
         assert_eq!(white_balanced.2.timings.resampling, Duration::ZERO);
 

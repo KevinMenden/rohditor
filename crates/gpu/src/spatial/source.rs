@@ -206,7 +206,7 @@ impl GpuCapturedSource {
         capture_contract: &CaptureSharpeningContract,
     ) -> bool {
         self.description.shares_camera_source(description)
-            && self.description.capture_sharpening() == description.capture_sharpening()
+            && self.description.detail() == description.detail()
             && self.description.source_dimensions() == description.source_dimensions()
             && self.capture_contract.settings() == capture_contract.settings()
             && self.capture_contract.ceilings() == capture_contract.ceilings()

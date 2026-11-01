@@ -3,8 +3,8 @@
 use crate::GpuPreviewError;
 use rohditor_core::{
     CAPTURE_SHARPENING_FLOOR, CAPTURE_SHARPENING_ITERATIONS, CPU_WORKING_SET_LIMIT_BYTES,
-    CancellationToken, CaptureSharpeningContract, CaptureSharpeningProvenance, CpuPipeline,
-    DemosaicedCameraSource, ReconstructedPreview,
+    CancellationToken, CaptureSharpeningContract, CpuPipeline, DemosaicedCameraSource,
+    DetailProvenance, ReconstructedPreview,
 };
 use rohditor_image::LinearRgbImage;
 use std::sync::mpsc;
@@ -111,7 +111,13 @@ impl GpuCaptureProcessor {
         source: DemosaicedCameraSource,
         cancellation: &CancellationToken,
     ) -> Result<(rohditor_core::CapturedCameraSource, CaptureMetrics), GpuPreviewError> {
+        if let Some(reason) = rohditor_core::cpu_only_stage_reason(source.recipe()) {
+            return Err(GpuPreviewError::UnsupportedEdits {
+                reason: reason.to_owned(),
+            });
+        }
         let contract = source.capture_contract().map_err(error)?;
+        let provenance = DetailProvenance::for_recipe(source.recipe());
         let (captured, metrics) = match self.process(
             source.image(),
             &contract,
@@ -128,7 +134,7 @@ impl GpuCaptureProcessor {
                     source
                         .with_capture_result(
                             result.image,
-                            CaptureSharpeningProvenance::for_settings(contract.settings()),
+                            provenance,
                             metrics.total,
                             metrics.estimated_host_bytes,
                             cancellation,

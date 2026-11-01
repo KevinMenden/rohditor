@@ -9,6 +9,7 @@ mod camera_look;
 mod cancel;
 mod color;
 mod cpu;
+mod cpu_only;
 mod demosaic;
 mod editing;
 mod error;
@@ -43,6 +44,7 @@ pub use cpu::{
     render_display_srgb8_with_geometry, render_display_srgb16, render_display_srgb16_with_geometry,
     white_balance_gains, white_balance_gains_from_calibration,
 };
+pub use cpu_only::cpu_only_stage_reason;
 pub use editing::{
     WhiteBalanceMode, WhiteBalanceModeMemory, auto_tone, default_recipe, sample_rgb_patch,
     white_balance_from_camera_sample,
@@ -59,10 +61,11 @@ pub use optics::optics_query_from_info;
 pub use output::{paths_refer_to_same_file, write_output_bytes};
 pub use pipeline::{
     CPU_WORKING_SET_LIMIT_BYTES, CapturedCameraSource, CpuPipeline, CpuPreviewWorkspace,
-    DEFAULT_PREVIEW_LONG_EDGE, DemosaicedBase, DemosaicedCameraSource, ExportRenderResult,
-    MemoryEstimate, NormalizationContract, OutputPolicy, PreviewOptions, RawCropPolicy,
-    ReconstructedPreview, RenderOptions, RenderResult, SensorCameraMetadata, SensorCrop,
-    SensorDevelopmentDescription, SpatialCompletionDescription, SpatialOptics, StageTimings,
+    DEFAULT_PREVIEW_LONG_EDGE, DemosaicedBase, DemosaicedCameraSource, DetailProvenance,
+    ExportRenderResult, MemoryEstimate, NOISE_REDUCTION_ALGORITHM_VERSION, NormalizationContract,
+    OutputPolicy, PreviewOptions, RawCropPolicy, ReconstructedPreview, RenderOptions, RenderResult,
+    SensorCameraMetadata, SensorCrop, SensorDevelopmentDescription, SpatialCompletionDescription,
+    SpatialOptics, StageTimings, detail_is_active,
 };
 pub use rendering::{
     BASE_RENDERING_LUT_SIZE, BaseRenderingLut, ROHDITOR_STANDARD_MIDDLE_GRAY, base_rendering_lut,
@@ -85,7 +88,7 @@ pub use rohditor_optics::{
 };
 pub use sharpening::{
     CAPTURE_SHARPENING_ALGORITHM_VERSION, CAPTURE_SHARPENING_FLOOR, CAPTURE_SHARPENING_ITERATIONS,
-    CaptureReferencePlanes, CaptureSharpeningContract, CaptureSharpeningProvenance,
+    CaptureReferencePlanes, CaptureSharpeningContract,
 };
 pub use white_balance::{
     WHITE_BALANCE_ALGORITHM_VERSION, WhiteBalanceCoordinates,
