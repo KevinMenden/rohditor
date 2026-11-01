@@ -19,13 +19,22 @@ impl super::GpuSpatialProcessor {
         cancellation: &CancellationToken,
     ) -> Result<(GpuSpatialPreview, super::SpatialMetrics), GpuPreviewError> {
         check_cancel(cancellation)?;
+        let started = Instant::now();
         let contract = source.detail_contract.clone();
         if !source.matches(&description, &contract) {
             return Err(GpuPreviewError::BaseMismatch {
                 reason: "resident captured source does not match the spatial description".into(),
             });
         }
-        let started = Instant::now();
+        if description.defringe_pending() {
+            let baked = self.baked_source(source, description, cancellation)?;
+            let description = baked.description.clone();
+            let (preview, mut metrics) = self.reduce_preview(&baked, description, cancellation)?;
+            metrics.spatial = started.elapsed();
+            // The unbaked source stays resident while the baked one is reduced.
+            metrics.estimated_gpu_bytes += source.estimated_bytes();
+            return Ok((preview, metrics));
+        }
         let (target_width, target_height) = description.target_dimensions();
         let target_width_u32 =
             u32::try_from(target_width).map_err(|_| invalid("preview target width exceeds u32"))?;

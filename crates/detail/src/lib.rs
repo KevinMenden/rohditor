@@ -20,13 +20,17 @@ mod planes;
 mod test_support;
 
 pub use atrous::{Decomposition, atrous_decompose, atrous_halo, edge_avoiding_decompose};
-pub use defringe::{FringeColour, FringeRemoval, defringe_scratch_bytes, remove_fringes};
+pub use defringe::{
+    DEFRINGE_HALO, DILATE_RADIUS, EDGE_FRACTION, FringeColour, FringeRemoval, HUE_ROLLOFF,
+    LOCAL_MAX_RADIUS, NEIGHBOURHOOD_RADIUS, NEUTRAL_SATURATION, NOISE_SIGMAS, TRUSTED_SATURATION,
+    defringe_scratch_bytes, remove_fringes,
+};
 pub use denoise::{
     CHROMA_HALO, CHROMA_LEVELS, CHROMA_RANGE_SIGMAS, ChromaDenoise, ChromaLevel, LUMA_FLOOR,
     LUMA_HALO, LUMA_LEVELS, LUMA_MAX_GAIN, LUMA_SIGNAL_FLOOR, LUMA_WINDOW_RADIUS, LumaDenoise,
     LumaLevel, NoiseProfiles, chroma_levels, chroma_scratch_bytes, denoise_chroma, denoise_luma,
-    estimate_luma_noise, estimate_noise_profiles, estimate_noise_profiles_sampled, luma_levels,
-    luma_scratch_bytes, noise_sample_rows,
+    estimate_luma_noise, estimate_luma_noise_sampled, estimate_noise_profiles,
+    estimate_noise_profiles_sampled, luma_levels, luma_scratch_bytes, noise_sample_rows,
 };
 pub use false_color::{FalseColor, false_color_scratch_bytes, suppress_false_color};
 pub use gaussian::{gaussian_blur, gaussian_kernel};

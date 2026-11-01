@@ -113,6 +113,7 @@ impl CpuPipeline {
             highlight_diagnostics: diagnostics,
             detail: crate::DetailProvenance::for_recipe(&source.recipe),
             defringe: crate::DefringeProvenance::for_recipe(&source.recipe),
+            defringe_baked: false,
             preparation_timings: timings,
             decoded_raw_bytes: source
                 .frame
