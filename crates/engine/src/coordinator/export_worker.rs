@@ -93,6 +93,7 @@ fn process_export(
         job.settings.format.bit_depth(),
         job.settings.dithering,
         job.settings.size,
+        job.settings.sharpening,
         |error| {
             tracing::warn!(%error, "GPU export failed; using CPU reference");
             send_progress(

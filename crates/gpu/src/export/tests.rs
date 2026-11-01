@@ -79,6 +79,7 @@ fn optics_export_reads_back_only_final_integer_bands() {
                 depth,
                 DitherMode::Ordered8x8,
                 OutputSize::Original,
+                None,
             )
             .expect("CPU optics export");
         let actual = gpu
@@ -154,6 +155,7 @@ fn rcd_export_matches_cpu_with_capture_and_both_gamut_policies() {
                         depth,
                         DitherMode::None,
                         OutputSize::Original,
+                        None,
                     )
                     .expect("CPU RCD export");
                 let actual = gpu
@@ -276,6 +278,7 @@ fn capture_bridge_precedes_reduction_and_matches_export() {
                             depth,
                             dither,
                             OutputSize::Original,
+                            None,
                         )
                         .expect("CPU export");
                     let actual = gpu
@@ -364,6 +367,7 @@ fn export_bands_precision_geometry_and_cancellation() {
                             depth,
                             dither,
                             OutputSize::Original,
+                            None,
                         )
                         .expect("export qualification fixture");
                     let (max, mean) = difference(&actual.image, &reference.image);

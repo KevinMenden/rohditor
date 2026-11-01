@@ -14,6 +14,7 @@ mod false_color;
 mod gaussian;
 mod median;
 mod noise;
+mod output_sharpen;
 mod planes;
 #[cfg(test)]
 mod test_support;
@@ -28,6 +29,7 @@ pub use false_color::{FalseColor, false_color_scratch_bytes, suppress_false_colo
 pub use gaussian::{gaussian_blur, gaussian_kernel};
 pub use median::{median3, median5};
 pub use noise::{NoiseProfile, estimate_noise};
+pub use output_sharpen::{OutputSharpen, output_sharpen_scratch_bytes, sharpen_output};
 pub use planes::{OpponentPlanes, Plane, luma_plane, merge_opponent, split_opponent};
 
 use rohditor_image::ImageError;

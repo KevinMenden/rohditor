@@ -21,7 +21,7 @@ use crate::cpu::{
     apply_white_balance_cancellable, preview_dimensions,
     render_display_srgb8_cancellable_with_geometry,
     render_display_srgb8_dithered_with_geometry_and_diagnostics,
-    render_display_srgb16_with_geometry_and_diagnostics,
+    render_display_srgb16_with_geometry_and_diagnostics, render_sharpened_export,
 };
 use crate::demosaic::demosaic_cancellable;
 use crate::export_resize::crop_and_resize;
@@ -29,7 +29,7 @@ use crate::highlight::{HighlightDiagnostics, apply_cancellable as apply_highligh
 use crate::resample::resize_area_with_plan_cancellable;
 use crate::{
     CancellationToken, DitherMode, ExportImage, GamutMappingDiagnostics, OutputBitDepth,
-    OutputGeometry, OutputSize, PipelineError, apply_adjustments,
+    OutputGeometry, OutputSharpening, OutputSize, PipelineError, apply_adjustments,
 };
 
 /// Default longest edge of an interactively developed preview.
@@ -912,6 +912,7 @@ pub(super) mod render {
                 size_of::<u8>(),
                 geometry,
                 geometry.output_dimensions(),
+                false,
             )?;
             let retained_peak = base
                 .decoded_raw_bytes
@@ -996,6 +997,7 @@ pub(super) mod render {
                 size_of::<u8>(),
                 geometry,
                 geometry.output_dimensions(),
+                false,
             )?;
             let adjustments_started = Instant::now();
             apply_adjustments_cancellable(&mut base.image, recipe, cancellation)?;
@@ -1045,6 +1047,7 @@ pub(super) mod render {
             )
         }
 
+        #[allow(clippy::too_many_arguments)]
         pub fn render_export(
             &self,
             frame: &RawFrame,
@@ -1053,13 +1056,20 @@ pub(super) mod render {
             bit_depth: OutputBitDepth,
             dithering: DitherMode,
             size: OutputSize,
+            sharpening: Option<OutputSharpening>,
         ) -> Result<ExportRenderResult, PipelineError> {
             let total_started = Instant::now();
             let mut base = prepare_base(self.optics.as_deref(), frame, recipe, options)?;
             let mut geometry = output_geometry(&base.image, base.source_orientation, recipe)?;
             let (output_width, output_height) = geometry.output_dimensions();
             let target = size.resolve(output_width, output_height);
-            let memory = memory_estimate(&base, bit_depth.bytes_per_sample(), geometry, target)?;
+            let memory = memory_estimate(
+                &base,
+                bit_depth.bytes_per_sample(),
+                geometry,
+                target,
+                sharpening.is_some(),
+            )?;
             let adjustments_started = Instant::now();
             apply_adjustments(&mut base.image, recipe)?;
             base.timings.adjustments = adjustments_started.elapsed();
@@ -1076,25 +1086,39 @@ pub(super) mod render {
                 Some(resized)
             };
             let source = resized.as_ref().unwrap_or(&base.image);
-            let (image, output_gamut_diagnostics) = match bit_depth {
-                OutputBitDepth::Eight => {
-                    let (image, diagnostics) =
-                        render_display_srgb8_dithered_with_geometry_and_diagnostics(
-                            source,
-                            geometry,
-                            options.output_policy,
-                            dithering,
-                        )?;
-                    (ExportImage::Rgb8(image), diagnostics)
-                }
-                OutputBitDepth::Sixteen => {
-                    let (image, diagnostics) = render_display_srgb16_with_geometry_and_diagnostics(
-                        source,
-                        geometry,
-                        options.output_policy,
-                        dithering,
-                    )?;
-                    (ExportImage::Rgb16(image), diagnostics)
+            let (image, output_gamut_diagnostics) = if let Some(sharpening) = sharpening {
+                // Needs the float-encoded image between encode and quantize.
+                render_sharpened_export(
+                    source,
+                    geometry,
+                    options.output_policy,
+                    dithering,
+                    bit_depth,
+                    sharpening.params(),
+                    &CancellationToken::new(),
+                )?
+            } else {
+                match bit_depth {
+                    OutputBitDepth::Eight => {
+                        let (image, diagnostics) =
+                            render_display_srgb8_dithered_with_geometry_and_diagnostics(
+                                source,
+                                geometry,
+                                options.output_policy,
+                                dithering,
+                            )?;
+                        (ExportImage::Rgb8(image), diagnostics)
+                    }
+                    OutputBitDepth::Sixteen => {
+                        let (image, diagnostics) =
+                            render_display_srgb16_with_geometry_and_diagnostics(
+                                source,
+                                geometry,
+                                options.output_policy,
+                                dithering,
+                            )?;
+                        (ExportImage::Rgb16(image), diagnostics)
+                    }
                 }
             };
             base.timings.output_conversion = output_started.elapsed();
@@ -1489,6 +1513,7 @@ fn render_base(
         size_of::<u8>(),
         geometry,
         geometry.output_dimensions(),
+        false,
     )?;
 
     let adjustments_started = Instant::now();
@@ -1537,6 +1562,7 @@ fn memory_estimate(
     display_sample_bytes: usize,
     output_geometry: OutputGeometry,
     final_dimensions: (usize, usize),
+    output_sharpening: bool,
 ) -> Result<MemoryEstimate, PipelineError> {
     let width = base.image.width();
     let height = base.image.height();
@@ -1564,8 +1590,16 @@ fn memory_estimate(
         .checked_mul(3)
         .and_then(|elements| elements.checked_mul(display_sample_bytes))
         .ok_or_else(|| dimension_overflow(width, height))?;
+    // Sharpening holds a float-encoded copy and its planes next to the output.
+    let output_sharpening_bytes = if output_sharpening {
+        crate::cpu::sharpened_output_bytes(output_width, output_height)
+            .ok_or_else(|| dimension_overflow(output_width, output_height))?
+    } else {
+        0
+    };
     let output_peak = decoded_raw_bytes
         .checked_add(linear_rgb_bytes)
+        .and_then(|bytes| bytes.checked_add(output_sharpening_bytes))
         .and_then(|bytes| bytes.checked_add(export_resize_bytes))
         .and_then(|bytes| bytes.checked_add(display_rgb_bytes))
         .ok_or_else(|| dimension_overflow(width, height))?;
