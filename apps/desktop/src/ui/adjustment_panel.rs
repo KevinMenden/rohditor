@@ -28,6 +28,8 @@ pub(crate) enum AdjustmentTarget {
     Blacks,
     HighlightThreshold,
     ChromaNoiseReduction,
+    LuminanceNoiseReduction,
+    LuminanceDetail,
     CaptureAmount,
     CaptureRadius,
     CaptureNoise,

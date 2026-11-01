@@ -197,20 +197,7 @@ pub fn detail_scores(
 /// Returns `None` if the profile has no rising edge in the window.
 #[must_use]
 pub fn edge_rise_distance(image: &LinearRgbImage<f32>, x0: usize, x1: usize) -> Option<f64> {
-    let (w, h) = (image.width(), image.height());
-    let x1 = x1.min(w);
-    if x0 + 2 > x1 || h == 0 {
-        return None;
-    }
-    let profile: Vec<f64> = (x0..x1)
-        .map(|x| {
-            (0..h)
-                .filter_map(|y| image.pixel(x, y))
-                .map(|p| f64::from(p[0] + 2.0 * p[1] + p[2]) / 4.0)
-                .sum::<f64>()
-                / h as f64
-        })
-        .collect();
+    let profile = row_averaged_luma(image, x0, x1)?;
     let (low, high) = (profile[0], profile[profile.len() - 1]);
     if high - low < 1e-6 {
         return None;
@@ -224,6 +211,47 @@ pub fn edge_rise_distance(image: &LinearRgbImage<f32>, x0: usize, x1: usize) -> 
         })
     };
     Some(crossing(0.9)? - crossing(0.1)?)
+}
+
+/// Edge acutance between columns `x0` and `x1`: the summed squared
+/// per-pixel step of the row-averaged balanced luma profile, relative to the
+/// total edge height. A one-pixel step scores 1 and an edge blurred over `n`
+/// pixels about `1 / n`, so lower means softer. Row averaging removes noise,
+/// so this measures what a denoiser did to the edge itself.
+/// Returns `None` if the window has no edge.
+#[must_use]
+pub fn edge_acutance(image: &LinearRgbImage<f32>, x0: usize, x1: usize) -> Option<f64> {
+    let profile = row_averaged_luma(image, x0, x1)?;
+    let height = profile[profile.len() - 1] - profile[0];
+    if height.abs() < 1e-6 {
+        return None;
+    }
+    Some(
+        profile
+            .windows(2)
+            .map(|pair| ((pair[1] - pair[0]) / height).powi(2))
+            .sum(),
+    )
+}
+
+/// Balanced luma of columns `x0..x1`, averaged over all rows.
+fn row_averaged_luma(image: &LinearRgbImage<f32>, x0: usize, x1: usize) -> Option<Vec<f64>> {
+    let (w, h) = (image.width(), image.height());
+    let x1 = x1.min(w);
+    if x0 + 2 > x1 || h == 0 {
+        return None;
+    }
+    Some(
+        (x0..x1)
+            .map(|x| {
+                (0..h)
+                    .filter_map(|y| image.pixel(x, y))
+                    .map(|p| f64::from(p[0] + 2.0 * p[1] + p[2]) / 4.0)
+                    .sum::<f64>()
+                    / h as f64
+            })
+            .collect(),
+    )
 }
 
 #[cfg(test)]
@@ -315,5 +343,18 @@ mod tests {
         assert!((rise - 8.0).abs() < 1e-4, "{rise}");
         let flat = rgb(30, 3, |_, _, _| 0.3);
         assert!(edge_rise_distance(&flat, 0, 30).is_none());
+    }
+
+    #[test]
+    fn acutance_is_one_for_a_step_and_falls_with_blur() {
+        // 7 columns x 3 rows; the profile is the same on every row.
+        let profile = |values: [f32; 7]| rgb(7, 3, |x, _, _| values[x]);
+        let step = profile([0.1, 0.1, 0.1, 0.9, 0.9, 0.9, 0.9]);
+        assert!((edge_acutance(&step, 0, 7).unwrap() - 1.0).abs() < 1e-9);
+        // Same edge spread evenly over four steps: 4 * (1/4)^2.
+        let ramp = profile([0.1, 0.1, 0.3, 0.5, 0.7, 0.9, 0.9]);
+        assert!((edge_acutance(&ramp, 0, 7).unwrap() - 0.25).abs() < 1e-6);
+        let flat = profile([0.5; 7]);
+        assert_eq!(edge_acutance(&flat, 0, 7), None);
     }
 }
