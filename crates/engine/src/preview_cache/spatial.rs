@@ -364,7 +364,7 @@ impl SpatialCache {
                 .gpu
                 .as_ref()
                 .expect("spatial processor initialized")
-                .full_resolution_source(resident, description)?;
+                .full_resolution_source(resident, description, cancellation)?;
             (
                 PreparedSpatial::Full(full),
                 SpatialMetrics {
@@ -492,7 +492,11 @@ impl SpatialCache {
             metrics.estimated_gpu_bytes =
                 metrics.estimated_gpu_bytes.max(resident.estimated_bytes());
             Ok((
-                PreparedSpatial::Full(spatial.full_resolution_source(resident, description)?),
+                PreparedSpatial::Full(spatial.full_resolution_source(
+                    resident,
+                    description,
+                    cancellation,
+                )?),
                 metrics,
             ))
         } else {

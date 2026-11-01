@@ -286,6 +286,7 @@ fn describe_spatial_completion(
         highlight_diagnostics: source.highlight_diagnostics,
         detail: DetailProvenance::for_recipe(&source.recipe),
         defringe: crate::DefringeProvenance::for_recipe(&source.recipe),
+        defringe_baked: false,
         preparation_timings: source.timings,
         decoded_raw_bytes: source.decoded_raw_bytes,
         normalized_mosaic_bytes: source.normalized_mosaic_bytes,

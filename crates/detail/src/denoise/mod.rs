@@ -43,7 +43,17 @@ pub fn estimate_luma_noise(
     cancellation: &dyn CancellationCheck,
 ) -> Result<Option<NoiseProfile>, DetailError> {
     let sampled = sample_rows(image)?;
-    let luma = luma_plane(&sampled, balance)?;
+    estimate_luma_noise_sampled(&sampled, balance, cancellation)
+}
+
+/// [`estimate_luma_noise`] for rows already gathered with
+/// [`noise_sample_rows`] (stacked in order).
+pub fn estimate_luma_noise_sampled(
+    sampled: &LinearRgbImage<f32>,
+    balance: [f32; 3],
+    cancellation: &dyn CancellationCheck,
+) -> Result<Option<NoiseProfile>, DetailError> {
+    let luma = luma_plane(sampled, balance)?;
     profile_or_none(estimate_noise(&luma, &luma, cancellation))
 }
 

@@ -228,7 +228,7 @@ fn capture_residency_and_exact_reduction_match_cpu_without_camera_readback() {
         }
     }
     let full = processor
-        .full_resolution_source(&resident, description)
+        .full_resolution_source(&resident, description, &CancellationToken::new())
         .expect("full spatial source");
     let gpu_frame = preview_processor
         .render_spatial_full(
@@ -751,4 +751,200 @@ fn readback(processor: &GpuSpatialProcessor, preview: &GpuSpatialPreview) -> Vec
     drop(mapped);
     buffer.unmap();
     result
+}
+
+/// Bayer mosaic of two noisy luma edges, each with a purple band before it and
+/// a green band after it. The second sits on the seam between the defringe
+/// tiles' cores and is weak, with a dark line a few pixels before it, whose
+/// stronger gradient suppresses that edge in the edge mask.
+fn fringed_frame(width: usize, height: usize) -> rohditor_raw::RawFrame {
+    let mut frame = crate::preview::processor::tests::synthetic_frame(Orientation::Normal);
+    let mut state = 0x9e37_79b9_u32;
+    let mut noise = move || {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        state as f32 / u32::MAX as f32 - 0.5
+    };
+    let mosaic: Vec<u16> = (0..width * height)
+        .map(|index| {
+            let (x, y) = (index % width, index / width);
+            let level = match x {
+                0..200 => 0.12,
+                200..512 => 0.5,
+                _ => 0.55,
+            };
+            let base =
+                if (506..508).contains(&x) { 0.0 } else { level } + 0.05 * y as f32 / height as f32;
+            let at_edge = |edge: usize| (edge.saturating_sub(3)..edge, edge..edge + 3);
+            let (purple, green) = (
+                [200, 512].iter().any(|&e| at_edge(e).0.contains(&x)),
+                [200, 512].iter().any(|&e| at_edge(e).1.contains(&x)),
+            );
+            let [r, g, b] = if purple {
+                [base * 2.2, base * 0.2, base * 2.2]
+            } else if green {
+                [base * 0.5, base * 1.15, base * 0.5]
+            } else {
+                [base; 3]
+            };
+            let channel = match (y % 2, x % 2) {
+                (0, 0) => r,
+                (1, 1) => b,
+                _ => g,
+            };
+            ((channel + 0.01 * noise()).clamp(0.0, 1.0) * 60_000.0) as u16
+        })
+        .collect();
+    frame.info.width = width;
+    frame.info.height = height;
+    frame.row_stride = width;
+    frame.mosaic = Arc::from(mosaic);
+    frame
+}
+
+#[test]
+#[ignore = "requires Vulkan; defringe on tiles that cross a seam, with and without optics"]
+fn defringe_matches_the_cpu_across_tile_seams() {
+    let _guard = crate::preview::processor::tests::gpu_test_guard();
+    let (mut processor, _preview) = processors();
+    let token = CancellationToken::new();
+    let (width, height) = (700, 90);
+    let mut with_lens = fringed_frame(width, height);
+    with_lens.info.make = "Sony".into();
+    with_lens.info.model = "ILCE-6400".into();
+    with_lens.info.clean_make = "Sony".into();
+    with_lens.info.clean_model = "Alpha 6400".into();
+    with_lens.info.capture = CaptureMetadata {
+        focal_length: Some(RationalValue {
+            numerator: 35,
+            denominator: 1,
+        }),
+        aperture: Some(RationalValue {
+            numerator: 28,
+            denominator: 10,
+        }),
+        focus_distance: Some(RationalValue {
+            numerator: 10,
+            denominator: 1,
+        }),
+        lens_make: Some("Tamron".into()),
+        lens_model: Some("Tamron 17-70mm F/2.8 Di III-A VC RXD".into()),
+        ..CaptureMetadata::default()
+    };
+    let cpu = CpuPipeline::new(Arc::new(
+        rohditor_core::OpticsService::load_bundled().expect("bundled optics"),
+    ));
+    for (name, frame, optics, long_edge) in [
+        ("no optics", fringed_frame(width, height), false, width),
+        ("with optics", with_lens.clone(), true, width),
+        ("reduced", fringed_frame(width, height), false, 350),
+        ("reduced with optics", with_lens, true, 350),
+    ] {
+        let mut recipe = EditRecipe::default();
+        recipe.defringe.purple_amount = 1.0;
+        recipe.defringe.green_amount = 1.0;
+        recipe.defringe.purple_hue = [250.0, 330.0];
+        if optics {
+            recipe.optics.profile = rohditor_edit::LensProfileSelection::Automatic;
+        }
+        let options = PreviewOptions {
+            max_long_edge: long_edge,
+            ..Default::default()
+        };
+        let source = cpu
+            .prepare_camera_source(&frame, &recipe, options, &token)
+            .expect("camera source");
+        let description = cpu
+            .describe_spatial_completion(&source, &token)
+            .expect("spatial description");
+        assert!(description.defringe_pending());
+        let reference = cpu
+            .complete_camera_source(source.clone().capture_cpu(&token).expect("capture"), &token)
+            .expect("CPU optics, defringe and reduction");
+        let untouched = {
+            let mut plain = recipe.clone();
+            plain.defringe = Default::default();
+            let source = cpu
+                .prepare_camera_source(&frame, &plain, options, &token)
+                .expect("camera source");
+            cpu.complete_camera_source(source.capture_cpu(&token).expect("capture"), &token)
+                .expect("CPU without defringe")
+        };
+        let (resident, _) = processor
+            .upload_captured_source(&cpu, &source, &token)
+            .expect("resident source");
+        if long_edge == width {
+            let full = processor
+                .full_resolution_source(&resident, description.clone(), &token)
+                .expect("baked full-resolution source");
+            assert_eq!(full.optics_provenance().is_some(), optics);
+        }
+        let (preview, metrics) = processor
+            .reduce_preview(&resident, description, &token)
+            .expect("GPU optics, defringe and reduction");
+        assert!(!preview.description.defringe_pending());
+        assert_eq!(
+            preview.description.optics().provenance().is_some(),
+            optics,
+            "baked optics keep their provenance"
+        );
+        assert_eq!(metrics.readback_bytes, 4);
+        let actual = readback(&processor, &preview);
+        let (mut worst, mut changed) = (0.0_f32, 0.0_f32);
+        for ((actual, expected), plain) in actual
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(reference.image().data().as_chunks::<3>().0)
+            .zip(untouched.image().data().as_chunks::<3>().0)
+        {
+            for channel in 0..3 {
+                worst = worst.max(
+                    (actual[channel] - expected[channel]).abs() / (1.0 + expected[channel].abs()),
+                );
+                changed = changed.max((expected[channel] - plain[channel]).abs());
+            }
+        }
+        eprintln!("{name}: max error {worst:e}, defringe changed up to {changed:e}");
+        assert!(changed > 1e-3, "{name}: defringe must visibly act");
+        assert!(worst <= 2.0e-4, "{name}: deviates from CPU by {worst:e}");
+    }
+}
+
+#[test]
+#[ignore = "requires Vulkan; prints the cost of baking optics and defringe at 24 MP"]
+fn defringe_timing_at_24mp() {
+    let _guard = crate::preview::processor::tests::gpu_test_guard();
+    let (mut processor, _preview) = processors();
+    let token = CancellationToken::new();
+    let cpu = CpuPipeline::default();
+    let frame = fringed_frame(6000, 4000);
+    for defringe in [false, true] {
+        let mut recipe = EditRecipe::default();
+        recipe.defringe.purple_amount = if defringe { 1.0 } else { 0.0 };
+        recipe.defringe.green_amount = if defringe { 1.0 } else { 0.0 };
+        let options = PreviewOptions {
+            max_long_edge: 1600,
+            ..Default::default()
+        };
+        let source = cpu
+            .prepare_camera_source(&frame, &recipe, options, &token)
+            .expect("camera source");
+        let description = cpu
+            .describe_spatial_completion(&source, &token)
+            .expect("spatial description");
+        let (resident, _) = processor
+            .upload_captured_source(&cpu, &source, &token)
+            .expect("resident source");
+        let started = std::time::Instant::now();
+        let (_preview, metrics) = processor
+            .reduce_preview(&resident, description, &token)
+            .expect("GPU reduction");
+        eprintln!(
+            "defringe {defringe}: fit reduction {:?}, {} MiB",
+            started.elapsed(),
+            metrics.estimated_gpu_bytes >> 20
+        );
+    }
 }

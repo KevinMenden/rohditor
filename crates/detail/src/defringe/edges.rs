@@ -6,13 +6,13 @@ use crate::{CancellationCheck, DetailError, NoiseProfile, Plane, for_each_row};
 /// A pixel is an edge when its gradient reaches this fraction of the largest
 /// gradient within [`LOCAL_MAX_RADIUS`]: only the dominant edge of each
 /// neighbourhood counts, not the weaker texture beside it.
-const EDGE_FRACTION: f32 = 0.2;
+pub const EDGE_FRACTION: f32 = 0.2;
 /// 9x9 neighbourhood the gradient is compared with.
-const LOCAL_MAX_RADIUS: usize = 4;
+pub const LOCAL_MAX_RADIUS: usize = 4;
 /// How far fringes reach from the edge pixels, in pixels.
-const DILATE_RADIUS: usize = 3;
+pub const DILATE_RADIUS: usize = 3;
 /// Gradients below this many noise standard deviations are not edges.
-const NOISE_SIGMAS: f32 = 6.0;
+pub const NOISE_SIGMAS: f32 = 6.0;
 
 /// 1 where `luma` is within [`DILATE_RADIUS`] pixels of a strong edge, else 0.
 ///
