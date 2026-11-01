@@ -61,12 +61,12 @@ pub use optics::optics_query_from_info;
 pub use output::{paths_refer_to_same_file, write_output_bytes};
 pub use pipeline::{
     CPU_WORKING_SET_LIMIT_BYTES, CapturedCameraSource, CpuPipeline, CpuPreviewWorkspace,
-    DEFAULT_PREVIEW_LONG_EDGE, DemosaicedBase, DemosaicedCameraSource, DetailProvenance,
-    ExportRenderResult, FALSE_COLOR_ALGORITHM_VERSION, MemoryEstimate,
-    NOISE_REDUCTION_ALGORITHM_VERSION, NormalizationContract, OutputPolicy, PreviewOptions,
-    RawCropPolicy, ReconstructedPreview, RenderOptions, RenderResult, SensorCameraMetadata,
-    SensorCrop, SensorDevelopmentDescription, SpatialCompletionDescription, SpatialOptics,
-    StageTimings, detail_is_active,
+    DEFAULT_PREVIEW_LONG_EDGE, DEFRINGE_ALGORITHM_VERSION, DefringeProvenance, DemosaicedBase,
+    DemosaicedCameraSource, DetailProvenance, ExportRenderResult, FALSE_COLOR_ALGORITHM_VERSION,
+    MemoryEstimate, NOISE_REDUCTION_ALGORITHM_VERSION, NormalizationContract, OutputPolicy,
+    PreviewOptions, RawCropPolicy, ReconstructedPreview, RenderOptions, RenderResult,
+    SensorCameraMetadata, SensorCrop, SensorDevelopmentDescription, SpatialCompletionDescription,
+    SpatialOptics, StageTimings, detail_is_active,
 };
 pub use rendering::{
     BASE_RENDERING_LUT_SIZE, BaseRenderingLut, ROHDITOR_STANDARD_MIDDLE_GRAY, base_rendering_lut,

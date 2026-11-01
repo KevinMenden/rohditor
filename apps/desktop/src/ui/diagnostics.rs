@@ -35,6 +35,7 @@ pub(crate) struct TimingModel {
     pub luminance_noise_reduction: Duration,
     pub capture_sharpening: Duration,
     pub optics: Duration,
+    pub defringe: Duration,
     pub resampling: Duration,
     pub color_conversion: Duration,
     pub adjustments: Duration,
@@ -274,6 +275,7 @@ pub(crate) fn show(
                     );
                     duration_row(ui, "Capture sharpening", preview.timings.capture_sharpening);
                     duration_row(ui, "Optics", preview.timings.optics);
+                    duration_row(ui, "Defringe", preview.timings.defringe);
                     duration_row(ui, "Area reduction", preview.timings.resampling);
                     duration_row(ui, "Color conversion", preview.timings.color_conversion);
                     duration_row(ui, "Adjustments", preview.timings.adjustments);
@@ -552,6 +554,7 @@ pub(crate) struct TimingReport {
     pub luminance_noise_reduction: f64,
     pub capture_sharpening: f64,
     pub optics: f64,
+    pub defringe: f64,
     pub resampling: f64,
     pub color_conversion: f64,
     pub adjustments: f64,
@@ -571,6 +574,7 @@ impl From<TimingModel> for TimingReport {
             luminance_noise_reduction: duration_milliseconds(value.luminance_noise_reduction),
             capture_sharpening: duration_milliseconds(value.capture_sharpening),
             optics: duration_milliseconds(value.optics),
+            defringe: duration_milliseconds(value.defringe),
             resampling: duration_milliseconds(value.resampling),
             color_conversion: duration_milliseconds(value.color_conversion),
             adjustments: duration_milliseconds(value.adjustments),

@@ -14,10 +14,11 @@ use anyhow::{Context, Result};
 use clap::ValueEnum;
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_detail::{
-    ChromaDenoise, FalseColor, LumaDenoise, NeverCancelled, denoise_chroma, denoise_luma,
-    estimate_luma_noise, estimate_noise, gaussian_blur, luma_plane, split_opponent,
-    suppress_false_color,
+    ChromaDenoise, FalseColor, FringeColour, FringeRemoval, LumaDenoise, NeverCancelled,
+    denoise_chroma, denoise_luma, estimate_luma_noise, estimate_noise, gaussian_blur, luma_plane,
+    remove_fringes, split_opponent, suppress_false_color,
 };
+use rohditor_edit::{DEFAULT_GREEN_HUE, DEFAULT_PURPLE_HUE};
 use rohditor_image::LinearRgbImage;
 use rohditor_reference::detail_scenes::{self, DetailScene, EDGE_PERIOD, Scene};
 use rohditor_reference::metrics::{detail_scores, edge_acutance, edge_rise_distance};
@@ -46,6 +47,8 @@ pub(super) enum DetailStage {
     /// Experiment: false-colour suppression applied only where the luma
     /// high-pass is strong (blend weight reaches 1 at [`MASK_FULL`]).
     FalseColorMasked,
+    /// Defringe at `--strength` for both purple and green, default hue ranges.
+    Defringe,
 }
 
 /// Knobs shared by the stages; each stage reads the ones it has.
@@ -88,6 +91,26 @@ impl DetailStage {
                 if matches!(self, Self::FalseColorMasked) {
                     blend_by_luma_highpass(input, &mut output)?;
                 }
+            }
+            Self::Defringe => {
+                let noise = estimate_luma_noise(input, BALANCE, &NeverCancelled)?;
+                let colour = |hue| FringeColour {
+                    amount: settings.strength,
+                    hue,
+                };
+                remove_fringes(
+                    &mut output,
+                    FringeRemoval {
+                        purple: colour(DEFAULT_PURPLE_HUE),
+                        green: colour(DEFAULT_GREEN_HUE),
+                        balance: BALANCE,
+                        // Hue is judged on the scene's own RGB.
+                        to_rec2020: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                        ceilings: CEILINGS,
+                        noise,
+                    },
+                    &NeverCancelled,
+                )?;
             }
             Self::ChromaNr | Self::LumaNr => {
                 // Too small to profile: the stage leaves the image alone.

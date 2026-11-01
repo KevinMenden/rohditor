@@ -1,6 +1,7 @@
 use eframe::egui;
 use rohditor_edit::{
     CAPTURE_AMOUNT_RANGE, CAPTURE_NOISE_RANGE, CAPTURE_RADIUS_RANGE, CHROMA_NOISE_REDUCTION_RANGE,
+    DEFAULT_GREEN_HUE, DEFAULT_PURPLE_HUE, DEFRINGE_AMOUNT_RANGE, DEFRINGE_HUE_RANGE_DEGREES,
     FALSE_COLOR_MAX_STEPS, LUMINANCE_DETAIL_RANGE, LUMINANCE_NOISE_REDUCTION_RANGE, ParameterRange,
 };
 
@@ -20,6 +21,81 @@ pub(super) fn show(
     noise_reduction(ui, document, output);
     ui.separator();
     capture_sharpening(ui, document, output);
+    ui.separator();
+    defringe(ui, document, output);
+}
+
+/// Purple and green fringe removal, each with an amount and a hue range
+/// (two sliders: the range ends).
+fn defringe(
+    ui: &mut egui::Ui,
+    document: &mut DocumentPanelModel,
+    output: &mut AdjustmentPanelOutput,
+) {
+    ui.label("Defringe").on_hover_text(
+        "Removes purple and green colour fringes along high-contrast edges (branches against \
+         sky, bright highlights). Only pixels next to strong edges whose hue falls in the range \
+         are touched; they lose colour but keep their brightness. Inspect at Source 1:1. Runs \
+         on the CPU, so the preview and export use the CPU path while it is on.",
+    );
+    let settings = &mut document.defringe;
+    let purple_active = settings.purple_active();
+    let green_active = settings.green_active();
+    for (name, amount_target, start_target, end_target, active, amount, hue, default_hue) in [
+        (
+            "Purple",
+            AdjustmentTarget::DefringePurpleAmount,
+            AdjustmentTarget::DefringePurpleHueStart,
+            AdjustmentTarget::DefringePurpleHueEnd,
+            purple_active,
+            &mut settings.purple_amount,
+            &mut settings.purple_hue,
+            DEFAULT_PURPLE_HUE,
+        ),
+        (
+            "Green",
+            AdjustmentTarget::DefringeGreenAmount,
+            AdjustmentTarget::DefringeGreenHueStart,
+            AdjustmentTarget::DefringeGreenHueEnd,
+            green_active,
+            &mut settings.green_amount,
+            &mut settings.green_hue,
+            DEFAULT_GREEN_HUE,
+        ),
+    ] {
+        record_slider(
+            ui,
+            &mut output.interactions,
+            amount_target,
+            amount,
+            slider(name, DEFRINGE_AMOUNT_RANGE),
+        );
+        // The hue range has nothing to act on while the colour is off.
+        let [start, end] = hue;
+        ui.add_enabled_ui(active, |ui| {
+            for (target, label, value, neutral) in [
+                (start_target, "Hue from", start, default_hue[0]),
+                (end_target, "Hue to", end, default_hue[1]),
+            ] {
+                record_slider(
+                    ui,
+                    &mut output.interactions,
+                    target,
+                    value,
+                    AdjustmentSpec {
+                        label,
+                        minimum: DEFRINGE_HUE_RANGE_DEGREES.minimum,
+                        maximum: DEFRINGE_HUE_RANGE_DEGREES.maximum,
+                        neutral,
+                        decimals: 0,
+                        step: 1.0,
+                        suffix: "°",
+                        scale: ValueScale::Raw,
+                    },
+                );
+            }
+        });
+    }
 }
 
 fn false_color(
