@@ -1,7 +1,7 @@
 use eframe::egui;
 use rohditor_edit::{
     CAPTURE_AMOUNT_RANGE, CAPTURE_NOISE_RANGE, CAPTURE_RADIUS_RANGE, CHROMA_NOISE_REDUCTION_RANGE,
-    LUMINANCE_DETAIL_RANGE, LUMINANCE_NOISE_REDUCTION_RANGE, ParameterRange,
+    FALSE_COLOR_MAX_STEPS, LUMINANCE_DETAIL_RANGE, LUMINANCE_NOISE_REDUCTION_RANGE, ParameterRange,
 };
 
 use super::adjustment_panel::{
@@ -15,9 +15,43 @@ pub(super) fn show(
     document: &mut DocumentPanelModel,
     output: &mut AdjustmentPanelOutput,
 ) {
+    false_color(ui, document, output);
+    ui.separator();
     noise_reduction(ui, document, output);
     ui.separator();
     capture_sharpening(ui, document, output);
+}
+
+fn false_color(
+    ui: &mut egui::Ui,
+    document: &mut DocumentPanelModel,
+    output: &mut AdjustmentPanelOutput,
+) {
+    // A whole-step slider: the recipe stores a count, the widget a float.
+    let mut steps = f32::from(document.false_color.steps);
+    record_slider(
+        ui,
+        &mut output.interactions,
+        AdjustmentTarget::FalseColorSteps,
+        &mut steps,
+        AdjustmentSpec {
+            label: "Moiré / false colour",
+            minimum: 0.0,
+            maximum: f32::from(FALSE_COLOR_MAX_STEPS),
+            neutral: 0.0,
+            decimals: 0,
+            step: 1.0,
+            suffix: "",
+            scale: ValueScale::Raw,
+        },
+    )
+    .on_hover_text(
+        "Removes rainbow-coloured bands that fine patterns (fabric, screens, distant buildings) \
+         cause in demosaicing. Each step smooths colour further and can wash out tiny colour \
+         details. Does not touch luminance. Inspect at Source 1:1. Runs on the CPU, so the \
+         preview and export use the CPU path while it is on.",
+    );
+    document.false_color.steps = steps.round() as u8;
 }
 
 fn noise_reduction(

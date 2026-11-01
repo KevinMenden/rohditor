@@ -14,7 +14,10 @@ mod types;
 pub use orchestration::{CapturedCameraSource, DemosaicedCameraSource, SensorCameraMetadata};
 pub use sensor::{NormalizationContract, SensorCrop, SensorDevelopmentDescription};
 
-pub use detail::{DetailProvenance, NOISE_REDUCTION_ALGORITHM_VERSION, detail_is_active};
+pub use detail::{
+    DetailProvenance, FALSE_COLOR_ALGORITHM_VERSION, NOISE_REDUCTION_ALGORITHM_VERSION,
+    detail_is_active,
+};
 pub use memory::{CPU_WORKING_SET_LIMIT_BYTES, MemoryEstimate};
 pub use prepare::{CpuPreviewWorkspace, DemosaicedBase, ReconstructedPreview};
 pub use render::CpuPipeline;
