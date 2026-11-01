@@ -4,8 +4,8 @@
 //! failure recovery, and the CPU reference fallback.
 
 use rohditor_core::{
-    CancellationToken, CpuPipeline, DitherMode, ExportRenderResult, OutputBitDepth, OutputSize,
-    PipelineError, RenderOptions,
+    CancellationToken, CpuPipeline, DitherMode, ExportRenderResult, OutputBitDepth,
+    OutputSharpening, OutputSize, PipelineError, RenderOptions,
 };
 use rohditor_edit::EditRecipe;
 use rohditor_raw::RawFrame;
@@ -82,14 +82,18 @@ impl FallbackExporter {
         bit_depth: OutputBitDepth,
         dithering: DitherMode,
         size: OutputSize,
+        sharpening: Option<OutputSharpening>,
         on_fallback: impl FnOnce(&str),
     ) -> Result<ExportRender, ExportRenderError> {
         let mut gpu_error = None;
         // A CPU-only stage is a routing choice, not a GPU failure: skip the
         // GPU without touching (or discarding) its device.
-        // Export resize has no GPU path yet (#78).
+        // Export resize and output sharpening have no GPU path yet (#78).
         let cpu_only = rohditor_core::cpu_only_stage_reason(recipe)
-            .or((size != OutputSize::Original).then_some("export resize runs on the CPU"));
+            .or((size != OutputSize::Original).then_some("export resize runs on the CPU"))
+            .or(sharpening
+                .is_some()
+                .then_some("output sharpening runs on the CPU"));
         if let Some(reason) = cpu_only
             && backend != ExportBackend::Cpu
         {
@@ -110,7 +114,9 @@ impl FallbackExporter {
                 }
             }
         }
-        let result = pipeline.render_export(frame, recipe, options, bit_depth, dithering, size)?;
+        let result = pipeline.render_export(
+            frame, recipe, options, bit_depth, dithering, size, sharpening,
+        )?;
         Ok(ExportRender::Cpu { result, gpu_error })
     }
 
