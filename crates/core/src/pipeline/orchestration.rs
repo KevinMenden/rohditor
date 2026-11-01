@@ -124,20 +124,27 @@ pub struct StageTimings {
 pub enum SpatialOptics {
     Off,
     Enabled(Box<OpticsExecution>),
+    /// Already applied to the pixels of the source this describes (an
+    /// executor baked optics in before defringe): nothing left to execute.
+    Applied(Box<OpticsProvenance>),
 }
 
 impl SpatialOptics {
     #[must_use]
     pub fn execution(&self) -> Option<&OpticsExecution> {
         match self {
-            Self::Off => None,
+            Self::Off | Self::Applied(_) => None,
             Self::Enabled(execution) => Some(execution.as_ref()),
         }
     }
 
     #[must_use]
     pub fn provenance(&self) -> Option<&OpticsProvenance> {
-        self.execution().map(OpticsExecution::provenance)
+        match self {
+            Self::Off => None,
+            Self::Enabled(execution) => Some(execution.provenance()),
+            Self::Applied(provenance) => Some(provenance),
+        }
     }
 }
 
@@ -170,6 +177,8 @@ pub struct SpatialCompletionDescription {
     highlight_diagnostics: HighlightDiagnostics,
     detail: Option<crate::DetailProvenance>,
     defringe: Option<crate::DefringeProvenance>,
+    /// Optics and defringe are already part of the pixels this describes.
+    defringe_baked: bool,
     preparation_timings: StageTimings,
     decoded_raw_bytes: usize,
     normalized_mosaic_bytes: usize,
@@ -242,6 +251,25 @@ impl SpatialCompletionDescription {
     #[must_use]
     pub const fn detail(&self) -> Option<crate::DetailProvenance> {
         self.detail
+    }
+
+    /// This description for pixels that went through optics and defringe
+    /// already (see [`SpatialOptics::Applied`]), as an executor that bakes
+    /// both into its source produces them.
+    #[must_use]
+    pub fn with_defringe_baked(mut self) -> Self {
+        if let SpatialOptics::Enabled(execution) = &self.optics {
+            self.optics = SpatialOptics::Applied(Box::new(execution.provenance().clone()));
+        }
+        self.defringe_baked = true;
+        self
+    }
+
+    /// Whether the source still has to be defringed (after optics) before
+    /// reduction or development.
+    #[must_use]
+    pub const fn defringe_pending(&self) -> bool {
+        self.defringe.is_some() && !self.defringe_baked
     }
 
     /// The defringe step the spatial stage will run, if any.

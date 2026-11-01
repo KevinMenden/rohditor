@@ -4,11 +4,11 @@ use std::f32::consts::PI;
 
 /// Fraction of a hue range, at each end, over which membership rises from 0
 /// to 1 (raised cosine). The middle of the range is fully inside.
-const HUE_ROLLOFF: f32 = 0.25;
+pub const HUE_ROLLOFF: f32 = 0.25;
 /// Colourfulness (`(max - min) / max`) below which a pixel counts as neutral,
 /// and above which its hue is trusted completely.
-const NEUTRAL_SATURATION: f32 = 0.03;
-const TRUSTED_SATURATION: f32 = 0.12;
+pub const NEUTRAL_SATURATION: f32 = 0.03;
+pub const TRUSTED_SATURATION: f32 = 0.12;
 
 /// Hue in degrees `[0, 360)` and saturation (`(max - min) / max`) of an
 /// RGB triple, or `None` if it is not finite or has no positive channel.
