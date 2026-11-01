@@ -167,6 +167,22 @@ enum Command {
         #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..=5))]
         false_color_steps: u8,
 
+        /// Purple defringe strength (0 to 1; 0 is off). Runs on the CPU.
+        #[arg(long, default_value_t = 0.0)]
+        defringe_purple: f32,
+
+        /// Hue range of purple fringes in degrees, `START,END` (10 to 90 wide).
+        #[arg(long, value_name = "START,END", default_value = "270,330", value_parser = parse_hue_range)]
+        defringe_purple_hue: [f32; 2],
+
+        /// Green defringe strength (0 to 1; 0 is off). Runs on the CPU.
+        #[arg(long, default_value_t = 0.0)]
+        defringe_green: f32,
+
+        /// Hue range of green fringes in degrees, `START,END` (10 to 90 wide).
+        #[arg(long, value_name = "START,END", default_value = "75,150", value_parser = parse_hue_range)]
+        defringe_green_hue: [f32; 2],
+
         /// Chroma noise reduction strength (0 to 1; 0 is off). Runs on the CPU.
         #[arg(long, default_value_t = 0.0)]
         chroma_nr: f32,
@@ -628,6 +644,10 @@ pub(crate) fn run() -> Result<()> {
             camera_profile,
             rendering_profile,
             false_color_steps,
+            defringe_purple,
+            defringe_purple_hue,
+            defringe_green,
+            defringe_green_hue,
             chroma_nr,
             luma_nr,
             luma_nr_detail,
@@ -674,6 +694,10 @@ pub(crate) fn run() -> Result<()> {
                 camera_profile,
                 rendering_profile,
                 false_color_steps,
+                defringe_purple,
+                defringe_purple_hue,
+                defringe_green,
+                defringe_green_hue,
                 chroma_nr,
                 luma_nr,
                 luma_nr_detail,
@@ -809,6 +833,7 @@ struct QualityTimingReport {
     luminance_noise_reduction: f64,
     capture_sharpening: f64,
     optics: f64,
+    defringe: f64,
     resampling: f64,
     color_conversion: f64,
     adjustments: f64,
@@ -828,6 +853,7 @@ impl From<StageTimings> for QualityTimingReport {
             luminance_noise_reduction: milliseconds(value.luminance_noise_reduction),
             capture_sharpening: milliseconds(value.capture_sharpening),
             optics: milliseconds(value.optics),
+            defringe: milliseconds(value.defringe),
             resampling: milliseconds(value.resampling),
             color_conversion: milliseconds(value.color_conversion),
             adjustments: milliseconds(value.adjustments),
@@ -918,6 +944,10 @@ struct DevelopArguments {
     camera_profile: Option<PathBuf>,
     rendering_profile: CliRenderingProfile,
     false_color_steps: u8,
+    defringe_purple: f32,
+    defringe_purple_hue: [f32; 2],
+    defringe_green: f32,
+    defringe_green_hue: [f32; 2],
     chroma_nr: f32,
     luma_nr: f32,
     luma_nr_detail: f32,
@@ -1104,6 +1134,12 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
     recipe.false_color = rohditor_edit::FalseColorSuppression {
         steps: arguments.false_color_steps,
     };
+    recipe.defringe = rohditor_edit::Defringe {
+        purple_amount: arguments.defringe_purple,
+        purple_hue: arguments.defringe_purple_hue,
+        green_amount: arguments.defringe_green,
+        green_hue: arguments.defringe_green_hue,
+    };
     recipe.noise_reduction = rohditor_edit::NoiseReduction {
         chroma: arguments.chroma_nr,
         luminance: arguments.luma_nr,
@@ -1281,10 +1317,12 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
         ),
     };
     let optics_report = format!(
-        "{}\nFalse colour: {:?} (algorithm v{})\nNoise reduction: {:?} (algorithm v{})\nCapture sharpening: {:?} (algorithm v{}, {} iterations)",
+        "{}\nFalse colour: {:?} (algorithm v{})\nDefringe: {:?} (algorithm v{})\nNoise reduction: {:?} (algorithm v{})\nCapture sharpening: {:?} (algorithm v{}, {} iterations)",
         format_optics_report(&recipe.optics, result.optics_provenance.as_ref()),
         recipe.false_color,
         rohditor_core::FALSE_COLOR_ALGORITHM_VERSION,
+        recipe.defringe,
+        rohditor_core::DEFRINGE_ALGORITHM_VERSION,
         recipe.noise_reduction,
         rohditor_core::NOISE_REDUCTION_ALGORITHM_VERSION,
         recipe.capture_sharpening,
@@ -1335,6 +1373,19 @@ fn optics_adjustments(arguments: &DevelopArguments) -> Result<OpticsAdjustments>
         vignetting: !arguments.no_lens_vignetting,
         chromatic_aberration: !arguments.no_lens_tca,
     })
+}
+
+/// Parse `START,END` degrees. Range checks are left to recipe validation.
+fn parse_hue_range(value: &str) -> Result<[f32; 2], String> {
+    let (start, end) = value
+        .split_once(',')
+        .ok_or_else(|| "expected START,END in degrees".to_owned())?;
+    let parse = |text: &str| {
+        text.trim()
+            .parse::<f32>()
+            .map_err(|error| error.to_string())
+    };
+    Ok([parse(start)?, parse(end)?])
 }
 
 fn parse_lens_profile(value: &str) -> Result<LensProfileSelection> {
@@ -1961,7 +2012,7 @@ fn format_quality(format: ExportFormat) -> String {
 
 fn format_stage_timings(decode: Duration, timings: StageTimings, encode: Duration) -> String {
     format!(
-        "CPU stages: decode {:.1} ms, metadata {:.1} ms, normalize {:.1} ms, highlight processing {:.1} ms, demosaic {:.1} ms, false colour {:.1} ms, chroma NR {:.1} ms, luminance NR {:.1} ms, capture sharpening {:.1} ms, optics {:.1} ms, area resize {:.1} ms, color {:.1} ms, adjustments {:.1} ms, output {:.1} ms, pipeline total {:.1} ms, export encode/commit {:.1} ms",
+        "CPU stages: decode {:.1} ms, metadata {:.1} ms, normalize {:.1} ms, highlight processing {:.1} ms, demosaic {:.1} ms, false colour {:.1} ms, chroma NR {:.1} ms, luminance NR {:.1} ms, capture sharpening {:.1} ms, optics {:.1} ms, defringe {:.1} ms, area resize {:.1} ms, color {:.1} ms, adjustments {:.1} ms, output {:.1} ms, pipeline total {:.1} ms, export encode/commit {:.1} ms",
         decode.as_secs_f64() * 1_000.0,
         timings.metadata.as_secs_f64() * 1_000.0,
         timings.normalization.as_secs_f64() * 1_000.0,
@@ -1972,6 +2023,7 @@ fn format_stage_timings(decode: Duration, timings: StageTimings, encode: Duratio
         timings.luminance_noise_reduction.as_secs_f64() * 1_000.0,
         timings.capture_sharpening.as_secs_f64() * 1_000.0,
         timings.optics.as_secs_f64() * 1_000.0,
+        timings.defringe.as_secs_f64() * 1_000.0,
         timings.resampling.as_secs_f64() * 1_000.0,
         timings.color_conversion.as_secs_f64() * 1_000.0,
         timings.adjustments.as_secs_f64() * 1_000.0,
@@ -2229,6 +2281,10 @@ mod tests {
             camera_profile: None,
             rendering_profile: CliRenderingProfile::Standard,
             false_color_steps: 0,
+            defringe_purple: 0.0,
+            defringe_purple_hue: [270.0, 330.0],
+            defringe_green: 0.0,
+            defringe_green_hue: [75.0, 150.0],
             chroma_nr: 0.0,
             luma_nr: 0.0,
             luma_nr_detail: 0.5,

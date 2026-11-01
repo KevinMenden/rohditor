@@ -110,6 +110,7 @@ impl CpuPipeline {
             highlight_white_balance: source.sensor.white_balance(),
             highlight_diagnostics: diagnostics,
             detail: crate::DetailProvenance::for_recipe(&source.recipe),
+            defringe: crate::DefringeProvenance::for_recipe(&source.recipe),
             preparation_timings: timings,
             decoded_raw_bytes: source
                 .frame

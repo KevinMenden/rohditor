@@ -8,6 +8,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 mod atrous;
+mod defringe;
 mod denoise;
 mod false_color;
 mod gaussian;
@@ -18,6 +19,7 @@ mod planes;
 mod test_support;
 
 pub use atrous::{Decomposition, atrous_decompose, atrous_halo, edge_avoiding_decompose};
+pub use defringe::{FringeColour, FringeRemoval, defringe_scratch_bytes, remove_fringes};
 pub use denoise::{
     ChromaDenoise, LumaDenoise, chroma_scratch_bytes, denoise_chroma, denoise_luma,
     estimate_luma_noise, luma_scratch_bytes,
