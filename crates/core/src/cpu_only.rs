@@ -14,6 +14,9 @@ pub fn cpu_only_stage_reason(recipe: &EditRecipe) -> Option<&'static str> {
     if recipe.false_color.is_active() {
         return Some("false-colour suppression runs on the CPU");
     }
+    if recipe.defringe.is_active() {
+        return Some("defringe runs on the CPU");
+    }
     if recipe.noise_reduction.is_active() {
         return Some("noise reduction runs on the CPU");
     }
@@ -36,6 +39,10 @@ mod tests {
         recipe.noise_reduction.chroma = 0.0;
         recipe.noise_reduction.luminance = 0.3;
         assert!(cpu_only_stage_reason(&recipe).is_some());
+        recipe.noise_reduction.luminance = 0.0;
+        recipe.defringe.green_amount = 0.2;
+        assert!(cpu_only_stage_reason(&recipe).is_some());
+        recipe.defringe.green_amount = 0.0;
         // The texture setting alone does no work.
         recipe.noise_reduction.luminance = 0.0;
         recipe.noise_reduction.luminance_detail = 0.9;

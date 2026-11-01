@@ -3,6 +3,7 @@
 mod camera_chroma;
 mod camera_tone;
 mod color;
+mod defringe;
 mod false_color;
 mod light_settings;
 mod noise_reduction;
@@ -15,6 +16,7 @@ mod validation;
 pub use camera_chroma::*;
 pub use camera_tone::*;
 pub use color::*;
+pub use defringe::*;
 pub use false_color::*;
 pub use light_settings::*;
 pub use noise_reduction::*;

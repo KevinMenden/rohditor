@@ -21,7 +21,7 @@ use rohditor_edit::{
     FALSE_COLOR_MAX_STEPS, HIGHLIGHT_THRESHOLD_RANGE, HIGHLIGHTS_RANGE, HSL_CHANNEL_COUNT,
     HSL_HUE_RANGE, HSL_LUMINANCE_RANGE, HSL_SATURATION_RANGE, HighlightMethod, SATURATION_RANGE,
     SHADOWS_RANGE, TEMPERATURE_RANGE, TINT_RANGE, TONE_CURVE_RANGE, VIBRANCE_RANGE,
-    WHITE_BALANCE_MULTIPLIER_RANGE, WHITES_RANGE, WhiteBalance,
+    WHITE_BALANCE_MULTIPLIER_RANGE, WHITES_RANGE, WhiteBalance, with_hue_edge,
 };
 use rohditor_raw::{RawFileInfo, RawFrame};
 use tracing::{info, warn};
@@ -2526,6 +2526,7 @@ impl RohditorApp {
                         luminance_noise_reduction: preview.worker.timings.luminance_noise_reduction,
                         capture_sharpening: preview.worker.timings.capture_sharpening,
                         optics: preview.worker.timings.optics,
+                        defringe: preview.worker.timings.defringe,
                         resampling: preview.worker.timings.resampling,
                         color_conversion: preview.worker.timings.color_conversion,
                         adjustments: preview.worker.timings.adjustments,
@@ -3079,6 +3080,7 @@ fn document_panel_model(
         false_color: document.edits.recipe().false_color,
         noise_reduction: document.edits.recipe().noise_reduction,
         capture_sharpening: document.edits.recipe().capture_sharpening,
+        defringe: document.edits.recipe().defringe,
     }
 }
 
@@ -3306,7 +3308,13 @@ fn apply_adjustment_interaction(
                 | AdjustmentTarget::LuminanceDetail
                 | AdjustmentTarget::CaptureAmount
                 | AdjustmentTarget::CaptureRadius
-                | AdjustmentTarget::CaptureNoise => {}
+                | AdjustmentTarget::CaptureNoise
+                | AdjustmentTarget::DefringePurpleAmount
+                | AdjustmentTarget::DefringePurpleHueStart
+                | AdjustmentTarget::DefringePurpleHueEnd
+                | AdjustmentTarget::DefringeGreenAmount
+                | AdjustmentTarget::DefringeGreenHueStart
+                | AdjustmentTarget::DefringeGreenHueEnd => {}
                 AdjustmentTarget::Exposure
                 | AdjustmentTarget::Contrast
                 | AdjustmentTarget::Highlights
@@ -3353,6 +3361,20 @@ fn apply_adjustment_interaction(
         AdjustmentTarget::CaptureRadius => next.capture_sharpening.radius = interaction.value,
         AdjustmentTarget::CaptureNoise => {
             next.capture_sharpening.noise_protection = interaction.value
+        }
+        AdjustmentTarget::DefringePurpleAmount => next.defringe.purple_amount = interaction.value,
+        AdjustmentTarget::DefringePurpleHueStart => {
+            next.defringe.purple_hue = with_hue_edge(next.defringe.purple_hue, 0, interaction.value)
+        }
+        AdjustmentTarget::DefringePurpleHueEnd => {
+            next.defringe.purple_hue = with_hue_edge(next.defringe.purple_hue, 1, interaction.value)
+        }
+        AdjustmentTarget::DefringeGreenAmount => next.defringe.green_amount = interaction.value,
+        AdjustmentTarget::DefringeGreenHueStart => {
+            next.defringe.green_hue = with_hue_edge(next.defringe.green_hue, 0, interaction.value)
+        }
+        AdjustmentTarget::DefringeGreenHueEnd => {
+            next.defringe.green_hue = with_hue_edge(next.defringe.green_hue, 1, interaction.value)
         }
         AdjustmentTarget::Exposure => next.light.exposure_ev = interaction.value,
         AdjustmentTarget::Contrast => next.light.contrast = interaction.value,
