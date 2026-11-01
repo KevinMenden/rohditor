@@ -13,9 +13,9 @@ use rohditor_camera_profile::parse_dcp_file;
 use rohditor_core::{
     CameraCalibration, CpuPipeline, DitherMode, ExportFormat, ExportImage, ExportMetadataPolicy,
     ExportSettings, HighlightDiagnostics, JPEG_QUALITY_DEFAULT, JPEG_QUALITY_MAX, JPEG_QUALITY_MIN,
-    OpticsService, OutputPolicy, PngBitDepth, RawCropPolicy, RenderOptions, StageTimings,
-    WhiteBalanceCoordinates, export_image, paths_refer_to_same_file, resolve_camera_colour,
-    write_output_bytes,
+    OpticsService, OutputPolicy, OutputSize, PngBitDepth, RawCropPolicy, RenderOptions,
+    StageTimings, WhiteBalanceCoordinates, export_image, paths_refer_to_same_file,
+    resolve_camera_colour, write_output_bytes,
 };
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_edit::{
@@ -269,6 +269,14 @@ enum Command {
         /// Integer sample depth; PNG only (default: 8).
         #[arg(long, value_enum, value_name = "8|16")]
         png_bit_depth: Option<CliPngBitDepth>,
+
+        /// Resize so the longer edge has this many pixels (never upscales).
+        #[arg(long, value_name = "PIXELS", conflicts_with = "fit", value_parser = clap::value_parser!(u32).range(1..))]
+        long_edge: Option<u32>,
+
+        /// Resize to fit inside a WxH bounding box (never upscales).
+        #[arg(long, value_name = "WxH", value_parser = parse_fit_box)]
+        fit: Option<(u32, u32)>,
 
         /// Apply deterministic ordered dithering before integer quantization.
         #[arg(long)]
@@ -668,6 +676,8 @@ pub(crate) fn run() -> Result<()> {
             orientation,
             jpeg_quality,
             png_bit_depth,
+            long_edge,
+            fit,
             dither,
             metadata,
             force,
@@ -718,6 +728,8 @@ pub(crate) fn run() -> Result<()> {
                 orientation,
                 jpeg_quality,
                 png_bit_depth,
+                long_edge,
+                fit,
                 dither,
                 metadata,
                 force,
@@ -967,6 +979,8 @@ struct DevelopArguments {
     orientation: Option<CliOrientation>,
     jpeg_quality: Option<u8>,
     png_bit_depth: Option<CliPngBitDepth>,
+    long_edge: Option<u32>,
+    fit: Option<(u32, u32)>,
     dither: bool,
     metadata: CliMetadata,
     force: bool,
@@ -1229,6 +1243,7 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
             },
             export_settings.format.bit_depth(),
             export_settings.dithering,
+            export_settings.size,
             |error| eprintln!("GPU export unavailable; using CPU: {error}"),
         )
         .with_context(|| format!("could not develop {}", file.display()))?;
@@ -1537,6 +1552,7 @@ fn quality_crops(
         dithering: DitherMode::None,
         metadata: ExportMetadataPolicy::None,
         overwrite: force,
+        size: OutputSize::Original,
     };
     let mut source_reports = Vec::new();
     let mut artifacts = Vec::new();
@@ -1562,6 +1578,7 @@ fn quality_crops(
                 render_options,
                 rohditor_core::OutputBitDepth::Eight,
                 DitherMode::None,
+                OutputSize::Original,
             )
             .with_context(|| format!("could not develop quality source {}", requested.source))?;
         let image = match &rendered.image {
@@ -1958,6 +1975,21 @@ pub(super) fn milliseconds(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1_000.0
 }
 
+/// Parse `WxH` (e.g. `2048x1365`) with both sides at least one pixel.
+fn parse_fit_box(value: &str) -> Result<(u32, u32), String> {
+    let (width, height) = value
+        .split_once(['x', 'X'])
+        .ok_or_else(|| "expected WIDTHxHEIGHT, e.g. 2048x1365".to_owned())?;
+    let parse = |part: &str| {
+        part.trim()
+            .parse::<u32>()
+            .ok()
+            .filter(|&pixels| pixels > 0)
+            .ok_or_else(|| format!("{part:?} is not a positive pixel count"))
+    };
+    Ok((parse(width)?, parse(height)?))
+}
+
 fn develop_export_settings(output: &Path, arguments: &DevelopArguments) -> Result<ExportSettings> {
     let extension = output
         .extension()
@@ -1996,6 +2028,11 @@ fn develop_export_settings(output: &Path, arguments: &DevelopArguments) -> Resul
         },
         metadata: arguments.metadata.into(),
         overwrite: arguments.force,
+        size: match (arguments.long_edge, arguments.fit) {
+            (Some(pixels), _) => OutputSize::LongEdge { pixels },
+            (None, Some((width, height))) => OutputSize::Fit { width, height },
+            (None, None) => OutputSize::Original,
+        },
     };
     settings
         .validate_destination(output)
@@ -2304,6 +2341,8 @@ mod tests {
             orientation: None,
             jpeg_quality: None,
             png_bit_depth: None,
+            long_edge: None,
+            fit: None,
             dither: false,
             metadata: CliMetadata::Safe,
             force: false,

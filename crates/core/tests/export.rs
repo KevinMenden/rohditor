@@ -6,8 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use image::{ColorType, ImageDecoder, ImageReader};
 use rohditor_core::{
-    DitherMode, ExportFormat, ExportImage, ExportMetadataPolicy, ExportSettings, PngBitDepth,
-    export_image, paths_refer_to_same_file, write_output_bytes,
+    DitherMode, ExportFormat, ExportImage, ExportMetadataPolicy, ExportSettings, OutputSize,
+    PngBitDepth, export_image, paths_refer_to_same_file, write_output_bytes,
 };
 use rohditor_image::{DisplayRgbImage, DisplayTransfer, Orientation};
 use rohditor_raw::{
@@ -40,6 +40,7 @@ fn png8_and_jpeg_embed_srgb_and_orientation_safe_exif() -> Result<(), Box<dyn Er
                 dithering: DitherMode::None,
                 metadata: ExportMetadataPolicy::Safe,
                 overwrite: false,
+                size: OutputSize::Original,
             },
         )?;
         assert_eq!((report.width, report.height), (96, 64));

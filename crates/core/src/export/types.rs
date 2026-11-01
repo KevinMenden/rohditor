@@ -102,6 +102,71 @@ pub enum ExportMetadataPolicy {
     Safe,
 }
 
+/// Pixel size of the exported image relative to the cropped, oriented result.
+///
+/// Resizing never upscales: a target at least as large as the image on the
+/// limiting axis keeps the original size.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum OutputSize {
+    #[default]
+    Original,
+    /// Scale so the longer edge has this many pixels.
+    LongEdge { pixels: u32 },
+    /// Scale to fit inside this bounding box, keeping the aspect ratio.
+    Fit { width: u32, height: u32 },
+}
+
+impl OutputSize {
+    pub fn validate(self) -> Result<(), ExportError> {
+        let valid = match self {
+            Self::Original => true,
+            Self::LongEdge { pixels } => pixels > 0,
+            Self::Fit { width, height } => width > 0 && height > 0,
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(ExportError::InvalidSettings {
+                reason: "export size must be at least 1 pixel on each axis".to_owned(),
+            })
+        }
+    }
+
+    /// Final pixel size for a cropped, oriented `width` x `height` image.
+    ///
+    /// The limiting axis lands exactly on its target; the other axis is the
+    /// aspect-preserving value rounded to the nearest pixel (at least 1).
+    #[must_use]
+    pub fn resolve(self, width: usize, height: usize) -> (usize, usize) {
+        let (box_width, box_height) = match self {
+            Self::Original => return (width, height),
+            Self::LongEdge { pixels } => (pixels as usize, pixels as usize),
+            Self::Fit { width, height } => (width as usize, height as usize),
+        };
+        // Compare box_width/width with box_height/height by cross-multiplying.
+        let (box_width, box_height) = (box_width as u128, box_height as u128);
+        let (src_width, src_height) = (width as u128, height as u128);
+        let width_limited = box_width * src_height <= box_height * src_width;
+        let (target, limiting, other) = if width_limited {
+            (box_width, src_width, src_height)
+        } else {
+            (box_height, src_height, src_width)
+        };
+        if target >= limiting {
+            return (width, height);
+        }
+        // round(other * target / limiting) in integers.
+        let scaled = ((2 * other * target + limiting) / (2 * limiting)).max(1) as usize;
+        let target = target as usize;
+        if width_limited {
+            (target, scaled)
+        } else {
+            (scaled, target)
+        }
+    }
+}
+
 /// Stable export choices, independent of any CLI or UI widgets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExportSettings {
@@ -109,6 +174,7 @@ pub struct ExportSettings {
     pub dithering: DitherMode,
     pub metadata: ExportMetadataPolicy,
     pub overwrite: bool,
+    pub size: OutputSize,
 }
 
 impl Default for ExportSettings {
@@ -120,12 +186,14 @@ impl Default for ExportSettings {
             dithering: DitherMode::None,
             metadata: ExportMetadataPolicy::Safe,
             overwrite: false,
+            size: OutputSize::Original,
         }
     }
 }
 
 impl ExportSettings {
     pub fn validate(self) -> Result<(), ExportError> {
+        self.size.validate()?;
         if let ExportFormat::Jpeg { quality } = self.format
             && !(JPEG_QUALITY_MIN..=JPEG_QUALITY_MAX).contains(&quality)
         {
@@ -214,4 +282,65 @@ pub struct ExportReport {
     pub bit_depth: OutputBitDepth,
     pub bytes_written: u64,
     pub metadata_embedded: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn long_edge_resolves_both_orientations_and_rounds_to_nearest() {
+        let long = OutputSize::LongEdge { pixels: 1000 };
+        assert_eq!(long.resolve(6000, 4000), (1000, 667));
+        assert_eq!(long.resolve(4000, 6000), (667, 1000));
+        // 3 * 5 / 7 = 2.14
+        assert_eq!(OutputSize::LongEdge { pixels: 5 }.resolve(7, 3), (5, 2));
+        // The short edge never collapses below one pixel.
+        assert_eq!(OutputSize::LongEdge { pixels: 2 }.resolve(1000, 3), (2, 1));
+    }
+
+    #[test]
+    fn resize_never_upscales() {
+        let long = OutputSize::LongEdge { pixels: 8000 };
+        assert_eq!(long.resolve(6000, 4000), (6000, 4000));
+        let fit = OutputSize::Fit {
+            width: 7000,
+            height: 100,
+        };
+        assert_eq!(fit.resolve(6000, 4000), (150, 100));
+        let wide = OutputSize::Fit {
+            width: 7000,
+            height: 5000,
+        };
+        assert_eq!(wide.resolve(6000, 4000), (6000, 4000));
+    }
+
+    #[test]
+    fn fit_uses_the_tighter_box_side() {
+        let fit = OutputSize::Fit {
+            width: 1200,
+            height: 1200,
+        };
+        assert_eq!(fit.resolve(3000, 2000), (1200, 800));
+        assert_eq!(fit.resolve(2000, 3000), (800, 1200));
+        let tall_box = OutputSize::Fit {
+            width: 500,
+            height: 2000,
+        };
+        assert_eq!(tall_box.resolve(3000, 2000), (500, 333));
+    }
+
+    #[test]
+    fn zero_sizes_are_rejected() {
+        assert!(OutputSize::LongEdge { pixels: 0 }.validate().is_err());
+        assert!(
+            OutputSize::Fit {
+                width: 10,
+                height: 0
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(OutputSize::Original.validate().is_ok());
+    }
 }

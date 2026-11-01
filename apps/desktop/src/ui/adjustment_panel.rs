@@ -184,11 +184,24 @@ pub(crate) enum PngDepth {
     Sixteen,
 }
 
+/// Which size control the export dialog shows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum SizeMode {
+    #[default]
+    Original,
+    LongEdge,
+    Fit,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ExportUiSettings {
     pub kind: ExportKind,
     pub jpeg_quality: u8,
     pub png_depth: PngDepth,
+    pub size_mode: SizeMode,
+    pub long_edge: u32,
+    pub fit_width: u32,
+    pub fit_height: u32,
     pub dither: bool,
     pub safe_metadata: bool,
     pub overwrite: bool,
@@ -200,6 +213,10 @@ impl ExportUiSettings {
             kind: ExportKind::Jpeg,
             jpeg_quality,
             png_depth: PngDepth::Eight,
+            size_mode: SizeMode::Original,
+            long_edge: 2048,
+            fit_width: 2048,
+            fit_height: 2048,
             dither: false,
             safe_metadata: true,
             overwrite: false,
@@ -1281,10 +1298,49 @@ fn show_export_settings(ui: &mut egui::Ui, settings: &mut ExportUiSettings) {
             settings.png_depth = depth;
         }
     }
+    show_size_controls(ui, settings);
     ui.checkbox(&mut settings.dither, "Ordered output dithering");
     ui.checkbox(&mut settings.safe_metadata, "Include safe EXIF metadata");
     ui.checkbox(&mut settings.overwrite, "Allow replacing an existing file");
     ui.add_space(4.0);
+}
+
+fn pixel_field(value: &mut u32) -> egui::DragValue<'_> {
+    egui::DragValue::new(value).range(1..=65_535).suffix(" px")
+}
+
+/// Output size: original, long edge, or bounding box. Never upscales.
+fn show_size_controls(ui: &mut egui::Ui, settings: &mut ExportUiSettings) {
+    let mut mode = settings.size_mode;
+    widgets::dropdown(
+        ui,
+        "export_size",
+        "Size",
+        match mode {
+            SizeMode::Original => "Original",
+            SizeMode::LongEdge => "Long edge",
+            SizeMode::Fit => "Fit in box",
+        },
+        |ui| {
+            ui.selectable_value(&mut mode, SizeMode::Original, "Original");
+            ui.selectable_value(&mut mode, SizeMode::LongEdge, "Long edge");
+            ui.selectable_value(&mut mode, SizeMode::Fit, "Fit in box");
+        },
+    );
+    settings.size_mode = mode;
+    match mode {
+        SizeMode::Original => {}
+        SizeMode::LongEdge => {
+            ui.add(pixel_field(&mut settings.long_edge));
+        }
+        SizeMode::Fit => {
+            ui.horizontal(|ui| {
+                ui.add(pixel_field(&mut settings.fit_width));
+                ui.label("×");
+                ui.add(pixel_field(&mut settings.fit_height));
+            });
+        }
+    }
 }
 
 #[cfg(test)]
