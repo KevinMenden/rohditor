@@ -11,8 +11,8 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use rohditor_core::{
     CpuPipeline, DitherMode, ExportFormat, ExportImage, ExportMetadataPolicy, ExportSettings,
-    HighlightDiagnostics, OutputBitDepth, OutputPolicy, PngBitDepth, RawCropPolicy, RenderOptions,
-    export_image, write_output_bytes,
+    HighlightDiagnostics, OutputBitDepth, OutputPolicy, OutputSize, PngBitDepth, RawCropPolicy,
+    RenderOptions, export_image, write_output_bytes,
 };
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_edit::{EditRecipe, HighlightMethod, RenderingProfileSelection};
@@ -178,6 +178,7 @@ pub(super) fn highlight_compare(
         dithering: DitherMode::None,
         metadata: ExportMetadataPolicy::None,
         overwrite: force,
+        size: OutputSize::Original,
     };
     let decoder = RawlerDecoder::default();
     let mut sources = Vec::new();
@@ -214,6 +215,7 @@ pub(super) fn highlight_compare(
                     render_options,
                     OutputBitDepth::Eight,
                     DitherMode::None,
+                    OutputSize::Original,
                 )
                 .with_context(|| {
                     format!("could not develop {} with {method:?}", requested.source)

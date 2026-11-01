@@ -10,10 +10,10 @@ use eframe::egui;
 use rohditor_core::{
     CameraCalibration, DatabaseProvenance, DitherMode, ExportFormat, ExportMetadataPolicy,
     ExportSettings, HighlightDiagnostics, Histogram, JPEG_QUALITY_DEFAULT, MemoryEstimate,
-    OutputPolicy, PngBitDepth, PreviewOptions, ProfileMatch, StageTimings, WhiteBalanceCoordinates,
-    WhiteBalanceMode, WhiteBalanceModeMemory, auto_tone, camera_color_transform, default_recipe,
-    hsl_channel_weights_from_display_rgb, paths_refer_to_same_file, resolve_camera_colour,
-    sample_rgb_patch,
+    OutputPolicy, OutputSize, PngBitDepth, PreviewOptions, ProfileMatch, StageTimings,
+    WhiteBalanceCoordinates, WhiteBalanceMode, WhiteBalanceModeMemory, auto_tone,
+    camera_color_transform, default_recipe, hsl_channel_weights_from_display_rgb,
+    paths_refer_to_same_file, resolve_camera_colour, sample_rgb_patch,
 };
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_edit::{
@@ -35,7 +35,7 @@ use crate::ui::ViewMode;
 use crate::ui::adjustment_panel::{
     self, AdjustmentInteraction, AdjustmentRange, AdjustmentRanges, AdjustmentTarget,
     AdjustmentValues, CameraProfileChoice, DocumentPanelModel, ExportKind, ExportUiSettings,
-    PngDepth,
+    PngDepth, SizeMode,
 };
 use crate::ui::catalog::{
     self, FilmstripModel, LibraryEntryModel, LibraryEntryState, LibraryModel, LibrarySort,
@@ -290,6 +290,16 @@ impl ExportUiSettings {
                 ExportMetadataPolicy::None
             },
             overwrite: self.overwrite,
+            size: match self.size_mode {
+                SizeMode::Original => OutputSize::Original,
+                SizeMode::LongEdge => OutputSize::LongEdge {
+                    pixels: self.long_edge,
+                },
+                SizeMode::Fit => OutputSize::Fit {
+                    width: self.fit_width,
+                    height: self.fit_height,
+                },
+            },
         }
     }
 
@@ -3617,6 +3627,10 @@ mod tests {
             kind: ExportKind::Png,
             jpeg_quality: 42,
             png_depth: PngDepth::Sixteen,
+            size_mode: SizeMode::Fit,
+            long_edge: 1000,
+            fit_width: 1200,
+            fit_height: 800,
             dither: true,
             safe_metadata: false,
             overwrite: true,
@@ -3632,6 +3646,13 @@ mod tests {
         assert_eq!(settings.dithering, DitherMode::Ordered8x8);
         assert_eq!(settings.metadata, ExportMetadataPolicy::None);
         assert!(settings.overwrite);
+        assert_eq!(
+            settings.size,
+            OutputSize::Fit {
+                width: 1200,
+                height: 800
+            }
+        );
     }
 
     #[test]

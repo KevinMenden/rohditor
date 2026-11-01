@@ -24,11 +24,12 @@ use crate::cpu::{
     render_display_srgb16_with_geometry_and_diagnostics,
 };
 use crate::demosaic::demosaic_cancellable;
+use crate::export_resize::crop_and_resize;
 use crate::highlight::{HighlightDiagnostics, apply_cancellable as apply_highlight_cancellable};
 use crate::resample::resize_area_with_plan_cancellable;
 use crate::{
     CancellationToken, DitherMode, ExportImage, GamutMappingDiagnostics, OutputBitDepth,
-    OutputGeometry, PipelineError, apply_adjustments,
+    OutputGeometry, OutputSize, PipelineError, apply_adjustments,
 };
 
 /// Default longest edge of an interactively developed preview.
@@ -281,6 +282,8 @@ pub struct MemoryEstimate {
     pub optics_scratch_bytes: usize,
     pub resample_intermediate_bytes: usize,
     pub linear_rgb_bytes: usize,
+    /// Cropped, horizontal-pass and resized linear buffers of an export resize.
+    pub export_resize_bytes: usize,
     pub display_rgb_bytes: usize,
     pub estimated_peak_bytes: usize,
 }
@@ -904,7 +907,12 @@ pub(super) mod render {
                 .checked_mul(size_of::<f32>())
                 .ok_or_else(|| dimension_overflow(base.image.width(), base.image.height()))?;
             let geometry = output_geometry(base.image(), base.source_orientation, recipe)?;
-            let mut memory = memory_estimate(base, size_of::<u8>(), geometry)?;
+            let mut memory = memory_estimate(
+                base,
+                size_of::<u8>(),
+                geometry,
+                geometry.output_dimensions(),
+            )?;
             let retained_peak = base
                 .decoded_raw_bytes
                 .checked_add(retained_base_bytes)
@@ -983,7 +991,12 @@ pub(super) mod render {
                 cancellation,
             )?;
             let geometry = output_geometry(&base.image, base.source_orientation, recipe)?;
-            let memory = memory_estimate(&base, size_of::<u8>(), geometry)?;
+            let memory = memory_estimate(
+                &base,
+                size_of::<u8>(),
+                geometry,
+                geometry.output_dimensions(),
+            )?;
             let adjustments_started = Instant::now();
             apply_adjustments_cancellable(&mut base.image, recipe, cancellation)?;
             base.timings.adjustments = adjustments_started.elapsed();
@@ -1039,20 +1052,35 @@ pub(super) mod render {
             options: RenderOptions,
             bit_depth: OutputBitDepth,
             dithering: DitherMode,
+            size: OutputSize,
         ) -> Result<ExportRenderResult, PipelineError> {
             let total_started = Instant::now();
             let mut base = prepare_base(self.optics.as_deref(), frame, recipe, options)?;
-            let geometry = output_geometry(&base.image, base.source_orientation, recipe)?;
-            let memory = memory_estimate(&base, bit_depth.bytes_per_sample(), geometry)?;
+            let mut geometry = output_geometry(&base.image, base.source_orientation, recipe)?;
+            let (output_width, output_height) = geometry.output_dimensions();
+            let target = size.resolve(output_width, output_height);
+            let memory = memory_estimate(&base, bit_depth.bytes_per_sample(), geometry, target)?;
             let adjustments_started = Instant::now();
             apply_adjustments(&mut base.image, recipe)?;
             base.timings.adjustments = adjustments_started.elapsed();
             let output_started = Instant::now();
+            // Resize in linear light on the cropped, oriented image; the
+            // result is already in output orientation, so encoding uses an
+            // identity geometry. An unchanged size keeps the fused path.
+            let resized = if target == (output_width, output_height) {
+                None
+            } else {
+                let resized =
+                    crop_and_resize(&base.image, geometry, target, &CancellationToken::new())?;
+                geometry = OutputGeometry::new(target.0, target.1, Orientation::Normal, None)?;
+                Some(resized)
+            };
+            let source = resized.as_ref().unwrap_or(&base.image);
             let (image, output_gamut_diagnostics) = match bit_depth {
                 OutputBitDepth::Eight => {
                     let (image, diagnostics) =
                         render_display_srgb8_dithered_with_geometry_and_diagnostics(
-                            &base.image,
+                            source,
                             geometry,
                             options.output_policy,
                             dithering,
@@ -1061,7 +1089,7 @@ pub(super) mod render {
                 }
                 OutputBitDepth::Sixteen => {
                     let (image, diagnostics) = render_display_srgb16_with_geometry_and_diagnostics(
-                        &base.image,
+                        source,
                         geometry,
                         options.output_policy,
                         dithering,
@@ -1456,7 +1484,12 @@ fn render_base(
 ) -> Result<RenderResult, PipelineError> {
     validate_base_recipe(&base, recipe)?;
     let geometry = output_geometry(&base.image, base.source_orientation, recipe)?;
-    let memory = memory_estimate(&base, size_of::<u8>(), geometry)?;
+    let memory = memory_estimate(
+        &base,
+        size_of::<u8>(),
+        geometry,
+        geometry.output_dimensions(),
+    )?;
 
     let adjustments_started = Instant::now();
     apply_adjustments(&mut base.image, recipe)?;
@@ -1503,6 +1536,7 @@ fn memory_estimate(
     base: &DemosaicedBase,
     display_sample_bytes: usize,
     output_geometry: OutputGeometry,
+    final_dimensions: (usize, usize),
 ) -> Result<MemoryEstimate, PipelineError> {
     let width = base.image.width();
     let height = base.image.height();
@@ -1516,7 +1550,13 @@ fn memory_estimate(
         .checked_mul(3)
         .and_then(|elements| elements.checked_mul(size_of::<f32>()))
         .ok_or_else(|| dimension_overflow(width, height))?;
-    let (output_width, output_height) = output_geometry.output_dimensions();
+    let (output_width, output_height) = final_dimensions;
+    let export_resize_bytes = if final_dimensions == output_geometry.output_dimensions() {
+        0
+    } else {
+        crate::export_resize::resize_bytes(output_geometry.output_dimensions(), final_dimensions)
+            .ok_or_else(|| dimension_overflow(output_width, output_height))?
+    };
     let output_pixels = output_width
         .checked_mul(output_height)
         .ok_or_else(|| dimension_overflow(output_width, output_height))?;
@@ -1526,6 +1566,7 @@ fn memory_estimate(
         .ok_or_else(|| dimension_overflow(width, height))?;
     let output_peak = decoded_raw_bytes
         .checked_add(linear_rgb_bytes)
+        .and_then(|bytes| bytes.checked_add(export_resize_bytes))
         .and_then(|bytes| bytes.checked_add(display_rgb_bytes))
         .ok_or_else(|| dimension_overflow(width, height))?;
 
@@ -1538,6 +1579,7 @@ fn memory_estimate(
         optics_scratch_bytes: base.optics_scratch_bytes,
         resample_intermediate_bytes,
         linear_rgb_bytes,
+        export_resize_bytes,
         display_rgb_bytes,
         estimated_peak_bytes: base.preparation_peak_bytes.max(output_peak),
     };

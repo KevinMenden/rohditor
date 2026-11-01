@@ -592,8 +592,8 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        DitherMode, ExportFormat, ExportMetadataPolicy, ExportSettings, PngBitDepth, exif_datetime,
-        srgb_icc_profile,
+        DitherMode, ExportFormat, ExportMetadataPolicy, ExportSettings, OutputSize, PngBitDepth,
+        exif_datetime, srgb_icc_profile,
     };
 
     #[test]
@@ -638,6 +638,10 @@ mod tests {
             dithering: DitherMode::Ordered8x8,
             metadata: ExportMetadataPolicy::None,
             overwrite: true,
+            size: OutputSize::Fit {
+                width: 2048,
+                height: 1365,
+            },
         };
         let json = serde_json::to_string(&settings).expect("serialize export settings");
         let decoded: ExportSettings =
