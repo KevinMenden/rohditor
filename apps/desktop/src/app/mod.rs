@@ -18,9 +18,9 @@ use rohditor_core::{
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_edit::{
     BLACKS_RANGE, COLOR_GRADING_RANGE, CONTRAST_RANGE, EXPOSURE_EV_RANGE, EditRecipe,
-    HIGHLIGHT_THRESHOLD_RANGE, HIGHLIGHTS_RANGE, HSL_CHANNEL_COUNT, HSL_HUE_RANGE,
-    HSL_LUMINANCE_RANGE, HSL_SATURATION_RANGE, HighlightMethod, SATURATION_RANGE, SHADOWS_RANGE,
-    TEMPERATURE_RANGE, TINT_RANGE, TONE_CURVE_RANGE, VIBRANCE_RANGE,
+    FALSE_COLOR_MAX_STEPS, HIGHLIGHT_THRESHOLD_RANGE, HIGHLIGHTS_RANGE, HSL_CHANNEL_COUNT,
+    HSL_HUE_RANGE, HSL_LUMINANCE_RANGE, HSL_SATURATION_RANGE, HighlightMethod, SATURATION_RANGE,
+    SHADOWS_RANGE, TEMPERATURE_RANGE, TINT_RANGE, TONE_CURVE_RANGE, VIBRANCE_RANGE,
     WHITE_BALANCE_MULTIPLIER_RANGE, WHITES_RANGE, WhiteBalance,
 };
 use rohditor_raw::{RawFileInfo, RawFrame};
@@ -2464,6 +2464,14 @@ impl RohditorApp {
                                 )
                             },
                         ),
+                    false_color: preview
+                        .worker
+                        .detail
+                        .and_then(|p| p.false_color.map(|f| (p, f)))
+                        .map_or_else(
+                            || "Off".to_owned(),
+                            |(p, f)| format!("v{}, {} steps", p.false_color_version, f.steps),
+                        ),
                     noise_reduction: preview
                         .worker
                         .detail
@@ -2513,6 +2521,7 @@ impl RohditorApp {
                         normalization: preview.worker.timings.normalization,
                         highlight_processing: preview.worker.timings.highlight_processing,
                         demosaic: preview.worker.timings.demosaic,
+                        false_color: preview.worker.timings.false_color,
                         chroma_noise_reduction: preview.worker.timings.chroma_noise_reduction,
                         luminance_noise_reduction: preview.worker.timings.luminance_noise_reduction,
                         capture_sharpening: preview.worker.timings.capture_sharpening,
@@ -3067,6 +3076,7 @@ fn document_panel_model(
         picker_mode,
         color_mixer_channel,
         optics: optics_panel_model(document),
+        false_color: document.edits.recipe().false_color,
         noise_reduction: document.edits.recipe().noise_reduction,
         capture_sharpening: document.edits.recipe().capture_sharpening,
     }
@@ -3290,6 +3300,7 @@ fn apply_adjustment_interaction(
                 | AdjustmentTarget::GradingMidtones(_)
                 | AdjustmentTarget::GradingHighlights(_)
                 | AdjustmentTarget::HighlightThreshold
+                | AdjustmentTarget::FalseColorSteps
                 | AdjustmentTarget::ChromaNoiseReduction
                 | AdjustmentTarget::LuminanceNoiseReduction
                 | AdjustmentTarget::LuminanceDetail
@@ -3322,6 +3333,14 @@ fn apply_adjustment_interaction(
                 _ => unreachable!("temperature/tint branch only handles its controls"),
             }
             next.color.white_balance = WhiteBalance::TemperatureTint { temperature, tint };
+        }
+        // The slider works in whole steps; round in case a typed value is fractional.
+        AdjustmentTarget::FalseColorSteps => {
+            next.false_color.steps = interaction
+                .value
+                .round()
+                .clamp(0.0, f32::from(FALSE_COLOR_MAX_STEPS))
+                as u8
         }
         AdjustmentTarget::ChromaNoiseReduction => next.noise_reduction.chroma = interaction.value,
         AdjustmentTarget::LuminanceNoiseReduction => {

@@ -159,6 +159,7 @@ impl DemosaicedCameraSource {
             stage: super::super::detail::DetailStage {
                 provenance,
                 scratch_bytes,
+                false_color: Duration::ZERO,
                 chroma_noise_reduction: Duration::ZERO,
                 luminance_noise_reduction: Duration::ZERO,
                 capture_sharpening: elapsed,
@@ -187,6 +188,7 @@ impl CapturedCameraSource {
                 reason: "detail settings or ceilings changed".into(),
             });
         }
+        self.stage.false_color = Duration::ZERO;
         self.stage.chroma_noise_reduction = Duration::ZERO;
         self.stage.luminance_noise_reduction = Duration::ZERO;
         self.stage.capture_sharpening = Duration::ZERO;
@@ -554,12 +556,14 @@ fn complete_camera_source(
         highlight_processing,
         highlight_clipping: highlight_processing,
         demosaic,
+        false_color: capture.false_color,
         chroma_noise_reduction: capture.chroma_noise_reduction,
         luminance_noise_reduction: capture.luminance_noise_reduction,
         capture_sharpening: capture.capture_sharpening,
         optics: optics_timing,
         resampling,
         total: prior_total
+            + capture.false_color
             + capture.chroma_noise_reduction
             + capture.luminance_noise_reduction
             + capture.capture_sharpening

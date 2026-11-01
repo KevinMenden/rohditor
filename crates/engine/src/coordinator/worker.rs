@@ -1678,6 +1678,7 @@ fn add_stage_timings(target: &mut StageTimings, additional: StageTimings) {
     target.highlight_processing += additional.highlight_processing;
     target.highlight_clipping += additional.highlight_clipping;
     target.demosaic += additional.demosaic;
+    target.false_color += additional.false_color;
     target.chroma_noise_reduction += additional.chroma_noise_reduction;
     target.luminance_noise_reduction += additional.luminance_noise_reduction;
     target.capture_sharpening += additional.capture_sharpening;
@@ -1723,6 +1724,7 @@ fn log_preview_diagnostics(
         metadata_us = diagnostics.timings.metadata.as_micros(),
         normalization_us = diagnostics.timings.normalization.as_micros(),
         demosaic_us = diagnostics.timings.demosaic.as_micros(),
+        false_color_us = diagnostics.timings.false_color.as_micros(),
         chroma_noise_reduction_us = diagnostics.timings.chroma_noise_reduction.as_micros(),
         luminance_noise_reduction_us = diagnostics.timings.luminance_noise_reduction.as_micros(),
         capture_sharpening_us = diagnostics.timings.capture_sharpening.as_micros(),
