@@ -39,7 +39,7 @@ pub struct EditError {
 }
 
 /// Schema version of the current non-destructive edit recipe.
-pub const EDIT_RECIPE_SCHEMA_VERSION: u32 = 12;
+pub const EDIT_RECIPE_SCHEMA_VERSION: u32 = 13;
 const LEGACY_EDIT_RECIPE_SCHEMA_VERSION: u32 = 1;
 const PREVIOUS_EDIT_RECIPE_SCHEMA_VERSION: u32 = 2;
 const PREVIOUS_RAW_EDIT_RECIPE_SCHEMA_VERSION: u32 = 3;
@@ -809,7 +809,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
             }
         } else {
             Self {
-                schema_version: if matches!(fields.schema_version, 10 | 11) {
+                schema_version: if matches!(fields.schema_version, 10..=12) {
                     EDIT_RECIPE_SCHEMA_VERSION
                 } else {
                     fields.schema_version

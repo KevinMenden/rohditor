@@ -12,6 +12,7 @@
 use rayon::prelude::*;
 use rohditor_image::LinearRgbImage;
 
+use super::sample_bands;
 use crate::{
     CancellationCheck, DetailError, NoiseProfile, Plane, estimate_noise, mirror, split_opponent,
 };
@@ -43,6 +44,10 @@ pub struct ChromaDenoise {
     /// Per-channel values at or above which a pixel counts as blown and
     /// keeps its chroma (same ceilings capture sharpening masks with).
     pub ceilings: [f32; 3],
+    /// Luma noise of `image` for the same `balance` (see
+    /// [`estimate_luma_noise`](super::estimate_luma_noise)). It sets how
+    /// strongly luma edges stop the colour averaging.
+    pub luma_noise: NoiseProfile,
 }
 
 /// Heap bytes the filter allocates on top of the image itself.
@@ -56,7 +61,7 @@ pub fn chroma_scratch_bytes(width: usize, height: usize) -> Option<usize> {
 /// Reduce colour noise in `image` in place.
 ///
 /// Pixels with a non-finite channel are copied through, as are pixels at or
-/// above `ceilings`. Images smaller than the noise estimator's tile are left
+/// above `ceilings`. Images too small to profile the colour noise are left
 /// alone.
 pub fn denoise_chroma(
     image: &mut LinearRgbImage<f32>,
@@ -87,8 +92,7 @@ pub fn denoise_chroma(
     // Profile only a subset of row bands: the estimate needs flat tiles
     // across the brightness range, not every pixel.
     let sampled_luma = sample_bands(&luma)?;
-    let (Ok(luma_noise), Ok(noise1), Ok(noise2)) = (
-        estimate_noise(&sampled_luma, &sampled_luma, cancellation),
+    let (Ok(noise1), Ok(noise2)) = (
         sample_bands(&c1).and_then(|c| estimate_noise(&c, &sampled_luma, cancellation)),
         sample_bands(&c2).and_then(|c| estimate_noise(&c, &sampled_luma, cancellation)),
     ) else {
@@ -101,7 +105,7 @@ pub fn denoise_chroma(
     };
     let shrink = Shrinkage {
         strength: params.strength,
-        luma_noise,
+        luma_noise: params.luma_noise,
         noise: [noise1, noise2],
     };
     let mut pair = Pair::new(c1, c2)?;
@@ -130,27 +134,6 @@ pub fn denoise_chroma(
         }
     }
     write_back(image, &luma, &accumulated, &params, cancellation)
-}
-
-/// Rows per band and band period of [`sample_bands`].
-const BAND_ROWS: usize = 64;
-const BAND_PERIOD: usize = 256;
-
-/// Every fourth 64-row band of `plane`, stacked. Small planes are returned
-/// whole. Band seams only disturb the few rows the first à-trous level
-/// reaches across, which the estimator's flat-tile selection ignores.
-fn sample_bands(plane: &Plane) -> Result<Plane, DetailError> {
-    let (w, h) = (plane.width(), plane.height());
-    if h < 4 * BAND_PERIOD {
-        return Ok(plane.clone());
-    }
-    let mut data = Vec::with_capacity(w * (h / BAND_PERIOD + 1) * BAND_ROWS);
-    for start in (0..h).step_by(BAND_PERIOD) {
-        let end = (start + BAND_ROWS).min(h);
-        data.extend_from_slice(&plane.data()[start * w..end * w]);
-    }
-    let rows = data.len() / w;
-    Plane::new(w, rows, data)
 }
 
 /// The two colour planes that are filtered together (they share the
@@ -434,19 +417,32 @@ fn write_back(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::NeverCancelled;
     use crate::test_support::Gauss;
+    use crate::{NeverCancelled, estimate_luma_noise};
     use rohditor_image::LinearRgbSpace;
 
     const BALANCE: [f32; 3] = [2.0, 1.0, 1.5];
     const NO_CEILING: [f32; 3] = [f32::INFINITY; 3];
 
-    fn params(strength: f32) -> ChromaDenoise {
+    fn params(image: &LinearRgbImage<f32>, strength: f32) -> ChromaDenoise {
         ChromaDenoise {
             strength,
             balance: BALANCE,
             ceilings: NO_CEILING,
+            luma_noise: luma_noise(image, BALANCE),
         }
+    }
+
+    /// Luma profile of `image`; tiny images get an arbitrary one (the
+    /// filter then declines to run on its own).
+    fn luma_noise(image: &LinearRgbImage<f32>, balance: [f32; 3]) -> NoiseProfile {
+        estimate_luma_noise(image, balance, &NeverCancelled)
+            .unwrap()
+            .unwrap_or(NoiseProfile {
+                a: 0.0,
+                b: 1e-4,
+                bins: 0,
+            })
     }
 
     /// Camera RGB whose balanced version is `luma(x)` grey plus colour noise
@@ -484,10 +480,12 @@ mod tests {
     fn zero_strength_is_a_no_op_and_bad_strength_is_rejected() {
         let mut image = colour_noise_image(64, 48, 64 * 3, 0.02);
         let before = image.clone();
-        denoise_chroma(&mut image, params(0.0), &NeverCancelled).unwrap();
+        let p = params(&image, 0.0);
+        denoise_chroma(&mut image, p, &NeverCancelled).unwrap();
         assert_eq!(image, before);
         for bad in [-0.1, 1.5, f32::NAN] {
-            assert!(denoise_chroma(&mut image, params(bad), &NeverCancelled).is_err());
+            let p = params(&image, bad);
+            assert!(denoise_chroma(&mut image, p, &NeverCancelled).is_err());
         }
     }
 
@@ -497,7 +495,8 @@ mod tests {
         let (w, h, stride) = (150, 90, 150 * 3 + 5);
         let noisy = colour_noise_image(w, h, stride, 0.03);
         let mut image = noisy.clone();
-        denoise_chroma(&mut image, params(0.5), &NeverCancelled).unwrap();
+        let p = params(&image, 0.5);
+        denoise_chroma(&mut image, p, &NeverCancelled).unwrap();
         assert!(
             chroma_rms(&image) < 0.5 * chroma_rms(&noisy),
             "{} vs {}",
@@ -547,6 +546,7 @@ mod tests {
                 strength: 1.0,
                 balance,
                 ceilings: NO_CEILING,
+                luma_noise: luma_noise(&before, balance),
             },
             &NeverCancelled,
         )
@@ -578,6 +578,7 @@ mod tests {
                 strength: 0.8,
                 balance: BALANCE,
                 ceilings,
+                luma_noise: luma_noise(&before, BALANCE),
             },
             &NeverCancelled,
         )
@@ -600,14 +601,16 @@ mod tests {
     fn images_smaller_than_the_estimator_tile_are_left_alone() {
         let mut image = colour_noise_image(10, 10, 30, 0.05);
         let before = image.clone();
-        denoise_chroma(&mut image, params(1.0), &NeverCancelled).unwrap();
+        let p = params(&image, 1.0);
+        denoise_chroma(&mut image, p, &NeverCancelled).unwrap();
         assert_eq!(image, before);
     }
 
     #[test]
     fn cancellation_is_reported() {
         let mut image = colour_noise_image(64, 64, 64 * 3, 0.02);
-        let result = denoise_chroma(&mut image, params(0.5), &|| true);
+        let p = params(&image, 0.5);
+        let result = denoise_chroma(&mut image, p, &|| true);
         assert_eq!(result.unwrap_err(), DetailError::Cancelled);
     }
 }

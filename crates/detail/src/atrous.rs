@@ -49,33 +49,76 @@ fn check_levels(levels: u32) -> Result<(), DetailError> {
 }
 
 /// Separable B3 smoothing of `input` with tap spacing `step`.
-fn smooth(
+pub(crate) fn smooth(
     input: &Plane,
     step: usize,
     cancellation: &dyn CancellationCheck,
 ) -> Result<Plane, DetailError> {
     let (w, h) = (input.width(), input.height());
-    let src = input.data();
-    let mut horizontal = vec![0.0_f32; w * h];
-    for_each_row(&mut horizontal, w, cancellation, |y, row| {
-        let line = &src[y * w..(y + 1) * w];
-        for (x, out) in row.iter_mut().enumerate() {
-            *out = (0..5)
-                .map(|k| B3[k] * line[mirror(x as isize + (k as isize - 2) * step as isize, w)])
-                .sum();
-        }
-    })?;
+    let mut scratch = vec![0.0_f32; w * h];
     let mut out = vec![0.0_f32; w * h];
-    for_each_row(&mut out, w, cancellation, |y, row| {
+    smooth_into(input.data(), w, &mut scratch, &mut out, step, cancellation)?;
+    Plane::new(w, h, out)
+}
+
+/// [`smooth`] on raw `width`-wide row-major data, writing into `out` and
+/// using `scratch` (same length) for the horizontal pass, so callers that
+/// smooth repeatedly can reuse their buffers.
+pub(crate) fn smooth_into(
+    src: &[f32],
+    w: usize,
+    scratch: &mut [f32],
+    out: &mut [f32],
+    step: usize,
+    cancellation: &dyn CancellationCheck,
+) -> Result<(), DetailError> {
+    let h = src.len() / w;
+    for_each_row(scratch, w, cancellation, |y, row| {
+        smooth_row(&src[y * w..(y + 1) * w], row, step);
+    })?;
+    let horizontal: &[f32] = scratch;
+    for_each_row(out, w, cancellation, |y, row| {
         let rows: [&[f32]; 5] = std::array::from_fn(|k| {
             let sy = mirror(y as isize + (k as isize - 2) * step as isize, h);
             &horizontal[sy * w..(sy + 1) * w]
         });
         for (x, out) in row.iter_mut().enumerate() {
-            *out = (0..5).map(|k| B3[k] * rows[k][x]).sum();
+            *out = B3[0] * rows[0][x]
+                + B3[1] * rows[1][x]
+                + B3[2] * rows[2][x]
+                + B3[3] * rows[3][x]
+                + B3[4] * rows[4][x];
         }
-    })?;
-    Plane::new(w, h, out)
+    })
+}
+
+/// Horizontal B3 pass over one row. Pixels at least `2 * step` from both
+/// ends have contiguous taps (vectorisable); only the borders mirror.
+fn smooth_row(line: &[f32], row: &mut [f32], step: usize) {
+    let w = line.len();
+    let edge = (2 * step).min(w);
+    let mirrored = |x: usize| -> f32 {
+        let tap = |k: usize| line[mirror(x as isize + (k as isize - 2) * step as isize, w)];
+        B3[0] * tap(0) + B3[1] * tap(1) + B3[2] * tap(2) + B3[3] * tap(3) + B3[4] * tap(4)
+    };
+    if w <= 2 * edge {
+        for (x, out) in row.iter_mut().enumerate() {
+            *out = mirrored(x);
+        }
+        return;
+    }
+    for x in (0..edge).chain(w - edge..w) {
+        row[x] = mirrored(x);
+    }
+    let n = w - 2 * edge;
+    let taps: [&[f32]; 5] = std::array::from_fn(|k| &line[k * step..k * step + n]);
+    for (t, out) in row[edge..w - edge].iter_mut().enumerate() {
+        *out = B3[0] * taps[0][t]
+            + B3[1] * taps[1][t]
+            + B3[2] * taps[2][t]
+            + B3[3] * taps[3][t]
+            + B3[4] * taps[4][t];
+    }
 }
 
 /// Edge-avoiding smoothing (Dammertz et al. 2010): the B3 weights are

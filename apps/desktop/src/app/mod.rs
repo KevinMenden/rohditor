@@ -2472,8 +2472,11 @@ impl RohditorApp {
                             || "Off".to_owned(),
                             |(p, n)| {
                                 format!(
-                                    "chroma v{}, strength {:.2}",
-                                    p.noise_reduction_version, n.chroma
+                                    "v{}, chroma {:.2}, luminance {:.2} (detail {:.2})",
+                                    p.noise_reduction_version,
+                                    n.chroma,
+                                    n.luminance,
+                                    n.luminance_detail
                                 )
                             },
                         ),
@@ -2510,7 +2513,8 @@ impl RohditorApp {
                         normalization: preview.worker.timings.normalization,
                         highlight_processing: preview.worker.timings.highlight_processing,
                         demosaic: preview.worker.timings.demosaic,
-                        noise_reduction: preview.worker.timings.noise_reduction,
+                        chroma_noise_reduction: preview.worker.timings.chroma_noise_reduction,
+                        luminance_noise_reduction: preview.worker.timings.luminance_noise_reduction,
                         capture_sharpening: preview.worker.timings.capture_sharpening,
                         optics: preview.worker.timings.optics,
                         resampling: preview.worker.timings.resampling,
@@ -3287,6 +3291,8 @@ fn apply_adjustment_interaction(
                 | AdjustmentTarget::GradingHighlights(_)
                 | AdjustmentTarget::HighlightThreshold
                 | AdjustmentTarget::ChromaNoiseReduction
+                | AdjustmentTarget::LuminanceNoiseReduction
+                | AdjustmentTarget::LuminanceDetail
                 | AdjustmentTarget::CaptureAmount
                 | AdjustmentTarget::CaptureRadius
                 | AdjustmentTarget::CaptureNoise => {}
@@ -3318,6 +3324,12 @@ fn apply_adjustment_interaction(
             next.color.white_balance = WhiteBalance::TemperatureTint { temperature, tint };
         }
         AdjustmentTarget::ChromaNoiseReduction => next.noise_reduction.chroma = interaction.value,
+        AdjustmentTarget::LuminanceNoiseReduction => {
+            next.noise_reduction.luminance = interaction.value
+        }
+        AdjustmentTarget::LuminanceDetail => {
+            next.noise_reduction.luminance_detail = interaction.value
+        }
         AdjustmentTarget::CaptureAmount => next.capture_sharpening.amount = interaction.value,
         AdjustmentTarget::CaptureRadius => next.capture_sharpening.radius = interaction.value,
         AdjustmentTarget::CaptureNoise => {
