@@ -536,12 +536,12 @@ impl super::GpuSpatialProcessor {
     }
 }
 
-struct AxisBuffers {
-    samples: wgpu::Buffer,
-    weights: wgpu::Buffer,
+pub(crate) struct AxisBuffers {
+    pub(crate) samples: wgpu::Buffer,
+    pub(crate) weights: wgpu::Buffer,
 }
 
-fn axis_buffers(
+pub(crate) fn axis_buffers(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     axis: &AreaReductionAxis,
@@ -665,7 +665,7 @@ fn maximum_band_source_rows(
         .ok_or_else(|| invalid("area reduction has no output bands"))
 }
 
-fn source_rows_for_band(
+pub(crate) fn source_rows_for_band(
     vertical: &AreaReductionAxis,
     target_first: usize,
     target_count: usize,
@@ -685,7 +685,9 @@ fn source_rows_for_band(
     Ok((first, end - first))
 }
 
-fn plan_table_bytes(plan: &rohditor_core::AreaReductionPlan) -> Result<u64, GpuPreviewError> {
+pub(crate) fn plan_table_bytes(
+    plan: &rohditor_core::AreaReductionPlan,
+) -> Result<u64, GpuPreviewError> {
     let entries = plan
         .horizontal()
         .samples()
