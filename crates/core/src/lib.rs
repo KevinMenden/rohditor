@@ -14,6 +14,7 @@ mod demosaic;
 mod editing;
 mod error;
 mod export;
+mod export_resize;
 mod geometry;
 mod highlight;
 mod optics;
@@ -53,7 +54,7 @@ pub use error::PipelineError;
 pub use export::{
     DitherMode, ExportError, ExportFormat, ExportImage, ExportMetadataPolicy, ExportReport,
     ExportSettings, JPEG_QUALITY_DEFAULT, JPEG_QUALITY_MAX, JPEG_QUALITY_MIN, OutputBitDepth,
-    PngBitDepth, export_image,
+    OutputSize, PngBitDepth, export_image,
 };
 pub use geometry::{OutputGeometry, ResolvedCropRect};
 pub use highlight::HighlightDiagnostics;
