@@ -17,8 +17,10 @@ use thiserror::Error;
 
 use crate::output::write_transactionally;
 
+mod sharpening;
 mod types;
 
+pub use sharpening::*;
 pub use types::*;
 
 #[derive(Debug, Error)]
@@ -592,8 +594,9 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        DitherMode, ExportFormat, ExportMetadataPolicy, ExportSettings, OutputSize, PngBitDepth,
-        exif_datetime, srgb_icc_profile,
+        DitherMode, ExportFormat, ExportMetadataPolicy, ExportSettings, OutputMedium,
+        OutputSharpening, OutputSharpeningStrength, OutputSize, PngBitDepth, exif_datetime,
+        srgb_icc_profile,
     };
 
     #[test]
@@ -642,6 +645,10 @@ mod tests {
                 width: 2048,
                 height: 1365,
             },
+            sharpening: Some(OutputSharpening {
+                medium: OutputMedium::Glossy,
+                strength: OutputSharpeningStrength::High,
+            }),
         };
         let json = serde_json::to_string(&settings).expect("serialize export settings");
         let decoded: ExportSettings =

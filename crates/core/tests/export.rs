@@ -41,6 +41,7 @@ fn png8_and_jpeg_embed_srgb_and_orientation_safe_exif() -> Result<(), Box<dyn Er
                 metadata: ExportMetadataPolicy::Safe,
                 overwrite: false,
                 size: OutputSize::Original,
+                sharpening: None,
             },
         )?;
         assert_eq!((report.width, report.height), (96, 64));

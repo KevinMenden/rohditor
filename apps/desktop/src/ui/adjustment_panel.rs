@@ -1,5 +1,8 @@
 use eframe::egui;
-use rohditor_core::{HSL_CHANNEL_CENTERS, Histogram, WhiteBalanceMode, evaluate_tone_curve};
+use rohditor_core::{
+    HSL_CHANNEL_CENTERS, Histogram, OutputMedium, OutputSharpening, OutputSharpeningStrength,
+    WhiteBalanceMode, evaluate_tone_curve,
+};
 use rohditor_edit::{
     CameraProfileSelection, HighlightMethod, OpticsAction, RenderingProfileSelection, ToneCurve,
 };
@@ -202,6 +205,8 @@ pub(crate) struct ExportUiSettings {
     pub long_edge: u32,
     pub fit_width: u32,
     pub fit_height: u32,
+    /// Export-only; `None` is off.
+    pub sharpening: Option<OutputSharpening>,
     pub dither: bool,
     pub safe_metadata: bool,
     pub overwrite: bool,
@@ -217,6 +222,7 @@ impl ExportUiSettings {
             long_edge: 2048,
             fit_width: 2048,
             fit_height: 2048,
+            sharpening: None,
             dither: false,
             safe_metadata: true,
             overwrite: false,
@@ -1299,6 +1305,7 @@ fn show_export_settings(ui: &mut egui::Ui, settings: &mut ExportUiSettings) {
         }
     }
     show_size_controls(ui, settings);
+    show_sharpening_controls(ui, &mut settings.sharpening);
     ui.checkbox(&mut settings.dither, "Ordered output dithering");
     ui.checkbox(&mut settings.safe_metadata, "Include safe EXIF metadata");
     ui.checkbox(&mut settings.overwrite, "Allow replacing an existing file");
@@ -1341,6 +1348,61 @@ fn show_size_controls(ui: &mut egui::Ui, settings: &mut ExportUiSettings) {
             });
         }
     }
+}
+
+/// Output sharpening medium and strength. It is applied on export only, so
+/// the editor preview does not show it.
+fn show_sharpening_controls(ui: &mut egui::Ui, sharpening: &mut Option<OutputSharpening>) {
+    let medium_label = |medium: Option<OutputMedium>| match medium {
+        None => "Off",
+        Some(OutputMedium::Screen) => "Screen",
+        Some(OutputMedium::Matte) => "Matte",
+        Some(OutputMedium::Glossy) => "Glossy",
+    };
+    let mut medium = sharpening.map(|value| value.medium);
+    widgets::dropdown(
+        ui,
+        "export_sharpening",
+        "Output sharpening",
+        medium_label(medium),
+        |ui| {
+            for choice in [
+                None,
+                Some(OutputMedium::Screen),
+                Some(OutputMedium::Matte),
+                Some(OutputMedium::Glossy),
+            ] {
+                ui.selectable_value(&mut medium, choice, medium_label(choice));
+            }
+        },
+    );
+    let Some(medium) = medium else {
+        *sharpening = None;
+        return;
+    };
+    let mut strength =
+        sharpening.map_or(OutputSharpeningStrength::Standard, |value| value.strength);
+    widgets::dropdown(
+        ui,
+        "export_sharpening_strength",
+        "Strength",
+        match strength {
+            OutputSharpeningStrength::Low => "Low",
+            OutputSharpeningStrength::Standard => "Standard",
+            OutputSharpeningStrength::High => "High",
+        },
+        |ui| {
+            ui.selectable_value(&mut strength, OutputSharpeningStrength::Low, "Low");
+            ui.selectable_value(
+                &mut strength,
+                OutputSharpeningStrength::Standard,
+                "Standard",
+            );
+            ui.selectable_value(&mut strength, OutputSharpeningStrength::High, "High");
+        },
+    );
+    *sharpening = Some(OutputSharpening { medium, strength });
+    ui.weak("Applied on export only; not shown in the preview.");
 }
 
 #[cfg(test)]

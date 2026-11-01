@@ -13,9 +13,9 @@ use rohditor_camera_profile::parse_dcp_file;
 use rohditor_core::{
     CameraCalibration, CpuPipeline, DitherMode, ExportFormat, ExportImage, ExportMetadataPolicy,
     ExportSettings, HighlightDiagnostics, JPEG_QUALITY_DEFAULT, JPEG_QUALITY_MAX, JPEG_QUALITY_MIN,
-    OpticsService, OutputPolicy, OutputSize, PngBitDepth, RawCropPolicy, RenderOptions,
-    StageTimings, WhiteBalanceCoordinates, export_image, paths_refer_to_same_file,
-    resolve_camera_colour, write_output_bytes,
+    OpticsService, OutputMedium, OutputPolicy, OutputSharpening, OutputSharpeningStrength,
+    OutputSize, PngBitDepth, RawCropPolicy, RenderOptions, StageTimings, WhiteBalanceCoordinates,
+    export_image, paths_refer_to_same_file, resolve_camera_colour, write_output_bytes,
 };
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_edit::{
@@ -48,6 +48,8 @@ struct Cli {
     command: Command,
 }
 
+// Parsed once at startup; boxing the large `Develop` arguments would only add noise.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Inspect normalized metadata and, by default, decode the sensor mosaic.
@@ -277,6 +279,11 @@ enum Command {
         /// Resize to fit inside a WxH bounding box (never upscales).
         #[arg(long, value_name = "WxH", value_parser = parse_fit_box)]
         fit: Option<(u32, u32)>,
+
+        /// Sharpen after resizing: MEDIUM[:STRENGTH] with medium screen, matte
+        /// or glossy and strength low, standard (default) or high.
+        #[arg(long, value_name = "MEDIUM[:STRENGTH]", value_parser = parse_output_sharpening)]
+        output_sharpen: Option<OutputSharpening>,
 
         /// Apply deterministic ordered dithering before integer quantization.
         #[arg(long)]
@@ -678,6 +685,7 @@ pub(crate) fn run() -> Result<()> {
             png_bit_depth,
             long_edge,
             fit,
+            output_sharpen,
             dither,
             metadata,
             force,
@@ -730,6 +738,7 @@ pub(crate) fn run() -> Result<()> {
                 png_bit_depth,
                 long_edge,
                 fit,
+                output_sharpen,
                 dither,
                 metadata,
                 force,
@@ -981,6 +990,7 @@ struct DevelopArguments {
     png_bit_depth: Option<CliPngBitDepth>,
     long_edge: Option<u32>,
     fit: Option<(u32, u32)>,
+    output_sharpen: Option<OutputSharpening>,
     dither: bool,
     metadata: CliMetadata,
     force: bool,
@@ -1244,6 +1254,7 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
             export_settings.format.bit_depth(),
             export_settings.dithering,
             export_settings.size,
+            export_settings.sharpening,
             |error| eprintln!("GPU export unavailable; using CPU: {error}"),
         )
         .with_context(|| format!("could not develop {}", file.display()))?;
@@ -1553,6 +1564,7 @@ fn quality_crops(
         metadata: ExportMetadataPolicy::None,
         overwrite: force,
         size: OutputSize::Original,
+        sharpening: None,
     };
     let mut source_reports = Vec::new();
     let mut artifacts = Vec::new();
@@ -1579,6 +1591,7 @@ fn quality_crops(
                 rohditor_core::OutputBitDepth::Eight,
                 DitherMode::None,
                 OutputSize::Original,
+                None,
             )
             .with_context(|| format!("could not develop quality source {}", requested.source))?;
         let image = match &rendered.image {
@@ -1990,6 +2003,24 @@ fn parse_fit_box(value: &str) -> Result<(u32, u32), String> {
     Ok((parse(width)?, parse(height)?))
 }
 
+/// Parse `MEDIUM[:STRENGTH]`, e.g. `screen` or `glossy:high`.
+fn parse_output_sharpening(value: &str) -> Result<OutputSharpening, String> {
+    let (medium, strength) = value.split_once(':').unwrap_or((value, "standard"));
+    let medium = match medium.to_ascii_lowercase().as_str() {
+        "screen" => OutputMedium::Screen,
+        "matte" => OutputMedium::Matte,
+        "glossy" => OutputMedium::Glossy,
+        other => return Err(format!("{other:?} is not screen, matte or glossy")),
+    };
+    let strength = match strength.to_ascii_lowercase().as_str() {
+        "low" => OutputSharpeningStrength::Low,
+        "standard" => OutputSharpeningStrength::Standard,
+        "high" => OutputSharpeningStrength::High,
+        other => return Err(format!("{other:?} is not low, standard or high")),
+    };
+    Ok(OutputSharpening { medium, strength })
+}
+
 fn develop_export_settings(output: &Path, arguments: &DevelopArguments) -> Result<ExportSettings> {
     let extension = output
         .extension()
@@ -2033,6 +2064,7 @@ fn develop_export_settings(output: &Path, arguments: &DevelopArguments) -> Resul
             (None, Some((width, height))) => OutputSize::Fit { width, height },
             (None, None) => OutputSize::Original,
         },
+        sharpening: arguments.output_sharpen,
     };
     settings
         .validate_destination(output)
@@ -2264,9 +2296,10 @@ mod tests {
 
     use super::{
         Cli, CliCropPolicy, CliDemosaic, CliHighlightMethod, CliMetadata, CliOutputGamut,
-        CliRenderingProfile, Command, DemosaicAlgorithm, DevelopArguments, QualityCropSpec,
-        RgbMultipliers, WhiteBalance, crop_display_image, develop_export_settings, extract_preview,
-        format_photometric, nearest_neighbor_2x, parse_lens_profile, parse_libraw_pgm,
+        CliRenderingProfile, Command, DemosaicAlgorithm, DevelopArguments, OutputMedium,
+        OutputSharpening, OutputSharpeningStrength, QualityCropSpec, RgbMultipliers, WhiteBalance,
+        crop_display_image, develop_export_settings, extract_preview, format_photometric,
+        nearest_neighbor_2x, parse_lens_profile, parse_libraw_pgm, parse_output_sharpening,
         validate_highlight_options, validate_preview_extension, white_balance_from_arguments,
     };
 
@@ -2343,6 +2376,7 @@ mod tests {
             png_bit_depth: None,
             long_edge: None,
             fit: None,
+            output_sharpen: None,
             dither: false,
             metadata: CliMetadata::Safe,
             force: false,
@@ -2793,5 +2827,25 @@ mod tests {
         );
 
         fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn output_sharpening_argument_defaults_to_standard_strength() {
+        assert_eq!(
+            parse_output_sharpening("Screen"),
+            Ok(OutputSharpening {
+                medium: OutputMedium::Screen,
+                strength: OutputSharpeningStrength::Standard,
+            })
+        );
+        assert_eq!(
+            parse_output_sharpening("glossy:high"),
+            Ok(OutputSharpening {
+                medium: OutputMedium::Glossy,
+                strength: OutputSharpeningStrength::High,
+            })
+        );
+        assert!(parse_output_sharpening("paper").is_err());
+        assert!(parse_output_sharpening("screen:max").is_err());
     }
 }

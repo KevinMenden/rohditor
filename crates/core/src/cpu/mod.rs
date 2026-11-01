@@ -6,6 +6,7 @@
 mod adjustments;
 mod display;
 mod normalize;
+mod sharpened_output;
 mod stages;
 mod white_balance;
 
@@ -28,6 +29,7 @@ pub(crate) use display::{
     render_display_srgb16_with_geometry_and_diagnostics,
 };
 pub(crate) use normalize::preview_dimensions;
+pub(crate) use sharpened_output::{render_sharpened_export, sharpened_output_bytes};
 pub use stages::raw_crop_dimensions;
 pub(crate) use white_balance::{
     apply_camera_color_transform_cancellable, apply_white_balance_cancellable,

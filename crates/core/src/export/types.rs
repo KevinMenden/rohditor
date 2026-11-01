@@ -3,7 +3,7 @@ use std::path::Path;
 use rohditor_image::{DisplayRgbImage, DisplayTransfer};
 use serde::{Deserialize, Serialize};
 
-use super::ExportError;
+use super::{ExportError, OutputSharpening};
 
 pub const JPEG_QUALITY_MIN: u8 = 1;
 pub const JPEG_QUALITY_MAX: u8 = 100;
@@ -175,6 +175,8 @@ pub struct ExportSettings {
     pub metadata: ExportMetadataPolicy,
     pub overwrite: bool,
     pub size: OutputSize,
+    /// Applied after resize, on export only. `None` leaves pixels untouched.
+    pub sharpening: Option<OutputSharpening>,
 }
 
 impl Default for ExportSettings {
@@ -187,6 +189,7 @@ impl Default for ExportSettings {
             metadata: ExportMetadataPolicy::Safe,
             overwrite: false,
             size: OutputSize::Original,
+            sharpening: None,
         }
     }
 }

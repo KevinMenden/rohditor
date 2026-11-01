@@ -404,6 +404,10 @@ impl<T> DisplayRgbImage<T> {
         let start = y * self.row_stride + x * 3;
         Some(&self.data[start..start + 3])
     }
+
+    pub fn data_mut(&mut self) -> &mut [T] {
+        &mut self.data
+    }
 }
 
 #[doc(hidden)]

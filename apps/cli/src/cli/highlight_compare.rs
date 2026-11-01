@@ -179,6 +179,7 @@ pub(super) fn highlight_compare(
         metadata: ExportMetadataPolicy::None,
         overwrite: force,
         size: OutputSize::Original,
+        sharpening: None,
     };
     let decoder = RawlerDecoder::default();
     let mut sources = Vec::new();
@@ -216,6 +217,7 @@ pub(super) fn highlight_compare(
                     OutputBitDepth::Eight,
                     DitherMode::None,
                     OutputSize::Original,
+                    None,
                 )
                 .with_context(|| {
                     format!("could not develop {} with {method:?}", requested.source)
