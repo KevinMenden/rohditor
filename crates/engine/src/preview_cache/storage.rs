@@ -199,7 +199,8 @@ struct ReconstructedCameraRgbKey {
 /// Inactive steps are `None`, so their parked values never change a key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct DetailKey {
-    noise_reduction: Option<(u32, u16)>,
+    /// Chroma strength, luminance strength and detail bits, version.
+    noise_reduction: Option<([u32; 3], u16)>,
     capture_sharpening: Option<([u32; 3], u16)>,
 }
 
@@ -209,7 +210,16 @@ impl DetailKey {
         let sharpening = recipe.capture_sharpening;
         Self {
             noise_reduction: nr.is_active().then_some((
-                nr.chroma.to_bits(),
+                [
+                    nr.chroma.to_bits(),
+                    nr.luminance.to_bits(),
+                    // Parked while luminance reduction is off.
+                    if nr.luminance_active() {
+                        nr.luminance_detail.to_bits()
+                    } else {
+                        0
+                    },
+                ],
                 rohditor_core::NOISE_REDUCTION_ALGORITHM_VERSION,
             )),
             capture_sharpening: sharpening.is_active().then_some((
@@ -911,7 +921,7 @@ mod tests {
     }
 
     #[test]
-    fn chroma_noise_reduction_invalidates_reconstruction_and_downstream_but_retain_raw() {
+    fn noise_reduction_invalidates_reconstruction_and_downstream_but_retain_raw() {
         let frame = frame();
         let options = PreviewOptions::default();
         let mut recipe = EditRecipe::default();
@@ -927,6 +937,18 @@ mod tests {
         recipe.noise_reduction.chroma = 0.6;
         let stronger = PreviewCacheKeys::new(1, &frame, &recipe, options);
         assert_ne!(on.reconstructed, stronger.reconstructed);
+        // The texture setting only matters while luminance reduction is on.
+        recipe.noise_reduction.luminance_detail = 0.9;
+        let parked = PreviewCacheKeys::new(1, &frame, &recipe, options);
+        assert_eq!(stronger.reconstructed, parked.reconstructed);
+        recipe.noise_reduction.luminance = 0.3;
+        let luminance = PreviewCacheKeys::new(1, &frame, &recipe, options);
+        assert_ne!(parked.reconstructed, luminance.reconstructed);
+        recipe.noise_reduction.luminance_detail = 0.2;
+        let texture = PreviewCacheKeys::new(1, &frame, &recipe, options);
+        assert_ne!(luminance.reconstructed, texture.reconstructed);
+        recipe.noise_reduction.luminance = 0.0;
+        recipe.noise_reduction.luminance_detail = 0.5;
         // Downstream-only edits keep the captured source.
         recipe.light.exposure_ev = 1.0;
         let creative = PreviewCacheKeys::new(1, &frame, &recipe, options);
@@ -957,20 +979,31 @@ mod tests {
                 .expect("spatial source")
         };
         let off = prepare(&recipe, &mut cache);
-        assert!(off.timings().noise_reduction.is_zero());
+        assert!(off.timings().chroma_noise_reduction.is_zero());
+        assert!(off.timings().luminance_noise_reduction.is_zero());
         recipe.noise_reduction.chroma = 0.5;
         let on = prepare(&recipe, &mut cache);
         assert!(on.timings().demosaic.is_zero(), "demosaic is reused");
-        assert!(!on.timings().noise_reduction.is_zero(), "NR ran");
+        assert!(!on.timings().chroma_noise_reduction.is_zero(), "NR ran");
         assert!(on.detail().is_some_and(|d| d.noise_reduction.is_some()));
         // Same settings again, and a downstream edit: the captured source stays.
         recipe.light.exposure_ev = 0.5;
         let creative = prepare(&recipe, &mut cache);
         assert!(creative.timings().demosaic.is_zero());
-        assert!(creative.timings().noise_reduction.is_zero());
+        assert!(creative.timings().chroma_noise_reduction.is_zero());
         recipe.noise_reduction.chroma = 0.7;
         let stronger = prepare(&recipe, &mut cache);
-        assert!(!stronger.timings().noise_reduction.is_zero());
+        assert!(!stronger.timings().chroma_noise_reduction.is_zero());
+        // Luminance reduction joins the same cached stage.
+        recipe.noise_reduction.luminance = 0.4;
+        let luminance = prepare(&recipe, &mut cache);
+        assert!(luminance.timings().demosaic.is_zero(), "demosaic is reused");
+        assert!(
+            luminance
+                .detail()
+                .and_then(|d| d.noise_reduction)
+                .is_some_and(|n| n.luminance == 0.4)
+        );
     }
 
     pub(super) fn frame() -> RawFrame {

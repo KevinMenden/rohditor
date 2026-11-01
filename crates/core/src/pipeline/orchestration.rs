@@ -105,7 +105,8 @@ pub struct StageTimings {
     /// pipeline. New code should use [`Self::highlight_processing`].
     pub highlight_clipping: Duration,
     pub demosaic: Duration,
-    pub noise_reduction: Duration,
+    pub chroma_noise_reduction: Duration,
+    pub luminance_noise_reduction: Duration,
     pub capture_sharpening: Duration,
     pub optics: Duration,
     pub resampling: Duration,
@@ -768,7 +769,9 @@ pub(super) mod render {
             base.timings.highlight_processing = reconstructed.timings.highlight_processing;
             base.timings.highlight_clipping = reconstructed.timings.highlight_clipping;
             base.timings.demosaic = reconstructed.timings.demosaic;
-            base.timings.noise_reduction = reconstructed.timings.noise_reduction;
+            base.timings.chroma_noise_reduction = reconstructed.timings.chroma_noise_reduction;
+            base.timings.luminance_noise_reduction =
+                reconstructed.timings.luminance_noise_reduction;
             base.timings.capture_sharpening = reconstructed.timings.capture_sharpening;
             base.timings.optics = reconstructed.timings.optics;
             base.timings.resampling = reconstructed.timings.resampling;
@@ -1313,7 +1316,8 @@ fn prepare_base_cancellable(
         highlight_processing,
         highlight_clipping: highlight_processing,
         demosaic,
-        noise_reduction: capture.noise_reduction,
+        chroma_noise_reduction: capture.chroma_noise_reduction,
+        luminance_noise_reduction: capture.luminance_noise_reduction,
         capture_sharpening: capture.capture_sharpening,
         optics: optics_timing,
         color_conversion,
@@ -1457,7 +1461,8 @@ fn render_base(
     base.timings.total = base.timings.metadata
         + base.timings.normalization
         + base.timings.highlight_processing
-        + base.timings.noise_reduction
+        + base.timings.chroma_noise_reduction
+        + base.timings.luminance_noise_reduction
         + base.timings.capture_sharpening
         + base.timings.demosaic
         + base.timings.optics

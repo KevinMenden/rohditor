@@ -1,6 +1,7 @@
 use eframe::egui;
 use rohditor_edit::{
     CAPTURE_AMOUNT_RANGE, CAPTURE_NOISE_RANGE, CAPTURE_RADIUS_RANGE, CHROMA_NOISE_REDUCTION_RANGE,
+    LUMINANCE_DETAIL_RANGE, LUMINANCE_NOISE_REDUCTION_RANGE, ParameterRange,
 };
 
 use super::adjustment_panel::{
@@ -25,25 +26,51 @@ fn noise_reduction(
     output: &mut AdjustmentPanelOutput,
 ) {
     ui.label("Noise reduction").on_hover_text(
-        "Removes colour noise at source resolution, before sharpening. Inspect at Source 1:1. \
-         Runs on the CPU, so the preview and export use the CPU path while it is on.",
+        "Removes colour noise, then luminance (grain) noise, at source resolution and before \
+         sharpening. Inspect at Source 1:1. Runs on the CPU, so the preview and export use the \
+         CPU path while it is on.",
     );
+    let settings = &mut document.noise_reduction;
     record_slider(
         ui,
         &mut output.interactions,
         AdjustmentTarget::ChromaNoiseReduction,
-        &mut document.noise_reduction.chroma,
-        AdjustmentSpec {
-            label: "Colour",
-            minimum: CHROMA_NOISE_REDUCTION_RANGE.minimum,
-            maximum: CHROMA_NOISE_REDUCTION_RANGE.maximum,
-            neutral: CHROMA_NOISE_REDUCTION_RANGE.neutral,
-            decimals: 2,
-            step: 0.01,
-            suffix: "",
-            scale: ValueScale::Raw,
-        },
+        &mut settings.chroma,
+        slider("Colour", CHROMA_NOISE_REDUCTION_RANGE),
     );
+    record_slider(
+        ui,
+        &mut output.interactions,
+        AdjustmentTarget::LuminanceNoiseReduction,
+        &mut settings.luminance,
+        slider("Luminance", LUMINANCE_NOISE_REDUCTION_RANGE),
+    );
+    // Texture preservation has nothing to act on while luminance is off.
+    ui.add_enabled_ui(settings.luminance > 0.0, |ui| {
+        record_slider(
+            ui,
+            &mut output.interactions,
+            AdjustmentTarget::LuminanceDetail,
+            &mut settings.luminance_detail,
+            slider("Detail", LUMINANCE_DETAIL_RANGE),
+        );
+    })
+    .response
+    .on_hover_text("Higher keeps more fine texture (and some grain).");
+}
+
+/// A 0..1 slider with two decimals.
+fn slider(label: &'static str, range: ParameterRange) -> AdjustmentSpec<'static> {
+    AdjustmentSpec {
+        label,
+        minimum: range.minimum,
+        maximum: range.maximum,
+        neutral: range.neutral,
+        decimals: 2,
+        step: 0.01,
+        suffix: "",
+        scale: ValueScale::Raw,
+    }
 }
 
 fn capture_sharpening(

@@ -22,5 +22,9 @@ harness = false
 name = "chroma"
 harness = false
 
+[[bench]]
+name = "luma"
+harness = false
+
 [lints]
 workspace = true

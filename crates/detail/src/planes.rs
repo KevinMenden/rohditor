@@ -103,6 +103,23 @@ fn validate_balance(balance: [f32; 3]) -> Result<(), DetailError> {
     }
 }
 
+/// Balanced luma `(r + 2g + b) / 4` alone (the `Y` of [`split_opponent`]), with
+/// non-finite results replaced by 0 so they cannot poison neighbours.
+pub fn luma_plane(image: &LinearRgbImage<f32>, balance: [f32; 3]) -> Result<Plane, DetailError> {
+    validate_balance(balance)?;
+    let (width, height) = (image.width(), image.height());
+    let mut y = vec![0.0_f32; checked_len(width, height)?];
+    y.par_chunks_mut(width).enumerate().for_each(|(row, y)| {
+        let start = row * image.row_stride();
+        let pixels = image.data()[start..start + width * 3].as_chunks::<3>().0;
+        for (y, px) in y.iter_mut().zip(pixels) {
+            let luma = (px[0] * balance[0] + 2.0 * px[1] * balance[1] + px[2] * balance[2]) * 0.25;
+            *y = if luma.is_finite() { luma } else { 0.0 };
+        }
+    });
+    Plane::new(width, height, y)
+}
+
 /// Split into opponent planes after multiplying each channel by `balance`
 /// (e.g. white-balance gains, so neutral greys have `C1 = C2 = 0`).
 pub fn split_opponent(
@@ -189,6 +206,23 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn luma_plane_matches_the_split_and_zeroes_non_finite_pixels() {
+        let (w, h, stride) = (4, 3, 14);
+        let data: Vec<f32> = (0..stride * h)
+            .map(|i| (i * 7 % 23) as f32 / 23.0)
+            .collect();
+        let mut image =
+            LinearRgbImage::new(w, h, stride, LinearRgbSpace::CameraNative, data).unwrap();
+        let balance = [2.1, 1.0, 1.6];
+        let split = split_opponent(&image, balance).unwrap().luma;
+        assert_eq!(luma_plane(&image, balance).unwrap(), split);
+        image.data_mut()[stride + 3] = f32::NAN;
+        let plane = luma_plane(&image, balance).unwrap();
+        assert_eq!(plane.get(1, 1), 0.0);
+        assert!(plane.data().iter().all(|v| v.is_finite()));
     }
 
     #[test]
