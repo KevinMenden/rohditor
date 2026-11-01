@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use rohditor_core::{
     CancellationToken, CpuPipeline, PreviewOptions, RenderOptions, decode_camera_preview,
-    match_camera_look,
+    estimate_noise_profile, match_camera_look, with_default_noise_reduction,
 };
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_edit::{CameraProfileSelection, EditRecipe, RenderingProfileSelection};
@@ -236,6 +236,58 @@ fn fitted_camera_tone_matches_the_embedded_jpeg_brightness() -> Result<(), Box<d
             "{name}: Standard bias {:+.3}, Matched bias {:+.3}",
             bias[0],
             bias[1]
+        );
+    }
+    Ok(())
+}
+
+/// Chroma strength the derived default picks per corpus file, as recorded by
+/// `rohditor-cli detail-corpus`. Base-ISO files must stay off so they keep the
+/// GPU path.
+#[test]
+#[ignore = "requires the ignored Sony ARW corpus in testdata/private"]
+fn default_noise_reduction_follows_each_private_files_noise() -> Result<(), Box<dyn Error>> {
+    let decoder = RawlerDecoder::default();
+    let pipeline = CpuPipeline::default();
+    let mut recipe = EditRecipe::default();
+    recipe.rendering.profile = RenderingProfileSelection::NEUTRAL;
+    let options = RenderOptions {
+        demosaic: DemosaicAlgorithm::Amaze,
+        ..RenderOptions::default()
+    };
+    // (file, minimum, maximum) of the derived chroma strength.
+    let expected = [
+        ("DSC00851.ARW", 0.0, 0.0),
+        ("DSC01166.ARW", 0.3, 0.4),
+        ("DSC02382.ARW", 0.0, 0.0),
+        ("DSC03270.ARW", 0.1, 0.25),
+        ("DSC03687.ARW", 0.3, 0.4),
+        ("DSC03821.ARW", 0.1, 0.25),
+        ("DSC00554.ARW", 0.1, 0.25),
+        ("DSC00850.ARW", 0.0, 0.0),
+        ("DSC01109.ARW", 0.3, 0.4),
+        ("DSC02616.ARW", 0.25, 0.4),
+        ("DSC01787.ARW", 0.3, 0.4),
+    ];
+    for (name, minimum, maximum) in expected {
+        let frame = decoder.decode(&private_corpus_directory().join(name))?;
+        let profile = estimate_noise_profile(&pipeline, &frame, &recipe, options)?;
+        let derived = with_default_noise_reduction(recipe.clone(), profile.as_ref());
+        let chroma = derived.noise_reduction.chroma;
+        assert!(
+            (minimum..=maximum).contains(&chroma),
+            "{name}: derived chroma {chroma}, expected {minimum}..={maximum}"
+        );
+        assert!(
+            !derived.noise_reduction.luminance_active(),
+            "{name}: luminance reduction must stay off"
+        );
+        // The derived recipe renders, and the chroma stage runs exactly when on.
+        let rendered = pipeline.render(&frame, &derived, options)?;
+        assert_eq!(
+            !rendered.timings.chroma_noise_reduction.is_zero(),
+            chroma > 0.0,
+            "{name}"
         );
     }
     Ok(())

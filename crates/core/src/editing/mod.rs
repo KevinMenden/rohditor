@@ -4,10 +4,12 @@
 //! caller owns undo/revision handling.
 
 mod auto_tone;
+mod noise_reduction;
 mod sampling;
 mod white_balance;
 
 pub use auto_tone::auto_tone;
+pub use noise_reduction::{estimate_noise_profile, with_default_noise_reduction};
 pub use sampling::sample_rgb_patch;
 pub use white_balance::{
     WhiteBalanceMode, WhiteBalanceModeMemory, white_balance_from_camera_sample,

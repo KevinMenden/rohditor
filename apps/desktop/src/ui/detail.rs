@@ -6,7 +6,7 @@ use rohditor_edit::{
 };
 
 use super::adjustment_panel::{
-    AdjustmentPanelOutput, AdjustmentTarget, DocumentPanelModel, record_slider,
+    AdjustmentPanelOutput, AdjustmentTarget, DocumentPanelModel, NoiseSuggestion, record_slider,
 };
 use super::widgets::{AdjustmentSpec, ValueScale};
 
@@ -135,11 +135,16 @@ fn noise_reduction(
     document: &mut DocumentPanelModel,
     output: &mut AdjustmentPanelOutput,
 ) {
-    ui.label("Noise reduction").on_hover_text(
-        "Removes colour noise, then luminance (grain) noise, at source resolution and before \
-         sharpening. Inspect at Source 1:1. Runs on the CPU, so the preview and export use the \
-         CPU path while it is on.",
-    );
+    ui.horizontal(|ui| {
+        ui.label("Noise reduction").on_hover_text(
+            "Removes colour noise, then luminance (grain) noise, at source resolution and \
+             before sharpening. Inspect at Source 1:1. Runs on the CPU, so the preview and \
+             export use the CPU path while it is on.",
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            auto_button(ui, document.noise_suggestion, output);
+        });
+    });
     let settings = &mut document.noise_reduction;
     record_slider(
         ui,
@@ -167,6 +172,37 @@ fn noise_reduction(
     })
     .response
     .on_hover_text("Higher keeps more fine texture (and some grain).");
+}
+
+/// Sets the colour strength from the photo's estimated noise; the first click
+/// on a photo that has not been profiled yet runs the estimate.
+fn auto_button(ui: &mut egui::Ui, suggestion: NoiseSuggestion, output: &mut AdjustmentPanelOutput) {
+    let (enabled, hint) = match suggestion {
+        NoiseSuggestion::Unknown => (
+            true,
+            "Estimates this photo's noise and sets the Colour strength to match.".to_owned(),
+        ),
+        NoiseSuggestion::Estimating => (false, "Estimating this photo's noise…".to_owned()),
+        NoiseSuggestion::Unavailable => (
+            false,
+            "The noise of this photo could not be estimated.".to_owned(),
+        ),
+        NoiseSuggestion::Suggested { chroma } if chroma > 0.0 => (
+            true,
+            format!("Sets Colour to {chroma:.2}, from this photo's estimated noise."),
+        ),
+        NoiseSuggestion::Suggested { .. } => (
+            true,
+            "This photo is clean enough that no colour noise reduction is suggested.".to_owned(),
+        ),
+    };
+    if ui
+        .add_enabled(enabled, egui::Button::new("Auto").small())
+        .on_hover_text(hint)
+        .clicked()
+    {
+        output.auto_noise_reduction = true;
+    }
 }
 
 /// A 0..1 slider with two decimals.

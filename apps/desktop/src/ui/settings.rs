@@ -14,6 +14,8 @@ pub(crate) struct SettingsWindowModel<'a> {
     pub draft_output_policy: OutputPolicy,
     pub active_cpu_only: bool,
     pub draft_cpu_only: bool,
+    pub active_auto_noise_reduction: bool,
+    pub draft_auto_noise_reduction: bool,
     pub warning: Option<&'a str>,
 }
 
@@ -22,6 +24,7 @@ impl SettingsWindowModel<'_> {
         self.draft_demosaic != self.active_demosaic
             || self.draft_output_policy != self.active_output_policy
             || self.draft_cpu_only != self.active_cpu_only
+            || self.draft_auto_noise_reduction != self.active_auto_noise_reduction
     }
 }
 
@@ -30,6 +33,7 @@ pub(crate) struct SettingsWindowOutput {
     pub selected_demosaic: Option<DemosaicAlgorithm>,
     pub selected_output_policy: Option<OutputPolicy>,
     pub selected_cpu_only: Option<bool>,
+    pub selected_auto_noise_reduction: Option<bool>,
     pub cancel: bool,
     pub apply: bool,
 }
@@ -96,6 +100,21 @@ pub(crate) fn show(
             ui.label(
                 egui::RichText::new(
                     "Otherwise the GPU is used wherever possible. Takes effect after restart.",
+                )
+                .color(colors::TEXT_MUTED),
+            );
+
+            ui.add_space(12.0);
+            let mut auto_noise = model.draft_auto_noise_reduction;
+            ui.checkbox(&mut auto_noise, "Automatic noise reduction for new photos");
+            if auto_noise != model.draft_auto_noise_reduction {
+                output.selected_auto_noise_reduction = Some(auto_noise);
+            }
+            ui.label(
+                egui::RichText::new(
+                    "Estimates each new photo's noise and starts noisy ones with colour noise \
+                     reduction; low-ISO photos are left alone. Photos with saved edits keep \
+                     them (use Auto in the Detail panel). Applies to photos opened afterwards.",
                 )
                 .color(colors::TEXT_MUTED),
             );
