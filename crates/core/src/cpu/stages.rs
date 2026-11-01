@@ -1024,7 +1024,7 @@ pub(super) mod display {
         Ok((image, diagnostics))
     }
 
-    fn quantization_dither(mode: DitherMode, x: usize, y: usize) -> f32 {
+    pub(in crate::cpu) fn quantization_dither(mode: DitherMode, x: usize, y: usize) -> f32 {
         const BAYER_8X8: [[u8; 8]; 8] = [
             [0, 32, 8, 40, 2, 34, 10, 42],
             [48, 16, 56, 24, 50, 18, 58, 26],

@@ -300,6 +300,7 @@ impl ExportUiSettings {
                     height: self.fit_height,
                 },
             },
+            sharpening: self.sharpening,
         }
     }
 
@@ -3631,6 +3632,7 @@ mod tests {
             long_edge: 1000,
             fit_width: 1200,
             fit_height: 800,
+            sharpening: None,
             dither: true,
             safe_metadata: false,
             overwrite: true,

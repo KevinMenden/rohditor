@@ -54,7 +54,8 @@ pub use error::PipelineError;
 pub use export::{
     DitherMode, ExportError, ExportFormat, ExportImage, ExportMetadataPolicy, ExportReport,
     ExportSettings, JPEG_QUALITY_DEFAULT, JPEG_QUALITY_MAX, JPEG_QUALITY_MIN, OutputBitDepth,
-    OutputSize, PngBitDepth, export_image,
+    OutputMedium, OutputSharpening, OutputSharpeningStrength, OutputSize, PngBitDepth,
+    export_image,
 };
 pub use geometry::{OutputGeometry, ResolvedCropRect};
 pub use highlight::HighlightDiagnostics;
