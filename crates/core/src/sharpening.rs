@@ -68,23 +68,6 @@ impl CaptureSharpeningContract {
     }
 }
 
-/// Settings and implementation identity of an already processed base.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct CaptureSharpeningProvenance {
-    pub settings: CaptureSharpening,
-    pub algorithm_version: u16,
-}
-
-impl CaptureSharpeningProvenance {
-    #[must_use]
-    pub fn for_settings(settings: CaptureSharpening) -> Option<Self> {
-        settings.is_active().then_some(Self {
-            settings,
-            algorithm_version: CAPTURE_SHARPENING_ALGORITHM_VERSION,
-        })
-    }
-}
-
 /// Six reusable single-channel planes; kernel storage is bounded to nine floats.
 pub(crate) fn scratch_bytes(width: usize, height: usize) -> Result<usize, PipelineError> {
     width

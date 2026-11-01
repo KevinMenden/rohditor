@@ -1,5 +1,6 @@
 //! Single-channel planes and the luma/opponent split used by chroma filters.
 
+use rayon::prelude::*;
 use rohditor_image::{LinearRgbImage, LinearRgbSpace};
 
 use crate::DetailError;
@@ -111,20 +112,21 @@ pub fn split_opponent(
     validate_balance(balance)?;
     let (width, height) = (image.width(), image.height());
     let len = checked_len(width, height)?;
-    let (mut y, mut c1, mut c2) = (
-        Vec::with_capacity(len),
-        Vec::with_capacity(len),
-        Vec::with_capacity(len),
-    );
-    for row in 0..height {
-        let start = row * image.row_stride();
-        for px in image.data()[start..start + width * 3].as_chunks::<3>().0 {
-            let (r, g, b) = (px[0] * balance[0], px[1] * balance[1], px[2] * balance[2]);
-            y.push((r + 2.0 * g + b) * 0.25);
-            c1.push(r - g);
-            c2.push(b - g);
-        }
-    }
+    let (mut y, mut c1, mut c2) = (vec![0.0_f32; len], vec![0.0_f32; len], vec![0.0_f32; len]);
+    y.par_chunks_mut(width)
+        .zip(c1.par_chunks_mut(width))
+        .zip(c2.par_chunks_mut(width))
+        .enumerate()
+        .for_each(|(row, ((y, c1), c2))| {
+            let start = row * image.row_stride();
+            let pixels = image.data()[start..start + width * 3].as_chunks::<3>().0;
+            for (x, px) in pixels.iter().enumerate() {
+                let (r, g, b) = (px[0] * balance[0], px[1] * balance[1], px[2] * balance[2]);
+                y[x] = (r + 2.0 * g + b) * 0.25;
+                c1[x] = r - g;
+                c2[x] = b - g;
+            }
+        });
     Ok(OpponentPlanes {
         luma: Plane::new(width, height, y)?,
         c1: Plane::new(width, height, c1)?,

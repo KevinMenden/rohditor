@@ -27,6 +27,7 @@ pub(crate) enum AdjustmentTarget {
     Whites,
     Blacks,
     HighlightThreshold,
+    ChromaNoiseReduction,
     CaptureAmount,
     CaptureRadius,
     CaptureNoise,
@@ -125,6 +126,7 @@ pub(crate) struct DocumentPanelModel {
     pub picker_mode: Option<Picker>,
     pub color_mixer_channel: usize,
     pub optics: OpticsPanelModel,
+    pub noise_reduction: rohditor_edit::NoiseReduction,
     pub capture_sharpening: rohditor_edit::CaptureSharpening,
 }
 
@@ -214,7 +216,7 @@ pub(crate) fn show_body(
         show_tone_curve_controls(ui, &mut document, &mut output);
     });
     widgets::adjustment_section(ui, "Detail", |ui| {
-        super::capture_sharpening::show(ui, &mut document, &mut output);
+        super::detail::show(ui, &mut document, &mut output);
     });
     widgets::adjustment_section(ui, "Color", |ui| {
         show_color_controls(ui, &mut document, &mut output);

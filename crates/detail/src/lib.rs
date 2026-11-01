@@ -8,12 +8,16 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 mod atrous;
+mod denoise;
 mod gaussian;
 mod median;
 mod noise;
 mod planes;
+#[cfg(test)]
+mod test_support;
 
 pub use atrous::{Decomposition, atrous_decompose, atrous_halo, edge_avoiding_decompose};
+pub use denoise::{ChromaDenoise, chroma_scratch_bytes, denoise_chroma};
 pub use gaussian::{gaussian_blur, gaussian_kernel};
 pub use median::{median3, median5};
 pub use noise::{NoiseProfile, estimate_noise};

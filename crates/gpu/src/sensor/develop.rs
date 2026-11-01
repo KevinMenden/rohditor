@@ -74,6 +74,11 @@ impl GpuSensorProcessor {
         cancellation: &CancellationToken,
     ) -> Result<(GpuDevelopedSource, SpatialMetrics), GpuPreviewError> {
         super::normalize::check_cancel(cancellation)?;
+        if let Some(reason) = rohditor_core::cpu_only_stage_reason(recipe) {
+            return Err(GpuPreviewError::UnsupportedEdits {
+                reason: reason.to_owned(),
+            });
+        }
         let metadata = SensorCameraMetadata::new(frame, recipe, options).map_err(pipeline_error)?;
         if !Self::supports(metadata.sensor()) {
             return Err(GpuPreviewError::UnsupportedEdits {
