@@ -12,9 +12,11 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use clap::ValueEnum;
+use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_detail::{
-    ChromaDenoise, LumaDenoise, NeverCancelled, denoise_chroma, denoise_luma, estimate_luma_noise,
-    estimate_noise, split_opponent,
+    ChromaDenoise, FalseColor, LumaDenoise, NeverCancelled, denoise_chroma, denoise_luma,
+    estimate_luma_noise, estimate_noise, gaussian_blur, luma_plane, split_opponent,
+    suppress_false_color,
 };
 use rohditor_image::LinearRgbImage;
 use rohditor_reference::detail_scenes::{self, DetailScene, EDGE_PERIOD, Scene};
@@ -39,6 +41,11 @@ pub(super) enum DetailStage {
     ChromaNr,
     /// Luminance noise reduction at `--strength` and `--detail`.
     LumaNr,
+    /// False-colour suppression with `--steps` median passes.
+    FalseColor,
+    /// Experiment: false-colour suppression applied only where the luma
+    /// high-pass is strong (blend weight reaches 1 at [`MASK_FULL`]).
+    FalseColorMasked,
 }
 
 /// Knobs shared by the stages; each stage reads the ones it has.
@@ -46,7 +53,16 @@ pub(super) enum DetailStage {
 pub(super) struct StageSettings {
     pub strength: f32,
     pub detail: f32,
+    /// Median passes of the false-colour stages.
+    pub steps: u8,
+    /// Demosaic the scenes go through before the stage (the stage input).
+    pub demosaic: DemosaicAlgorithm,
 }
+
+/// Luma high-pass (input minus a [`MASK_SIGMA`] blur) at which the masked
+/// false-colour experiment applies the full filter.
+const MASK_FULL: f32 = 0.05;
+const MASK_SIGMA: f32 = 1.5;
 
 impl DetailStage {
     fn apply(
@@ -59,6 +75,20 @@ impl DetailStage {
         let mut output = input.clone();
         match self {
             Self::Noop => {}
+            Self::FalseColor | Self::FalseColorMasked => {
+                suppress_false_color(
+                    &mut output,
+                    FalseColor {
+                        steps: settings.steps,
+                        balance: BALANCE,
+                        ceilings: CEILINGS,
+                    },
+                    &NeverCancelled,
+                )?;
+                if matches!(self, Self::FalseColorMasked) {
+                    blend_by_luma_highpass(input, &mut output)?;
+                }
+            }
             Self::ChromaNr | Self::LumaNr => {
                 // Too small to profile: the stage leaves the image alone.
                 let Some(noise) = estimate_luma_noise(input, BALANCE, &NeverCancelled)? else {
@@ -92,6 +122,29 @@ impl DetailStage {
         }
         Ok(output)
     }
+}
+
+/// Replace `filtered` by `input` where the luma high-pass is weak, with a
+/// linear ramp up to [`MASK_FULL`]. Both images share one layout.
+fn blend_by_luma_highpass(
+    input: &LinearRgbImage<f32>,
+    filtered: &mut LinearRgbImage<f32>,
+) -> Result<()> {
+    let luma = luma_plane(input, [1.0; 3])?;
+    let blurred = gaussian_blur(&luma, MASK_SIGMA, &NeverCancelled)?;
+    let (width, stride) = (input.width(), input.row_stride());
+    for y in 0..input.height() {
+        for x in 0..width {
+            let weight = ((luma.get(x, y) - blurred.get(x, y)).abs() / MASK_FULL).min(1.0);
+            let at = y * stride + x * 3;
+            for c in 0..3 {
+                let original = input.data()[at + c];
+                filtered.data_mut()[at + c] =
+                    original + weight * (filtered.data()[at + c] - original);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// One scored (scene, noise level) pair.
@@ -144,7 +197,7 @@ fn score(
     noise: Option<NoiseModel>,
     seed: u64,
 ) -> Result<Row> {
-    let input = scene.noisy_input(noise, seed)?;
+    let input = scene.noisy_input(noise, seed, settings.demosaic)?;
     let output = stage.apply(&input, settings)?;
     let scores = detail_scores(&scene.truth, &output, MARGIN);
 
@@ -206,10 +259,12 @@ fn format_table(stage: DetailStage, settings: StageSettings, rows: &[Row]) -> St
         value.map_or_else(|| "-".to_owned(), |v| format!("{v:.precision$}"))
     };
     let mut out = format!(
-        "detail-compare stage={stage:?} strength={} detail={} size={WIDTH}x{HEIGHT} margin={MARGIN}\n\
+        "detail-compare stage={stage:?} strength={} detail={} steps={} demosaic={:?} size={WIDTH}x{HEIGHT} margin={MARGIN}\n\
          {:<16} {:<9} {:>10} {:>11} {:>12} {:>9} {:>9} {:>9}\n",
         settings.strength,
         settings.detail,
+        settings.steps,
+        settings.demosaic,
         "scene",
         "noise",
         "luma PSNR",

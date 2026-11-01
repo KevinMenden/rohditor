@@ -23,7 +23,7 @@ pub use rendering::{
     RenderingAdjustments, RenderingProfileSelection,
 };
 
-use crate::{CaptureSharpening, NoiseReduction};
+use crate::{CaptureSharpening, FalseColorSuppression, NoiseReduction};
 use color_adjustments::*;
 use color_settings::WhiteBalance;
 use light_settings::*;
@@ -39,7 +39,7 @@ pub struct EditError {
 }
 
 /// Schema version of the current non-destructive edit recipe.
-pub const EDIT_RECIPE_SCHEMA_VERSION: u32 = 13;
+pub const EDIT_RECIPE_SCHEMA_VERSION: u32 = 14;
 const LEGACY_EDIT_RECIPE_SCHEMA_VERSION: u32 = 1;
 const PREVIOUS_EDIT_RECIPE_SCHEMA_VERSION: u32 = 2;
 const PREVIOUS_RAW_EDIT_RECIPE_SCHEMA_VERSION: u32 = 3;
@@ -524,6 +524,7 @@ pub struct EditRecipe {
     #[serde(default)]
     pub optics: OpticsAdjustments,
     pub rendering: RenderingAdjustments,
+    pub false_color: FalseColorSuppression,
     pub noise_reduction: NoiseReduction,
     pub capture_sharpening: CaptureSharpening,
     pub light: LightAdjustments,
@@ -538,6 +539,7 @@ impl Default for EditRecipe {
             raw: RawAdjustments::default(),
             optics: OpticsAdjustments::default(),
             rendering: RenderingAdjustments::default(),
+            false_color: FalseColorSuppression::default(),
             noise_reduction: NoiseReduction::default(),
             capture_sharpening: CaptureSharpening::default(),
             light: LightAdjustments::default(),
@@ -559,6 +561,7 @@ impl EditRecipe {
             });
         }
         self.rendering.validate()?;
+        self.false_color.validate()?;
         self.noise_reduction.validate()?;
         self.capture_sharpening.validate()?;
         if let LensProfileSelection::Lensfun { profile_id } = &self.optics.profile {
@@ -690,6 +693,8 @@ struct RecipeFields {
     #[serde(default)]
     rendering: Option<RenderingAdjustments>,
     #[serde(default)]
+    false_color: FalseColorSuppression,
+    #[serde(default)]
     noise_reduction: NoiseReduction,
     #[serde(default)]
     capture_sharpening: CaptureSharpening,
@@ -730,6 +735,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
                 raw: legacy_raw_adjustments(),
                 optics: OpticsAdjustments::default(),
                 rendering: RenderingAdjustments::NEUTRAL,
+                false_color: FalseColorSuppression::default(),
                 noise_reduction: NoiseReduction::default(),
                 capture_sharpening: CaptureSharpening::default(),
                 light,
@@ -748,6 +754,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
                 raw: legacy_raw_adjustments(),
                 optics: OpticsAdjustments::default(),
                 rendering: RenderingAdjustments::NEUTRAL,
+                false_color: FalseColorSuppression::default(),
                 noise_reduction: NoiseReduction::default(),
                 capture_sharpening: CaptureSharpening::default(),
                 light: fields.light,
@@ -765,6 +772,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
                 raw: fields.raw,
                 optics: OpticsAdjustments::default(),
                 rendering: RenderingAdjustments::NEUTRAL,
+                false_color: FalseColorSuppression::default(),
                 noise_reduction: NoiseReduction::default(),
                 capture_sharpening: CaptureSharpening::default(),
                 light: fields.light,
@@ -781,6 +789,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
                 raw: fields.raw,
                 optics: fields.optics,
                 rendering: RenderingAdjustments::NEUTRAL,
+                false_color: FalseColorSuppression::default(),
                 noise_reduction: NoiseReduction::default(),
                 capture_sharpening: CaptureSharpening::default(),
                 light: fields.light,
@@ -801,6 +810,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
                 raw: fields.raw,
                 optics: fields.optics,
                 rendering: fields.rendering.unwrap_or_default(),
+                false_color: FalseColorSuppression::default(),
                 noise_reduction: NoiseReduction::default(),
                 capture_sharpening: CaptureSharpening::default(),
                 light: fields.light,
@@ -809,7 +819,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
             }
         } else {
             Self {
-                schema_version: if matches!(fields.schema_version, 10..=12) {
+                schema_version: if matches!(fields.schema_version, 10..=13) {
                     EDIT_RECIPE_SCHEMA_VERSION
                 } else {
                     fields.schema_version
@@ -817,6 +827,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
                 raw: fields.raw,
                 optics: fields.optics,
                 rendering: fields.rendering.unwrap_or_default(),
+                false_color: fields.false_color,
                 noise_reduction: fields.noise_reduction,
                 capture_sharpening: fields.capture_sharpening,
                 light: fields.light,
