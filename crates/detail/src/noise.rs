@@ -34,10 +34,16 @@ pub struct NoiseProfile {
 }
 
 impl NoiseProfile {
+    /// Noise variance expected at signal level `x`.
+    #[must_use]
+    pub fn variance(&self, x: f32) -> f32 {
+        self.a * x.max(0.0) + self.b
+    }
+
     /// Standard deviation expected at signal level `x`.
     #[must_use]
     pub fn sigma(&self, x: f32) -> f32 {
-        (self.a * x.max(0.0) + self.b).sqrt()
+        self.variance(x).sqrt()
     }
 }
 

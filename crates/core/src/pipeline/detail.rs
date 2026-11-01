@@ -1,11 +1,14 @@
 //! Source-resolution detail stage shared by fit previews and full-resolution
 //! renders. It runs on demosaiced camera RGB, before optics, in a fixed order:
-//! noise reduction, then capture sharpening. (False-colour suppression will
-//! join in front of noise reduction.)
+//! chroma noise reduction, luminance noise reduction, then capture sharpening.
+//! (False-colour suppression will join in front of noise reduction.)
 use std::time::{Duration, Instant};
 
 use rohditor_demosaic::WhiteBalanceGains;
-use rohditor_detail::{ChromaDenoise, chroma_scratch_bytes, denoise_chroma};
+use rohditor_detail::{
+    ChromaDenoise, DetailError, LumaDenoise, chroma_scratch_bytes, denoise_chroma, denoise_luma,
+    estimate_luma_noise, luma_scratch_bytes,
+};
 use rohditor_edit::{CaptureSharpening, EditRecipe, HighlightMethod, NoiseReduction};
 use rohditor_image::LinearRgbImage;
 use rohditor_raw::RawFrame;
@@ -29,10 +32,16 @@ impl DetailProvenance {
     /// `None` when the recipe has no active detail step.
     #[must_use]
     pub fn for_recipe(recipe: &EditRecipe) -> Option<Self> {
-        let noise_reduction = recipe
-            .noise_reduction
-            .is_active()
-            .then_some(recipe.noise_reduction);
+        // The texture setting is parked while luminance reduction is off, so
+        // it must not make otherwise identical work look different.
+        let noise_reduction = recipe.noise_reduction.is_active().then(|| NoiseReduction {
+            luminance_detail: if recipe.noise_reduction.luminance_active() {
+                recipe.noise_reduction.luminance_detail
+            } else {
+                NoiseReduction::default().luminance_detail
+            },
+            ..recipe.noise_reduction
+        });
         let capture_sharpening = recipe
             .capture_sharpening
             .is_active()
@@ -69,7 +78,8 @@ pub(super) struct DetailStage {
     pub provenance: Option<DetailProvenance>,
     /// Peak scratch of any step (steps run one after another).
     pub scratch_bytes: usize,
-    pub noise_reduction: Duration,
+    pub chroma_noise_reduction: Duration,
+    pub luminance_noise_reduction: Duration,
     pub capture_sharpening: Duration,
 }
 
@@ -78,7 +88,8 @@ impl DetailStage {
         Self {
             provenance: None,
             scratch_bytes: 0,
-            noise_reduction: Duration::ZERO,
+            chroma_noise_reduction: Duration::ZERO,
+            luminance_noise_reduction: Duration::ZERO,
             capture_sharpening: Duration::ZERO,
         }
     }
@@ -92,8 +103,11 @@ pub(crate) fn scratch_bytes(
 ) -> Result<usize, PipelineError> {
     let overflow = || super::orchestration::dimension_overflow(width, height);
     let mut peak = 0;
-    if recipe.noise_reduction.is_active() {
+    if recipe.noise_reduction.chroma_active() {
         peak = peak.max(chroma_scratch_bytes(width, height).ok_or_else(overflow)?);
+    }
+    if recipe.noise_reduction.luminance_active() {
+        peak = peak.max(luma_scratch_bytes(width, height).ok_or_else(overflow)?);
     }
     if recipe.capture_sharpening.is_active() {
         peak = peak.max(sharpening::scratch_bytes(width, height)?);
@@ -154,24 +168,7 @@ pub(super) fn apply(
         ..DetailStage::skipped()
     };
     if recipe.noise_reduction.is_active() {
-        let started = Instant::now();
-        denoise_chroma(
-            image,
-            ChromaDenoise {
-                strength: recipe.noise_reduction.chroma,
-                balance: [balance.red, balance.green, balance.blue],
-                ceilings: levels,
-            },
-            &|| cancellation.is_cancelled(),
-        )
-        .map_err(|error| match error {
-            rohditor_detail::DetailError::Cancelled => PipelineError::Cancelled,
-            other => PipelineError::InvalidRecipe {
-                field: "noise_reduction",
-                reason: other.to_string(),
-            },
-        })?;
-        stage.noise_reduction = started.elapsed();
+        reduce_noise(image, recipe, balance, levels, cancellation, &mut stage)?;
     }
     if recipe.capture_sharpening.is_active() {
         let started = Instant::now();
@@ -179,6 +176,82 @@ pub(super) fn apply(
         stage.capture_sharpening = started.elapsed();
     }
     Ok(stage)
+}
+
+/// Chroma, then luminance noise reduction, both driven by one luma noise
+/// profile (chroma leaves luma unchanged, so it stays valid for the second
+/// step). Images too small to profile are left alone.
+fn reduce_noise(
+    image: &mut LinearRgbImage<f32>,
+    recipe: &EditRecipe,
+    balance: WhiteBalanceGains,
+    ceilings: [f32; 3],
+    cancellation: &CancellationToken,
+    stage: &mut DetailStage,
+) -> Result<(), PipelineError> {
+    let settings = recipe.noise_reduction;
+    let balance = [balance.red, balance.green, balance.blue];
+    let is_cancelled = || cancellation.is_cancelled();
+    let started = Instant::now();
+    let noise =
+        estimate_luma_noise(image, balance, &is_cancelled).map_err(noise_reduction_error)?;
+    // The profile serves both steps; its time is booked to the first one.
+    let profiling = started.elapsed();
+    let (first, second) = (
+        &mut stage.chroma_noise_reduction,
+        &mut stage.luminance_noise_reduction,
+    );
+    if settings.chroma_active() {
+        *first += profiling;
+    } else {
+        *second += profiling;
+    }
+    // Too small to profile: nothing to do.
+    let Some(noise) = noise else {
+        return Ok(());
+    };
+    if settings.chroma_active() {
+        let started = Instant::now();
+        denoise_chroma(
+            image,
+            ChromaDenoise {
+                strength: settings.chroma,
+                balance,
+                ceilings,
+                luma_noise: noise,
+            },
+            &is_cancelled,
+        )
+        .map_err(noise_reduction_error)?;
+        stage.chroma_noise_reduction += started.elapsed();
+    }
+    if settings.luminance_active() {
+        let started = Instant::now();
+        denoise_luma(
+            image,
+            LumaDenoise {
+                strength: settings.luminance,
+                detail: settings.luminance_detail,
+                balance,
+                ceilings,
+                noise,
+            },
+            &is_cancelled,
+        )
+        .map_err(noise_reduction_error)?;
+        stage.luminance_noise_reduction += started.elapsed();
+    }
+    Ok(())
+}
+
+fn noise_reduction_error(error: DetailError) -> PipelineError {
+    match error {
+        DetailError::Cancelled => PipelineError::Cancelled,
+        other => PipelineError::InvalidRecipe {
+            field: "noise_reduction",
+            reason: other.to_string(),
+        },
+    }
 }
 
 pub(super) fn ceilings(recipe: &EditRecipe, gains: WhiteBalanceGains) -> [f32; 3] {
@@ -195,5 +268,28 @@ pub(super) fn ceilings(recipe: &EditRecipe, gains: WhiteBalanceGains) -> [f32; 3
         HighlightMethod::LocalRatios => [recipe.raw.highlights.local_ratios.detection_threshold; 3],
         HighlightMethod::Opposed => [recipe.raw.highlights.opposed.detection_threshold; 3],
         HighlightMethod::Off => [1.0; 3],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provenance_ignores_the_parked_texture_setting() {
+        let mut recipe = EditRecipe::default();
+        assert_eq!(DetailProvenance::for_recipe(&recipe), None);
+        // Texture preservation alone is not work.
+        recipe.noise_reduction.luminance_detail = 0.9;
+        assert_eq!(DetailProvenance::for_recipe(&recipe), None);
+        recipe.noise_reduction.chroma = 0.4;
+        let chroma_only = DetailProvenance::for_recipe(&recipe);
+        recipe.noise_reduction.luminance_detail = 0.1;
+        assert_eq!(DetailProvenance::for_recipe(&recipe), chroma_only);
+        // Once luminance reduction runs, the setting is part of the work.
+        recipe.noise_reduction.luminance = 0.5;
+        let low = DetailProvenance::for_recipe(&recipe);
+        recipe.noise_reduction.luminance_detail = 0.9;
+        assert_ne!(DetailProvenance::for_recipe(&recipe), low);
     }
 }

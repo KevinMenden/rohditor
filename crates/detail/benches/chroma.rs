@@ -1,5 +1,5 @@
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
-use rohditor_detail::{ChromaDenoise, NeverCancelled, denoise_chroma};
+use rohditor_detail::{ChromaDenoise, NeverCancelled, denoise_chroma, estimate_luma_noise};
 use rohditor_image::{LinearRgbImage, LinearRgbSpace};
 
 /// Smooth gradient plus deterministic pseudo-noise, so the noise estimator
@@ -26,12 +26,16 @@ fn bench_chroma(c: &mut Criterion) {
             b.iter_batched(
                 || input.clone(),
                 |mut image| {
+                    let luma_noise = estimate_luma_noise(&image, [2.0, 1.0, 1.5], &NeverCancelled)
+                        .expect("profile")
+                        .expect("large enough");
                     denoise_chroma(
                         black_box(&mut image),
                         ChromaDenoise {
                             strength: 0.5,
                             balance: [2.0, 1.0, 1.5],
                             ceilings: [1.0; 3],
+                            luma_noise,
                         },
                         &NeverCancelled,
                     )

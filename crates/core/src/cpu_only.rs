@@ -27,5 +27,12 @@ mod tests {
         assert_eq!(cpu_only_stage_reason(&recipe), None);
         recipe.noise_reduction.chroma = 0.3;
         assert!(cpu_only_stage_reason(&recipe).is_some());
+        recipe.noise_reduction.chroma = 0.0;
+        recipe.noise_reduction.luminance = 0.3;
+        assert!(cpu_only_stage_reason(&recipe).is_some());
+        // The texture setting alone does no work.
+        recipe.noise_reduction.luminance = 0.0;
+        recipe.noise_reduction.luminance_detail = 0.9;
+        assert_eq!(cpu_only_stage_reason(&recipe), None);
     }
 }

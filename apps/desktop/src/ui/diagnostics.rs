@@ -30,7 +30,8 @@ pub(crate) struct TimingModel {
     pub normalization: Duration,
     pub highlight_processing: Duration,
     pub demosaic: Duration,
-    pub noise_reduction: Duration,
+    pub chroma_noise_reduction: Duration,
+    pub luminance_noise_reduction: Duration,
     pub capture_sharpening: Duration,
     pub optics: Duration,
     pub resampling: Duration,
@@ -257,7 +258,16 @@ pub(crate) fn show(
                         preview.timings.highlight_processing,
                     );
                     duration_row(ui, "Demosaic", preview.timings.demosaic);
-                    duration_row(ui, "Noise reduction", preview.timings.noise_reduction);
+                    duration_row(
+                        ui,
+                        "Chroma noise reduction",
+                        preview.timings.chroma_noise_reduction,
+                    );
+                    duration_row(
+                        ui,
+                        "Luminance noise reduction",
+                        preview.timings.luminance_noise_reduction,
+                    );
                     duration_row(ui, "Capture sharpening", preview.timings.capture_sharpening);
                     duration_row(ui, "Optics", preview.timings.optics);
                     duration_row(ui, "Area reduction", preview.timings.resampling);
@@ -531,7 +541,8 @@ pub(crate) struct TimingReport {
     pub normalization: f64,
     pub highlight_processing: f64,
     pub demosaic: f64,
-    pub noise_reduction: f64,
+    pub chroma_noise_reduction: f64,
+    pub luminance_noise_reduction: f64,
     pub capture_sharpening: f64,
     pub optics: f64,
     pub resampling: f64,
@@ -548,7 +559,8 @@ impl From<TimingModel> for TimingReport {
             normalization: duration_milliseconds(value.normalization),
             highlight_processing: duration_milliseconds(value.highlight_processing),
             demosaic: duration_milliseconds(value.demosaic),
-            noise_reduction: duration_milliseconds(value.noise_reduction),
+            chroma_noise_reduction: duration_milliseconds(value.chroma_noise_reduction),
+            luminance_noise_reduction: duration_milliseconds(value.luminance_noise_reduction),
             capture_sharpening: duration_milliseconds(value.capture_sharpening),
             optics: duration_milliseconds(value.optics),
             resampling: duration_milliseconds(value.resampling),
