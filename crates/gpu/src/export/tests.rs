@@ -1,6 +1,8 @@
 use super::super::tests::{gpu_control_matrix, gpu_test_guard, neutral_recipe, synthetic_frame};
 use super::*;
-use rohditor_core::{apply_adjustments, render_display_srgb8_dithered, render_display_srgb16};
+use rohditor_core::{
+    OutputSize, apply_adjustments, render_display_srgb8_dithered, render_display_srgb16,
+};
 use rohditor_raw::{RawDecoder, RawlerDecoder};
 use std::sync::Arc;
 
@@ -76,6 +78,7 @@ fn optics_export_reads_back_only_final_integer_bands() {
                 RenderOptions::default(),
                 depth,
                 DitherMode::Ordered8x8,
+                OutputSize::Original,
             )
             .expect("CPU optics export");
         let actual = gpu
@@ -144,7 +147,14 @@ fn rcd_export_matches_cpu_with_capture_and_both_gamut_policies() {
             };
             for depth in [OutputBitDepth::Eight, OutputBitDepth::Sixteen] {
                 let expected = cpu
-                    .render_export(&frame, &recipe, options, depth, DitherMode::None)
+                    .render_export(
+                        &frame,
+                        &recipe,
+                        options,
+                        depth,
+                        DitherMode::None,
+                        OutputSize::Original,
+                    )
                     .expect("CPU RCD export");
                 let actual = gpu
                     .render(
@@ -259,7 +269,14 @@ fn capture_bridge_precedes_reduction_and_matches_export() {
             for depth in [OutputBitDepth::Eight, OutputBitDepth::Sixteen] {
                 for dither in [DitherMode::None, DitherMode::Ordered8x8] {
                     let reference = cpu
-                        .render_export(&frame, &recipe, options, depth, dither)
+                        .render_export(
+                            &frame,
+                            &recipe,
+                            options,
+                            depth,
+                            dither,
+                            OutputSize::Original,
+                        )
                         .expect("CPU export");
                     let actual = gpu
                         .render(&cpu, &frame, &recipe, options, depth, dither, &token)
@@ -340,7 +357,14 @@ fn export_bands_precision_geometry_and_cancellation() {
                         )
                         .expect("export qualification fixture");
                     let reference = cpu
-                        .render_export(&frame, &recipe, RenderOptions::default(), depth, dither)
+                        .render_export(
+                            &frame,
+                            &recipe,
+                            RenderOptions::default(),
+                            depth,
+                            dither,
+                            OutputSize::Original,
+                        )
                         .expect("export qualification fixture");
                     let (max, mean) = difference(&actual.image, &reference.image);
                     if let ExportImage::Rgb16(image) = &actual.image {

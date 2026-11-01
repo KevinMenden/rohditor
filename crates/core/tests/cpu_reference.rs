@@ -6,7 +6,7 @@ use rayon::ThreadPoolBuilder;
 use rohditor_camera_profile::{CalibrationIlluminant, MatrixCalibration, MatrixCameraProfile};
 use rohditor_core::{
     CancellationToken, CpuPipeline, DitherMode, ExportImage, HighlightDiagnostics, OpticsService,
-    OutputBitDepth, PipelineError, PreviewOptions, RawCropPolicy, RenderOptions,
+    OutputBitDepth, OutputSize, PipelineError, PreviewOptions, RawCropPolicy, RenderOptions,
     camera_color_transform,
 };
 use rohditor_edit::{
@@ -92,11 +92,59 @@ fn user_crop_is_late_and_consistent_for_render_source_scale_and_export()
         RenderOptions::default(),
         OutputBitDepth::Sixteen,
         DitherMode::None,
+        OutputSize::Original,
     )?;
     let ExportImage::Rgb16(export) = export.image else {
         panic!("requested 16-bit export");
     };
     assert_eq!((export.width(), export.height()), (2, 3));
+    Ok(())
+}
+
+#[test]
+fn export_resize_is_exact_after_crop_and_rotation_and_never_upscales() -> Result<(), Box<dyn Error>>
+{
+    let frame = synthetic_rggb_frame();
+    let mut recipe = EditRecipe::default();
+    recipe.geometry.orientation_override = Some(Orientation::Rotate90);
+    recipe.geometry.crop = Some(NormalizedCropRect {
+        left: 0.0,
+        top: 0.0,
+        right: 1.0,
+        bottom: 0.5,
+    });
+    let render = |size| {
+        CpuPipeline::default().render_export(
+            &frame,
+            &recipe,
+            RenderOptions::default(),
+            OutputBitDepth::Eight,
+            DitherMode::None,
+            size,
+        )
+    };
+    let original = render(OutputSize::Original)?;
+    let (width, height) = (original.image.width(), original.image.height());
+    assert_eq!((width, height), (4, 3));
+    assert_eq!(original.memory.export_resize_bytes, 0);
+
+    let resized = render(OutputSize::LongEdge { pixels: 2 })?;
+    assert_eq!((resized.image.width(), resized.image.height()), (2, 2));
+    assert!(resized.memory.export_resize_bytes > 0);
+
+    let fit = render(OutputSize::Fit {
+        width: 3,
+        height: 1,
+    })?;
+    assert_eq!((fit.image.width(), fit.image.height()), (1, 1));
+
+    // A larger target keeps the original pixels exactly.
+    let larger = render(OutputSize::LongEdge { pixels: 100 })?;
+    let (ExportImage::Rgb8(original), ExportImage::Rgb8(larger)) = (original.image, larger.image)
+    else {
+        panic!("requested 8-bit export");
+    };
+    assert_eq!(original.data(), larger.data());
     Ok(())
 }
 
@@ -172,6 +220,7 @@ fn capture_sharpening_is_shared_by_source_scale_preview_and_export() -> Result<(
             options.render,
             OutputBitDepth::Eight,
             DitherMode::None,
+            OutputSize::Original,
         )?;
         let ExportImage::Rgb8(export_image) = export.image else {
             panic!("expected 8-bit export")
@@ -183,6 +232,7 @@ fn capture_sharpening_is_shared_by_source_scale_preview_and_export() -> Result<(
             options.render,
             OutputBitDepth::Sixteen,
             DitherMode::None,
+            OutputSize::Original,
         )?;
         let ExportImage::Rgb16(export16_image) = export16.image else {
             panic!("expected 16-bit export")
@@ -353,6 +403,7 @@ fn selected_matrix_profile_is_used_by_preview_split_and_export() -> Result<(), B
         options.render,
         OutputBitDepth::Sixteen,
         DitherMode::None,
+        OutputSize::Original,
     )?;
     let automatic_export = pipeline.render_export(
         &frame,
@@ -360,6 +411,7 @@ fn selected_matrix_profile_is_used_by_preview_split_and_export() -> Result<(), B
         options.render,
         OutputBitDepth::Sixteen,
         DitherMode::None,
+        OutputSize::Original,
     )?;
     let (ExportImage::Rgb16(selected), ExportImage::Rgb16(automatic)) =
         (selected_export.image, automatic_export.image)
@@ -652,6 +704,7 @@ fn bundled_optics_plan_is_shared_by_preview_and_export() -> Result<(), Box<dyn E
         RenderOptions::default(),
         OutputBitDepth::Eight,
         DitherMode::None,
+        OutputSize::Original,
     )?;
     assert_eq!(export.optics_provenance, preview.optics_provenance);
     assert_eq!((preview.image.width(), preview.image.height()), (4, 6));
@@ -674,6 +727,7 @@ fn sixteen_bit_dithered_export_is_identical_across_rayon_thread_counts()
             options,
             OutputBitDepth::Sixteen,
             DitherMode::Ordered8x8,
+            OutputSize::Original,
         )
     })?;
     let multiple = multi_pool.install(|| {
@@ -683,6 +737,7 @@ fn sixteen_bit_dithered_export_is_identical_across_rayon_thread_counts()
             options,
             OutputBitDepth::Sixteen,
             DitherMode::Ordered8x8,
+            OutputSize::Original,
         )
     })?;
     let (ExportImage::Rgb16(single_image), ExportImage::Rgb16(multiple_image)) =

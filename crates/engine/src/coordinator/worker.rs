@@ -1315,6 +1315,7 @@ fn process_gpu_base(
         optics_scratch_bytes: 0,
         resample_intermediate_bytes: 0,
         linear_rgb_bytes: 0,
+        export_resize_bytes: 0,
         display_rgb_bytes: 0,
         estimated_peak_bytes: description
             .decoded_raw_bytes()
