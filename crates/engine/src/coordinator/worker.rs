@@ -1065,7 +1065,7 @@ fn process_source_scale_preview(
         "Developing full-resolution 1:1 inspection",
     );
     let result =
-        if job.backend == PreviewBackend::GpuBase && job.recipe.capture_sharpening.is_active() {
+        if job.backend == PreviewBackend::GpuBase && rohditor_core::detail_is_active(&job.recipe) {
             render_gpu_capture_source_scale(&job, pipeline, preview_cache, cancellation)
         } else {
             pipeline.render_source_scale_preview_cancellable(

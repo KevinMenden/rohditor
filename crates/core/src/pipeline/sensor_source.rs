@@ -32,10 +32,11 @@ impl SensorCameraMetadata {
         &self.sensor
     }
 
-    pub fn capture_contract(&self) -> Result<crate::CaptureSharpeningContract, PipelineError> {
-        crate::CaptureSharpeningContract::new(
-            self.recipe.capture_sharpening,
-            super::super::detail::ceilings(&self.recipe, self.sensor.white_balance_gains()),
+    pub fn detail_contract(&self) -> Result<crate::DetailContract, PipelineError> {
+        crate::DetailContract::new(
+            &self.recipe,
+            self.sensor.demosaic_balance(),
+            self.sensor.white_balance_gains(),
         )
     }
 
@@ -52,8 +53,9 @@ impl SensorCameraMetadata {
             || self.sensor.normalization() != next.sensor.normalization()
             || self.sensor.highlight_execution() != next.sensor.highlight_execution()
             || self.sensor.demosaic() != next.sensor.demosaic()
-            || self.capture_contract()?.settings() != next.capture_contract()?.settings()
-            || self.capture_contract()?.ceilings() != next.capture_contract()?.ceilings()
+            || crate::DetailProvenance::for_recipe(&self.recipe)
+                != crate::DetailProvenance::for_recipe(&next.recipe)
+            || self.detail_contract()?.ceilings() != next.detail_contract()?.ceilings()
         {
             return Err(PipelineError::InvalidRecipe {
                 field: "raw",
