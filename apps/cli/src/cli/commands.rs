@@ -162,6 +162,11 @@ enum Command {
         #[arg(long, value_name = "PROFILE.dcp")]
         camera_profile: Option<PathBuf>,
 
+        /// Moiré / false-colour suppression: median passes over the colour
+        /// differences (0 to 5; 0 is off). Runs on the CPU.
+        #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..=5))]
+        false_color_steps: u8,
+
         /// Chroma noise reduction strength (0 to 1; 0 is off). Runs on the CPU.
         #[arg(long, default_value_t = 0.0)]
         chroma_nr: f32,
@@ -299,6 +304,14 @@ enum Command {
         /// Texture preservation in 0..=1, for stages that have one.
         #[arg(long, default_value_t = 0.5)]
         detail: f32,
+
+        /// Median passes of the false-colour stages (0 to 5).
+        #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u8).range(0..=5))]
+        steps: u8,
+
+        /// Demosaic the synthetic scenes go through before the stage.
+        #[arg(long, value_enum, default_value_t = CliDemosaic::Bilinear)]
+        demosaic: CliDemosaic,
 
         /// Also score every readable RAW file in this directory.
         #[arg(long, value_name = "RAW_DIR")]
@@ -614,6 +627,7 @@ pub(crate) fn run() -> Result<()> {
             white_balance,
             camera_profile,
             rendering_profile,
+            false_color_steps,
             chroma_nr,
             luma_nr,
             luma_nr_detail,
@@ -659,6 +673,7 @@ pub(crate) fn run() -> Result<()> {
                 white_balance,
                 camera_profile,
                 rendering_profile,
+                false_color_steps,
                 chroma_nr,
                 luma_nr,
                 luma_nr_detail,
@@ -695,10 +710,17 @@ pub(crate) fn run() -> Result<()> {
             stage,
             strength,
             detail,
+            steps,
+            demosaic,
             raw_dir,
         } => detail_compare(
             stage,
-            StageSettings { strength, detail },
+            StageSettings {
+                strength,
+                detail,
+                steps,
+                demosaic: demosaic.into(),
+            },
             raw_dir.as_deref(),
         ),
         Command::HighlightCompare {
@@ -782,6 +804,7 @@ struct QualityTimingReport {
     normalization: f64,
     highlight_processing: f64,
     demosaic: f64,
+    false_color: f64,
     chroma_noise_reduction: f64,
     luminance_noise_reduction: f64,
     capture_sharpening: f64,
@@ -800,6 +823,7 @@ impl From<StageTimings> for QualityTimingReport {
             normalization: milliseconds(value.normalization),
             highlight_processing: milliseconds(value.highlight_processing),
             demosaic: milliseconds(value.demosaic),
+            false_color: milliseconds(value.false_color),
             chroma_noise_reduction: milliseconds(value.chroma_noise_reduction),
             luminance_noise_reduction: milliseconds(value.luminance_noise_reduction),
             capture_sharpening: milliseconds(value.capture_sharpening),
@@ -893,6 +917,7 @@ struct DevelopArguments {
     white_balance: Option<RgbMultipliers>,
     camera_profile: Option<PathBuf>,
     rendering_profile: CliRenderingProfile,
+    false_color_steps: u8,
     chroma_nr: f32,
     luma_nr: f32,
     luma_nr_detail: f32,
@@ -1076,6 +1101,9 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
     if let Some(profile) = camera_profile {
         recipe.color.camera_profile = CameraProfileSelection::Matrix(profile);
     }
+    recipe.false_color = rohditor_edit::FalseColorSuppression {
+        steps: arguments.false_color_steps,
+    };
     recipe.noise_reduction = rohditor_edit::NoiseReduction {
         chroma: arguments.chroma_nr,
         luminance: arguments.luma_nr,
@@ -1253,8 +1281,10 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
         ),
     };
     let optics_report = format!(
-        "{}\nNoise reduction: {:?} (algorithm v{})\nCapture sharpening: {:?} (algorithm v{}, {} iterations)",
+        "{}\nFalse colour: {:?} (algorithm v{})\nNoise reduction: {:?} (algorithm v{})\nCapture sharpening: {:?} (algorithm v{}, {} iterations)",
         format_optics_report(&recipe.optics, result.optics_provenance.as_ref()),
+        recipe.false_color,
+        rohditor_core::FALSE_COLOR_ALGORITHM_VERSION,
         recipe.noise_reduction,
         rohditor_core::NOISE_REDUCTION_ALGORITHM_VERSION,
         recipe.capture_sharpening,
@@ -1931,12 +1961,13 @@ fn format_quality(format: ExportFormat) -> String {
 
 fn format_stage_timings(decode: Duration, timings: StageTimings, encode: Duration) -> String {
     format!(
-        "CPU stages: decode {:.1} ms, metadata {:.1} ms, normalize {:.1} ms, highlight processing {:.1} ms, demosaic {:.1} ms, chroma NR {:.1} ms, luminance NR {:.1} ms, capture sharpening {:.1} ms, optics {:.1} ms, area resize {:.1} ms, color {:.1} ms, adjustments {:.1} ms, output {:.1} ms, pipeline total {:.1} ms, export encode/commit {:.1} ms",
+        "CPU stages: decode {:.1} ms, metadata {:.1} ms, normalize {:.1} ms, highlight processing {:.1} ms, demosaic {:.1} ms, false colour {:.1} ms, chroma NR {:.1} ms, luminance NR {:.1} ms, capture sharpening {:.1} ms, optics {:.1} ms, area resize {:.1} ms, color {:.1} ms, adjustments {:.1} ms, output {:.1} ms, pipeline total {:.1} ms, export encode/commit {:.1} ms",
         decode.as_secs_f64() * 1_000.0,
         timings.metadata.as_secs_f64() * 1_000.0,
         timings.normalization.as_secs_f64() * 1_000.0,
         timings.highlight_processing.as_secs_f64() * 1_000.0,
         timings.demosaic.as_secs_f64() * 1_000.0,
+        timings.false_color.as_secs_f64() * 1_000.0,
         timings.chroma_noise_reduction.as_secs_f64() * 1_000.0,
         timings.luminance_noise_reduction.as_secs_f64() * 1_000.0,
         timings.capture_sharpening.as_secs_f64() * 1_000.0,
@@ -2197,6 +2228,7 @@ mod tests {
             white_balance: None,
             camera_profile: None,
             rendering_profile: CliRenderingProfile::Standard,
+            false_color_steps: 0,
             chroma_nr: 0.0,
             luma_nr: 0.0,
             luma_nr_detail: 0.5,

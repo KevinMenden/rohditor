@@ -27,6 +27,7 @@ pub(crate) enum AdjustmentTarget {
     Whites,
     Blacks,
     HighlightThreshold,
+    FalseColorSteps,
     ChromaNoiseReduction,
     LuminanceNoiseReduction,
     LuminanceDetail,
@@ -128,6 +129,7 @@ pub(crate) struct DocumentPanelModel {
     pub picker_mode: Option<Picker>,
     pub color_mixer_channel: usize,
     pub optics: OpticsPanelModel,
+    pub false_color: rohditor_edit::FalseColorSuppression,
     pub noise_reduction: rohditor_edit::NoiseReduction,
     pub capture_sharpening: rohditor_edit::CaptureSharpening,
 }

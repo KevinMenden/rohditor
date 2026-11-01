@@ -30,6 +30,7 @@ pub(crate) struct TimingModel {
     pub normalization: Duration,
     pub highlight_processing: Duration,
     pub demosaic: Duration,
+    pub false_color: Duration,
     pub chroma_noise_reduction: Duration,
     pub luminance_noise_reduction: Duration,
     pub capture_sharpening: Duration,
@@ -84,6 +85,7 @@ pub(crate) struct PreviewModel {
     pub backend: String,
     pub algorithm: String,
     pub profile: String,
+    pub false_color: String,
     pub noise_reduction: String,
     pub capture_sharpening: String,
     pub rendering: String,
@@ -208,6 +210,7 @@ pub(crate) fn show(
                 preview.source_state, preview.algorithm
             ));
             ui.weak(format!("Camera colour: {}", preview.profile));
+            ui.weak(format!("False colour: {}", preview.false_color));
             ui.weak(format!("Noise reduction: {}", preview.noise_reduction));
             ui.weak(format!("Capture sharpening: {}", preview.capture_sharpening));
             ui.weak(format!("Rendering profile: {}", preview.rendering));
@@ -258,6 +261,7 @@ pub(crate) fn show(
                         preview.timings.highlight_processing,
                     );
                     duration_row(ui, "Demosaic", preview.timings.demosaic);
+                    duration_row(ui, "False colour suppression", preview.timings.false_color);
                     duration_row(
                         ui,
                         "Chroma noise reduction",
@@ -455,6 +459,7 @@ pub(crate) struct PreviewReport<'a> {
     pub backend: &'a str,
     pub algorithm: &'a str,
     pub profile: &'a str,
+    pub false_color: &'a str,
     pub noise_reduction: &'a str,
     pub capture_sharpening: &'a str,
     pub rendering: &'a str,
@@ -475,6 +480,7 @@ impl<'a> From<&'a PreviewModel> for PreviewReport<'a> {
             backend: &value.backend,
             algorithm: &value.algorithm,
             profile: &value.profile,
+            false_color: &value.false_color,
             noise_reduction: &value.noise_reduction,
             capture_sharpening: &value.capture_sharpening,
             rendering: &value.rendering,
@@ -541,6 +547,7 @@ pub(crate) struct TimingReport {
     pub normalization: f64,
     pub highlight_processing: f64,
     pub demosaic: f64,
+    pub false_color: f64,
     pub chroma_noise_reduction: f64,
     pub luminance_noise_reduction: f64,
     pub capture_sharpening: f64,
@@ -559,6 +566,7 @@ impl From<TimingModel> for TimingReport {
             normalization: duration_milliseconds(value.normalization),
             highlight_processing: duration_milliseconds(value.highlight_processing),
             demosaic: duration_milliseconds(value.demosaic),
+            false_color: duration_milliseconds(value.false_color),
             chroma_noise_reduction: duration_milliseconds(value.chroma_noise_reduction),
             luminance_noise_reduction: duration_milliseconds(value.luminance_noise_reduction),
             capture_sharpening: duration_milliseconds(value.capture_sharpening),

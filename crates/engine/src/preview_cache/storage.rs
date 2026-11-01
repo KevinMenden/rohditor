@@ -199,6 +199,8 @@ struct ReconstructedCameraRgbKey {
 /// Inactive steps are `None`, so their parked values never change a key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct DetailKey {
+    /// Median passes, version.
+    false_color: Option<(u8, u16)>,
     /// Chroma strength, luminance strength and detail bits, version.
     noise_reduction: Option<([u32; 3], u16)>,
     capture_sharpening: Option<([u32; 3], u16)>,
@@ -209,6 +211,10 @@ impl DetailKey {
         let nr = recipe.noise_reduction;
         let sharpening = recipe.capture_sharpening;
         Self {
+            false_color: recipe.false_color.is_active().then_some((
+                recipe.false_color.steps,
+                rohditor_core::FALSE_COLOR_ALGORITHM_VERSION,
+            )),
             noise_reduction: nr.is_active().then_some((
                 [
                     nr.chroma.to_bits(),
@@ -958,6 +964,29 @@ mod tests {
     }
 
     #[test]
+    fn false_color_invalidates_reconstruction_and_downstream_but_retains_raw() {
+        let frame = frame();
+        let options = PreviewOptions::default();
+        let mut recipe = EditRecipe::default();
+        let off = PreviewCacheKeys::new(1, &frame, &recipe, options);
+        recipe.false_color.steps = 2;
+        let on = PreviewCacheKeys::new(1, &frame, &recipe, options);
+        assert_eq!(off.decoded, on.decoded);
+        assert_ne!(off.reconstructed, on.reconstructed);
+        assert_ne!(off.demosaiced, on.demosaiced);
+        assert_ne!(off.adjusted, on.adjusted);
+        recipe.false_color.steps = 3;
+        let more = PreviewCacheKeys::new(1, &frame, &recipe, options);
+        assert_ne!(on.reconstructed, more.reconstructed);
+        // Downstream-only edits keep the captured source.
+        recipe.light.exposure_ev = 1.0;
+        let creative = PreviewCacheKeys::new(1, &frame, &recipe, options);
+        assert_eq!(creative.reconstructed, more.reconstructed);
+        assert_eq!(creative.demosaiced, more.demosaiced);
+        assert_ne!(creative.adjusted, more.adjusted);
+    }
+
+    #[test]
     fn noise_reduction_recomputes_only_the_detail_stage() {
         let mut frame = frame();
         frame.info.color_matrices = vec![rohditor_raw::CameraColorMatrix {
@@ -1004,6 +1033,25 @@ mod tests {
                 .and_then(|d| d.noise_reduction)
                 .is_some_and(|n| n.luminance == 0.4)
         );
+        // False colour runs first in the same stage and is reused like the rest.
+        recipe.false_color.steps = 2;
+        let false_color = prepare(&recipe, &mut cache);
+        assert!(
+            false_color.timings().demosaic.is_zero(),
+            "demosaic is reused"
+        );
+        assert!(
+            !false_color.timings().false_color.is_zero(),
+            "false colour ran"
+        );
+        assert!(
+            false_color
+                .detail()
+                .is_some_and(|d| d.false_color.is_some())
+        );
+        recipe.light.exposure_ev = 0.25;
+        let creative = prepare(&recipe, &mut cache);
+        assert!(creative.timings().false_color.is_zero());
     }
 
     pub(super) fn frame() -> RawFrame {

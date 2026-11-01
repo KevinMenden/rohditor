@@ -1,15 +1,19 @@
 //! Source-resolution detail stage shared by fit previews and full-resolution
 //! renders. It runs on demosaiced camera RGB, before optics, in a fixed order:
-//! chroma noise reduction, luminance noise reduction, then capture sharpening.
-//! (False-colour suppression will join in front of noise reduction.)
+//! false-colour suppression (a demosaic clean-up, so it sees the raw demosaic
+//! output), chroma noise reduction, luminance noise reduction, then capture
+//! sharpening.
 use std::time::{Duration, Instant};
 
 use rohditor_demosaic::WhiteBalanceGains;
 use rohditor_detail::{
-    ChromaDenoise, DetailError, LumaDenoise, chroma_scratch_bytes, denoise_chroma, denoise_luma,
-    estimate_luma_noise, luma_scratch_bytes,
+    ChromaDenoise, DetailError, FalseColor, LumaDenoise, chroma_scratch_bytes, denoise_chroma,
+    denoise_luma, estimate_luma_noise, false_color_scratch_bytes, luma_scratch_bytes,
+    suppress_false_color,
 };
-use rohditor_edit::{CaptureSharpening, EditRecipe, HighlightMethod, NoiseReduction};
+use rohditor_edit::{
+    CaptureSharpening, EditRecipe, FalseColorSuppression, HighlightMethod, NoiseReduction,
+};
 use rohditor_image::LinearRgbImage;
 use rohditor_raw::RawFrame;
 
@@ -17,13 +21,17 @@ use crate::{CancellationToken, PipelineError, sharpening};
 
 /// Bump when the noise-reduction output changes for the same settings.
 pub const NOISE_REDUCTION_ALGORITHM_VERSION: u16 = 1;
+/// Bump when the false-colour suppression output changes for the same settings.
+pub const FALSE_COLOR_ALGORITHM_VERSION: u16 = 1;
 
 /// Settings and implementation identity of an already processed base: every
 /// detail step that ran, so a cached source is reused only for the same work.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DetailProvenance {
+    pub false_color: Option<FalseColorSuppression>,
     pub noise_reduction: Option<NoiseReduction>,
     pub capture_sharpening: Option<CaptureSharpening>,
+    pub false_color_version: u16,
     pub noise_reduction_version: u16,
     pub capture_sharpening_version: u16,
 }
@@ -46,18 +54,23 @@ impl DetailProvenance {
             .capture_sharpening
             .is_active()
             .then_some(recipe.capture_sharpening);
-        (noise_reduction.is_some() || capture_sharpening.is_some()).then_some(Self {
-            noise_reduction,
-            capture_sharpening,
-            noise_reduction_version: NOISE_REDUCTION_ALGORITHM_VERSION,
-            capture_sharpening_version: sharpening::CAPTURE_SHARPENING_ALGORITHM_VERSION,
-        })
+        let false_color = recipe.false_color.is_active().then_some(recipe.false_color);
+        (false_color.is_some() || noise_reduction.is_some() || capture_sharpening.is_some())
+            .then_some(Self {
+                false_color,
+                noise_reduction,
+                capture_sharpening,
+                false_color_version: FALSE_COLOR_ALGORITHM_VERSION,
+                noise_reduction_version: NOISE_REDUCTION_ALGORITHM_VERSION,
+                capture_sharpening_version: sharpening::CAPTURE_SHARPENING_ALGORITHM_VERSION,
+            })
     }
 }
 
 impl DetailProvenance {
     /// Copy the recorded detail settings into `recipe` (inactive when `None`).
     pub fn write_settings(provenance: Option<Self>, recipe: &mut EditRecipe) {
+        recipe.false_color = provenance.and_then(|p| p.false_color).unwrap_or_default();
         recipe.noise_reduction = provenance
             .and_then(|p| p.noise_reduction)
             .unwrap_or_default();
@@ -70,7 +83,9 @@ impl DetailProvenance {
 /// Whether any step of the detail stage has work to do for `recipe`.
 #[must_use]
 pub fn detail_is_active(recipe: &EditRecipe) -> bool {
-    recipe.noise_reduction.is_active() || recipe.capture_sharpening.is_active()
+    recipe.false_color.is_active()
+        || recipe.noise_reduction.is_active()
+        || recipe.capture_sharpening.is_active()
 }
 
 #[derive(Debug, Clone)]
@@ -78,6 +93,7 @@ pub(super) struct DetailStage {
     pub provenance: Option<DetailProvenance>,
     /// Peak scratch of any step (steps run one after another).
     pub scratch_bytes: usize,
+    pub false_color: Duration,
     pub chroma_noise_reduction: Duration,
     pub luminance_noise_reduction: Duration,
     pub capture_sharpening: Duration,
@@ -88,6 +104,7 @@ impl DetailStage {
         Self {
             provenance: None,
             scratch_bytes: 0,
+            false_color: Duration::ZERO,
             chroma_noise_reduction: Duration::ZERO,
             luminance_noise_reduction: Duration::ZERO,
             capture_sharpening: Duration::ZERO,
@@ -103,6 +120,9 @@ pub(crate) fn scratch_bytes(
 ) -> Result<usize, PipelineError> {
     let overflow = || super::orchestration::dimension_overflow(width, height);
     let mut peak = 0;
+    if recipe.false_color.is_active() {
+        peak = peak.max(false_color_scratch_bytes(width, height).ok_or_else(overflow)?);
+    }
     if recipe.noise_reduction.chroma_active() {
         peak = peak.max(chroma_scratch_bytes(width, height).ok_or_else(overflow)?);
     }
@@ -119,6 +139,7 @@ pub(super) fn validate_working_set(
     frame: &RawFrame,
     recipe: &EditRecipe,
 ) -> Result<(), PipelineError> {
+    recipe.false_color.validate()?;
     recipe.noise_reduction.validate()?;
     recipe.capture_sharpening.validate()?;
     if detail_is_active(recipe) {
@@ -167,6 +188,20 @@ pub(super) fn apply(
         scratch_bytes: scratch_bytes(recipe, image.width(), image.height())?,
         ..DetailStage::skipped()
     };
+    if recipe.false_color.is_active() {
+        let started = Instant::now();
+        suppress_false_color(
+            image,
+            FalseColor {
+                steps: recipe.false_color.steps,
+                balance: [balance.red, balance.green, balance.blue],
+                ceilings: levels,
+            },
+            &|| cancellation.is_cancelled(),
+        )
+        .map_err(|error| detail_error("false_color", error))?;
+        stage.false_color = started.elapsed();
+    }
     if recipe.noise_reduction.is_active() {
         reduce_noise(image, recipe, balance, levels, cancellation, &mut stage)?;
     }
@@ -245,10 +280,14 @@ fn reduce_noise(
 }
 
 fn noise_reduction_error(error: DetailError) -> PipelineError {
+    detail_error("noise_reduction", error)
+}
+
+fn detail_error(field: &'static str, error: DetailError) -> PipelineError {
     match error {
         DetailError::Cancelled => PipelineError::Cancelled,
         other => PipelineError::InvalidRecipe {
-            field: "noise_reduction",
+            field,
             reason: other.to_string(),
         },
     }
@@ -276,9 +315,61 @@ mod tests {
     use super::*;
 
     #[test]
+    fn false_color_runs_alone_and_leaves_green_and_inactive_recipes_untouched() {
+        use rohditor_image::LinearRgbSpace;
+        // Neutral ramp with one magenta speck (red and blue up, green alone).
+        let (w, h) = (9, 7);
+        let mut data: Vec<f32> = (0..w * h)
+            .flat_map(|i| [0.2 + 0.01 * (i % w) as f32; 3])
+            .collect();
+        let speck = (3 * w + 4) * 3;
+        data[speck] += 0.4;
+        data[speck + 2] += 0.4;
+        let input =
+            LinearRgbImage::new(w, h, w * 3, LinearRgbSpace::CameraNative, data).unwrap();
+        let balance = WhiteBalanceGains::identity();
+        let token = CancellationToken::new();
+
+        // Steps = 0 does no work and leaves the image bit-identical.
+        let mut image = input.clone();
+        let stage = apply(&mut image, &EditRecipe::default(), balance, balance, &token).unwrap();
+        assert!(stage.provenance.is_none());
+        assert_eq!(image, input);
+
+        let mut recipe = EditRecipe::default();
+        recipe.false_color.steps = 1;
+        let stage = apply(&mut image, &recipe, balance, balance, &token).unwrap();
+        assert_eq!(
+            stage.provenance.and_then(|p| p.false_color),
+            Some(recipe.false_color)
+        );
+        assert!(stage.provenance.is_some_and(|p| p.noise_reduction.is_none()));
+        assert!(stage.scratch_bytes > 0);
+        assert!(stage.chroma_noise_reduction.is_zero() && stage.capture_sharpening.is_zero());
+        assert_ne!(image, input);
+        for y in 0..h {
+            for x in 0..w {
+                let (a, b) = (image.pixel(x, y).unwrap(), input.pixel(x, y).unwrap());
+                assert_eq!(a[1], b[1], "green is kept at ({x},{y})");
+            }
+        }
+        // The speck is gone: red and blue are back on the green ramp.
+        let fixed = image.pixel(4, 3).unwrap();
+        assert!((fixed[0] - fixed[1]).abs() < 1e-5 && (fixed[2] - fixed[1]).abs() < 1e-5);
+    }
+
+    #[test]
     fn provenance_ignores_the_parked_texture_setting() {
         let mut recipe = EditRecipe::default();
         assert_eq!(DetailProvenance::for_recipe(&recipe), None);
+        // False colour is detail work of its own.
+        recipe.false_color.steps = 2;
+        let false_color = DetailProvenance::for_recipe(&recipe).expect("active");
+        assert_eq!(false_color.false_color, Some(recipe.false_color));
+        assert!(false_color.noise_reduction.is_none());
+        recipe.false_color.steps = 3;
+        assert_ne!(DetailProvenance::for_recipe(&recipe), Some(false_color));
+        recipe.false_color.steps = 0;
         // Texture preservation alone is not work.
         recipe.noise_reduction.luminance_detail = 0.9;
         assert_eq!(DetailProvenance::for_recipe(&recipe), None);

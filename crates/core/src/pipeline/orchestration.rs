@@ -105,6 +105,7 @@ pub struct StageTimings {
     /// pipeline. New code should use [`Self::highlight_processing`].
     pub highlight_clipping: Duration,
     pub demosaic: Duration,
+    pub false_color: Duration,
     pub chroma_noise_reduction: Duration,
     pub luminance_noise_reduction: Duration,
     pub capture_sharpening: Duration,
@@ -769,6 +770,7 @@ pub(super) mod render {
             base.timings.highlight_processing = reconstructed.timings.highlight_processing;
             base.timings.highlight_clipping = reconstructed.timings.highlight_clipping;
             base.timings.demosaic = reconstructed.timings.demosaic;
+            base.timings.false_color = reconstructed.timings.false_color;
             base.timings.chroma_noise_reduction = reconstructed.timings.chroma_noise_reduction;
             base.timings.luminance_noise_reduction =
                 reconstructed.timings.luminance_noise_reduction;
@@ -1316,6 +1318,7 @@ fn prepare_base_cancellable(
         highlight_processing,
         highlight_clipping: highlight_processing,
         demosaic,
+        false_color: capture.false_color,
         chroma_noise_reduction: capture.chroma_noise_reduction,
         luminance_noise_reduction: capture.luminance_noise_reduction,
         capture_sharpening: capture.capture_sharpening,
@@ -1461,6 +1464,7 @@ fn render_base(
     base.timings.total = base.timings.metadata
         + base.timings.normalization
         + base.timings.highlight_processing
+        + base.timings.false_color
         + base.timings.chroma_noise_reduction
         + base.timings.luminance_noise_reduction
         + base.timings.capture_sharpening

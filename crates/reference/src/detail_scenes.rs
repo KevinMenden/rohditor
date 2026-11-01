@@ -32,14 +32,18 @@ pub enum DetailScene {
     Gradient,
     /// Vertical bars of decreasing period, for detail loss.
     ResolutionBars,
+    /// Saturated colour checkerboards of decreasing cell size on a coloured
+    /// ramp: real chroma detail that false-colour suppression must keep.
+    ColourDetail,
 }
 
 impl DetailScene {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::ZonePlate,
         Self::FringedEdges,
         Self::Gradient,
         Self::ResolutionBars,
+        Self::ColourDetail,
     ];
 
     #[must_use]
@@ -49,7 +53,16 @@ impl DetailScene {
             Self::FringedEdges => "fringed-edges",
             Self::Gradient => "gradient",
             Self::ResolutionBars => "resolution-bars",
+            Self::ColourDetail => "colour-detail",
         }
+    }
+
+    /// Neutral scenes have the same value in all three channels.
+    fn truth_pixel(self, x: usize, y: usize, width: usize, height: usize) -> [f32; 3] {
+        if self == Self::ColourDetail {
+            return colour_detail_pixel(x, y, width, height);
+        }
+        [self.truth_value(x, y, width, height); 3]
     }
 
     fn truth_value(self, x: usize, y: usize, width: usize, height: usize) -> f32 {
@@ -71,6 +84,7 @@ impl DetailScene {
                 }
             }
             Self::Gradient => 0.03 + 0.94 * x as f32 / (width.max(2) - 1) as f32,
+            Self::ColourDetail => unreachable!("handled by truth_pixel"),
             Self::ResolutionBars => {
                 // Five blocks of bars with half-periods 8, 4, 3, 2, 1 pixels.
                 const HALF_PERIODS: [usize; 5] = [8, 4, 3, 2, 1];
@@ -90,7 +104,7 @@ impl DetailScene {
         let mut data = Vec::with_capacity(width * height * 3);
         for y in 0..height {
             for x in 0..width {
-                data.extend([self.truth_value(x, y, width, height); 3]);
+                data.extend(self.truth_pixel(x, y, width, height));
             }
         }
         Ok(LinearRgbImage::new(
@@ -134,6 +148,27 @@ impl DetailScene {
     }
 }
 
+/// Cell sizes of the [`DetailScene::ColourDetail`] checkerboard bands.
+const COLOUR_CELLS: [usize; 4] = [12, 6, 4, 2];
+
+/// Two saturated colours of different brightness alternate on a checkerboard
+/// whose cells shrink band by band (rows); a smooth red-to-blue ramp runs
+/// underneath so that the pattern is not the only chroma in the image.
+fn colour_detail_pixel(x: usize, y: usize, width: usize, height: usize) -> [f32; 3] {
+    let ramp = x as f32 / (width.max(2) - 1) as f32;
+    let base = [0.25 + 0.4 * ramp, 0.3, 0.65 - 0.4 * ramp];
+    let band = (y * COLOUR_CELLS.len() / height.max(1)).min(COLOUR_CELLS.len() - 1);
+    let cell = COLOUR_CELLS[band];
+    // Checkerboard coordinates are taken relative to the band start so every
+    // band begins with a full cell.
+    let band_start = band * height / COLOUR_CELLS.len();
+    if ((x / cell) + ((y - band_start) / cell)).is_multiple_of(2) {
+        base
+    } else {
+        [0.85, 0.45, 0.15]
+    }
+}
+
 /// One entry of the harness set: ground truth plus the stage input.
 #[derive(Debug, Clone)]
 pub struct Scene {
@@ -157,6 +192,7 @@ impl Scene {
         &self,
         noise: Option<NoiseModel>,
         seed: u64,
+        algorithm: DemosaicAlgorithm,
     ) -> Result<LinearRgbImage<f32>, ReferenceError> {
         let noisy = match noise {
             Some(model) => add_noise(&self.input, model, seed)?,
@@ -166,12 +202,8 @@ impl Scene {
             return Ok(noisy);
         }
         let mosaic = remosaic(&noisy, BayerPattern::Rggb)?;
-        demosaic(
-            &mosaic,
-            WhiteBalanceGains::identity(),
-            DemosaicAlgorithm::Bilinear,
-        )
-        .map_err(|e| ReferenceError::Other(e.to_string()))
+        demosaic(&mosaic, WhiteBalanceGains::identity(), algorithm)
+            .map_err(|e| ReferenceError::Other(e.to_string()))
     }
 }
 
@@ -230,11 +262,28 @@ mod tests {
     }
 
     #[test]
+    fn colour_detail_truth_has_chroma_and_fine_cells() {
+        let (w, h) = (96, 64);
+        let truth = DetailScene::ColourDetail.truth(w, h).unwrap();
+        let chroma = |x, y| {
+            let p = truth.pixel(x, y).unwrap();
+            (p[0] - p[1]).abs().max((p[2] - p[1]).abs())
+        };
+        assert!(chroma(3, 3) > 0.1);
+        // Finest band (last rows): alternating cells of two pixels.
+        let y = h - 2;
+        assert_ne!(truth.pixel(0, y), truth.pixel(2, y));
+        assert_eq!(truth.pixel(0, y), truth.pixel(1, y));
+    }
+
+    #[test]
     fn zone_plate_is_neutral_but_demosaicing_adds_colour() {
         let scene = &synthetic_set(256, 192).unwrap()[0];
         let truth = &scene.truth;
         assert!(truth.data().chunks(3).all(|p| p[0] == p[1] && p[1] == p[2]));
-        let seen = scene.noisy_input(None, 0).unwrap();
+        let seen = scene
+            .noisy_input(None, 0, DemosaicAlgorithm::Bilinear)
+            .unwrap();
         let max_chroma = seen
             .data()
             .chunks(3)

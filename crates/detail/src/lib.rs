@@ -9,6 +9,7 @@
 
 mod atrous;
 mod denoise;
+mod false_color;
 mod gaussian;
 mod median;
 mod noise;
@@ -21,6 +22,7 @@ pub use denoise::{
     ChromaDenoise, LumaDenoise, chroma_scratch_bytes, denoise_chroma, denoise_luma,
     estimate_luma_noise, luma_scratch_bytes,
 };
+pub use false_color::{FalseColor, false_color_scratch_bytes, suppress_false_color};
 pub use gaussian::{gaussian_blur, gaussian_kernel};
 pub use median::{median3, median5};
 pub use noise::{NoiseProfile, estimate_noise};
