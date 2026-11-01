@@ -110,6 +110,7 @@ pub struct StageTimings {
     pub luminance_noise_reduction: Duration,
     pub capture_sharpening: Duration,
     pub optics: Duration,
+    pub defringe: Duration,
     pub resampling: Duration,
     pub color_conversion: Duration,
     pub adjustments: Duration,
@@ -167,6 +168,7 @@ pub struct SpatialCompletionDescription {
     highlight_white_balance: WhiteBalance,
     highlight_diagnostics: HighlightDiagnostics,
     detail: Option<crate::DetailProvenance>,
+    defringe: Option<crate::DefringeProvenance>,
     preparation_timings: StageTimings,
     decoded_raw_bytes: usize,
     normalized_mosaic_bytes: usize,
@@ -239,6 +241,12 @@ impl SpatialCompletionDescription {
     #[must_use]
     pub const fn detail(&self) -> Option<crate::DetailProvenance> {
         self.detail
+    }
+
+    /// The defringe step the spatial stage will run, if any.
+    #[must_use]
+    pub const fn defringe(&self) -> Option<crate::DefringeProvenance> {
+        self.defringe
     }
 
     #[must_use]
@@ -776,6 +784,7 @@ pub(super) mod render {
                 reconstructed.timings.luminance_noise_reduction;
             base.timings.capture_sharpening = reconstructed.timings.capture_sharpening;
             base.timings.optics = reconstructed.timings.optics;
+            base.timings.defringe = reconstructed.timings.defringe;
             base.timings.resampling = reconstructed.timings.resampling;
             base.timings.total += reconstructed.timings.total;
             Ok(base)
@@ -1193,7 +1202,8 @@ fn prepare_base_cancellable(
     options: RenderOptions,
     cancellation: &CancellationToken,
 ) -> Result<DemosaicedBase, PipelineError> {
-    if super::detail::detail_is_active(recipe) {
+    // Defringe sits in the spatial stage of the camera-source path.
+    if super::detail::detail_is_active(recipe) || recipe.defringe.is_active() {
         return camera_source::prepare_full_capture_base(
             optics,
             frame,
@@ -1470,6 +1480,7 @@ fn render_base(
         + base.timings.capture_sharpening
         + base.timings.demosaic
         + base.timings.optics
+        + base.timings.defringe
         + base.timings.resampling
         + base.timings.color_conversion
         + base.timings.adjustments

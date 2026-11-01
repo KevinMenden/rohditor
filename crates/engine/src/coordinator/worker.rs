@@ -1683,6 +1683,7 @@ fn add_stage_timings(target: &mut StageTimings, additional: StageTimings) {
     target.luminance_noise_reduction += additional.luminance_noise_reduction;
     target.capture_sharpening += additional.capture_sharpening;
     target.optics += additional.optics;
+    target.defringe += additional.defringe;
     target.resampling += additional.resampling;
     target.color_conversion += additional.color_conversion;
     target.adjustments += additional.adjustments;
@@ -1730,6 +1731,7 @@ fn log_preview_diagnostics(
         capture_sharpening_us = diagnostics.timings.capture_sharpening.as_micros(),
         detail = ?diagnostics.detail,
         optics_us = diagnostics.timings.optics.as_micros(),
+        defringe_us = diagnostics.timings.defringe.as_micros(),
         resampling_us = diagnostics.timings.resampling.as_micros(),
         color_us = diagnostics.timings.color_conversion.as_micros(),
         adjustments_us = diagnostics.timings.adjustments.as_micros(),

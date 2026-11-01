@@ -34,6 +34,12 @@ pub(crate) enum AdjustmentTarget {
     CaptureAmount,
     CaptureRadius,
     CaptureNoise,
+    DefringePurpleAmount,
+    DefringePurpleHueStart,
+    DefringePurpleHueEnd,
+    DefringeGreenAmount,
+    DefringeGreenHueStart,
+    DefringeGreenHueEnd,
     ToneCurveShadows,
     ToneCurveDarks,
     ToneCurveLights,
@@ -132,6 +138,7 @@ pub(crate) struct DocumentPanelModel {
     pub false_color: rohditor_edit::FalseColorSuppression,
     pub noise_reduction: rohditor_edit::NoiseReduction,
     pub capture_sharpening: rohditor_edit::CaptureSharpening,
+    pub defringe: rohditor_edit::Defringe,
 }
 
 #[derive(Debug, Clone, Copy)]

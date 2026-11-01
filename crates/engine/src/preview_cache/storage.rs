@@ -96,6 +96,7 @@ impl PreviewCacheKeys {
             reconstruction_version: 8,
             resampling_version: AREA_REDUCTION_ALGORITHM_VERSION,
             detail: DetailKey::from_recipe(recipe),
+            defringe: DefringeKey::from_recipe(recipe),
         };
         let demosaiced = DemosaicedBaseKey {
             reconstructed: reconstructed.clone(),
@@ -193,6 +194,8 @@ struct ReconstructedCameraRgbKey {
     reconstruction_version: u8,
     resampling_version: u16,
     detail: DetailKey,
+    /// Runs after optics, so it is not part of the cached capture (`detail`).
+    defringe: Option<DefringeKey>,
 }
 
 /// Settings and algorithm versions of the source-resolution detail steps.
@@ -237,6 +240,46 @@ impl DetailKey {
                 rohditor_core::CAPTURE_SHARPENING_ALGORITHM_VERSION,
             )),
         }
+    }
+}
+
+/// Defringe settings and what its hue test depends on, `None` while off.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct DefringeKey {
+    /// Purple amount, green amount, purple hue range, green hue range.
+    settings: [u32; 6],
+    /// Hue is judged through the camera's colour matrix.
+    camera_profile: CameraProfileKey,
+    version: u16,
+}
+
+impl DefringeKey {
+    fn from_recipe(recipe: &EditRecipe) -> Option<Self> {
+        let d = recipe.defringe;
+        // A colour that is off ignores its hue range, so park the range.
+        let hue = |active: bool, range: [f32; 2]| {
+            if active {
+                range.map(f32::to_bits)
+            } else {
+                [0; 2]
+            }
+        };
+        let (purple, green) = (
+            hue(d.purple_active(), d.purple_hue),
+            hue(d.green_active(), d.green_hue),
+        );
+        d.is_active().then(|| Self {
+            settings: [
+                d.purple_amount.to_bits(),
+                d.green_amount.to_bits(),
+                purple[0],
+                purple[1],
+                green[0],
+                green[1],
+            ],
+            camera_profile: camera_profile_key(&recipe.color.camera_profile),
+            version: rohditor_core::DEFRINGE_ALGORITHM_VERSION,
+        })
     }
 }
 
@@ -1052,6 +1095,46 @@ mod tests {
         recipe.light.exposure_ev = 0.25;
         let creative = prepare(&recipe, &mut cache);
         assert!(creative.timings().false_color.is_zero());
+        // Defringe runs after optics: it re-runs alone, on the cached capture.
+        recipe.defringe.purple_amount = 0.5;
+        let defringe = prepare(&recipe, &mut cache);
+        assert!(defringe.timings().demosaic.is_zero(), "demosaic is reused");
+        assert!(
+            defringe.timings().false_color.is_zero(),
+            "capture is reused"
+        );
+        assert!(!defringe.timings().defringe.is_zero(), "defringe ran");
+        recipe.defringe.purple_amount = 0.9;
+        let stronger = prepare(&recipe, &mut cache);
+        assert!(
+            stronger.timings().false_color.is_zero(),
+            "capture is reused"
+        );
+        assert!(!stronger.timings().defringe.is_zero());
+    }
+
+    #[test]
+    fn defringe_invalidates_the_reconstruction_but_not_the_captured_detail() {
+        let frame = frame();
+        let options = PreviewOptions::default();
+        let mut recipe = EditRecipe::default();
+        let off = PreviewCacheKeys::new(1, &frame, &recipe, options);
+        recipe.defringe.green_amount = 0.4;
+        let on = PreviewCacheKeys::new(1, &frame, &recipe, options);
+        assert_eq!(off.decoded, on.decoded);
+        assert_ne!(off.reconstructed, on.reconstructed);
+        assert_ne!(off.demosaiced, on.demosaiced);
+        assert_ne!(off.adjusted, on.adjusted);
+        // The capture cache is keyed on the detail steps alone.
+        assert_eq!(off.reconstructed.detail, on.reconstructed.detail);
+        // The parked range of a colour that is off does not matter...
+        recipe.defringe.purple_hue = [100.0, 150.0];
+        let parked = PreviewCacheKeys::new(1, &frame, &recipe, options);
+        assert_eq!(on.reconstructed, parked.reconstructed);
+        // ...but an active colour's range does.
+        recipe.defringe.green_hue = [100.0, 150.0];
+        let moved = PreviewCacheKeys::new(1, &frame, &recipe, options);
+        assert_ne!(on.reconstructed, moved.reconstructed);
     }
 
     pub(super) fn frame() -> RawFrame {

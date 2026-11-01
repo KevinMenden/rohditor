@@ -288,6 +288,7 @@ fn describe_spatial_completion(
         highlight_white_balance: source.recipe.color.white_balance,
         highlight_diagnostics: source.highlight_diagnostics,
         detail: DetailProvenance::for_recipe(&source.recipe),
+        defringe: crate::DefringeProvenance::for_recipe(&source.recipe),
         preparation_timings: source.timings,
         decoded_raw_bytes: source.decoded_raw_bytes,
         normalized_mosaic_bytes: source.normalized_mosaic_bytes,
@@ -446,6 +447,8 @@ fn complete_camera_source(
         normalized_mosaic_bytes,
         highlight_scratch_bytes,
         timings,
+        gains,
+        demosaic_balance,
         ..
     } = source;
     // Validate before copy-on-write, optics, or reduction allocate. Two image
@@ -465,6 +468,16 @@ fn complete_camera_source(
                 .width()
                 .checked_mul(24)
                 .and_then(|scratch| n.checked_add(scratch))
+        })
+        .and_then(|n| {
+            n.checked_add(
+                super::super::defringe::scratch_bytes(
+                    &recipe,
+                    full_linear.width(),
+                    full_linear.height(),
+                )
+                .ok()?,
+            )
         })
         .ok_or_else(|| dimension_overflow(full_linear.width(), full_linear.height()))?;
     validate_working_set(completion_peak)?;
@@ -489,6 +502,8 @@ fn complete_camera_source(
     let recipe = &recipe;
     let source_width = full_linear.width();
     let source_height = full_linear.height();
+    let defringe_scratch_bytes =
+        super::super::defringe::scratch_bytes(recipe, source_width, source_height)?;
     let StageTimings {
         metadata,
         normalization,
@@ -503,11 +518,19 @@ fn complete_camera_source(
         full_linear,
         cancellation,
     )?;
-    let optics = optics_result.image;
+    let mut optics = optics_result.image;
     let optics_provenance = optics_result.provenance;
     let optics_output_bytes = optics_result.output_bytes;
     let optics_scratch_bytes = optics_result.scratch_bytes;
     let optics_timing = optics_started.elapsed();
+    let defringe_timing = super::super::defringe::apply(
+        &mut optics,
+        recipe,
+        &calibration,
+        demosaic_balance,
+        gains,
+        cancellation,
+    )?;
 
     let (target_width, target_height) = description.target_dimensions;
     let unchanged_dimensions = source_width == target_width && source_height == target_height;
@@ -541,7 +564,7 @@ fn complete_camera_source(
     let preparation_peak_bytes = preparation_peak_bytes.max(
         decoded_raw_bytes
             .checked_add(full_linear_bytes)
-            .and_then(|n| n.checked_add(capture.scratch_bytes))
+            .and_then(|n| n.checked_add(capture.scratch_bytes.max(defringe_scratch_bytes)))
             .ok_or_else(|| dimension_overflow(source_width, source_height))?,
     );
     validate_working_set(preparation_peak_bytes)?;
@@ -561,6 +584,7 @@ fn complete_camera_source(
         luminance_noise_reduction: capture.luminance_noise_reduction,
         capture_sharpening: capture.capture_sharpening,
         optics: optics_timing,
+        defringe: defringe_timing,
         resampling,
         total: prior_total
             + capture.false_color
