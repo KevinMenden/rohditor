@@ -2984,6 +2984,7 @@ dependencies = [
  "rohditor-color",
  "rohditor-core",
  "rohditor-demosaic",
+ "rohditor-detail",
  "rohditor-edit",
  "rohditor-highlight",
  "rohditor-image",

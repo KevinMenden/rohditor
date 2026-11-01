@@ -1,8 +1,8 @@
 //! Noise-reduction defaults derived from the frame's own noise estimate.
 //!
-//! Any active noise reduction keeps a document off the GPU (see
-//! `cpu_only_stage_reason`), and low-ISO files gain almost nothing from it, so
-//! a fixed default for every file would cost the common case for the sake of
+//! Low-ISO files gain almost nothing from noise reduction, yet it costs about
+//! 0.8 s per 24 MP render and trades away a little fine colour detail, so a
+//! fixed default for every file would charge the common case for the sake of
 //! the noisy one. The estimate is the same luma [`NoiseProfile`] the filters
 //! use; it is judged at mid grey and mapped to a chroma strength. Luminance
 //! reduction, false-colour suppression and defringe stay off: on the private

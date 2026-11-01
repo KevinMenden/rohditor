@@ -3,6 +3,7 @@
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use rohditor_detail::{
     ChromaDenoise, LumaDenoise, NeverCancelled, denoise_chroma, denoise_luma, estimate_luma_noise,
+    estimate_noise_profiles,
 };
 use rohditor_image::{LinearRgbImage, LinearRgbSpace};
 
@@ -56,7 +57,7 @@ fn bench_luma(c: &mut Criterion) {
             b.iter_batched(
                 || input.clone(),
                 |mut image| {
-                    let noise = estimate_luma_noise(&image, BALANCE, &NeverCancelled)
+                    let profiles = estimate_noise_profiles(&image, BALANCE, &NeverCancelled)
                         .expect("profile")
                         .expect("large enough");
                     denoise_chroma(
@@ -65,7 +66,7 @@ fn bench_luma(c: &mut Criterion) {
                             strength: 0.5,
                             balance: BALANCE,
                             ceilings: [1.0; 3],
-                            luma_noise: noise,
+                            noise: profiles,
                         },
                         &NeverCancelled,
                     )
@@ -77,7 +78,7 @@ fn bench_luma(c: &mut Criterion) {
                             detail: 0.5,
                             balance: BALANCE,
                             ceilings: [1.0; 3],
-                            noise,
+                            noise: profiles.luma,
                         },
                         &NeverCancelled,
                     )

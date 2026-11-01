@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
 use rohditor_core::{
-    CancellationToken, CaptureSharpeningContract, DemosaicedCameraSource,
-    SpatialCompletionDescription,
+    CancellationToken, DemosaicedCameraSource, DetailContract, SpatialCompletionDescription,
 };
 
 use super::resources::ResidentLayout;
@@ -180,7 +179,7 @@ impl ResidentCameraPlanes {
 pub struct GpuCapturedSource {
     pub(crate) planes: Arc<ResidentCameraPlanes>,
     pub(crate) description: SpatialCompletionDescription,
-    pub(crate) capture_contract: CaptureSharpeningContract,
+    pub(crate) detail_contract: DetailContract,
     pub(crate) uploaded_bytes: u64,
 }
 
@@ -203,13 +202,13 @@ impl GpuCapturedSource {
     pub(super) fn matches(
         &self,
         description: &SpatialCompletionDescription,
-        capture_contract: &CaptureSharpeningContract,
+        detail_contract: &DetailContract,
     ) -> bool {
         self.description.shares_camera_source(description)
             && self.description.detail() == description.detail()
             && self.description.source_dimensions() == description.source_dimensions()
-            && self.capture_contract.settings() == capture_contract.settings()
-            && self.capture_contract.ceilings() == capture_contract.ceilings()
+            && self.detail_contract.capture().settings() == detail_contract.capture().settings()
+            && self.detail_contract.ceilings() == detail_contract.ceilings()
             && self.description.highlight_adjustments() == description.highlight_adjustments()
             && self.description.camera_profile_key() == description.camera_profile_key()
             && self.description.calibration() == description.calibration()

@@ -242,8 +242,8 @@ fn fitted_camera_tone_matches_the_embedded_jpeg_brightness() -> Result<(), Box<d
 }
 
 /// Chroma strength the derived default picks per corpus file, as recorded by
-/// `rohditor-cli detail-corpus`. Base-ISO files must stay off so they keep the
-/// GPU path.
+/// `rohditor-cli detail-corpus`. Base-ISO files must stay off: they gain nothing
+/// from it.
 #[test]
 #[ignore = "requires the ignored Sony ARW corpus in testdata/private"]
 fn default_noise_reduction_follows_each_private_files_noise() -> Result<(), Box<dyn Error>> {

@@ -5,7 +5,9 @@
 
 use rohditor_core::with_default_noise_reduction;
 use rohditor_demosaic::DemosaicAlgorithm;
-use rohditor_detail::{ChromaDenoise, NeverCancelled, denoise_chroma, estimate_luma_noise};
+use rohditor_detail::{
+    ChromaDenoise, NeverCancelled, denoise_chroma, estimate_luma_noise, estimate_noise_profiles,
+};
 use rohditor_edit::EditRecipe;
 use rohditor_image::LinearRgbImage;
 use rohditor_reference::detail_scenes::{DetailScene, Scene, synthetic_set};
@@ -62,7 +64,7 @@ fn default_strength_removes_colour_noise_and_leaves_luma_alone() {
     let noisy = input(&scene, Some(level));
     let strength = default_chroma(&noisy);
     assert!(strength > 0.0);
-    let profile = estimate_luma_noise(&noisy, BALANCE, &NeverCancelled)
+    let profiles = estimate_noise_profiles(&noisy, BALANCE, &NeverCancelled)
         .expect("noise profile")
         .expect("profile");
     let mut cleaned = noisy.clone();
@@ -72,7 +74,7 @@ fn default_strength_removes_colour_noise_and_leaves_luma_alone() {
             strength,
             balance: BALANCE,
             ceilings: [f32::INFINITY; 3],
-            luma_noise: profile,
+            noise: profiles,
         },
         &NeverCancelled,
     )

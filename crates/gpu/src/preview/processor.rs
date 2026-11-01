@@ -917,6 +917,7 @@ impl GpuPreviewProcessor {
     ) -> Result<GpuPreviewSource, GpuPreviewError> {
         let description = &preview.description;
         if description.detail() != rohditor_core::DetailProvenance::for_recipe(recipe)
+            || description.defringe() != rohditor_core::DefringeProvenance::for_recipe(recipe)
             || !highlight_adjustments_match(
                 description.highlight_adjustments(),
                 recipe.raw.highlights,
@@ -1048,6 +1049,7 @@ impl GpuPreviewProcessor {
             })?;
         let description = &source.description;
         if description.detail() != rohditor_core::DetailProvenance::for_recipe(recipe)
+            || description.defringe() != rohditor_core::DefringeProvenance::for_recipe(recipe)
             || !highlight_adjustments_match(
                 description.highlight_adjustments(),
                 recipe.raw.highlights,
