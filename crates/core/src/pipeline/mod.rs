@@ -16,7 +16,7 @@ mod types;
 pub use orchestration::{CapturedCameraSource, DemosaicedCameraSource, SensorCameraMetadata};
 pub use sensor::{NormalizationContract, SensorCrop, SensorDevelopmentDescription};
 
-pub use defringe::{DEFRINGE_ALGORITHM_VERSION, DefringeProvenance};
+pub use defringe::{DEFRINGE_ALGORITHM_VERSION, DefringeContract, DefringeProvenance};
 pub use detail::{
     DetailProvenance, FALSE_COLOR_ALGORITHM_VERSION, NOISE_REDUCTION_ALGORITHM_VERSION,
     detail_is_active,

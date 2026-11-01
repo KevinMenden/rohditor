@@ -6,6 +6,7 @@ use rohditor_core::{CancellationToken, CpuPipeline, DemosaicedCameraSource};
 
 use crate::GpuPreviewError;
 
+mod defringe;
 #[cfg(test)]
 mod qualification;
 pub(crate) mod reduction;
@@ -37,6 +38,7 @@ pub struct GpuSpatialProcessor {
     materialize_pipeline: wgpu::ComputePipeline,
     capture: crate::GpuCaptureProcessor,
     scatter: CaptureScatter,
+    defringe: defringe::DefringePipelines,
     budget: u64,
     maximum_tile_edge: u32,
 }
@@ -77,6 +79,7 @@ impl GpuSpatialProcessor {
                 cache: None,
             });
         let scatter = CaptureScatter::new(device);
+        let defringe = defringe::DefringePipelines::new(device);
         let capture = crate::GpuCaptureProcessor::new(device, queue);
         let validation = pollster::block_on(device.pop_error_scope());
         let allocation = pollster::block_on(device.pop_error_scope());
@@ -93,6 +96,7 @@ impl GpuSpatialProcessor {
             materialize_pipeline,
             capture,
             scatter,
+            defringe,
             budget: resources::DEFAULT_BUDGET,
             maximum_tile_edge: device.limits().max_texture_dimension_2d,
         })
@@ -205,7 +209,12 @@ impl GpuSpatialProcessor {
         &self,
         source: &GpuCapturedSource,
         description: rohditor_core::SpatialCompletionDescription,
+        cancellation: &CancellationToken,
     ) -> Result<GpuSpatialFullSource, GpuPreviewError> {
+        if description.defringe_pending() && source.matches(&description, &source.detail_contract) {
+            let baked = self.baked_source(source, description, cancellation)?;
+            return self.full_resolution_source(&baked, baked.description.clone(), cancellation);
+        }
         if description.target_dimensions() != description.source_dimensions()
             || !source.matches(&description, &source.detail_contract)
         {

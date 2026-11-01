@@ -12,7 +12,7 @@ use rohditor_detail::{
     DetailError, FringeColour, FringeRemoval, defringe_scratch_bytes, estimate_luma_noise,
     remove_fringes,
 };
-use rohditor_edit::{Defringe, EditRecipe, WhiteBalance};
+use rohditor_edit::{CameraProfileSelection, Defringe, EditRecipe, WhiteBalance};
 use rohditor_image::LinearRgbImage;
 
 use crate::color::{CameraCalibration, resolve_camera_colour};
@@ -52,13 +52,112 @@ pub(crate) fn scratch_bytes(
         .ok_or_else(|| super::orchestration::dimension_overflow(width, height))
 }
 
+/// Everything an independent executor (the GPU) needs to run defringe
+/// exactly as [`apply`] does. Noise is profiled by the executor, from the
+/// image it defringes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DefringeContract {
+    purple: FringeColour,
+    green: FringeColour,
+    balance: [f32; 3],
+    to_rec2020: [[f32; 3]; 3],
+    ceilings: [f32; 3],
+}
+
+impl DefringeContract {
+    /// `balance` is the as-shot demosaic balance and `ceilings` the detail
+    /// stage's highlight ceilings. Hue is judged in the as-shot rendering
+    /// of `calibration`, which keeps the result independent of white-balance
+    /// edits; a large white-balance change therefore shifts which colours the
+    /// final image shows as purple or green relative to the configured ranges.
+    pub fn new(
+        settings: Defringe,
+        calibration: &CameraCalibration,
+        profile: &CameraProfileSelection,
+        balance: [f32; 3],
+        ceilings: [f32; 3],
+    ) -> Result<Self, PipelineError> {
+        let as_shot = resolve_camera_colour(calibration, profile, WhiteBalance::AsShot)?;
+        let colour = |amount: f32, hue: [f32; 2]| FringeColour { amount, hue };
+        Ok(Self {
+            purple: colour(settings.purple_amount, settings.purple_hue),
+            green: colour(settings.green_amount, settings.green_hue),
+            balance,
+            to_rec2020: as_shot.camera_to_linear_rec2020.values(),
+            ceilings,
+        })
+    }
+
+    #[must_use]
+    pub const fn purple(&self) -> FringeColour {
+        self.purple
+    }
+
+    #[must_use]
+    pub const fn green(&self) -> FringeColour {
+        self.green
+    }
+
+    #[must_use]
+    pub const fn balance(&self) -> [f32; 3] {
+        self.balance
+    }
+
+    /// Row-major matrix from balanced camera RGB to linear Rec.2020.
+    #[must_use]
+    pub const fn to_rec2020(&self) -> [[f32; 3]; 3] {
+        self.to_rec2020
+    }
+
+    #[must_use]
+    pub const fn ceilings(&self) -> [f32; 3] {
+        self.ceilings
+    }
+
+    /// Whether any colour is corrected.
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        self.purple.amount > 0.0 || self.green.amount > 0.0
+    }
+
+    /// Run defringe on the CPU, the reference every executor is qualified
+    /// against. Returns the time spent (zero when off).
+    pub fn apply_cpu(
+        &self,
+        image: &mut LinearRgbImage<f32>,
+        cancellation: &CancellationToken,
+    ) -> Result<Duration, PipelineError> {
+        cancellation.checkpoint()?;
+        if !self.is_active() {
+            return Ok(Duration::ZERO);
+        }
+        let started = Instant::now();
+        let is_cancelled = || cancellation.is_cancelled();
+        // Edges weaker than the grain are not edges. Too small to profile
+        // means too small to have meaningful fringes.
+        let noise =
+            estimate_luma_noise(image, self.balance, &is_cancelled).map_err(defringe_error)?;
+        remove_fringes(
+            image,
+            FringeRemoval {
+                purple: self.purple,
+                green: self.green,
+                balance: self.balance,
+                to_rec2020: self.to_rec2020,
+                ceilings: self.ceilings,
+                noise,
+            },
+            &is_cancelled,
+        )
+        .map_err(defringe_error)?;
+        Ok(started.elapsed())
+    }
+}
+
 /// Defringe `image` in place; returns the time spent (zero when off).
 ///
 /// `balance` is the as-shot demosaic balance and `gains` the user's white
-/// balance (it only shapes the highlight ceilings). Hue is judged in the
-/// as-shot rendering, which keeps the result independent of white-balance
-/// edits; a large white-balance change therefore shifts which colours the
-/// final image shows as purple or green relative to the configured ranges.
+/// balance (it only shapes the highlight ceilings).
 pub(super) fn apply(
     image: &mut LinearRgbImage<f32>,
     recipe: &EditRecipe,
@@ -67,37 +166,14 @@ pub(super) fn apply(
     gains: WhiteBalanceGains,
     cancellation: &CancellationToken,
 ) -> Result<Duration, PipelineError> {
-    cancellation.checkpoint()?;
-    let settings = recipe.defringe;
-    if !settings.is_active() {
-        return Ok(Duration::ZERO);
-    }
-    let started = Instant::now();
-    let as_shot = resolve_camera_colour(
+    DefringeContract::new(
+        recipe.defringe,
         calibration,
         &recipe.color.camera_profile,
-        WhiteBalance::AsShot,
-    )?;
-    let balance = [balance.red, balance.green, balance.blue];
-    let is_cancelled = || cancellation.is_cancelled();
-    // Edges weaker than the grain are not edges. Too small to profile means
-    // too small to have meaningful fringes.
-    let noise = estimate_luma_noise(image, balance, &is_cancelled).map_err(defringe_error)?;
-    let colour = |amount: f32, hue: [f32; 2]| FringeColour { amount, hue };
-    remove_fringes(
-        image,
-        FringeRemoval {
-            purple: colour(settings.purple_amount, settings.purple_hue),
-            green: colour(settings.green_amount, settings.green_hue),
-            balance,
-            to_rec2020: as_shot.camera_to_linear_rec2020.values(),
-            ceilings: super::detail::ceilings(recipe, gains),
-            noise,
-        },
-        &is_cancelled,
-    )
-    .map_err(defringe_error)?;
-    Ok(started.elapsed())
+        [balance.red, balance.green, balance.blue],
+        super::detail::ceilings(recipe, gains),
+    )?
+    .apply_cpu(image, cancellation)
 }
 
 fn defringe_error(error: DetailError) -> PipelineError {

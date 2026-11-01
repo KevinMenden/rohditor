@@ -17,6 +17,9 @@
 mod edges;
 mod hue;
 
+pub use edges::{DILATE_RADIUS, EDGE_FRACTION, LOCAL_MAX_RADIUS, NOISE_SIGMAS};
+pub use hue::{HUE_ROLLOFF, NEUTRAL_SATURATION, TRUSTED_SATURATION};
+
 use rayon::prelude::*;
 use rohditor_image::LinearRgbImage;
 
@@ -27,7 +30,12 @@ use hue::{hue_and_saturation, hue_window, saturation_ramp};
 /// is built; later the weights and the two replacement planes.
 const SCRATCH_PLANES: usize = 3;
 /// The replacement colour is searched in a 5x5 window.
-const NEIGHBOURHOOD_RADIUS: usize = 2;
+pub const NEIGHBOURHOOD_RADIUS: usize = 2;
+
+/// Source pixels defringe reads beyond an output pixel (per side), for tiles
+/// processed independently: the edge mask reaches the gradient, local maximum
+/// and dilation, and the replacement search reads masks that far again.
+pub const DEFRINGE_HALO: usize = 1 + LOCAL_MAX_RADIUS + DILATE_RADIUS + NEIGHBOURHOOD_RADIUS;
 
 /// One fringe colour: how strongly to correct it and which hues it covers.
 #[derive(Debug, Clone, Copy, PartialEq)]

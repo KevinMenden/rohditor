@@ -216,9 +216,9 @@ impl GpuExportProcessor {
             cancellation,
         )?;
         let description = resident.initial_description().clone();
-        let full = self
-            .spatial
-            .full_resolution_source(resident.captured(), description)?;
+        let full =
+            self.spatial
+                .full_resolution_source(resident.captured(), description, cancellation)?;
         self.render_spatial_source(
             &full,
             recipe,
@@ -315,6 +315,7 @@ impl GpuExportProcessor {
     ) -> Result<GpuExportResult, GpuPreviewError> {
         let description = &source.description;
         if description.detail() != rohditor_core::DetailProvenance::for_recipe(recipe)
+            || description.defringe() != rohditor_core::DefringeProvenance::for_recipe(recipe)
             || !highlight_adjustments_match(
                 description.highlight_adjustments(),
                 recipe.raw.highlights,
