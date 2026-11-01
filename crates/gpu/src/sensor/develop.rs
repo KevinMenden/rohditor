@@ -89,7 +89,7 @@ impl GpuSensorProcessor {
                 ),
             });
         }
-        let contract = metadata.capture_contract().map_err(pipeline_error)?;
+        let contract = metadata.detail_contract().map_err(pipeline_error)?;
         let (normalized, normalization) =
             self.normalize(frame, metadata.sensor().normalization(), cancellation)?;
         let (highlighted, diagnostics, highlight) =
@@ -128,7 +128,7 @@ impl GpuSensorProcessor {
         let captured = GpuCapturedSource {
             planes: std::sync::Arc::new(camera.planes),
             description,
-            capture_contract: contract,
+            detail_contract: contract,
             uploaded_bytes: normalization.uploaded_bytes,
         };
         Ok((

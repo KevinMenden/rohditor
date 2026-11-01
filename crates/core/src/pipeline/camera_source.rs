@@ -1,7 +1,7 @@
 //! Typed full-resolution camera-native preparation, capture, and CPU completion.
 use super::super::sensor::SensorDevelopmentDescription;
 use super::*;
-use crate::{CaptureSharpeningContract, DetailProvenance};
+use crate::{DetailContract, DetailProvenance};
 use rohditor_raw::RawFileInfo;
 
 /// Immutable unsharpened camera RGB. No WB, optics, or reduction has run.
@@ -77,11 +77,8 @@ impl DemosaicedCameraSource {
     pub fn decoded_raw_bytes(&self) -> usize {
         self.decoded_raw_bytes
     }
-    pub fn capture_contract(&self) -> Result<CaptureSharpeningContract, PipelineError> {
-        CaptureSharpeningContract::new(
-            self.recipe.capture_sharpening,
-            super::super::detail::ceilings(&self.recipe, self.gains),
-        )
+    pub fn detail_contract(&self) -> Result<DetailContract, PipelineError> {
+        DetailContract::new(&self.recipe, self.demosaic_balance, self.gains)
     }
 
     pub fn capture_cpu(
@@ -155,7 +152,7 @@ impl DemosaicedCameraSource {
         self.image = Arc::new(image);
         Ok(CapturedCameraSource {
             source: self,
-            // Executors outside the CPU only implement capture sharpening.
+            // An executor outside the CPU reports its detail stage as one time.
             stage: super::super::detail::DetailStage {
                 provenance,
                 scratch_bytes,
@@ -177,9 +174,9 @@ impl CapturedCameraSource {
         recipe: &EditRecipe,
         options: PreviewOptions,
     ) -> Result<Self, PipelineError> {
-        let previous = self.source.capture_contract()?;
+        let previous = self.source.detail_contract()?;
         self.source = self.source.with_recipe(recipe, options)?;
-        let next = self.source.capture_contract()?;
+        let next = self.source.detail_contract()?;
         if self.stage.provenance != DetailProvenance::for_recipe(recipe)
             || previous.ceilings() != next.ceilings()
         {

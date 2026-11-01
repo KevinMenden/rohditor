@@ -15,6 +15,7 @@ pollster.workspace = true
 rohditor-color = { path = "../color" }
 rohditor-core = { path = "../core" }
 rohditor-demosaic = { path = "../demosaic" }
+rohditor-detail = { path = "../detail" }
 rohditor-edit = { path = "../edit" }
 rohditor-image = { path = "../image" }
 rohditor-raw = { path = "../raw" }
