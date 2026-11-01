@@ -115,7 +115,7 @@ impl GpuSpatialProcessor {
     ) -> Result<(GpuCapturedSource, SpatialMetrics), GpuPreviewError> {
         check_cancel(cancellation)?;
         let contract = source
-            .capture_contract()
+            .detail_contract()
             .map_err(|error| invalid(&error.to_string()))?;
         let description = cpu
             .describe_spatial_completion(source, cancellation)
@@ -134,7 +134,7 @@ impl GpuSpatialProcessor {
             source.image().width(),
             source.image().height(),
             retained,
-            if contract.settings().is_active() {
+            if contract.is_active() {
                 32 * 1024 * 1024
             } else {
                 0
@@ -150,7 +150,7 @@ impl GpuSpatialProcessor {
         let operation = (|| {
             let planes =
                 std::sync::Arc::new(source::ResidentCameraPlanes::new(&self.device, layout)?);
-            let (uploaded_bytes, capture, upload) = if contract.settings().is_active() {
+            let (uploaded_bytes, capture, upload) = if contract.is_active() {
                 let remaining = self
                     .budget
                     .saturating_sub(layout.resident_bytes)
@@ -188,7 +188,7 @@ impl GpuSpatialProcessor {
             GpuCapturedSource {
                 planes,
                 description,
-                capture_contract: contract,
+                detail_contract: contract,
                 uploaded_bytes,
             },
             SpatialMetrics {
@@ -207,7 +207,7 @@ impl GpuSpatialProcessor {
         description: rohditor_core::SpatialCompletionDescription,
     ) -> Result<GpuSpatialFullSource, GpuPreviewError> {
         if description.target_dimensions() != description.source_dimensions()
-            || !source.matches(&description, &source.capture_contract)
+            || !source.matches(&description, &source.detail_contract)
         {
             return Err(GpuPreviewError::BaseMismatch {
                 reason: "full-resolution spatial description does not match the resident source"

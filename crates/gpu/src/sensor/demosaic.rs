@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use rohditor_core::{CancellationToken, CaptureSharpeningContract, SensorDevelopmentDescription};
+use rohditor_core::{CancellationToken, DetailContract, SensorDevelopmentDescription};
 use rohditor_demosaic::{ChannelBalance, DemosaicAlgorithm};
 
 use super::amaze::{AmazeExecutor, BATCH_SIZES};
@@ -16,7 +16,7 @@ use crate::{CaptureMetrics, GpuCaptureProcessor, GpuPreviewError, memory::Reserv
 pub struct GpuSensorCameraSource {
     pub(crate) planes: ResidentCameraPlanes,
     description: SensorDevelopmentDescription,
-    capture: CaptureSharpeningContract,
+    capture: DetailContract,
 }
 
 impl GpuSensorCameraSource {
@@ -39,7 +39,7 @@ impl GpuSensorCameraSource {
     }
 
     #[must_use]
-    pub fn capture_contract(&self) -> &CaptureSharpeningContract {
+    pub fn detail_contract(&self) -> &DetailContract {
         &self.capture
     }
 }
@@ -66,15 +66,16 @@ const AMAZE: u32 = 3;
 const WORK_BYTES: u64 = 64 * 1024;
 
 impl GpuSensorProcessor {
-    /// Consume a highlighted mosaic with bilinear, MHC, RCD or AMaZE. Active
-    /// capture receives each halo-expanded RGB tile directly from bilinear/MHC
-    /// demosaic, never a second full RGB image; RCD and AMaZE fill resident
+    /// Consume a highlighted mosaic with bilinear, MHC, RCD or AMaZE. An active
+    /// detail stage receives each halo-expanded RGB tile directly from
+    /// bilinear/MHC demosaic, never a second full RGB image; RCD, AMaZE and
+    /// noise reduction (which profiles the whole image first) fill resident
     /// planes first. Unsupported algorithms return before allocating camera planes.
     pub fn demosaic(
         &self,
         mosaic: GpuHighlightedMosaic,
         description: &SensorDevelopmentDescription,
-        capture: &CaptureSharpeningContract,
+        capture: &DetailContract,
         cancellation: &CancellationToken,
     ) -> Result<(GpuSensorCameraSource, DemosaicMetrics), GpuPreviewError> {
         check_cancel(cancellation)?;
@@ -90,6 +91,7 @@ impl GpuSensorProcessor {
             DemosaicAlgorithm::Amaze => AMAZE,
         };
         capture
+            .capture()
             .settings()
             .validate()
             .map_err(|e| invalid(&e.to_string()))?;
@@ -111,7 +113,7 @@ impl GpuSensorProcessor {
         &self,
         mosaic: GpuHighlightedMosaic,
         description: &SensorDevelopmentDescription,
-        capture: &CaptureSharpeningContract,
+        capture: &DetailContract,
         algorithm: u32,
         cancellation: &CancellationToken,
     ) -> Result<(GpuSensorCameraSource, DemosaicMetrics), GpuPreviewError> {
@@ -135,8 +137,11 @@ impl GpuSensorProcessor {
         let amaze = (algorithm == AMAZE)
             .then(|| AmazeExecutor::new(self, balance, amaze_batch))
             .transpose()?;
-        let resident_executor = algorithm >= RCD;
-        let captured_planes = if resident_executor && capture.settings().is_active() {
+        // RCD and AMaZE fill resident planes by construction. Noise reduction
+        // must profile the whole image before any tile is filtered, so it
+        // takes the same two-step route.
+        let resident_executor = algorithm >= RCD || capture.noise_reduction().is_active();
+        let captured_planes = if resident_executor && capture.is_active() {
             Some(ResidentCameraPlanes::with_budget(
                 &self.device,
                 layout,
@@ -182,13 +187,14 @@ impl GpuSensorProcessor {
                     &view,
                     &planes,
                     &validation,
-                    if resident_executor { 0 } else { algorithm },
+                    // RCD and AMaZE refine a bilinear base.
+                    if algorithm >= RCD { 0 } else { algorithm },
                     region,
                     target,
                 );
                 metrics.tiles += 1;
             };
-            if capture.settings().is_active() && !resident_executor {
+            if capture.is_active() && !resident_executor {
                 let mut processor = GpuCaptureProcessor::new(&self.device, &self.queue)?;
                 processor.set_remaining_budget(remaining);
                 #[cfg(test)]

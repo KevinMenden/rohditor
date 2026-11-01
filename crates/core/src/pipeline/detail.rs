@@ -2,14 +2,14 @@
 //! renders. It runs on demosaiced camera RGB, before optics, in a fixed order:
 //! false-colour suppression (a demosaic clean-up, so it sees the raw demosaic
 //! output), chroma noise reduction, luminance noise reduction, then capture
-//! sharpening.
+//! sharpening. Noise is profiled once, on the stage input.
 use std::time::{Duration, Instant};
 
 use rohditor_demosaic::WhiteBalanceGains;
 use rohditor_detail::{
-    ChromaDenoise, DetailError, FalseColor, LumaDenoise, chroma_scratch_bytes, denoise_chroma,
-    denoise_luma, estimate_luma_noise, false_color_scratch_bytes, luma_scratch_bytes,
-    suppress_false_color,
+    ChromaDenoise, DetailError, FalseColor, LumaDenoise, NoiseProfiles, chroma_scratch_bytes,
+    denoise_chroma, denoise_luma, estimate_noise_profiles, false_color_scratch_bytes,
+    luma_scratch_bytes, suppress_false_color,
 };
 use rohditor_edit::{
     CaptureSharpening, EditRecipe, FalseColorSuppression, HighlightMethod, NoiseReduction,
@@ -17,6 +17,7 @@ use rohditor_edit::{
 use rohditor_image::LinearRgbImage;
 use rohditor_raw::RawFrame;
 
+use super::detail_contract::DetailContract;
 use crate::{CancellationToken, PipelineError, sharpening};
 
 /// Bump when the noise-reduction output changes for the same settings.
@@ -182,19 +183,50 @@ pub(super) fn apply(
         cancellation.checkpoint()?;
         return Ok(DetailStage::skipped());
     }
-    let levels = ceilings(recipe, gains);
     let mut stage = DetailStage {
         provenance,
         scratch_bytes: scratch_bytes(recipe, image.width(), image.height())?,
         ..DetailStage::skipped()
     };
-    if recipe.false_color.is_active() {
+    let contract = DetailContract::new(recipe, balance, gains)?;
+    run_steps(image, &contract, cancellation, &mut stage)?;
+    Ok(stage)
+}
+
+/// Run the steps of `contract` in order, booking their times to `stage`.
+pub(super) fn run_steps(
+    image: &mut LinearRgbImage<f32>,
+    contract: &DetailContract,
+    cancellation: &CancellationToken,
+    stage: &mut DetailStage,
+) -> Result<(), PipelineError> {
+    let (balance, levels) = (contract.balance(), contract.ceilings());
+    let settings = contract.noise_reduction();
+    // Profile before any step edits the image, so executors that work on
+    // tiles can profile once up front too. Images too small to profile skip
+    // noise reduction.
+    let noise = if settings.is_active() {
+        let started = Instant::now();
+        let noise = estimate_noise_profiles(image, balance, &|| cancellation.is_cancelled())
+            .map_err(noise_reduction_error)?;
+        // The profile serves both steps; its time is booked to the first one.
+        let first = if settings.chroma_active() {
+            &mut stage.chroma_noise_reduction
+        } else {
+            &mut stage.luminance_noise_reduction
+        };
+        *first += started.elapsed();
+        noise
+    } else {
+        None
+    };
+    if contract.false_color().is_active() {
         let started = Instant::now();
         suppress_false_color(
             image,
             FalseColor {
-                steps: recipe.false_color.steps,
-                balance: [balance.red, balance.green, balance.blue],
+                steps: contract.false_color().steps,
+                balance,
                 ceilings: levels,
             },
             &|| cancellation.is_cancelled(),
@@ -202,49 +234,31 @@ pub(super) fn apply(
         .map_err(|error| detail_error("false_color", error))?;
         stage.false_color = started.elapsed();
     }
-    if recipe.noise_reduction.is_active() {
-        reduce_noise(image, recipe, balance, levels, cancellation, &mut stage)?;
+    if let Some(noise) = noise {
+        reduce_noise(image, settings, balance, levels, noise, cancellation, stage)?;
     }
-    if recipe.capture_sharpening.is_active() {
+    let capture = contract.capture();
+    if capture.settings().is_active() {
         let started = Instant::now();
-        sharpening::apply_cancellable(image, recipe.capture_sharpening, levels, cancellation)?;
+        capture.apply_cpu(image, cancellation)?;
         stage.capture_sharpening = started.elapsed();
     }
-    Ok(stage)
+    cancellation.checkpoint()?;
+    Ok(())
 }
 
-/// Chroma, then luminance noise reduction, both driven by one luma noise
-/// profile (chroma leaves luma unchanged, so it stays valid for the second
-/// step). Images too small to profile are left alone.
+/// Chroma, then luminance noise reduction, both driven by the profiles of
+/// the stage input.
 fn reduce_noise(
     image: &mut LinearRgbImage<f32>,
-    recipe: &EditRecipe,
-    balance: WhiteBalanceGains,
+    settings: NoiseReduction,
+    balance: [f32; 3],
     ceilings: [f32; 3],
+    noise: NoiseProfiles,
     cancellation: &CancellationToken,
     stage: &mut DetailStage,
 ) -> Result<(), PipelineError> {
-    let settings = recipe.noise_reduction;
-    let balance = [balance.red, balance.green, balance.blue];
     let is_cancelled = || cancellation.is_cancelled();
-    let started = Instant::now();
-    let noise =
-        estimate_luma_noise(image, balance, &is_cancelled).map_err(noise_reduction_error)?;
-    // The profile serves both steps; its time is booked to the first one.
-    let profiling = started.elapsed();
-    let (first, second) = (
-        &mut stage.chroma_noise_reduction,
-        &mut stage.luminance_noise_reduction,
-    );
-    if settings.chroma_active() {
-        *first += profiling;
-    } else {
-        *second += profiling;
-    }
-    // Too small to profile: nothing to do.
-    let Some(noise) = noise else {
-        return Ok(());
-    };
     if settings.chroma_active() {
         let started = Instant::now();
         denoise_chroma(
@@ -253,7 +267,7 @@ fn reduce_noise(
                 strength: settings.chroma,
                 balance,
                 ceilings,
-                luma_noise: noise,
+                noise,
             },
             &is_cancelled,
         )
@@ -269,7 +283,7 @@ fn reduce_noise(
                 detail: settings.luminance_detail,
                 balance,
                 ceilings,
-                noise,
+                noise: noise.luma,
             },
             &is_cancelled,
         )

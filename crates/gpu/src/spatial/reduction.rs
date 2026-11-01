@@ -19,7 +19,7 @@ impl super::GpuSpatialProcessor {
         cancellation: &CancellationToken,
     ) -> Result<(GpuSpatialPreview, super::SpatialMetrics), GpuPreviewError> {
         check_cancel(cancellation)?;
-        let contract = source.capture_contract.clone();
+        let contract = source.detail_contract.clone();
         if !source.matches(&description, &contract) {
             return Err(GpuPreviewError::BaseMismatch {
                 reason: "resident captured source does not match the spatial description".into(),

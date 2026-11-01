@@ -24,26 +24,31 @@ use crate::{
     CancellationCheck, DetailError, NoiseProfile, Plane, for_each_row, luma_plane, mirror,
 };
 
-const LEVELS: usize = 5;
+/// Number of à-trous levels.
+pub const LUMA_LEVELS: usize = 5;
+const LEVELS: usize = LUMA_LEVELS;
 /// Std-dev of each detail band for unit white noise, measured by
 /// `band_gains_match_white_noise` (so the table cannot silently drift).
 const BAND_NOISE_GAIN: [f32; LEVELS] = [0.890_8, 0.200_6, 0.085_6, 0.041_3, 0.020_3];
 /// Threshold multiplier per level.
 const LEVEL_WEIGHTS: [f32; LEVELS] = [1.0, 1.0, 1.0, 1.0, 1.0];
 /// Local-energy window: `2 * RADIUS + 1` pixels square.
-const WINDOW_RADIUS: usize = 3;
+pub const LUMA_WINDOW_RADIUS: usize = 3;
+const WINDOW_RADIUS: usize = LUMA_WINDOW_RADIUS;
 /// Floor of `σ_signal` relative to `σ_noise`; it also caps the threshold at
 /// `strength · k / SIGNAL_FLOOR` noise sigmas in perfectly flat areas.
-const SIGNAL_FLOOR: f32 = 0.4;
+pub const LUMA_SIGNAL_FLOOR: f32 = 0.4;
+const SIGNAL_FLOOR: f32 = LUMA_SIGNAL_FLOOR;
 /// `luminance_detail` relaxes the thresholds of this many finest levels by
 /// up to [`DETAIL_RELIEF`].
 const DETAIL_LEVELS: usize = 2;
 const DETAIL_RELIEF: f32 = 0.8;
 /// Largest gain a pixel's RGB may be scaled by.
-const MAX_GAIN: f32 = 4.0;
+pub const LUMA_MAX_GAIN: f32 = 4.0;
+const MAX_GAIN: f32 = LUMA_MAX_GAIN;
 /// Luma at or below this is too small to scale by (same value capture
 /// sharpening uses to guard its divisions).
-const LUMA_FLOOR: f32 = 1.0e-6;
+pub const LUMA_FLOOR: f32 = 1.0e-6;
 /// Planes alive at once: the working band, the smoothing, the accumulated
 /// result and two for the local energy.
 const SCRATCH_PLANES: usize = 5;
@@ -66,6 +71,44 @@ pub struct LumaDenoise {
     /// [`estimate_luma_noise`](super::estimate_luma_noise)).
     pub noise: NoiseProfile,
 }
+
+/// One level of the luminance filter, for executors that run it elsewhere.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LumaLevel {
+    /// Tap spacing of the B3 smoothing.
+    pub step: usize,
+    /// Multiplier of the BayesShrink threshold.
+    pub scale: f32,
+    /// Variance of the level's detail band for unit white noise.
+    pub noise_gain_squared: f32,
+}
+
+/// The levels of a pass, finest first (see [`LumaDenoise`] for the settings).
+#[must_use]
+pub fn luma_levels(strength: f32, detail: f32) -> [LumaLevel; LUMA_LEVELS] {
+    let shrink = Shrinkage {
+        strength,
+        detail,
+        // Only the level constants are read.
+        noise: NoiseProfile {
+            a: 0.0,
+            b: 0.0,
+            bins: 0,
+        },
+    };
+    std::array::from_fn(|level| {
+        let level_shrinkage = shrink.level(level);
+        LumaLevel {
+            step: 1 << level,
+            scale: level_shrinkage.scale,
+            noise_gain_squared: level_shrinkage.noise_gain_squared,
+        }
+    })
+}
+
+/// Source pixels a pass reads beyond an output pixel (per side): the
+/// smoothing chain of every level, then the energy window of the last band.
+pub const LUMA_HALO: usize = 2 * ((1 << LEVELS) - 1) + WINDOW_RADIUS;
 
 /// Heap bytes the filter allocates on top of the image itself.
 #[must_use]

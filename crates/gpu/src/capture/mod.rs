@@ -1,21 +1,29 @@
-//! Full-resolution f32 capture bridge. Scratch is local to one operation and
-//! reused across tiles, then released before color export allocates its source.
+//! Full-resolution f32 detail bridge: false colour, noise reduction and capture
+//! sharpening on camera RGB. Scratch is local to one operation and reused
+//! across tiles, then released before color export allocates its source.
 use crate::GpuPreviewError;
 use rohditor_core::{
     CAPTURE_SHARPENING_FLOOR, CAPTURE_SHARPENING_ITERATIONS, CPU_WORKING_SET_LIMIT_BYTES,
     CancellationToken, CaptureSharpeningContract, CpuPipeline, DemosaicedCameraSource,
-    DetailProvenance, ReconstructedPreview,
+    DetailContract, DetailProvenance, ReconstructedPreview,
 };
+use rohditor_detail::NoiseProfiles;
 use rohditor_image::LinearRgbImage;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+mod detail;
+#[cfg(test)]
+mod detail_tests;
+mod noise;
 mod processor;
 #[cfg(test)]
 mod qualification;
+mod resident;
 mod resources;
 #[cfg(test)]
 mod tests;
+use resident::ResidentLoader;
 use resources::{Resources, TilePlan};
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -47,6 +55,7 @@ pub struct GpuCaptureProcessor {
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipeline: wgpu::ComputePipeline,
+    detail: detail::DetailPasses,
     budget: u64,
     maximum_tile_edge: usize,
 }
@@ -68,6 +77,7 @@ impl GpuCaptureProcessor {
             compilation_options: Default::default(),
             cache: None,
         });
+        let detail = detail::DetailPasses::new(device);
         let validation = pollster::block_on(device.pop_error_scope());
         let allocation = pollster::block_on(device.pop_error_scope());
         let internal = pollster::block_on(device.pop_error_scope());
@@ -78,6 +88,7 @@ impl GpuCaptureProcessor {
             device: device.clone(),
             queue: queue.clone(),
             pipeline,
+            detail,
             budget: resources::DEFAULT_BUDGET,
             maximum_tile_edge: 512,
         })
@@ -116,7 +127,7 @@ impl GpuCaptureProcessor {
                 reason: reason.to_owned(),
             });
         }
-        let contract = source.capture_contract().map_err(error)?;
+        let contract = source.detail_contract().map_err(error)?;
         let provenance = DetailProvenance::for_recipe(source.recipe());
         let (captured, metrics) = match self.process(
             source.image(),
@@ -152,13 +163,13 @@ impl GpuCaptureProcessor {
     pub fn process(
         &mut self,
         image: &LinearRgbImage<f32>,
-        contract: &CaptureSharpeningContract,
+        contract: &DetailContract,
         retained_host_bytes: usize,
         cancellation: &CancellationToken,
     ) -> Result<Option<GpuCaptureResult>, GpuPreviewError> {
         check_cancel(cancellation)?;
-        contract.settings().validate().map_err(error)?;
-        if !contract.settings().is_active() {
+        contract.capture().settings().validate().map_err(error)?;
+        if !contract.is_active() {
             return Ok(None);
         }
         if image.space() != rohditor_image::LinearRgbSpace::CameraNative {
@@ -166,10 +177,11 @@ impl GpuCaptureProcessor {
                 "capture requires camera-native RGB before white balance and optics",
             ));
         }
+        let noise = noise::estimate_from_image(image, contract, cancellation)?;
         let plan = TilePlan::new(
             image.width(),
             image.height(),
-            contract.halo(),
+            contract,
             self.budget,
             &self.device.limits(),
             self.maximum_tile_edge,
@@ -189,7 +201,7 @@ impl GpuCaptureProcessor {
         self.device.push_error_scope(wgpu::ErrorFilter::Internal);
         self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
         self.device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let result = self.process_inner(image, contract, &plan, cancellation);
+        let result = self.process_inner(image, contract, &plan, noise, cancellation);
         let validation = pollster::block_on(self.device.pop_error_scope());
         let allocation = pollster::block_on(self.device.pop_error_scope());
         let internal = pollster::block_on(self.device.pop_error_scope());
@@ -203,17 +215,17 @@ impl GpuCaptureProcessor {
     pub(crate) fn process_to_resident(
         &mut self,
         image: &LinearRgbImage<f32>,
-        contract: &CaptureSharpeningContract,
+        contract: &DetailContract,
         retained_host_bytes: usize,
         resident: &crate::spatial::source::ResidentCameraPlanes,
         scatter: &crate::spatial::CaptureScatter,
         cancellation: &CancellationToken,
     ) -> Result<CaptureMetrics, GpuPreviewError> {
         check_cancel(cancellation)?;
-        contract.settings().validate().map_err(error)?;
-        if !contract.settings().is_active() {
+        contract.capture().settings().validate().map_err(error)?;
+        if !contract.is_active() {
             return Err(error(
-                "active capture contract required for resident execution",
+                "active detail contract required for resident execution",
             ));
         }
         if image.space() != rohditor_image::LinearRgbSpace::CameraNative {
@@ -231,10 +243,11 @@ impl GpuCaptureProcessor {
                 "resident capture target dimensions do not match the source",
             ));
         }
+        let noise = noise::estimate_from_image(image, contract, cancellation)?;
         let plan = TilePlan::new_resident(
             image.width(),
             image.height(),
-            contract.halo(),
+            contract,
             self.budget,
             &self.device.limits(),
             self.maximum_tile_edge,
@@ -254,8 +267,15 @@ impl GpuCaptureProcessor {
         self.device.push_error_scope(wgpu::ErrorFilter::Internal);
         self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
         self.device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let result =
-            self.process_resident_inner(image, contract, &plan, resident, scatter, cancellation);
+        let result = self.process_resident_inner(
+            image,
+            contract,
+            &plan,
+            noise,
+            resident,
+            scatter,
+            cancellation,
+        );
         let validation = pollster::block_on(self.device.pop_error_scope());
         let allocation = pollster::block_on(self.device.pop_error_scope());
         let internal = pollster::block_on(self.device.pop_error_scope());
