@@ -34,8 +34,11 @@ use super::scheduler::{PreviewCompletion, PreviewMailbox};
 mod camera_look_worker;
 #[path = "export_worker.rs"]
 mod export_worker;
+#[path = "noise_worker.rs"]
+mod noise_worker;
 
 pub use camera_look_worker::CameraLookJob;
+pub use noise_worker::NoiseProfileJob;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobKind {
@@ -243,6 +246,12 @@ pub enum WorkerEvent {
         ticket: PreviewTicket,
         message: String,
     },
+    /// The luma noise profile of a document's demosaiced frame. `Ok(None)`
+    /// means the frame is too small to profile.
+    NoiseProfileReady {
+        document_id: u64,
+        result: Result<Option<rohditor_core::NoiseProfile>, String>,
+    },
     /// The fitted camera look for a document, or why it could not be fitted.
     CameraLookReady {
         document_id: u64,
@@ -322,6 +331,7 @@ pub enum WorkerRequest {
     PreviewAvailable,
     SampleWhiteBalance(Box<WhiteBalanceSampleJob>),
     FitCameraLook(Box<CameraLookJob>),
+    EstimateNoise(Box<NoiseProfileJob>),
     Export(Box<ExportJob>),
     AbandonDocument(u64),
     Shutdown,
@@ -525,6 +535,21 @@ impl RenderCoordinator {
         })))
     }
 
+    /// Profile the photo's noise in the background. The result arrives as
+    /// [`WorkerEvent::NoiseProfileReady`].
+    pub fn estimate_noise(
+        &self,
+        document_id: u64,
+        frame: Arc<RawFrame>,
+        render_options: RenderOptions,
+    ) -> Result<(), String> {
+        self.send(WorkerRequest::EstimateNoise(Box::new(NoiseProfileJob {
+            document_id,
+            frame,
+            render_options,
+        })))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn export(
         &self,
@@ -609,6 +634,7 @@ fn worker_loop(
             CpuPipeline::default()
         }
     };
+    let noise_profiles = noise_worker::start(pipeline.clone(), sender.clone(), wake.clone());
     let exports = export_worker::start(pipeline.clone(), sender.clone(), wake.clone());
     let camera_looks = camera_look_worker::start(
         pipeline.clone(),
@@ -719,6 +745,22 @@ fn worker_loop(
                     );
                 }
             }
+            WorkerRequest::EstimateNoise(job) => {
+                let document_id = job.document_id;
+                let submitted = noise_profiles
+                    .as_ref()
+                    .is_some_and(|worker| worker.send(job).is_ok());
+                if !submitted {
+                    send_event(
+                        &sender,
+                        &wake,
+                        WorkerEvent::NoiseProfileReady {
+                            document_id,
+                            result: Err("The noise worker is unavailable".to_owned()),
+                        },
+                    );
+                }
+            }
             WorkerRequest::Export(job) => {
                 if !abandoned.contains(&job.document_id)
                     && let Err(job) = export_worker::submit(&exports, job)
@@ -761,6 +803,7 @@ impl WorkerRequest {
             }
             Self::Export(job) => Some(job.document_id),
             Self::FitCameraLook(job) => Some(job.document_id),
+            Self::EstimateNoise(job) => Some(job.document_id),
             Self::SampleWhiteBalance(job) => Some(job.ticket.document_id),
             Self::PreviewAvailable | Self::Shutdown | Self::CaptureDevice { .. } => None,
         }
@@ -2541,6 +2584,59 @@ mod tests {
             }
             if Instant::now() >= deadline {
                 return Err("timed out waiting for the camera look".into());
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn noise_estimate_of_a_tiny_frame_reports_no_profile() {
+        let coordinator = RenderCoordinator::new(crate::wake::noop()).expect("worker starts");
+        coordinator
+            .estimate_noise(70, Arc::new(fake_frame()), RenderOptions::default())
+            .expect("request is accepted");
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            for event in coordinator.try_events() {
+                if let WorkerEvent::NoiseProfileReady {
+                    document_id,
+                    result,
+                } = event
+                {
+                    assert_eq!(document_id, 70);
+                    assert_eq!(result, Ok(None), "too small to profile");
+                    return;
+                }
+            }
+            assert!(Instant::now() < deadline, "no noise profile arrived");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the ignored Sony ARW corpus in testdata/private"]
+    fn private_noise_estimate_runs_in_the_background() -> Result<(), Box<dyn Error>> {
+        let source =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/private/DSC01166.ARW");
+        let frame = Arc::new(RawlerDecoder::default().decode(&source)?);
+        let coordinator =
+            RenderCoordinator::new(crate::wake::noop()).map_err(std::io::Error::other)?;
+        coordinator
+            .estimate_noise(71, frame, RenderOptions::default())
+            .map_err(std::io::Error::other)?;
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            for event in coordinator.try_events() {
+                if let WorkerEvent::NoiseProfileReady { result, .. } = event {
+                    let profile = result?.ok_or("a 24 MP frame must be profiled")?;
+                    // ISO 2000 on this body: noisy enough for the default to act.
+                    assert!(profile.sigma(0.18) > 0.004, "{}", profile.sigma(0.18));
+                    return Ok(());
+                }
+            }
+            if Instant::now() >= deadline {
+                return Err("timed out waiting for the noise profile".into());
             }
             thread::sleep(Duration::from_millis(20));
         }

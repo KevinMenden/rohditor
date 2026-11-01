@@ -15,8 +15,8 @@ use clap::ValueEnum;
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_detail::{
     ChromaDenoise, FalseColor, FringeColour, FringeRemoval, LumaDenoise, NeverCancelled,
-    denoise_chroma, denoise_luma, estimate_luma_noise, estimate_noise, gaussian_blur, luma_plane,
-    remove_fringes, split_opponent, suppress_false_color,
+    denoise_chroma, denoise_luma, estimate_luma_noise, estimate_noise, remove_fringes,
+    split_opponent, suppress_false_color,
 };
 use rohditor_edit::{DEFAULT_GREEN_HUE, DEFAULT_PURPLE_HUE};
 use rohditor_image::LinearRgbImage;
@@ -44,9 +44,6 @@ pub(super) enum DetailStage {
     LumaNr,
     /// False-colour suppression with `--steps` median passes.
     FalseColor,
-    /// Experiment: false-colour suppression applied only where the luma
-    /// high-pass is strong (blend weight reaches 1 at [`MASK_FULL`]).
-    FalseColorMasked,
     /// Defringe at `--strength` for both purple and green, default hue ranges.
     Defringe,
 }
@@ -62,11 +59,6 @@ pub(super) struct StageSettings {
     pub demosaic: DemosaicAlgorithm,
 }
 
-/// Luma high-pass (input minus a [`MASK_SIGMA`] blur) at which the masked
-/// false-colour experiment applies the full filter.
-const MASK_FULL: f32 = 0.05;
-const MASK_SIGMA: f32 = 1.5;
-
 impl DetailStage {
     fn apply(
         self,
@@ -78,7 +70,7 @@ impl DetailStage {
         let mut output = input.clone();
         match self {
             Self::Noop => {}
-            Self::FalseColor | Self::FalseColorMasked => {
+            Self::FalseColor => {
                 suppress_false_color(
                     &mut output,
                     FalseColor {
@@ -88,9 +80,6 @@ impl DetailStage {
                     },
                     &NeverCancelled,
                 )?;
-                if matches!(self, Self::FalseColorMasked) {
-                    blend_by_luma_highpass(input, &mut output)?;
-                }
             }
             Self::Defringe => {
                 let noise = estimate_luma_noise(input, BALANCE, &NeverCancelled)?;
@@ -145,29 +134,6 @@ impl DetailStage {
         }
         Ok(output)
     }
-}
-
-/// Replace `filtered` by `input` where the luma high-pass is weak, with a
-/// linear ramp up to [`MASK_FULL`]. Both images share one layout.
-fn blend_by_luma_highpass(
-    input: &LinearRgbImage<f32>,
-    filtered: &mut LinearRgbImage<f32>,
-) -> Result<()> {
-    let luma = luma_plane(input, [1.0; 3])?;
-    let blurred = gaussian_blur(&luma, MASK_SIGMA, &NeverCancelled)?;
-    let (width, stride) = (input.width(), input.row_stride());
-    for y in 0..input.height() {
-        for x in 0..width {
-            let weight = ((luma.get(x, y) - blurred.get(x, y)).abs() / MASK_FULL).min(1.0);
-            let at = y * stride + x * 3;
-            for c in 0..3 {
-                let original = input.data()[at + c];
-                filtered.data_mut()[at + c] =
-                    original + weight * (filtered.data()[at + c] - original);
-            }
-        }
-    }
-    Ok(())
 }
 
 /// One scored (scene, noise level) pair.

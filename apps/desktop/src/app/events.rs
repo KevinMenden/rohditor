@@ -105,6 +105,7 @@ impl RohditorApp {
                 };
                 if should_preview {
                     self.queue_preview(context, document_id);
+                    self.start_default_noise_estimate(document_id);
                 }
             }
             WorkerEvent::PreviewReady {
@@ -329,6 +330,10 @@ impl RohditorApp {
                     ));
                 }
             }
+            WorkerEvent::NoiseProfileReady {
+                document_id,
+                result,
+            } => self.noise_profile_ready(context, document_id, result),
             WorkerEvent::CameraLookReady {
                 document_id,
                 camera_profile,

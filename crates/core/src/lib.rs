@@ -47,8 +47,8 @@ pub use cpu::{
 };
 pub use cpu_only::cpu_only_stage_reason;
 pub use editing::{
-    WhiteBalanceMode, WhiteBalanceModeMemory, auto_tone, default_recipe, sample_rgb_patch,
-    white_balance_from_camera_sample,
+    WhiteBalanceMode, WhiteBalanceModeMemory, auto_tone, default_recipe, estimate_noise_profile,
+    sample_rgb_patch, white_balance_from_camera_sample, with_default_noise_reduction,
 };
 pub use error::PipelineError;
 pub use export::{
@@ -80,6 +80,7 @@ pub use resample::{
 pub use rohditor_color::{
     CHROMA_COMPRESS_ALGORITHM_VERSION, GamutMapStatus, GamutMappingDiagnostics,
 };
+pub use rohditor_detail::NoiseProfile;
 pub use rohditor_highlight::{
     CLIP_ALGORITHM_VERSION, ChannelClipLevels, ClipStats, HighlightExecution,
     LOCAL_RATIOS_ALGORITHM_VERSION, OPPOSED_ALGORITHM_VERSION, OpposedStats, ReconstructionStats,
