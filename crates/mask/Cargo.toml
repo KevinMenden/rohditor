@@ -1,0 +1,22 @@
+[package]
+name = "rohditor-mask"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Evaluates local-adjustment mask layers (linear and radial gradients, brush strokes) into per-pixel alpha, row by row"
+
+[dependencies]
+rohditor-edit = { path = "../edit" }
+thiserror.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+rayon.workspace = true
+
+[[bench]]
+name = "mask"
+harness = false
+
+[lints]
+workspace = true

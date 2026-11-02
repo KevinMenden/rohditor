@@ -14,6 +14,7 @@ members = [
     "crates/highlight",
     "crates/image",
     "crates/look",
+    "crates/mask",
     "crates/optics",
     "crates/raw",
     "crates/reference",
