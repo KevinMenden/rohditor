@@ -3023,6 +3023,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rohditor-mask"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "rayon",
+ "rohditor-edit",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "rohditor-optics"
 version = "0.1.0"
 dependencies = [
