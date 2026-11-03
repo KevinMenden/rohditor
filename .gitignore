@@ -9,3 +9,7 @@ target/
 /benchmark-results/
 
 *.idea
+
+ml/data/
+
+*.pyc
