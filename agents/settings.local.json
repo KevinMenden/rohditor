@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls; ls *)",
+      "Bash(flatpak list *)",
+      "Bash(python3 -c \"import numpy, PIL; print\\('np ok'\\)\")",
+      "Bash(python3 -c \"import rawpy\")",
+      "Bash(ls && ls docs crates testdata testdata/private 2>/dev/null; cat Cargo.toml; cat scripts/check.sh; ls ~/Applications; cat .gitignore)",
+      "Bash(cd ~/.cargo/registry/src/*/rawler-0.7.2 && ls src src/dng 2>/dev/null; grep -n \"pub fn\\\\|pub struct\" src/dng/writer.rs | head -40; grep -rn \"image::\\\\|tiff\" Cargo.toml | head; cd /home/kevin/repos/rohditor; sed -n 1,80p crates/demosaic/tests/demosaic_quality.rs; grep -n \"pub \" crates/image/src/lib.rs | head -50)"
+    ]
+  }
+}

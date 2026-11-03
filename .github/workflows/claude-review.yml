@@ -34,23 +34,10 @@ jobs:
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
 
-            Review this pull request. Read CLAUDE.md / AGENTS.md first and judge the
-            change against those project guidelines. Focus on:
-            - Correctness bugs, including edge cases in image-processing math
-              (dimension/byte arithmetic, off-by-one, color-space/state mix-ups).
-            - Layering: lower crates must not depend on core/gpu/engine/apps, and
-              toolkit-specific code belongs only in apps/*.
-            - Immutable RAW data, validated/versioned recipes, cancellation, and
-              transactional output writes.
-            - Missing or weak tests (small asymmetric correctness tests for
-              image-processing changes).
-            - Maintainability: module structure, overly long files or functions,
-              unnecessary complexity.
-
-            Be concise and only raise issues that matter; skip style nits that
-            rustfmt/clippy already enforce (CI runs ./scripts/check.sh).
-            Leave inline comments on specific lines, then post one short summary
-            comment with `gh pr comment`.
+            Review this pull request using the `rohditor-review` skill
+            (.agents/skills/rohditor-review/SKILL.md). Follow its checklist and
+            output format. Leave inline comments on specific lines, then post one
+            short summary comment with `gh pr comment`.
           claude_args: |
             --model claude-sonnet-5-5
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
