@@ -141,6 +141,74 @@ fn color_fixture() -> Vec<f32> {
         .collect()
 }
 
+fn recipe_with_active_mask() -> EditRecipe {
+    use rohditor_edit::{
+        LocalSettings, MaskComponent, MaskLayer, MaskMode, MaskPoint, MaskShape, RadialGradient,
+    };
+    let mut recipe = neutral_recipe();
+    recipe.local.layers.push(MaskLayer {
+        id: 1,
+        name: "Spot".to_owned(),
+        enabled: true,
+        opacity: 1.0,
+        components: vec![MaskComponent {
+            mode: MaskMode::Add,
+            invert: false,
+            shape: MaskShape::Radial(RadialGradient {
+                center: MaskPoint { x: 0.5, y: 0.5 },
+                radius_x: 0.3,
+                radius_y: 0.2,
+                angle_degrees: 0.0,
+                feather: 0.5,
+            }),
+        }],
+        settings: LocalSettings {
+            exposure_ev: 0.5,
+            ..LocalSettings::default()
+        },
+    });
+    recipe
+}
+
+#[test]
+fn masks_are_a_cpu_only_stage_until_the_gpu_colour_pass_evaluates_them() {
+    let mut recipe = recipe_with_active_mask();
+    assert!(!GpuPreviewProcessor::supports_recipe(&recipe));
+    assert!(matches!(
+        GpuPreviewProcessor::require_supported_stages(&recipe),
+        Err(GpuPreviewError::UnsupportedEdits { .. })
+    ));
+    recipe.local.layers[0].enabled = false;
+    assert!(GpuPreviewProcessor::supports_recipe(&recipe));
+    assert!(GpuPreviewProcessor::require_supported_stages(&recipe).is_ok());
+}
+
+#[test]
+#[ignore = "requires a hardware Vulkan adapter; masked recipes are refused per recipe"]
+fn masked_recipe_is_refused_and_the_next_unmasked_render_uses_the_gpu_again() {
+    let _guard = gpu_test_guard();
+    let Some(processor) = gpu_test_processor() else {
+        return;
+    };
+    let plain = neutral_recipe();
+    let base = CpuPipeline::default()
+        .prepare_preview_base(
+            &synthetic_frame(Orientation::Normal),
+            &plain,
+            PreviewOptions::default(),
+        )
+        .expect("fixture base");
+    let source = processor.upload_base(&base).expect("fixture upload");
+    let render =
+        |recipe: &EditRecipe| processor.render(&source, recipe, OutputPolicy::ClipToSrgb, None);
+    render(&plain).expect("unmasked recipe renders");
+    assert!(matches!(
+        render(&recipe_with_active_mask()),
+        Err(GpuPreviewError::UnsupportedEdits { .. })
+    ));
+    render(&plain).expect("the GPU keeps working once the masks are gone");
+}
+
 #[test]
 #[ignore = "requires a hardware Vulkan adapter; checks linear and display color parity"]
 fn gpu_hsl_grading_matches_cpu_and_reuses_resident_source() {
