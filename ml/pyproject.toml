@@ -1,0 +1,23 @@
+# Python data and training code for the neural demosaic model (epic #115).
+# Not part of the Cargo workspace; run everything through `uv run` from this folder.
+[project]
+name = "rohditor-ml"
+version = "0.1.0"
+description = "Dataset curation and training code for Rohditor's neural demosaic model"
+requires-python = ">=3.11"
+# The download scripts use only the standard library. Decoding and training
+# dependencies are added by the tasks that need them.
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["rohditor_ml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

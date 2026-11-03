@@ -9,3 +9,11 @@ target/
 /benchmark-results/
 
 *.idea
+
+# Neural demosaic datasets, shards, training runs and the Python environment.
+/ml/data/raw/
+/ml/data/shards/
+/ml/runs/
+/ml/.venv/
+__pycache__/
+.pytest_cache/
