@@ -817,6 +817,18 @@ impl GpuPreviewProcessor {
         rohditor_core::cpu_only_stage_reason(recipe).is_none()
     }
 
+    /// Refuses a recipe that needs a CPU-only stage. This is a per-recipe routing answer, not
+    /// a device failure: callers render that recipe on the CPU and keep using the GPU for the
+    /// next one.
+    fn require_supported_stages(recipe: &EditRecipe) -> Result<(), GpuPreviewError> {
+        match rohditor_core::cpu_only_stage_reason(recipe) {
+            Some(reason) => Err(GpuPreviewError::UnsupportedEdits {
+                reason: reason.to_owned(),
+            }),
+            None => Ok(()),
+        }
+    }
+
     /// Poll callbacks for non-blocking GPU work, including asynchronous
     /// display readbacks. This never waits for the device to become idle.
     pub fn poll(&self) -> Result<(), GpuPreviewError> {
@@ -1047,6 +1059,7 @@ impl GpuPreviewProcessor {
             .map_err(|error| GpuPreviewError::InvalidInput {
                 reason: error.to_string(),
             })?;
+        Self::require_supported_stages(recipe)?;
         let description = &source.description;
         if description.detail() != rohditor_core::DetailProvenance::for_recipe(recipe)
             || description.defringe() != rohditor_core::DefringeProvenance::for_recipe(recipe)
@@ -1272,6 +1285,7 @@ impl GpuPreviewProcessor {
             .map_err(|error| GpuPreviewError::InvalidInput {
                 reason: error.to_string(),
             })?;
+        Self::require_supported_stages(recipe)?;
         if !highlight_adjustments_match(source.highlight_adjustments(), recipe.raw.highlights) {
             return Err(GpuPreviewError::BaseMismatch {
                 reason: "the GPU source was prepared with different RAW highlight settings"

@@ -1187,6 +1187,8 @@ fn render_gpu_capture_source_scale(
         &base,
         &job.recipe,
         options.render.output_policy,
+        // The overlay reaches frontends with the Masks tool; nothing consumes it yet.
+        None,
         &mut rohditor_core::CpuPreviewWorkspace::default(),
         cancellation,
     )?;
@@ -1317,6 +1319,7 @@ fn process_gpu_base(
         linear_rgb_bytes: 0,
         export_resize_bytes: 0,
         display_rgb_bytes: 0,
+        local_adjustment_bytes: 0,
         estimated_peak_bytes: description
             .decoded_raw_bytes()
             .saturating_add(if metrics.sensor_gpu {
@@ -1430,6 +1433,7 @@ fn develop_preview(
         base,
         &job.recipe,
         options.render.output_policy,
+        None,
         workspace,
         cancellation,
     )?;
@@ -2023,6 +2027,87 @@ mod tests {
         mailbox.finish(active.job.ticket, PreviewCompletion::Cancelled);
         let replacement = mailbox.take().expect("replacement should run next");
         assert_eq!(replacement.job.ticket.revision, 2);
+    }
+
+    #[test]
+    fn local_adjustment_edits_reuse_the_demosaiced_preview_base() {
+        use rohditor_edit::{
+            LinearGradient, LocalSettings, MaskComponent, MaskLayer, MaskMode, MaskPoint, MaskShape,
+        };
+
+        let frame = Arc::new(fake_frame());
+        let options = PreviewOptions::default();
+        let mut cache = PreviewCache::default();
+        let mut base_recipe = EditRecipe::default();
+        base_recipe.raw.highlights.method = HighlightMethod::Off;
+        let masked = |ev: f32| {
+            let mut recipe = base_recipe.clone();
+            recipe.local.layers.push(MaskLayer {
+                id: 3,
+                name: "Left".to_owned(),
+                enabled: true,
+                opacity: 1.0,
+                components: vec![MaskComponent {
+                    mode: MaskMode::Add,
+                    invert: false,
+                    shape: MaskShape::Linear(LinearGradient {
+                        start: MaskPoint { x: 0.2, y: 0.5 },
+                        end: MaskPoint { x: 0.8, y: 0.5 },
+                    }),
+                }],
+                settings: LocalSettings {
+                    exposure_ev: ev,
+                    ..LocalSettings::default()
+                },
+            });
+            recipe
+        };
+        let develop = |revision: u64, recipe: EditRecipe, cache: &mut PreviewCache| {
+            let job = PreviewJob {
+                ticket: PreviewTicket {
+                    document_id: 11,
+                    revision,
+                    sequence: revision,
+                },
+                frame: Arc::clone(&frame),
+                recipe,
+                options,
+                backend: PreviewBackend::Cpu,
+                resolution: PreviewResolution::Fit,
+            };
+            let keys = PreviewCacheKeys::new(11, &frame, &job.recipe, options);
+            let hits = cache.prepare(&keys, &frame);
+            let result = develop_preview(
+                &job,
+                options,
+                &keys,
+                hits,
+                &CancellationToken::new(),
+                &CpuPipeline::default(),
+                cache,
+            )
+            .expect("preview develops");
+            (hits, result)
+        };
+
+        let (first_hits, first) = develop(0, base_recipe.clone(), &mut cache);
+        assert!(!first_hits.demosaiced);
+        // Adding a mask is an adjustment-stage edit: the base is reused and the image changes.
+        let (added_hits, added) = develop(1, masked(1.0), &mut cache);
+        assert!(added_hits.demosaiced && !added_hits.adjusted);
+        assert_ne!(first.0, added.0);
+        assert_eq!(added.2.timings.demosaic, Duration::ZERO);
+        assert_eq!(added.2.timings.normalization, Duration::ZERO);
+        assert!(added.2.workspace_reused);
+        // Moving the mask slider must not be served from the previous adjusted image.
+        let (moved_hits, moved) = develop(2, masked(-1.0), &mut cache);
+        assert!(moved_hits.demosaiced && !moved_hits.adjusted);
+        assert_ne!(added.0, moved.0);
+        assert_eq!(moved.2.timings.demosaic, Duration::ZERO);
+        // Removing it returns to the unmasked image through the same base.
+        let (removed_hits, removed) = develop(3, base_recipe.clone(), &mut cache);
+        assert!(removed_hits.demosaiced);
+        assert_eq!(removed.0, first.0);
     }
 
     #[test]

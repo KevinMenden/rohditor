@@ -17,7 +17,7 @@ use crate::color::{
     CameraCalibration, CameraProfileKey, camera_profile_key, resolve_camera_colour,
 };
 use crate::cpu::{
-    apply_adjustments_cancellable, apply_camera_color_transform_cancellable,
+    MaskAlphaImage, apply_adjustments_with_local, apply_camera_color_transform_cancellable,
     apply_white_balance_cancellable, preview_dimensions,
     render_display_srgb8_cancellable_with_geometry,
     render_display_srgb8_dithered_with_geometry_and_diagnostics,
@@ -29,8 +29,9 @@ use crate::highlight::{HighlightDiagnostics, apply_cancellable as apply_highligh
 use crate::resample::resize_area_with_plan_cancellable;
 use crate::{
     CancellationToken, DitherMode, ExportImage, GamutMappingDiagnostics, OutputBitDepth,
-    OutputGeometry, OutputSharpening, OutputSize, PipelineError, apply_adjustments,
+    OutputGeometry, OutputSharpening, OutputSize, PipelineError,
 };
+use local_work::LocalWork;
 
 /// Default longest edge of an interactively developed preview.
 pub const DEFAULT_PREVIEW_LONG_EDGE: usize = 2_560;
@@ -78,6 +79,9 @@ pub struct RenderOptions {
     pub raw_crop_policy: RawCropPolicy,
     pub demosaic: DemosaicAlgorithm,
     pub output_policy: OutputPolicy,
+    /// Preview only: id of the mask layer whose alpha the Masks tool wants drawn. The render
+    /// result then carries [`RenderResult::mask_overlay`]. Exports ignore it.
+    pub mask_overlay: Option<u32>,
 }
 
 /// Resolution and processing choices for an interactive CPU preview.
@@ -313,6 +317,9 @@ pub struct MemoryEstimate {
     /// Cropped, horizontal-pass and resized linear buffers of an export resize.
     pub export_resize_bytes: usize,
     pub display_rgb_bytes: usize,
+    /// Prepared mask layers, their tone tables and per-thread alpha rows, plus the mask
+    /// overlay planes when one is requested.
+    pub local_adjustment_bytes: usize,
     pub estimated_peak_bytes: usize,
 }
 
@@ -517,6 +524,9 @@ pub struct RenderResult {
     pub highlight_stats: crate::ClipStats,
     pub optics_provenance: Option<OpticsProvenance>,
     pub memory: MemoryEstimate,
+    /// Alpha of the layer requested through [`RenderOptions::mask_overlay`], in the same
+    /// oriented and cropped geometry as `image`. `None` when none was requested.
+    pub mask_overlay: Option<MaskAlphaImage>,
 }
 
 /// A full-resolution export render and its processing diagnostics.
@@ -761,7 +771,7 @@ pub(super) mod render {
         ) -> Result<RenderResult, PipelineError> {
             let total_started = Instant::now();
             let base = prepare_base(self.optics.as_deref(), frame, recipe, options)?;
-            let mut result = render_base(base, recipe, options.output_policy)?;
+            let mut result = render_base(base, recipe, options)?;
             result.timings.total = total_started.elapsed();
             Ok(result)
         }
@@ -911,17 +921,20 @@ pub(super) mod render {
                 base,
                 recipe,
                 output_policy,
+                None,
                 workspace,
                 &CancellationToken::new(),
             )
         }
 
-        /// Cancellable form of [`Self::render_preview_from_base_reusing`].
+        /// Cancellable form of [`Self::render_preview_from_base_reusing`]. `mask_overlay` is the
+        /// id of the mask layer to draw (see [`RenderOptions::mask_overlay`]).
         pub fn render_preview_from_base_reusing_cancellable(
             &self,
             base: &DemosaicedBase,
             recipe: &EditRecipe,
             output_policy: OutputPolicy,
+            mask_overlay: Option<u32>,
             workspace: &mut CpuPreviewWorkspace,
             cancellation: &CancellationToken,
         ) -> Result<RenderResult, PipelineError> {
@@ -935,18 +948,21 @@ pub(super) mod render {
                 .checked_mul(size_of::<f32>())
                 .ok_or_else(|| dimension_overflow(base.image.width(), base.image.height()))?;
             let geometry = output_geometry(base.image(), base.source_orientation, recipe)?;
+            let local = LocalWork::prepare(base.image(), recipe, geometry, mask_overlay)?;
             let mut memory = memory_estimate(
                 base,
                 size_of::<u8>(),
                 geometry,
                 geometry.output_dimensions(),
                 false,
+                local.bytes(),
             )?;
             let retained_peak = base
                 .decoded_raw_bytes
                 .checked_add(retained_base_bytes)
                 .and_then(|bytes| bytes.checked_add(retained_base_bytes))
                 .and_then(|bytes| bytes.checked_add(memory.display_rgb_bytes))
+                .and_then(|bytes| bytes.checked_add(memory.local_adjustment_bytes))
                 .ok_or_else(|| dimension_overflow(base.image.width(), base.image.height()))?;
             memory.estimated_peak_bytes = memory.estimated_peak_bytes.max(retained_peak);
             validate_working_set(memory.estimated_peak_bytes)?;
@@ -955,7 +971,7 @@ pub(super) mod render {
             cancellation.checkpoint()?;
             let mut timings = StageTimings::default();
             let adjustments_started = Instant::now();
-            apply_adjustments_cancellable(working, recipe, cancellation)?;
+            apply_adjustments_with_local(working, recipe, local.stage.as_ref(), cancellation)?;
             timings.adjustments = adjustments_started.elapsed();
 
             let output_started = Instant::now();
@@ -965,6 +981,7 @@ pub(super) mod render {
                 output_policy,
                 cancellation,
             )?;
+            let mask_overlay = local.render_overlay(cancellation)?;
             let histogram = Histogram::from_display_rgb8(&image);
             timings.output_conversion = output_started.elapsed();
             timings.total = total_started.elapsed();
@@ -979,6 +996,7 @@ pub(super) mod render {
                 highlight_stats: base.highlight_stats(),
                 optics_provenance: base.optics_provenance.clone(),
                 memory,
+                mask_overlay,
             })
         }
 
@@ -992,7 +1010,7 @@ pub(super) mod render {
         ) -> Result<RenderResult, PipelineError> {
             let total_started = Instant::now();
             let base = self.prepare_preview_base(frame, recipe, options)?;
-            let mut result = render_base(base, recipe, options.render.output_policy)?;
+            let mut result = render_base(base, recipe, options.render)?;
             result.timings.total = total_started.elapsed();
             Ok(result)
         }
@@ -1020,15 +1038,22 @@ pub(super) mod render {
                 cancellation,
             )?;
             let geometry = output_geometry(&base.image, base.source_orientation, recipe)?;
+            let local = LocalWork::prepare(&base.image, recipe, geometry, options.mask_overlay)?;
             let memory = memory_estimate(
                 &base,
                 size_of::<u8>(),
                 geometry,
                 geometry.output_dimensions(),
                 false,
+                local.bytes(),
             )?;
             let adjustments_started = Instant::now();
-            apply_adjustments_cancellable(&mut base.image, recipe, cancellation)?;
+            apply_adjustments_with_local(
+                &mut base.image,
+                recipe,
+                local.stage.as_ref(),
+                cancellation,
+            )?;
             base.timings.adjustments = adjustments_started.elapsed();
             let output_started = Instant::now();
             let (image, output_gamut_diagnostics) = render_display_srgb8_cancellable_with_geometry(
@@ -1037,6 +1062,7 @@ pub(super) mod render {
                 options.output_policy,
                 cancellation,
             )?;
+            let mask_overlay = local.render_overlay(cancellation)?;
             let histogram = Histogram::from_display_rgb8(&image);
             base.timings.output_conversion = output_started.elapsed();
             base.timings.total = total_started.elapsed();
@@ -1050,6 +1076,7 @@ pub(super) mod render {
                 highlight_stats: base.highlight_stats(),
                 optics_provenance: base.optics_provenance.clone(),
                 memory,
+                mask_overlay,
             })
         }
 
@@ -1091,15 +1118,23 @@ pub(super) mod render {
             let mut geometry = output_geometry(&base.image, base.source_orientation, recipe)?;
             let (output_width, output_height) = geometry.output_dimensions();
             let target = size.resolve(output_width, output_height);
+            // Exports never draw the mask overlay.
+            let local = LocalWork::prepare(&base.image, recipe, geometry, None)?;
             let memory = memory_estimate(
                 &base,
                 bit_depth.bytes_per_sample(),
                 geometry,
                 target,
                 sharpening.is_some(),
+                local.bytes(),
             )?;
             let adjustments_started = Instant::now();
-            apply_adjustments(&mut base.image, recipe)?;
+            apply_adjustments_with_local(
+                &mut base.image,
+                recipe,
+                local.stage.as_ref(),
+                &CancellationToken::new(),
+            )?;
             base.timings.adjustments = adjustments_started.elapsed();
             let output_started = Instant::now();
             // Resize in linear light on the cropped, oriented image; the
@@ -1168,6 +1203,8 @@ pub(super) mod render {
 
 #[path = "camera_source.rs"]
 mod camera_source;
+#[path = "local_work.rs"]
+mod local_work;
 use camera_source::prepare_reconstructed_preview;
 pub use camera_source::{CapturedCameraSource, DemosaicedCameraSource};
 #[path = "sensor_source.rs"]
@@ -1532,20 +1569,28 @@ fn estimated_highlight_scratch_bytes(
 fn render_base(
     mut base: DemosaicedBase,
     recipe: &EditRecipe,
-    output_policy: OutputPolicy,
+    options: RenderOptions,
 ) -> Result<RenderResult, PipelineError> {
     validate_base_recipe(&base, recipe)?;
+    let output_policy = options.output_policy;
     let geometry = output_geometry(&base.image, base.source_orientation, recipe)?;
+    let local = LocalWork::prepare(&base.image, recipe, geometry, options.mask_overlay)?;
     let memory = memory_estimate(
         &base,
         size_of::<u8>(),
         geometry,
         geometry.output_dimensions(),
         false,
+        local.bytes(),
     )?;
 
     let adjustments_started = Instant::now();
-    apply_adjustments(&mut base.image, recipe)?;
+    apply_adjustments_with_local(
+        &mut base.image,
+        recipe,
+        local.stage.as_ref(),
+        &CancellationToken::new(),
+    )?;
     base.timings.adjustments = adjustments_started.elapsed();
 
     let output_started = Instant::now();
@@ -1556,6 +1601,7 @@ fn render_base(
             output_policy,
             DitherMode::None,
         )?;
+    let mask_overlay = local.render_overlay(&CancellationToken::new())?;
     base.timings.output_conversion = output_started.elapsed();
     base.timings.total = base.timings.metadata
         + base.timings.normalization
@@ -1582,6 +1628,7 @@ fn render_base(
         highlight_stats: base.highlight_stats(),
         optics_provenance: base.optics_provenance.clone(),
         memory,
+        mask_overlay,
     })
 }
 
@@ -1591,6 +1638,7 @@ fn memory_estimate(
     output_geometry: OutputGeometry,
     final_dimensions: (usize, usize),
     output_sharpening: bool,
+    local_adjustment_bytes: usize,
 ) -> Result<MemoryEstimate, PipelineError> {
     let width = base.image.width();
     let height = base.image.height();
@@ -1630,6 +1678,7 @@ fn memory_estimate(
         .and_then(|bytes| bytes.checked_add(output_sharpening_bytes))
         .and_then(|bytes| bytes.checked_add(export_resize_bytes))
         .and_then(|bytes| bytes.checked_add(display_rgb_bytes))
+        .and_then(|bytes| bytes.checked_add(local_adjustment_bytes))
         .ok_or_else(|| dimension_overflow(width, height))?;
 
     let estimate = MemoryEstimate {
@@ -1643,6 +1692,7 @@ fn memory_estimate(
         linear_rgb_bytes,
         export_resize_bytes,
         display_rgb_bytes,
+        local_adjustment_bytes,
         estimated_peak_bytes: base.preparation_peak_bytes.max(output_peak),
     };
     validate_working_set(estimate.estimated_peak_bytes)?;

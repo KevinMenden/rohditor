@@ -1,6 +1,7 @@
 //! Pure color transforms shared by the CPU reference and GPU contract.
 
 mod gamut;
+mod local_white_balance;
 mod matrix;
 mod profile_table;
 mod transfer;
@@ -10,6 +11,7 @@ pub use gamut::{
     GamutMapResult, GamutMapStatus, GamutMappingDiagnostics, clip_linear_srgb,
     compress_linear_srgb_chroma,
 };
+pub use local_white_balance::{REC2020_LUMINANCE, local_white_balance_gains};
 pub use matrix::{
     A_WHITE, ColorMathError, D50_WHITE, D65_WHITE, LINEAR_REC2020_TO_XYZ_D65, Matrix3,
     XYZ_D65_TO_LINEAR_REC2020, XYZ_D65_TO_LINEAR_SRGB, adapt_xyz_to_d65,

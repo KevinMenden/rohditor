@@ -17,6 +17,7 @@ rohditor-edit = { path = "../edit" }
 rohditor-highlight = { path = "../highlight" }
 rohditor-image = { path = "../image" }
 rohditor-look = { path = "../look" }
+rohditor-mask = { path = "../mask" }
 rohditor-optics = { path = "../optics" }
 rohditor-raw = { path = "../raw" }
 serde.workspace = true

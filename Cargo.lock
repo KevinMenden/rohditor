@@ -2885,6 +2885,7 @@ dependencies = [
  "rohditor-highlight",
  "rohditor-image",
  "rohditor-look",
+ "rohditor-mask",
  "rohditor-optics",
  "rohditor-raw",
  "serde",
