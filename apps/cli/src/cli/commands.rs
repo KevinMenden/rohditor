@@ -1250,6 +1250,7 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
                 raw_crop_policy: arguments.crop.into(),
                 demosaic: arguments.demosaic.into(),
                 output_policy: arguments.output_gamut.into(),
+                mask_overlay: None,
             },
             export_settings.format.bit_depth(),
             export_settings.dithering,
@@ -1552,6 +1553,7 @@ fn quality_crops(
         raw_crop_policy: RawCropPolicy::Recommended,
         demosaic: algorithm,
         output_policy: OutputPolicy::ClipToSrgb,
+        mask_overlay: None,
     };
     let mut recipe = EditRecipe::default();
     recipe.rendering.profile = RenderingProfileSelection::NEUTRAL;

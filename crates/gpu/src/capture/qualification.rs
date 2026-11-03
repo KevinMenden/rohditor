@@ -114,6 +114,7 @@ fn save_crops(
             &base,
             recipe,
             OutputPolicy::ClipToSrgb,
+            None,
             &mut rohditor_core::CpuPreviewWorkspace::default(),
             token,
         )?

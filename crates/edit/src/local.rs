@@ -193,6 +193,17 @@ pub struct LocalSettings {
     pub saturation: f32,
 }
 
+impl MaskLayer {
+    /// True when this layer would change pixels: enabled, visible, shaped and non-neutral.
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        self.enabled
+            && self.opacity > 0.0
+            && !self.components.is_empty()
+            && !self.settings.is_neutral()
+    }
+}
+
 impl LocalSettings {
     /// All sliders are exactly 0, so the layer changes nothing.
     #[must_use]
@@ -237,12 +248,7 @@ impl LocalAdjustments {
     /// True when at least one layer would change pixels; the pipeline skips the stage otherwise.
     #[must_use]
     pub fn is_active(&self) -> bool {
-        self.layers.iter().any(|layer| {
-            layer.enabled
-                && layer.opacity > 0.0
-                && !layer.components.is_empty()
-                && !layer.settings.is_neutral()
-        })
+        self.layers.iter().any(MaskLayer::is_active)
     }
 
     /// An id no current layer uses (one past the largest). Ids of deleted layers can only be

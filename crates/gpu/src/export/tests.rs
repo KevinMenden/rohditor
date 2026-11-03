@@ -191,6 +191,105 @@ fn rcd_export_matches_cpu_with_capture_and_both_gamut_policies() {
     }
 }
 
+/// A recipe with one radial mask layer that changes pixels (`exposure_ev` != 0).
+fn recipe_with_active_mask() -> EditRecipe {
+    use rohditor_edit::{
+        LocalSettings, MaskComponent, MaskLayer, MaskMode, MaskPoint, MaskShape, RadialGradient,
+    };
+    let mut recipe = neutral_recipe();
+    recipe.local.layers.push(MaskLayer {
+        id: 1,
+        name: "Spot".to_owned(),
+        enabled: true,
+        opacity: 1.0,
+        components: vec![MaskComponent {
+            mode: MaskMode::Add,
+            invert: false,
+            shape: MaskShape::Radial(RadialGradient {
+                center: MaskPoint { x: 0.5, y: 0.5 },
+                radius_x: 0.3,
+                radius_y: 0.2,
+                angle_degrees: 0.0,
+                feather: 0.5,
+            }),
+        }],
+        settings: LocalSettings {
+            exposure_ev: 0.5,
+            ..LocalSettings::default()
+        },
+    });
+    recipe
+}
+
+#[test]
+#[ignore = "requires Vulkan; local adjustments are routed to the CPU per recipe"]
+fn recipes_with_masks_are_refused_without_disabling_the_gpu() {
+    let _guard = gpu_test_guard();
+    let mut gpu = processor(false).expect("export device");
+    let cpu = CpuPipeline::default();
+    let frame = synthetic_frame(Orientation::Normal);
+    let plain = neutral_recipe();
+    let masked = recipe_with_active_mask();
+    let token = CancellationToken::new();
+    let render = |gpu: &mut GpuExportProcessor, recipe: &EditRecipe| {
+        gpu.render(
+            &cpu,
+            &frame,
+            recipe,
+            RenderOptions::default(),
+            OutputBitDepth::Eight,
+            DitherMode::None,
+            OutputSize::Original,
+            None,
+            &token,
+        )
+    };
+
+    render(&mut gpu, &plain).expect("GPU renders a recipe without masks");
+    assert!(matches!(
+        render(&mut gpu, &masked),
+        Err(GpuPreviewError::UnsupportedEdits { .. })
+    ));
+    // The refusal is a routing answer for that recipe, not a failure of the device.
+    let after = render(&mut gpu, &plain).expect("GPU still renders once the masks are gone");
+    assert!(after.sensor_gpu);
+
+    // The shared exporter falls back to the CPU for the masked recipe only.
+    let mut exporter = crate::FallbackExporter::default();
+    let export = |exporter: &mut crate::FallbackExporter, recipe: &EditRecipe| {
+        exporter
+            .render(
+                crate::ExportBackend::PreferGpu,
+                &cpu,
+                &frame,
+                recipe,
+                RenderOptions::default(),
+                OutputBitDepth::Eight,
+                DitherMode::None,
+                OutputSize::Original,
+                None,
+                |_| {},
+            )
+            .expect("export")
+    };
+    let crate::ExportRender::Cpu {
+        gpu_error: Some(reason),
+        ..
+    } = export(&mut exporter, &masked)
+    else {
+        panic!("a masked recipe must export on the CPU");
+    };
+    assert!(reason.contains("local adjustments"), "{reason}");
+    // The headless exporter only takes hardware adapters, so the return to the GPU can only be
+    // checked there; the direct processor check above covers software.
+    if processor(true).is_some() {
+        assert!(matches!(
+            export(&mut exporter, &plain),
+            crate::ExportRender::Gpu { .. }
+        ));
+    }
+}
+
 #[test]
 #[ignore = "requires Vulkan; software results do not qualify hardware"]
 fn capture_bridge_precedes_reduction_and_matches_export() {
