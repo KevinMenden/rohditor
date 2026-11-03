@@ -10,6 +10,11 @@ RESEARCH_ONLY = "LicenseRef-research-only"
 # once the share-alike / non-commercial implications have been decided.
 DEFAULT_ALLOWED = frozenset({CC0, CC_BY})
 
+# The licenses a *training/evaluation manifest* may contain. The build refuses
+# anything else, and a test enforces it. Changing this is a licensing decision
+# (e.g. adding CC_BY_SA means the model weights may need to be share-alike).
+TRAINING_ALLOWED = DEFAULT_ALLOWED
+
 
 def from_creative_commons_url(url: str) -> str:
     """Map a creativecommons.org license URL to an SPDX id.

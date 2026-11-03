@@ -1,0 +1,77 @@
+{
+ "cameras": {
+  "Canon EOS 7D": {
+   "k_min": 0.00011856463469910736,
+   "k_max": 0.006953099416510673,
+   "sigma_log_slope": 1.1044557867292748,
+   "sigma_log_intercept": 1.3348814329768552,
+   "sigma_log_std": 0.13125501576333218,
+   "row_sigma_max": 0.000697999925162705,
+   "black_offset_std": 0.0003
+  },
+  "unknown-crw-3088x2056": {
+   "k_min": 6.257235450362155e-05,
+   "k_max": 0.000414379820251336,
+   "sigma_log_slope": 1.0064458077020102,
+   "sigma_log_intercept": 2.0838776615088994,
+   "sigma_log_std": 0.25343561101698653,
+   "row_sigma_max": 0.00020994902556029335,
+   "black_offset_std": 0.0003
+  },
+  "NIKON D40": {
+   "k_min": 0.00013766058172417472,
+   "k_max": 0.0012344574783974727,
+   "sigma_log_slope": 1.1393902281918515,
+   "sigma_log_intercept": 2.8706371136487605,
+   "sigma_log_std": 0.5546300864622572,
+   "row_sigma_max": 0.00010912658775438722,
+   "black_offset_std": 0.0003
+  },
+  "Canon EOS 500D": {
+   "k_min": 8.598038635059803e-05,
+   "k_max": 0.002154784477915477,
+   "sigma_log_slope": 0.8909465259370816,
+   "sigma_log_intercept": 0.11849938286431581,
+   "sigma_log_std": 0.2279543373622029,
+   "row_sigma_max": 0.0004080912917002878,
+   "black_offset_std": 0.0003
+  },
+  "Panasonic DMC-GH1": {
+   "k_min": 0.00014284126013301484,
+   "k_max": 0.0020306274878160195,
+   "sigma_log_slope": 1.4255363026358043,
+   "sigma_log_intercept": 4.311102337228634,
+   "sigma_log_std": 0.06434288057625302,
+   "row_sigma_max": 0.0016669581551312085,
+   "black_offset_std": 0.0003
+  },
+  "NIKON Z 6": {
+   "k_min": 9.694684321778376e-06,
+   "k_max": 0.008524873348493861,
+   "sigma_log_slope": 0.6132030125315641,
+   "sigma_log_intercept": -1.99980039743486,
+   "sigma_log_std": 0.5593576913459073,
+   "row_sigma_max": 0.00023079037115236013,
+   "black_offset_std": 0.0003
+  }
+ },
+ "pooled": {
+  "k_min": 9.694684321778376e-06,
+  "k_max": 0.008524873348493861,
+  "sigma_log_slope": 0.6483550403036429,
+  "sigma_log_intercept": -1.4431229225908977,
+  "sigma_log_std": 0.5779179970835486,
+  "row_sigma_max": 0.0016669581551312085,
+  "black_offset_std": 0.0003
+ },
+ "pair_counts": {
+  "Canon EOS 7D": 7,
+  "unknown-crw-3088x2056": 12,
+  "NIKON D40": 8,
+  "Canon EOS 500D": 21,
+  "Panasonic DMC-GH1": 5,
+  "NIKON Z 6": 24
+ },
+ "subset": "small",
+ "seed": 0
+}

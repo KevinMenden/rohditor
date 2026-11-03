@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "input": {
+    "layout": "RGGB mosaic packed into channels [R, G1, G2, B]",
+    "dtype": "float32",
+    "shape": "[1, 4, H/2, W/2]",
+    "size_multiple": 16
+  },
+  "output": {
+    "layout": "linear camera RGB, white balanced",
+    "dtype": "float32",
+    "shape": "[1, 3, H, W]"
+  },
+  "scaling": {
+    "black": "subtracted per channel",
+    "divisor": "white - black (per channel)",
+    "negative_values": "kept",
+    "upper_end": "not clipped; saturated photosites are exactly 1.0"
+  },
+  "white_balance": {
+    "gains": "as-shot, normalised to green = 1, stored per patch as [R, G, B]",
+    "forward": "multiply the mosaic by the gains before the network",
+    "inverse": "divide the output by the gains",
+    "training_range": {"red": [1.0, 4.0], "blue": [1.0, 4.5]}
+  },
+  "tiling": {"tile": 512, "halo": 32},
+  "patches": {
+    "size": 256,
+    "origin": "even pixel offsets, so every patch starts on an R photosite (RGGB phase)",
+    "shard_dtype": "float32"
+  }
+}

@@ -4,10 +4,16 @@
 name = "rohditor-ml"
 version = "0.1.0"
 description = "Dataset curation and training code for Rohditor's neural demosaic model"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.14"
 # The download scripts use only the standard library. Decoding and training
 # dependencies are added by the tasks that need them.
-dependencies = []
+dependencies = [
+    "numpy>=2.4.6",
+    "opencv-python-headless>=5.0.0.93",
+    "pillow>=13.0.0",
+    "rawpy>=0.28.0",
+    "scipy>=1.17.1",
+]
 
 [dependency-groups]
 dev = ["pytest>=8"]
