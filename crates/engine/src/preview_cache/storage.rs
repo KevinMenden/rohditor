@@ -13,7 +13,8 @@ use rohditor_core::{
 use rohditor_core::{DatabaseProvenance, LensProfileSummary};
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_edit::{
-    EditRecipe, HighlightMethod, LensProfileSelection, RenderingProfileSelection, WhiteBalance,
+    EditRecipe, HighlightMethod, LensProfileSelection, LocalAdjustments, MaskLayer,
+    RenderingProfileSelection, WhiteBalance,
 };
 use rohditor_image::{DisplayRgbImage, Orientation};
 use rohditor_raw::{RawFrame, SourceIdentity};
@@ -140,6 +141,7 @@ impl PreviewCacheKeys {
                 .flat_map(|channel| [channel.hue, channel.saturation, channel.luminance])
                 .map(f32::to_bits)
                 .collect(),
+            local: LocalKey::from_local(&recipe.local),
             grading_bits: recipe
                 .color
                 .grading
@@ -484,10 +486,38 @@ struct AdjustedPreviewKey {
     vibrance_bits: u32,
     hsl_bits: Vec<u32>,
     grading_bits: Vec<u32>,
+    local: LocalKey,
     orientation: Orientation,
     crop_bits: Option<[u64; 4]>,
     output_policy: OutputPolicy,
     output_policy_version: Option<u16>,
+}
+
+/// The part of the mask layers that changes pixels: active layers in order, without the
+/// names and ids the UI uses. Inactive layers are left out so toggling one on or off an
+/// already-neutral recipe does not invalidate the cache.
+#[derive(Debug, Clone, PartialEq)]
+struct LocalKey(Vec<MaskLayer>);
+
+// Recipes are validated before they reach the cache and hold only finite numbers, for which
+// `==` is reflexive.
+impl Eq for LocalKey {}
+
+impl LocalKey {
+    fn from_local(local: &LocalAdjustments) -> Self {
+        Self(
+            local
+                .layers
+                .iter()
+                .filter(|layer| layer.is_active())
+                .map(|layer| MaskLayer {
+                    id: 0,
+                    name: String::new(),
+                    ..layer.clone()
+                })
+                .collect(),
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

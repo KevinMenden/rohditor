@@ -5,6 +5,10 @@
 
 mod adjustments;
 mod display;
+mod local_stage;
+#[cfg(test)]
+mod local_tests;
+mod mask_overlay;
 mod normalize;
 mod sharpened_output;
 mod stages;
@@ -22,12 +26,15 @@ pub use display::{
 pub use normalize::{normalize_raw, normalize_raw_preview};
 pub use white_balance::{white_balance_gains, white_balance_gains_from_calibration};
 
-pub(crate) use adjustments::apply_adjustments_cancellable;
+pub(crate) use adjustments::apply_adjustments_with_local;
 pub(crate) use display::{
     render_display_srgb8_cancellable_with_geometry,
     render_display_srgb8_dithered_with_geometry_and_diagnostics,
     render_display_srgb16_with_geometry_and_diagnostics,
 };
+pub(crate) use local_stage::LocalStage;
+pub use mask_overlay::MaskAlphaImage;
+pub(crate) use mask_overlay::MaskOverlayPlan;
 pub(crate) use normalize::preview_dimensions;
 pub(crate) use sharpened_output::{render_sharpened_export, sharpened_output_bytes};
 pub use stages::raw_crop_dimensions;
