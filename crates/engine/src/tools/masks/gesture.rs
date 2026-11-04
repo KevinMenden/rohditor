@@ -241,7 +241,10 @@ impl MaskToolSession {
             return Some(next);
         }
         match edit::add_component(recipe, self.selected_layer, shape) {
-            Ok((next, placed)) => {
+            Ok((mut next, placed)) => {
+                if placed.component > 0 {
+                    edit::set_component_mode(&mut next, placed, self.component_mode);
+                }
                 create.placed = Some(placed);
                 self.select(placed);
                 Some(next)

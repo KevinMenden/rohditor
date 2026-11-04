@@ -25,6 +25,7 @@ mod brush;
 mod edit;
 mod gesture;
 mod handles;
+mod layers;
 mod view;
 
 #[cfg(test)]
@@ -32,9 +33,12 @@ mod tests;
 
 pub use brush::BrushSettings;
 pub use handles::MaskHandle;
+pub use layers::{LayerEdit, LocalSlider};
 pub use view::MaskView;
 
-use rohditor_edit::{MAX_BRUSH_POINTS, MAX_BRUSH_STROKES, MAX_MASK_COMPONENTS, MAX_MASK_LAYERS};
+use rohditor_edit::{
+    MAX_BRUSH_POINTS, MAX_BRUSH_STROKES, MAX_MASK_COMPONENTS, MAX_MASK_LAYERS, MaskMode,
+};
 use thiserror::Error;
 
 use gesture::MaskDrag;
@@ -84,6 +88,9 @@ pub struct MaskToolSession {
     /// Index into the selected layer's components; its handles are the ones shown.
     pub selected_component: Option<usize>,
     pub mode: MaskEditMode,
+    /// How a gradient drawn into an existing layer combines with it (`Add` or `Subtract`). A
+    /// gradient that starts a new layer is always `Add`.
+    pub component_mode: MaskMode,
     /// Authoring state, copied into each new stroke.
     pub brush: BrushSettings,
     /// Whether the selected layer's alpha is drawn over the preview.
@@ -98,6 +105,7 @@ impl Default for MaskToolSession {
             selected_layer: None,
             selected_component: None,
             mode: MaskEditMode::Select,
+            component_mode: MaskMode::Add,
             brush: BrushSettings::default(),
             show_overlay: true,
             drag: None,
