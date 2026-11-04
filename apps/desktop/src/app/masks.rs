@@ -6,7 +6,7 @@
 
 use eframe::egui;
 use rohditor_core::{OutputGeometry, RawCropPolicy};
-use rohditor_edit::EditRecipe;
+use rohditor_edit::{EditRecipe, GeometryAdjustments, MaskComponent, MaskLayer};
 use rohditor_engine::document::EditSession;
 use rohditor_engine::tools::{LayerEdit, MaskToolSession, MaskView, ToolKind};
 use rohditor_image::Orientation;
@@ -73,13 +73,42 @@ pub(super) fn overlay_model<'a>(
 }
 
 /// Long edge, in pixels, of the tint image. It is a soft red wash, so a small image stretched
-/// over the preview is enough, and it is cheap to recompute on every frame of a drag.
+/// over the preview is enough, and it is recomputed on every frame of a handle drag.
 const TINT_LONG_EDGE: usize = 512;
+
+/// What a tint shows: the shape of one layer in the displayed frame. Opacity, sliders and
+/// everything else in the recipe do not change it, so a slider drag never recomputes it.
+struct TintSource {
+    layer: u32,
+    components: Vec<MaskComponent>,
+    /// Orientation and crop of the displayed image.
+    geometry: GeometryAdjustments,
+    /// Sets the developed frame, and with it the aspect the mask lives in.
+    policy: RawCropPolicy,
+}
+
+impl TintSource {
+    fn new(recipe: &EditRecipe, layer: &MaskLayer, policy: RawCropPolicy) -> Self {
+        Self {
+            layer: layer.id,
+            components: layer.components.clone(),
+            geometry: recipe.geometry.clone(),
+            policy,
+        }
+    }
+
+    /// Whether the tint of this source is still right, without copying the layer.
+    fn matches(&self, recipe: &EditRecipe, layer: &MaskLayer, policy: RawCropPolicy) -> bool {
+        self.layer == layer.id
+            && self.policy == policy
+            && self.geometry == recipe.geometry
+            && self.components == layer.components
+    }
+}
 
 /// The tint texture and what it was computed from.
 pub(super) struct MaskTint {
-    /// The recipe revision and layer the texture shows.
-    key: (u64, u32),
+    source: TintSource,
     texture: egui::TextureHandle,
 }
 
@@ -95,14 +124,20 @@ pub(super) fn refresh_tint(
     let Some(layer) = session.overlay_layer() else {
         return;
     };
-    let key = (document.edits.revision(), layer);
+    let recipe = document.edits.recipe();
+    let Some(shown) = recipe.local.layer(layer) else {
+        // The selection is stale (the layer was deleted): show nothing rather than its tint.
+        document.mask_overlay = None;
+        return;
+    };
     if document
         .mask_overlay
         .as_ref()
-        .is_some_and(|tint| tint.key == key)
+        .is_some_and(|tint| tint.source.matches(recipe, shown, policy))
     {
         return;
     }
+    let source = TintSource::new(recipe, shown, policy);
     let Some(info) = document.frame.as_ref().map(|frame| &frame.info) else {
         return;
     };
@@ -135,11 +170,11 @@ pub(super) fn refresh_tint(
     match document.mask_overlay.as_mut() {
         Some(tint) => {
             tint.texture.set(image, egui::TextureOptions::LINEAR);
-            tint.key = key;
+            tint.source = source;
         }
         None => {
             document.mask_overlay = Some(MaskTint {
-                key,
+                source,
                 texture: context.load_texture(
                     format!("document-{}-mask-tint", document.id),
                     image,
@@ -314,9 +349,11 @@ impl RohditorApp {
         false
     }
 
-    /// M, O, Delete, Backspace and Esc inside the Masks tool. True when a key was used.
+    /// O, Delete, Backspace and Esc inside the Masks tool (the tool's own key, M, is handled with
+    /// the other tool shortcuts). True when a key was used. A running drag owns the keyboard: the
+    /// keys only count once it ends.
     pub(super) fn handle_mask_shortcuts(&mut self, context: &egui::Context) -> bool {
-        if self.tool.masks().is_none() {
+        if self.tool.masks().is_none_or(MaskToolSession::is_dragging) {
             return false;
         }
         let pressed =
@@ -519,5 +556,32 @@ mod tests {
         assert!(edits.undo());
         assert!(edits.recipe().local.layers.is_empty());
         assert!(!edits.can_undo());
+    }
+
+    #[test]
+    fn the_tint_depends_on_the_shape_and_frame_but_not_on_sliders() {
+        let policy = RawCropPolicy::default();
+        let recipe = recipe_with_layer();
+        let source = TintSource::new(&recipe, &recipe.local.layers[0], policy);
+        let still_matches =
+            |recipe: &EditRecipe, policy| source.matches(recipe, &recipe.local.layers[0], policy);
+        assert!(still_matches(&recipe, policy));
+
+        let slider = LayerEdit::Slider(LocalSlider::Exposure, 1.0)
+            .apply(&recipe, 0)
+            .expect("changes the layer");
+        assert!(still_matches(&slider, policy));
+        let opacity = LayerEdit::Slider(LocalSlider::Opacity, 0.3)
+            .apply(&recipe, 0)
+            .expect("changes the layer");
+        assert!(still_matches(&opacity, policy));
+
+        let mut moved = recipe.clone();
+        moved.local.layers[0].components[0].invert = true;
+        assert!(!still_matches(&moved, policy));
+        let mut turned = recipe.clone();
+        turned.geometry.orientation_override = Some(Orientation::Rotate90);
+        assert!(!still_matches(&turned, policy));
+        assert!(!still_matches(&recipe, RawCropPolicy::ActiveArea));
     }
 }
