@@ -112,8 +112,6 @@ impl RohditorApp {
                 resolution,
                 image,
                 histogram,
-                // Drawn by the desktop Masks tool (#85).
-                mask_overlay: _,
                 diagnostics,
             } => {
                 let intent = match resolution {

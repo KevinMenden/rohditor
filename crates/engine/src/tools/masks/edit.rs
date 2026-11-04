@@ -123,6 +123,18 @@ pub(super) fn shape_mut(recipe: &mut EditRecipe, at: Placement) -> Option<&mut M
         .map(|component| &mut component.shape)
 }
 
+/// Sets how the component at `at` combines with the ones before it. The first component of a
+/// layer has nothing to combine with, so callers must not change it from `Add`.
+pub(super) fn set_component_mode(recipe: &mut EditRecipe, at: Placement, mode: MaskMode) {
+    if let Some(component) = recipe
+        .local
+        .layer_mut(at.layer)
+        .and_then(|layer| layer.components.get_mut(at.component))
+    {
+        component.mode = mode;
+    }
+}
+
 /// Stroke `stroke` of the brush component at `at`.
 pub(super) fn stroke_mut(
     recipe: &mut EditRecipe,

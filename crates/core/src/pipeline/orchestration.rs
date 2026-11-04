@@ -17,7 +17,7 @@ use crate::color::{
     CameraCalibration, CameraProfileKey, camera_profile_key, resolve_camera_colour,
 };
 use crate::cpu::{
-    MaskAlphaImage, apply_adjustments_with_local, apply_camera_color_transform_cancellable,
+    apply_adjustments_with_local, apply_camera_color_transform_cancellable,
     apply_white_balance_cancellable, preview_dimensions,
     render_display_srgb8_cancellable_with_geometry,
     render_display_srgb8_dithered_with_geometry_and_diagnostics,
@@ -79,9 +79,6 @@ pub struct RenderOptions {
     pub raw_crop_policy: RawCropPolicy,
     pub demosaic: DemosaicAlgorithm,
     pub output_policy: OutputPolicy,
-    /// Preview only: id of the mask layer whose alpha the Masks tool wants drawn. The render
-    /// result then carries [`RenderResult::mask_overlay`]. Exports ignore it.
-    pub mask_overlay: Option<u32>,
 }
 
 /// Resolution and processing choices for an interactive CPU preview.
@@ -317,8 +314,7 @@ pub struct MemoryEstimate {
     /// Cropped, horizontal-pass and resized linear buffers of an export resize.
     pub export_resize_bytes: usize,
     pub display_rgb_bytes: usize,
-    /// Prepared mask layers, their tone tables and per-thread alpha rows, plus the mask
-    /// overlay planes when one is requested.
+    /// Prepared mask layers, their tone tables and per-thread alpha rows.
     pub local_adjustment_bytes: usize,
     pub estimated_peak_bytes: usize,
 }
@@ -524,9 +520,6 @@ pub struct RenderResult {
     pub highlight_stats: crate::ClipStats,
     pub optics_provenance: Option<OpticsProvenance>,
     pub memory: MemoryEstimate,
-    /// Alpha of the layer requested through [`RenderOptions::mask_overlay`], in the same
-    /// oriented and cropped geometry as `image`. `None` when none was requested.
-    pub mask_overlay: Option<MaskAlphaImage>,
 }
 
 /// A full-resolution export render and its processing diagnostics.
@@ -921,20 +914,17 @@ pub(super) mod render {
                 base,
                 recipe,
                 output_policy,
-                None,
                 workspace,
                 &CancellationToken::new(),
             )
         }
 
-        /// Cancellable form of [`Self::render_preview_from_base_reusing`]. `mask_overlay` is the
-        /// id of the mask layer to draw (see [`RenderOptions::mask_overlay`]).
+        /// Cancellable form of [`Self::render_preview_from_base_reusing`].
         pub fn render_preview_from_base_reusing_cancellable(
             &self,
             base: &DemosaicedBase,
             recipe: &EditRecipe,
             output_policy: OutputPolicy,
-            mask_overlay: Option<u32>,
             workspace: &mut CpuPreviewWorkspace,
             cancellation: &CancellationToken,
         ) -> Result<RenderResult, PipelineError> {
@@ -948,7 +938,7 @@ pub(super) mod render {
                 .checked_mul(size_of::<f32>())
                 .ok_or_else(|| dimension_overflow(base.image.width(), base.image.height()))?;
             let geometry = output_geometry(base.image(), base.source_orientation, recipe)?;
-            let local = LocalWork::prepare(base.image(), recipe, geometry, mask_overlay)?;
+            let local = LocalWork::prepare(base.image(), recipe)?;
             let mut memory = memory_estimate(
                 base,
                 size_of::<u8>(),
@@ -981,7 +971,6 @@ pub(super) mod render {
                 output_policy,
                 cancellation,
             )?;
-            let mask_overlay = local.render_overlay(cancellation)?;
             let histogram = Histogram::from_display_rgb8(&image);
             timings.output_conversion = output_started.elapsed();
             timings.total = total_started.elapsed();
@@ -996,7 +985,6 @@ pub(super) mod render {
                 highlight_stats: base.highlight_stats(),
                 optics_provenance: base.optics_provenance.clone(),
                 memory,
-                mask_overlay,
             })
         }
 
@@ -1038,7 +1026,7 @@ pub(super) mod render {
                 cancellation,
             )?;
             let geometry = output_geometry(&base.image, base.source_orientation, recipe)?;
-            let local = LocalWork::prepare(&base.image, recipe, geometry, options.mask_overlay)?;
+            let local = LocalWork::prepare(&base.image, recipe)?;
             let memory = memory_estimate(
                 &base,
                 size_of::<u8>(),
@@ -1062,7 +1050,6 @@ pub(super) mod render {
                 options.output_policy,
                 cancellation,
             )?;
-            let mask_overlay = local.render_overlay(cancellation)?;
             let histogram = Histogram::from_display_rgb8(&image);
             base.timings.output_conversion = output_started.elapsed();
             base.timings.total = total_started.elapsed();
@@ -1076,7 +1063,6 @@ pub(super) mod render {
                 highlight_stats: base.highlight_stats(),
                 optics_provenance: base.optics_provenance.clone(),
                 memory,
-                mask_overlay,
             })
         }
 
@@ -1118,8 +1104,7 @@ pub(super) mod render {
             let mut geometry = output_geometry(&base.image, base.source_orientation, recipe)?;
             let (output_width, output_height) = geometry.output_dimensions();
             let target = size.resolve(output_width, output_height);
-            // Exports never draw the mask overlay.
-            let local = LocalWork::prepare(&base.image, recipe, geometry, None)?;
+            let local = LocalWork::prepare(&base.image, recipe)?;
             let memory = memory_estimate(
                 &base,
                 bit_depth.bytes_per_sample(),
@@ -1574,7 +1559,7 @@ fn render_base(
     validate_base_recipe(&base, recipe)?;
     let output_policy = options.output_policy;
     let geometry = output_geometry(&base.image, base.source_orientation, recipe)?;
-    let local = LocalWork::prepare(&base.image, recipe, geometry, options.mask_overlay)?;
+    let local = LocalWork::prepare(&base.image, recipe)?;
     let memory = memory_estimate(
         &base,
         size_of::<u8>(),
@@ -1601,7 +1586,6 @@ fn render_base(
             output_policy,
             DitherMode::None,
         )?;
-    let mask_overlay = local.render_overlay(&CancellationToken::new())?;
     base.timings.output_conversion = output_started.elapsed();
     base.timings.total = base.timings.metadata
         + base.timings.normalization
@@ -1628,7 +1612,6 @@ fn render_base(
         highlight_stats: base.highlight_stats(),
         optics_provenance: base.optics_provenance.clone(),
         memory,
-        mask_overlay,
     })
 }
 

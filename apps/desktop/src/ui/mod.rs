@@ -19,6 +19,8 @@ pub(crate) mod crop;
 mod detail;
 pub(crate) mod diagnostics;
 pub(crate) mod icons;
+pub(crate) mod mask_overlay;
+pub(crate) mod masks;
 pub(crate) mod optics;
 pub(crate) mod settings;
 pub(crate) mod theme;

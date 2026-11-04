@@ -23,9 +23,10 @@ pub(crate) struct ToolRailOutput {
 }
 
 /// The rail's tools in display order, with icon and tooltip.
-const TOOLS: [(ToolKind, Icon, &str); 2] = [
+const TOOLS: [(ToolKind, Icon, &str); 3] = [
     (ToolKind::Edit, Icon::Sliders, "Edit (E)"),
     (ToolKind::Crop, Icon::Crop, "Crop (C)"),
+    (ToolKind::Masks, Icon::Mask, "Masks (M)"),
 ];
 
 pub(crate) fn show(context: &egui::Context, model: ToolRailModel) -> ToolRailOutput {
