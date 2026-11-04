@@ -1,11 +1,10 @@
-//! Mask overlay output: one layer's alpha as an 8-bit image in display geometry.
+//! Mask overlay: one layer's alpha as an 8-bit image in display geometry.
 //!
-//! The Masks tool shows the selected mask on top of the preview. The overlay is produced in the
-//! output stage, from the same [`PreparedMask`] maths as the adjustment stage, and is oriented
-//! and cropped exactly like the colour image, so the UI can tint and draw it without knowing
-//! about the developed frame.
-
-use std::mem::size_of;
+//! The Masks tool shows the selected mask on top of the preview. A frontend asks for it with
+//! [`render_mask_overlay_preview`], separately from the preview render, so the tint can follow a
+//! drag without waiting for one. It uses the same [`PreparedMask`] maths as the adjustment stage
+//! and is oriented and cropped like the colour image, so the UI can tint and draw it without
+//! knowing about the developed frame.
 
 use rayon::prelude::*;
 use rohditor_edit::EditRecipe;
@@ -76,7 +75,7 @@ pub fn render_mask_overlay_preview(
 
 /// A requested overlay, resolved for one render: the layer's mask and the geometry to present it in.
 #[derive(Debug)]
-pub(crate) struct MaskOverlayPlan {
+pub(super) struct MaskOverlayPlan {
     mask: PreparedMask,
     frame: (usize, usize),
     geometry: OutputGeometry,
@@ -87,7 +86,7 @@ impl MaskOverlayPlan {
     ///
     /// The overlay shows the *shape* of the mask at full strength, whether or not the layer is
     /// enabled or has non-neutral sliders, so a layer can be inspected while it is being set up.
-    pub(crate) fn prepare(
+    pub(super) fn prepare(
         recipe: &EditRecipe,
         layer_id: u32,
         frame: (usize, usize),
@@ -113,23 +112,7 @@ impl MaskOverlayPlan {
         }))
     }
 
-    /// Bytes this overlay needs while rendering: the prepared mask, the developed-frame alpha
-    /// plane, the output image and one f32 row per worker thread.
-    pub(crate) fn bytes(&self) -> usize {
-        let (width, height) = self.frame;
-        let (output_width, output_height) = self.geometry.output_dimensions();
-        self.mask
-            .bytes()
-            .saturating_add(width.saturating_mul(height))
-            .saturating_add(output_width.saturating_mul(output_height))
-            .saturating_add(
-                width
-                    .saturating_mul(size_of::<f32>())
-                    .saturating_mul(rayon::current_num_threads()),
-            )
-    }
-
-    pub(crate) fn render(
+    pub(super) fn render(
         &self,
         cancellation: &CancellationToken,
     ) -> Result<MaskAlphaImage, PipelineError> {

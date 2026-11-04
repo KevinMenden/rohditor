@@ -221,68 +221,6 @@ fn crop_and_orientation_do_not_move_the_mask_relative_to_the_content() -> Result
 }
 
 #[test]
-fn mask_overlay_is_display_geometry_alpha_and_leaves_the_image_unchanged()
--> Result<(), Box<dyn Error>> {
-    let frame = flat_frame();
-    let mut recipe = masked_recipe();
-    recipe.geometry.orientation_override = Some(Orientation::Rotate180);
-    recipe.geometry.crop = Some(NormalizedCropRect {
-        left: 0.0,
-        top: 0.0,
-        right: 0.75,
-        bottom: 1.0,
-    });
-    let pipeline = CpuPipeline::default();
-    let options = PreviewOptions {
-        render: RenderOptions::default(),
-        max_long_edge: 64,
-    };
-    let plain = pipeline.render_preview(&frame, &recipe, options)?;
-    assert!(plain.mask_overlay.is_none());
-
-    let with_overlay = pipeline.render_preview(
-        &frame,
-        &recipe,
-        PreviewOptions {
-            render: RenderOptions {
-                mask_overlay: Some(LAYER_ID),
-                ..RenderOptions::default()
-            },
-            ..options
-        },
-    )?;
-    assert_eq!(with_overlay.image.data(), plain.image.data());
-    assert_eq!(with_overlay.histogram, plain.histogram);
-    let overlay = with_overlay.mask_overlay.expect("overlay requested");
-    assert_eq!(
-        (overlay.width(), overlay.height()),
-        (with_overlay.image.width(), with_overlay.image.height())
-    );
-    // The mask is 1 on the source's left side; the frame is turned by 180 degrees and cropped
-    // from the right, so the covered side is the right edge of the output.
-    let y = overlay.height() / 2;
-    let row = &overlay.data()[y * overlay.width()..(y + 1) * overlay.width()];
-    assert_eq!(row[row.len() - 1], 255);
-    assert_eq!(row[0], 0);
-    assert!(row.windows(2).all(|pair| pair[0] <= pair[1]));
-    assert!(with_overlay.memory.local_adjustment_bytes > plain.memory.local_adjustment_bytes);
-
-    let unknown = pipeline.render_preview(
-        &frame,
-        &recipe,
-        PreviewOptions {
-            render: RenderOptions {
-                mask_overlay: Some(LAYER_ID + 1),
-                ..RenderOptions::default()
-            },
-            ..options
-        },
-    )?;
-    assert!(unknown.mask_overlay.is_none());
-    Ok(())
-}
-
-#[test]
 fn working_set_accounts_for_prepared_masks_only_when_they_are_active() -> Result<(), Box<dyn Error>>
 {
     let frame = flat_frame();

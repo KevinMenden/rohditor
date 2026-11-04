@@ -11,9 +11,9 @@ use std::time::{Duration, Instant};
 use image::RgbImage;
 use rohditor_core::{
     CancellationToken, CorrectionComponents, CpuPipeline, DatabaseProvenance, ExportReport,
-    ExportSettings, GamutMappingDiagnostics, HighlightDiagnostics, Histogram, MaskAlphaImage,
-    MemoryEstimate, OpticsProvenance, OpticsService, PipelineError, PreviewOptions, ProfileMatch,
-    RenderOptions, StageTimings, export_image, optics_query_from_info,
+    ExportSettings, GamutMappingDiagnostics, HighlightDiagnostics, Histogram, MemoryEstimate,
+    OpticsProvenance, OpticsService, PipelineError, PreviewOptions, ProfileMatch, RenderOptions,
+    StageTimings, export_image, optics_query_from_info,
 };
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_edit::EditRecipe;
@@ -223,11 +223,6 @@ pub enum WorkerEvent {
         resolution: PreviewResolution,
         image: WorkerImage,
         histogram: Box<Histogram>,
-        /// Alpha of the mask layer the request asked to see
-        /// (`RenderOptions::mask_overlay`), in the geometry of `image`. `None` when no
-        /// overlay was requested, the layer does not exist, or the preview came from the GPU,
-        /// which does not produce one: a request for an overlay is rendered on the CPU.
-        mask_overlay: Option<Box<MaskAlphaImage>>,
         diagnostics: WorkerPreviewDiagnostics,
     },
     GpuUploadReady {
@@ -431,7 +426,7 @@ impl RenderCoordinator {
         options: PreviewOptions,
         prefer_gpu: bool,
     ) -> Result<(), String> {
-        let gpu = prefer_gpu && gpu_may_render(&recipe, options);
+        let gpu = prefer_gpu && gpu_may_render(&recipe);
         self.previews.queue(
             PreviewJob {
                 ticket,
@@ -977,7 +972,7 @@ fn process_preview(
         sender,
         wake,
         job.ticket,
-        if cache_hits.adjusted && options.render.mask_overlay.is_none() {
+        if cache_hits.adjusted {
             "Restoring cached adjusted CPU preview"
         } else if cache_hits.demosaiced {
             "Applying edits to cached demosaiced CPU base"
@@ -996,38 +991,35 @@ fn process_preview(
         pipeline,
         preview_cache,
     ) {
-        Ok((display, histogram, diagnostics, mask_overlay)) => {
-            match WorkerImage::from_display(display) {
-                Ok(image) => {
-                    log_preview_diagnostics(job.ticket, image.width, image.height, diagnostics);
-                    send_event(
-                        sender,
-                        wake,
-                        WorkerEvent::PreviewReady {
-                            ticket: job.ticket,
-                            resolution: job.resolution,
-                            image,
-                            histogram: Box::new(histogram),
-                            mask_overlay: mask_overlay.map(Box::new),
-                            diagnostics,
-                        },
-                    );
-                    PreviewCompletion::Completed
-                }
-                Err(error) => {
-                    send_failure(
-                        sender,
-                        wake,
-                        job.ticket.document_id,
-                        JobKind::Preview,
-                        Some(job.ticket.revision),
-                        None,
-                        format!("Could not prepare the CPU preview for display: {error}"),
-                    );
-                    PreviewCompletion::Failed
-                }
+        Ok((display, histogram, diagnostics)) => match WorkerImage::from_display(display) {
+            Ok(image) => {
+                log_preview_diagnostics(job.ticket, image.width, image.height, diagnostics);
+                send_event(
+                    sender,
+                    wake,
+                    WorkerEvent::PreviewReady {
+                        ticket: job.ticket,
+                        resolution: job.resolution,
+                        image,
+                        histogram: Box::new(histogram),
+                        diagnostics,
+                    },
+                );
+                PreviewCompletion::Completed
             }
-        }
+            Err(error) => {
+                send_failure(
+                    sender,
+                    wake,
+                    job.ticket.document_id,
+                    JobKind::Preview,
+                    Some(job.ticket.revision),
+                    None,
+                    format!("Could not prepare the CPU preview for display: {error}"),
+                );
+                PreviewCompletion::Failed
+            }
+        },
         Err(PipelineError::Cancelled) => {
             info!("CPU preview cancelled after being superseded");
             PreviewCompletion::Cancelled
@@ -1118,7 +1110,6 @@ fn process_source_scale_preview(
                             resolution: PreviewResolution::SourceScale,
                             image,
                             histogram: Box::new(result.histogram),
-                            mask_overlay: result.mask_overlay.map(Box::new),
                             diagnostics,
                         },
                     );
@@ -1195,7 +1186,6 @@ fn render_gpu_capture_source_scale(
         &base,
         &job.recipe,
         options.render.output_policy,
-        options.render.mask_overlay,
         &mut rohditor_core::CpuPreviewWorkspace::default(),
         cancellation,
     )?;
@@ -1368,21 +1358,14 @@ fn process_gpu_base(
     PreviewCompletion::Completed
 }
 
-/// Whether the GPU may render this preview. CPU-only stages, and a request for the mask overlay
-/// (which only the CPU pipeline produces until the GPU port, #88), route it to the CPU by
-/// choice. That is a per-request answer, not a GPU failure: the GPU stays enabled.
-fn gpu_may_render(recipe: &EditRecipe, options: PreviewOptions) -> bool {
-    rohditor_core::cpu_only_stage_reason(recipe).is_none() && options.render.mask_overlay.is_none()
+/// Whether the GPU may render this preview. CPU-only stages route it to the CPU by choice. That
+/// is a per-request answer, not a GPU failure: the GPU stays enabled.
+fn gpu_may_render(recipe: &EditRecipe) -> bool {
+    rohditor_core::cpu_only_stage_reason(recipe).is_none()
 }
 
-/// A CPU fit preview: the display image, its histogram, how it was made, and the alpha of the
-/// requested mask layer (`None` unless `RenderOptions::mask_overlay` named an existing one).
-type DevelopedPreview = (
-    DisplayRgbImage<u8>,
-    Histogram,
-    WorkerPreviewDiagnostics,
-    Option<MaskAlphaImage>,
-);
+/// A CPU fit preview: the display image, its histogram, and how it was made.
+type DevelopedPreview = (DisplayRgbImage<u8>, Histogram, WorkerPreviewDiagnostics);
 
 fn develop_preview(
     job: &PreviewJob,
@@ -1393,15 +1376,7 @@ fn develop_preview(
     pipeline: &CpuPipeline,
     preview_cache: &mut PreviewCache,
 ) -> Result<DevelopedPreview, PipelineError> {
-    // A requested mask overlay is rendered together with the image and is not cached, so the
-    // cached image alone would come back without it. The base is cached, so this re-render
-    // costs what any adjustment edit costs.
-    let overlay_requested = options.render.mask_overlay.is_some();
-    let cache_hits = PreviewCacheHits {
-        adjusted: cache_hits.adjusted && !overlay_requested,
-        ..cache_hits
-    };
-    if !overlay_requested && let Some(cached) = preview_cache.adjusted(keys) {
+    if let Some(cached) = preview_cache.adjusted(keys) {
         let copy_started = Instant::now();
         let image = cached.image.clone();
         let histogram = Histogram::from_display_rgb8(&image);
@@ -1442,7 +1417,6 @@ fn develop_preview(
                 optics_used_infinity_distance_fallback: optics_fallback,
                 optics_scale,
             },
-            None,
         ));
     }
 
@@ -1465,7 +1439,6 @@ fn develop_preview(
         base,
         &job.recipe,
         options.render.output_policy,
-        options.render.mask_overlay,
         workspace,
         cancellation,
     )?;
@@ -1499,12 +1472,7 @@ fn develop_preview(
         optics_used_infinity_distance_fallback: optics_fallback,
         optics_scale,
     };
-    Ok((
-        result.image,
-        result.histogram,
-        diagnostics,
-        result.mask_overlay,
-    ))
+    Ok((result.image, result.histogram, diagnostics))
 }
 
 fn ensure_preview_base(
@@ -2176,195 +2144,15 @@ mod tests {
         recipe
     }
 
-    fn options_with_overlay(layer: Option<u32>) -> PreviewOptions {
-        PreviewOptions {
-            render: RenderOptions {
-                mask_overlay: layer,
-                ..RenderOptions::default()
-            },
-            ..PreviewOptions::default()
-        }
-    }
-
     #[test]
-    fn a_requested_mask_overlay_is_rendered_with_the_image_even_when_the_image_is_cached() {
-        let frame = Arc::new(fake_frame());
-        let mut cache = PreviewCache::default();
-        let recipe = recipe_with_mask_layer();
-        let develop = |revision: u64, options: PreviewOptions, cache: &mut PreviewCache| {
-            let job = PreviewJob {
-                ticket: PreviewTicket {
-                    document_id: 12,
-                    revision,
-                    sequence: revision,
-                },
-                frame: Arc::clone(&frame),
-                recipe: recipe.clone(),
-                options,
-                backend: PreviewBackend::Cpu,
-                resolution: PreviewResolution::Fit,
-            };
-            let keys = PreviewCacheKeys::new(12, &frame, &job.recipe, options);
-            let hits = cache.prepare(&keys, &frame);
-            let result = develop_preview(
-                &job,
-                options,
-                &keys,
-                hits,
-                &CancellationToken::new(),
-                &CpuPipeline::default(),
-                cache,
-            )
-            .expect("preview develops");
-            (hits, result)
-        };
-
-        let (_, plain) = develop(0, options_with_overlay(None), &mut cache);
-        assert!(plain.3.is_none());
-
-        // Same recipe again: the adjusted image is restored from the cache, with no overlay.
-        let (restored_hits, restored) = develop(1, options_with_overlay(None), &mut cache);
-        assert!(restored_hits.adjusted);
-        assert!(restored.2.cache_hits.adjusted);
-        assert!(restored.3.is_none());
-
-        // Asking for the overlay must find the same cache entries (it is not an edit), yet the
-        // overlay has to be rendered rather than restored: the cache holds no overlay.
-        let (hits, overlaid) = develop(2, options_with_overlay(Some(3)), &mut cache);
-        assert!(
-            hits.demosaiced && hits.adjusted,
-            "the overlay changed a cache key"
-        );
-        assert!(!overlaid.2.cache_hits.adjusted);
-        assert!(overlaid.2.cache_hits.demosaiced);
-        assert_eq!(overlaid.2.timings.demosaic, Duration::ZERO);
-        assert_eq!(overlaid.0, plain.0, "the overlay must not change the image");
-        let overlay = overlaid.3.expect("the requested layer exists");
-        assert_eq!((overlay.width(), overlay.height()), (4, 4));
-        // 255 where the gradient has full effect, falling to 0, left to right on every row.
-        for row in overlay.data().chunks(overlay.width()) {
-            assert_eq!(row[0], 255);
-            assert_eq!(row[3], 0);
-            assert!(row.windows(2).all(|pair| pair[0] >= pair[1]), "{row:?}");
-        }
-
-        // A layer that does not exist (deleted, or undone away) gives no overlay, not an error.
-        let (_, missing) = develop(3, options_with_overlay(Some(99)), &mut cache);
-        assert!(missing.3.is_none());
-        assert_eq!(missing.0, plain.0);
-
-        // Without a request the cached path is used again.
-        let (_, back) = develop(4, options_with_overlay(None), &mut cache);
-        assert!(back.2.cache_hits.adjusted && back.3.is_none());
-    }
-
-    #[test]
-    fn a_mask_overlay_request_routes_to_the_cpu_even_for_a_mask_that_changes_nothing() {
+    fn only_recipes_with_an_active_mask_are_routed_to_the_cpu() {
         let mut recipe = recipe_with_mask_layer();
-        assert!(gpu_may_render(
-            &EditRecipe::default(),
-            options_with_overlay(None)
-        ));
-        // An active mask is CPU-only whatever is requested.
-        assert!(!gpu_may_render(&recipe, options_with_overlay(None)));
-        // A layer with neutral sliders is inactive, so the GPU could render the image; but it
-        // cannot produce the overlay, and a freshly drawn mask is exactly that case.
+        assert!(gpu_may_render(&EditRecipe::default()));
+        assert!(!gpu_may_render(&recipe));
+        // A layer with neutral sliders changes nothing, so the GPU can render it.
         recipe.local.layers[0].settings = rohditor_edit::LocalSettings::default();
         assert!(!recipe.local.is_active());
-        assert!(gpu_may_render(&recipe, options_with_overlay(None)));
-        assert!(!gpu_may_render(&recipe, options_with_overlay(Some(3))));
-    }
-
-    #[test]
-    fn the_mask_overlay_follows_the_crop_of_the_preview_it_accompanies() {
-        let frame = Arc::new(fake_frame());
-        let mut recipe = recipe_with_mask_layer();
-        recipe.geometry.crop = Some(rohditor_edit::NormalizedCropRect {
-            left: 0.25,
-            top: 0.0,
-            right: 0.75,
-            bottom: 1.0,
-        });
-        let options = options_with_overlay(Some(3));
-        let job = PreviewJob {
-            ticket: PreviewTicket {
-                document_id: 14,
-                revision: 0,
-                sequence: 0,
-            },
-            frame: Arc::clone(&frame),
-            recipe,
-            options,
-            backend: PreviewBackend::Cpu,
-            resolution: PreviewResolution::Fit,
-        };
-        let (sender, receiver) = mpsc::channel();
-        let completion = process_preview(
-            job,
-            &sender,
-            &crate::wake::noop(),
-            &CancellationToken::new(),
-            &CpuPipeline::default(),
-            &mut PreviewCache::default(),
-        );
-        assert_eq!(completion, PreviewCompletion::Completed);
-        let (image, overlay) = receiver
-            .try_iter()
-            .find_map(|event| match event {
-                WorkerEvent::PreviewReady {
-                    image,
-                    mask_overlay,
-                    ..
-                } => Some((image, mask_overlay)),
-                _ => None,
-            })
-            .expect("the preview completes");
-        let overlay = overlay.expect("the event carries the requested overlay");
-        // The crop keeps the middle two columns, so image and overlay are 2x4 together.
-        assert_eq!((image.width, image.height), (2, 4));
-        assert_eq!((overlay.width(), overlay.height()), (2, 4));
-    }
-
-    #[test]
-    fn source_scale_previews_carry_the_requested_mask_overlay_too() {
-        let (sender, receiver) = mpsc::channel();
-        let job = PreviewJob {
-            ticket: PreviewTicket {
-                document_id: 15,
-                revision: 0,
-                sequence: 0,
-            },
-            frame: Arc::new(fake_frame()),
-            recipe: recipe_with_mask_layer(),
-            options: options_with_overlay(Some(3)),
-            backend: PreviewBackend::Cpu,
-            resolution: PreviewResolution::SourceScale,
-        };
-        let completion = process_source_scale_preview(
-            job,
-            &sender,
-            &crate::wake::noop(),
-            &CancellationToken::new(),
-            &CpuPipeline::default(),
-            &mut PreviewCache::default(),
-        );
-        assert_eq!(completion, PreviewCompletion::Completed);
-        let (image, overlay) = receiver
-            .try_iter()
-            .find_map(|event| match event {
-                WorkerEvent::PreviewReady {
-                    image,
-                    mask_overlay,
-                    ..
-                } => Some((image, mask_overlay)),
-                _ => None,
-            })
-            .expect("the 1:1 preview completes");
-        let overlay = overlay.expect("the event carries the requested overlay");
-        assert_eq!(
-            (overlay.width(), overlay.height()),
-            (image.width, image.height)
-        );
+        assert!(gpu_may_render(&recipe));
     }
 
     #[test]
@@ -3128,7 +2916,7 @@ mod tests {
             PreviewCacheKeys::new(initial.ticket.document_id, &frame, &initial.recipe, options);
         let initial_hits = cache.prepare(&initial_keys, &frame);
         let initial_started = Instant::now();
-        let (initial_image, _, initial_diagnostics, _) = develop_preview(
+        let (initial_image, _, initial_diagnostics) = develop_preview(
             &initial,
             options,
             &initial_keys,
@@ -3162,7 +2950,7 @@ mod tests {
             let hits = cache.prepare(&keys, &frame);
             assert!(hits.decoded && hits.reconstructed && hits.demosaiced && !hits.adjusted);
             let started = Instant::now();
-            let (_, _, diagnostics, _) = develop_preview(
+            let (_, _, diagnostics) = develop_preview(
                 &job,
                 options,
                 &keys,

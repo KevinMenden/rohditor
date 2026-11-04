@@ -209,10 +209,13 @@ impl MaskToolSession {
         self.mode = shape;
     }
 
-    /// Leaves a creation mode. False when there was none.
+    /// Leaves a creation mode. False when there was none, or while a gesture is running: the
+    /// gesture owns the mode until its release.
     pub fn cancel_create(&mut self) -> bool {
-        let creating = self.mode != MaskEditMode::Select;
-        self.mode = MaskEditMode::Select;
+        let creating = self.mode != MaskEditMode::Select && !self.is_dragging();
+        if creating {
+            self.mode = MaskEditMode::Select;
+        }
         creating
     }
 
@@ -261,9 +264,13 @@ impl MaskToolSession {
     }
 
     /// The Delete key: the selected component, or the selected layer when no component is
-    /// selected or it is the last one.
+    /// selected or it is the last one. Nothing while a gesture is running.
     #[must_use]
     pub fn delete_selected(&mut self, recipe: &EditRecipe) -> Option<EditRecipe> {
+        // Not under a running gesture: its release would write to what was deleted.
+        if self.is_dragging() {
+            return None;
+        }
         let layer = self.selected_layer?;
         match self.selected_component {
             Some(component) => self.delete_component(recipe, layer, component),

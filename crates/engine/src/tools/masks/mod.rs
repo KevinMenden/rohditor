@@ -115,8 +115,8 @@ impl Default for MaskToolSession {
 }
 
 impl MaskToolSession {
-    /// The layer id for `RenderOptions::mask_overlay`: the selected layer while the overlay
-    /// is on. The render ignores an id that no longer exists.
+    /// The layer whose mask is tinted over the preview: the selected layer while the overlay is
+    /// on. The id may be stale (the layer was deleted or undone away), so check it in the recipe.
     pub const fn overlay_layer(&self) -> Option<u32> {
         if self.show_overlay {
             self.selected_layer

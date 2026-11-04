@@ -268,6 +268,26 @@ fn a_gradient_drawn_into_a_layer_takes_the_requested_mode_but_a_new_layer_stays_
 }
 
 #[test]
+fn escape_and_delete_do_nothing_while_a_gesture_is_running() {
+    let mut harness = Harness::selecting(linear_shape());
+    harness.session.mode = MaskEditMode::CreateRadial;
+    harness.press((0.5, 0.5));
+    harness.drag_to((0.6, 0.5));
+    assert!(harness.session.is_dragging());
+    // Leaving create mode or deleting under the gesture would let its release write into a
+    // mode or a layer that is gone.
+    assert!(!harness.session.cancel_create());
+    assert_eq!(harness.session.mode, MaskEditMode::CreateRadial);
+    let recipe = harness.recipe().clone();
+    assert!(harness.session.delete_selected(&recipe).is_none());
+
+    harness.release();
+    assert_eq!(harness.session.mode, MaskEditMode::Select);
+    let recipe = harness.recipe().clone();
+    assert!(harness.session.delete_selected(&recipe).is_some());
+}
+
+#[test]
 fn creation_follows_the_pointer_through_orientation_and_crop() {
     let crop = NormalizedCropRect {
         left: 0.1,

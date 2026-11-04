@@ -112,8 +112,6 @@ impl RohditorApp {
                 resolution,
                 image,
                 histogram,
-                // The Masks tool draws its own tint (see `app/masks.rs`).
-                mask_overlay: _,
                 diagnostics,
             } => {
                 let intent = match resolution {
