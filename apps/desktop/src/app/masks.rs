@@ -5,7 +5,7 @@
 //! goes into the recipe as it happens, so leaving the tool has nothing to commit.
 
 use eframe::egui;
-use rohditor_core::{MaskAlphaImage, OutputGeometry};
+use rohditor_core::OutputGeometry;
 use rohditor_edit::EditRecipe;
 use rohditor_engine::document::EditSession;
 use rohditor_engine::tools::{LayerEdit, MaskToolSession, MaskView, ToolKind};
@@ -45,7 +45,7 @@ pub(super) fn overlay_model<'a>(
     session: &'a MaskToolSession,
     edits: &'a EditSession,
     frame: Option<&RawFrame>,
-    mask_overlay: Option<&'a egui::TextureHandle>,
+    mask_overlay: Option<&'a MaskTint>,
 ) -> Option<MaskOverlayModel<'a>> {
     let recipe = edits.recipe();
     let geometry = output_geometry(&frame?.info, recipe)?;
@@ -57,17 +57,55 @@ pub(super) fn overlay_model<'a>(
         tint: session
             .overlay_layer()
             .filter(|id| recipe.local.layer(*id).is_some())
-            .and(mask_overlay),
+            .and(mask_overlay.map(|tint| &tint.texture)),
     })
 }
 
-/// The overlay as an egui texture: red, `OVERLAY_TINT_OPACITY` strong where the mask is 1.
-/// An existing texture is updated in place.
-pub(super) fn install_overlay(
+/// Long edge, in pixels, of the tint image. It is a soft red wash, so a small image stretched
+/// over the preview is enough, and it is cheap to recompute on every frame of a drag.
+const TINT_LONG_EDGE: usize = 512;
+
+/// The tint texture and what it was computed from.
+pub(super) struct MaskTint {
+    /// The recipe revision and layer the texture shows.
+    key: (u64, u32),
+    texture: egui::TextureHandle,
+}
+
+/// Brings the tint up to date with the recipe and the selected layer. It is computed here, from
+/// the recipe, at a small size: a render would show the mask only after the whole preview was
+/// done, so the tint would trail the handles while they are dragged.
+pub(super) fn refresh_tint(
     context: &egui::Context,
     document: &mut Document,
-    alpha: &MaskAlphaImage,
+    session: &MaskToolSession,
 ) {
+    let Some(layer) = session.overlay_layer() else {
+        return;
+    };
+    let key = (document.edits.revision(), layer);
+    if document
+        .mask_overlay
+        .as_ref()
+        .is_some_and(|tint| tint.key == key)
+    {
+        return;
+    }
+    let Some(info) = document.frame.as_ref().map(|frame| &frame.info) else {
+        return;
+    };
+    let alpha = rohditor_core::render_mask_overlay_preview(
+        document.edits.recipe(),
+        layer,
+        (info.width, info.height),
+        info.orientation,
+        TINT_LONG_EDGE,
+    );
+    let Ok(Some(alpha)) = alpha else {
+        // No such layer (or an unusable recipe): show nothing rather than a stale tint.
+        document.mask_overlay = None;
+        return;
+    };
     let pixels = alpha
         .data()
         .iter()
@@ -79,13 +117,19 @@ pub(super) fn install_overlay(
         .collect();
     let image = egui::ColorImage::new([alpha.width(), alpha.height()], pixels);
     match document.mask_overlay.as_mut() {
-        Some(texture) => texture.set(image, egui::TextureOptions::LINEAR),
+        Some(tint) => {
+            tint.texture.set(image, egui::TextureOptions::LINEAR);
+            tint.key = key;
+        }
         None => {
-            document.mask_overlay = Some(context.load_texture(
-                format!("document-{}-mask-overlay", document.id),
-                image,
-                egui::TextureOptions::LINEAR,
-            ));
+            document.mask_overlay = Some(MaskTint {
+                key,
+                texture: context.load_texture(
+                    format!("document-{}-mask-tint", document.id),
+                    image,
+                    egui::TextureOptions::LINEAR,
+                ),
+            });
         }
     }
 }
@@ -138,12 +182,11 @@ impl RohditorApp {
         };
         let panel = tool_panel_model(Some(document), ToolKind::Masks);
         let actions = tool_panel::show(context, &panel, |ui| masks::show(ui, &model));
-        let overlay_before = self.requested_overlay();
         let mut changed = false;
         for action in actions {
             changed |= self.apply_mask_action(action);
         }
-        self.finish_mask_interaction(context, changed, overlay_before);
+        self.finish_mask_interaction(context, changed);
     }
 
     /// Pointer events of the viewport: forwarded to the session as one gesture per drag.
@@ -155,9 +198,8 @@ impl RohditorApp {
         let Some(view) = output.view else {
             return;
         };
-        let overlay_before = self.requested_overlay();
         let changed = self.forward_mask_pointer(output, &view);
-        self.finish_mask_interaction(context, changed, overlay_before);
+        self.finish_mask_interaction(context, changed);
     }
 
     fn forward_mask_pointer(&mut self, output: &MaskOverlayOutput, view: &MaskView) -> bool {
@@ -191,29 +233,18 @@ impl RohditorApp {
         changed
     }
 
-    /// Whether the document changed or a different overlay is now wanted: either needs a new
-    /// preview, since the overlay is part of the render request.
-    fn finish_mask_interaction(
-        &mut self,
-        context: &egui::Context,
-        changed: bool,
-        overlay_before: Option<u32>,
-    ) {
-        let overlay_changed = self.requested_overlay() != overlay_before;
+    /// A changed recipe needs a new preview. Selection and overlay changes do not: the tint is
+    /// drawn from the recipe, not from a render.
+    fn finish_mask_interaction(&mut self, context: &egui::Context, changed: bool) {
+        if !changed {
+            return;
+        }
         let Some(document) = self.document.as_mut() else {
             return;
         };
-        if changed {
-            document.notice = None;
-        }
-        if changed || overlay_changed {
-            let id = document.id;
-            self.queue_preview(context, id);
-        }
-    }
-
-    fn requested_overlay(&self) -> Option<u32> {
-        self.tool.masks().and_then(MaskToolSession::overlay_layer)
+        document.notice = None;
+        let id = document.id;
+        self.queue_preview(context, id);
     }
 
     /// One panel action. Returns whether the recipe changed.
@@ -260,7 +291,6 @@ impl RohditorApp {
         }
         let pressed =
             |key| context.input(|input| input.modifiers.is_none() && input.key_pressed(key));
-        let overlay_before = self.requested_overlay();
         let mut changed = false;
         let mut used = true;
         if pressed(egui::Key::O) {
@@ -282,13 +312,13 @@ impl RohditorApp {
             used = false;
         }
         if used {
-            self.finish_mask_interaction(context, changed, overlay_before);
+            self.finish_mask_interaction(context, changed);
         }
         used
     }
 
     /// Enters the Masks tool, selecting the first mask so there is something to show.
-    pub(super) fn enter_masks_tool(&mut self, context: &egui::Context) {
+    pub(super) fn enter_masks_tool(&mut self) {
         if self.tool.masks().is_some() {
             return;
         }
@@ -299,16 +329,12 @@ impl RohditorApp {
         if let Some(first) = document.edits.recipe().local.layers.first() {
             session.select_layer(document.edits.recipe(), first.id);
         }
-        let document_id = document.id;
         self.pending_white_balance_pick = None;
         // Entering Masks drops any active picker.
         self.tool.enter_masks(session);
-        // The render request now asks for the overlay.
-        self.queue_preview(context, document_id);
     }
 
-    /// Leaves the Masks tool for another tool. Nothing to commit; the next preview drops the
-    /// overlay request and may return to the GPU.
+    /// Leaves the Masks tool for another tool. Nothing to commit.
     pub(super) fn exit_masks_tool(&mut self) -> bool {
         if self.tool.masks().is_none() {
             return false;

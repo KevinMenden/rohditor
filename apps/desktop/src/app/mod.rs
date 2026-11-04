@@ -61,7 +61,7 @@ use rohditor_engine::document::{EditSession, PreviewIntent, PreviewTicket};
 use rohditor_engine::preview_cache::PreviewCacheHits;
 use rohditor_engine::session;
 use rohditor_engine::settings::{self, AppSettings};
-use rohditor_engine::tools::{ActiveTool, MaskToolSession, Picker, ToolKind};
+use rohditor_engine::tools::{ActiveTool, Picker, ToolKind};
 use rohditor_engine::wake::WakeFn;
 
 const GPU_HISTOGRAM_DEBOUNCE: Duration = Duration::from_millis(75);
@@ -164,8 +164,8 @@ struct Document {
     frame: Option<Arc<RawFrame>>,
     edits: EditSession,
     texture: Option<PreviewTexture>,
-    /// The selected mask's alpha as a red tint, kept while the next frame renders.
-    mask_overlay: Option<egui::TextureHandle>,
+    /// The Masks tool's red tint of the selected mask.
+    mask_overlay: Option<masks::MaskTint>,
     preview_pixels: Option<DisplayPreviewPixels>,
     preview_source: Option<PreviewSource>,
     histogram: Option<Histogram>,
@@ -582,23 +582,17 @@ impl RohditorApp {
     }
 
     fn preview_options(&self) -> PreviewOptions {
-        let mut render = self.settings.render_options();
-        // The Masks tool asks for the selected mask's alpha to draw over the preview.
-        render.mask_overlay = self.tool.masks().and_then(MaskToolSession::overlay_layer);
         PreviewOptions {
-            render,
+            render: self.settings.render_options(),
             ..PreviewOptions::default()
         }
     }
 
     /// Show why the CPU renders this recipe although the GPU is available.
     /// This is a routing choice, not a GPU failure: the GPU stays enabled.
-    fn note_cpu_only_stage(&mut self, recipe: &EditRecipe, mask_overlay: bool) {
+    fn note_cpu_only_stage(&mut self, recipe: &EditRecipe) {
         const PREFIX: &str = "CPU-only stage: ";
-        // The mask overlay is only rendered by the CPU pipeline (the GPU port is #88).
-        let reason = rohditor_core::cpu_only_stage_reason(recipe)
-            .or_else(|| mask_overlay.then_some("mask overlay"));
-        match reason {
+        match rohditor_core::cpu_only_stage_reason(recipe) {
             Some(reason) if self.gpu.is_some() => {
                 self.processor_note = Some(format!("{PREFIX}{reason}"));
             }
@@ -681,13 +675,8 @@ impl RohditorApp {
             }
             return;
         }
-        self.note_cpu_only_stage(&recipe, options.render.mask_overlay.is_some());
-        // Only the CPU pipeline renders the mask overlay (the GPU port is #88), so asking for it
-        // sends this preview to the CPU, even for a mask whose sliders are still neutral.
-        if self.gpu.is_some()
-            && options.render.mask_overlay.is_none()
-            && gpu_supports_recipe(&recipe)
-        {
+        self.note_cpu_only_stage(&recipe);
+        if self.gpu.is_some() && gpu_supports_recipe(&recipe) {
             let gpu_base_is_current = self
                 .document
                 .as_ref()
@@ -1853,6 +1842,9 @@ impl RohditorApp {
             });
         let output = if let Some(document) = self.document.as_mut() {
             let preparing = document.open_status.is_some() || document.preview_status.is_some();
+            if let Some(session) = self.tool.masks() {
+                masks::refresh_tint(context, document, session);
+            }
             let masks = self.tool.masks().and_then(|session| {
                 masks::overlay_model(
                     session,

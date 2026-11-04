@@ -9,7 +9,7 @@ use std::mem::size_of;
 
 use rayon::prelude::*;
 use rohditor_edit::EditRecipe;
-use rohditor_image::allocate_zeroed_u8;
+use rohditor_image::{Orientation, allocate_zeroed_u8};
 use rohditor_mask::{MaskFrame, PreparedMask};
 
 use super::local_stage::mask_error;
@@ -40,6 +40,38 @@ impl MaskAlphaImage {
     pub fn data(&self) -> &[u8] {
         &self.data
     }
+}
+
+/// The overlay of layer `layer_id` at a small size, for a frontend that wants the tint to follow
+/// a drag without waiting for a render.
+///
+/// `frame` is the developed frame and `source_orientation` the file's; the recipe's orientation
+/// override and crop apply as in a render. Mask lengths are in long-edge units, so the mask is
+/// prepared on a copy of the frame scaled to `long_edge` pixels and gives the same shape as the
+/// full-size overlay at a fraction of the cost. `Ok(None)` when the recipe has no such layer.
+///
+/// # Errors
+/// An invalid recipe or geometry, or an allocation failure.
+pub fn render_mask_overlay_preview(
+    recipe: &EditRecipe,
+    layer_id: u32,
+    frame: (usize, usize),
+    source_orientation: Orientation,
+    long_edge: usize,
+) -> Result<Option<MaskAlphaImage>, PipelineError> {
+    let scale = (long_edge.max(1) as f64 / frame.0.max(frame.1).max(1) as f64).min(1.0);
+    let small = (
+        ((frame.0 as f64 * scale).round() as usize).max(1),
+        ((frame.1 as f64 * scale).round() as usize).max(1),
+    );
+    let orientation = recipe
+        .geometry
+        .orientation_override
+        .unwrap_or(source_orientation);
+    let geometry = OutputGeometry::new(small.0, small.1, orientation, recipe.geometry.crop)?;
+    MaskOverlayPlan::prepare(recipe, layer_id, small, geometry)?
+        .map(|plan| plan.render(&CancellationToken::new()))
+        .transpose()
 }
 
 /// A requested overlay, resolved for one render: the layer's mask and the geometry to present it in.

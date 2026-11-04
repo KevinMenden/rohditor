@@ -63,16 +63,10 @@ impl RohditorApp {
             return;
         }
         self.leave_tool(context, true);
-        let left_masks = self.exit_masks_tool();
+        self.exit_masks_tool();
         match target {
             ToolKind::Crop => self.enter_crop_tool(context),
-            ToolKind::Masks => self.enter_masks_tool(context),
-            // The overlay request ends with the tool, so the preview is rendered again.
-            ToolKind::Edit if left_masks => {
-                if let Some(document_id) = self.document.as_ref().map(|document| document.id) {
-                    self.queue_preview(context, document_id);
-                }
-            }
+            ToolKind::Masks => self.enter_masks_tool(),
             ToolKind::Edit => {}
         }
     }
