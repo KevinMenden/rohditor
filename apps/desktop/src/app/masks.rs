@@ -5,7 +5,7 @@
 //! goes into the recipe as it happens, so leaving the tool has nothing to commit.
 
 use eframe::egui;
-use rohditor_core::OutputGeometry;
+use rohditor_core::{OutputGeometry, RawCropPolicy};
 use rohditor_edit::EditRecipe;
 use rohditor_engine::document::EditSession;
 use rohditor_engine::tools::{LayerEdit, MaskToolSession, MaskView, ToolKind};
@@ -21,10 +21,20 @@ use crate::ui::tool_panel;
 /// Peak opacity of the red mask tint, at alpha 1.
 const OVERLAY_TINT_OPACITY: f32 = 0.5;
 
-/// Orientation and crop of the displayed image over the developed frame. Only the aspect of
-/// the frame matters to the Masks tool, so the RAW's own size stands in for the developed one.
-fn output_geometry(info: &RawFileInfo, recipe: &EditRecipe) -> Option<OutputGeometry> {
-    geometry_for((info.width, info.height), info.orientation, recipe)
+/// Size of the developed frame (the sensor area the pipeline develops, before the user's crop
+/// and orientation) that masks are normalized over. The RAW's full sensor size is not it: masked
+/// borders are cut off, which changes the aspect and with it every long-edge length.
+fn developed_size(info: &RawFileInfo, policy: RawCropPolicy) -> Option<(usize, usize)> {
+    rohditor_core::raw_crop_dimensions(info, policy).ok()
+}
+
+/// Orientation and crop of the displayed image over the developed frame.
+fn output_geometry(
+    info: &RawFileInfo,
+    policy: RawCropPolicy,
+    recipe: &EditRecipe,
+) -> Option<OutputGeometry> {
+    geometry_for(developed_size(info, policy)?, info.orientation, recipe)
 }
 
 fn geometry_for(
@@ -45,10 +55,11 @@ pub(super) fn overlay_model<'a>(
     session: &'a MaskToolSession,
     edits: &'a EditSession,
     frame: Option<&RawFrame>,
+    policy: RawCropPolicy,
     mask_overlay: Option<&'a MaskTint>,
 ) -> Option<MaskOverlayModel<'a>> {
     let recipe = edits.recipe();
-    let geometry = output_geometry(&frame?.info, recipe)?;
+    let geometry = output_geometry(&frame?.info, policy, recipe)?;
     Some(MaskOverlayModel {
         session,
         recipe,
@@ -79,6 +90,7 @@ pub(super) fn refresh_tint(
     context: &egui::Context,
     document: &mut Document,
     session: &MaskToolSession,
+    policy: RawCropPolicy,
 ) {
     let Some(layer) = session.overlay_layer() else {
         return;
@@ -94,10 +106,14 @@ pub(super) fn refresh_tint(
     let Some(info) = document.frame.as_ref().map(|frame| &frame.info) else {
         return;
     };
+    let Some(developed) = developed_size(info, policy) else {
+        document.mask_overlay = None;
+        return;
+    };
     let alpha = rohditor_core::render_mask_overlay_preview(
         document.edits.recipe(),
         layer,
-        (info.width, info.height),
+        developed,
         info.orientation,
         TINT_LONG_EDGE,
     );
@@ -167,6 +183,43 @@ fn apply_slider(edits: &mut EditSession, next: Option<EditRecipe>, phase: Slider
     changed
 }
 
+/// Forwards one frame of viewport pointer events to the session as edit gestures. Returns
+/// whether the recipe changed.
+///
+/// A drag is one gesture: opened by the press, closed by the release. A press that grabs nothing
+/// (or a brush press that hits a limit) opens none, so no release follows and the gesture must
+/// not stay open. `begin_gesture` and `finish_gesture` are no-ops when one is already open or
+/// none is, so a release without a press is harmless.
+fn drive_pointer(
+    edits: &mut EditSession,
+    session: &mut MaskToolSession,
+    output: &MaskOverlayOutput,
+    view: &MaskView,
+) -> bool {
+    if let Some(layer) = output.select_layer {
+        session.select_layer(edits.recipe(), layer);
+    }
+    let mut changed = false;
+    if let Some(position) = output.press {
+        edits.begin_gesture();
+        let next = session.press(edits.recipe(), view, position);
+        changed |= install_during_gesture(edits, next);
+        if !session.is_dragging() {
+            edits.finish_gesture();
+        }
+    }
+    if let Some(position) = output.drag_to {
+        let next = session.drag_to(edits.recipe(), view, position);
+        changed |= install_during_gesture(edits, next);
+    }
+    if output.release {
+        let next = session.release(edits.recipe());
+        changed |= install_during_gesture(edits, next);
+        edits.finish_gesture();
+    }
+    changed
+}
+
 impl RohditorApp {
     pub(super) fn show_masks_controls(&mut self, context: &egui::Context) {
         let (Some(session), Some(document)) = (self.tool.masks(), self.document.as_ref()) else {
@@ -207,30 +260,7 @@ impl RohditorApp {
         else {
             return false;
         };
-        let edits = &mut document.edits;
-        if let Some(layer) = output.select_layer {
-            session.select_layer(edits.recipe(), layer);
-        }
-        let mut changed = false;
-        if let Some(position) = output.press {
-            edits.begin_gesture();
-            let next = session.press(edits.recipe(), view, position);
-            changed |= install_during_gesture(edits, next);
-            if !session.is_dragging() {
-                // Nothing was grabbed (or painting hit a limit): there is no gesture to end later.
-                edits.finish_gesture();
-            }
-        }
-        if let Some(position) = output.drag_to {
-            let next = session.drag_to(edits.recipe(), view, position);
-            changed |= install_during_gesture(edits, next);
-        }
-        if output.release {
-            let next = session.release(edits.recipe());
-            changed |= install_during_gesture(edits, next);
-            edits.finish_gesture();
-        }
-        changed
+        drive_pointer(&mut document.edits, session, output, view)
     }
 
     /// A changed recipe needs a new preview. Selection and overlay changes do not: the tint is
@@ -351,7 +381,7 @@ impl RohditorApp {
 mod tests {
     use super::*;
     use rohditor_edit::{LinearGradient, MaskPoint, MaskShape};
-    use rohditor_engine::tools::LocalSlider;
+    use rohditor_engine::tools::{LocalSlider, MaskEditMode};
 
     fn recipe_with_layer() -> EditRecipe {
         let mut recipe = EditRecipe::default();
@@ -429,5 +459,65 @@ mod tests {
         recipe.geometry.orientation_override = Some(Orientation::Rotate90);
         let turned = geometry_for((600, 400), Orientation::Normal, &recipe).expect("geometry");
         assert_eq!(turned.output_dimensions(), (400, 600));
+    }
+
+    fn view() -> MaskView {
+        MaskView {
+            geometry: OutputGeometry::new(600, 400, Orientation::Normal, None)
+                .expect("valid geometry"),
+            screen_scale: 1.0,
+        }
+    }
+
+    #[test]
+    fn a_press_that_grabs_nothing_leaves_no_gesture_open() {
+        let mut edits = EditSession::from_saved(recipe_with_layer());
+        let mut session = MaskToolSession::default();
+        // Select mode with nothing selected: nothing to grab, and the drag that follows moves
+        // nothing.
+        let output = MaskOverlayOutput {
+            press: Some((0.5, 0.5)),
+            drag_to: Some((0.6, 0.6)),
+            ..MaskOverlayOutput::default()
+        };
+        assert!(!drive_pointer(&mut edits, &mut session, &output, &view()));
+        assert!(!edits.gesture_active());
+        assert!(!session.is_dragging());
+        // A release without a press is harmless too.
+        let release = MaskOverlayOutput {
+            release: true,
+            ..MaskOverlayOutput::default()
+        };
+        assert!(!drive_pointer(&mut edits, &mut session, &release, &view()));
+        assert!(!edits.can_undo());
+    }
+
+    #[test]
+    fn drawing_a_gradient_is_one_undo_step() {
+        let mut edits = EditSession::from_saved(EditRecipe::default());
+        let mut session = MaskToolSession::default();
+        session.create_layer(MaskEditMode::CreateLinear);
+        let press = MaskOverlayOutput {
+            press: Some((0.2, 0.5)),
+            drag_to: Some((0.4, 0.5)),
+            ..MaskOverlayOutput::default()
+        };
+        assert!(drive_pointer(&mut edits, &mut session, &press, &view()));
+        assert!(edits.gesture_active());
+        let drag = MaskOverlayOutput {
+            drag_to: Some((0.8, 0.5)),
+            ..MaskOverlayOutput::default()
+        };
+        assert!(drive_pointer(&mut edits, &mut session, &drag, &view()));
+        let release = MaskOverlayOutput {
+            release: true,
+            ..MaskOverlayOutput::default()
+        };
+        drive_pointer(&mut edits, &mut session, &release, &view());
+        assert!(!edits.gesture_active());
+        assert_eq!(edits.recipe().local.layers.len(), 1);
+        assert!(edits.undo());
+        assert!(edits.recipe().local.layers.is_empty());
+        assert!(!edits.can_undo());
     }
 }
