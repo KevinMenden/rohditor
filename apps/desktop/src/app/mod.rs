@@ -1842,14 +1842,16 @@ impl RohditorApp {
             });
         let output = if let Some(document) = self.document.as_mut() {
             let preparing = document.open_status.is_some() || document.preview_status.is_some();
+            let crop_policy = self.settings.render_options().raw_crop_policy;
             if let Some(session) = self.tool.masks() {
-                masks::refresh_tint(context, document, session);
+                masks::refresh_tint(context, document, session, crop_policy);
             }
             let masks = self.tool.masks().and_then(|session| {
                 masks::overlay_model(
                     session,
                     &document.edits,
                     document.frame.as_deref(),
+                    crop_policy,
                     document.mask_overlay.as_ref(),
                 )
             });
