@@ -196,11 +196,11 @@ pub(crate) fn interact_and_paint(
     } else if let Some(hover) = hover.filter(|hover| image_rect.contains(*hover)) {
         if model.session.mode != MaskEditMode::Select {
             context.set_cursor_icon(egui::CursorIcon::Crosshair);
-        } else if let Some(handle) = model.session.hit_test(
-            model.recipe,
-            &view,
-            to_display(image_rect, hover),
-        ) {
+        } else if let Some(handle) =
+            model
+                .session
+                .hit_test(model.recipe, &view, to_display(image_rect, hover))
+        {
             context.set_cursor_icon(cursor_for(handle));
         }
     }
@@ -327,7 +327,11 @@ fn paint_linear(
     }
     halo_line(painter, &[start, end], 1.0);
     let ring = start.lerp(center, 0.5);
-    painter.circle_stroke(ring, 5.0, egui::Stroke::new(3.0_f32, egui::Color32::from_black_alpha(150)));
+    painter.circle_stroke(
+        ring,
+        5.0,
+        egui::Stroke::new(3.0_f32, egui::Color32::from_black_alpha(150)),
+    );
     painter.circle_stroke(ring, 5.0, egui::Stroke::new(1.5_f32, egui::Color32::WHITE));
     paint_handle(painter, start, HANDLE_RADIUS - 1.0);
     paint_handle(painter, end, HANDLE_RADIUS - 1.0);
@@ -381,7 +385,10 @@ mod tests {
         for scale in [0.0_f32, 0.25, 0.5, 1.0] {
             let marker =
                 center + ((x - center) + (y - center)) * (std::f32::consts::FRAC_1_SQRT_2 * scale);
-            assert!((inner_scale(center, x, y, marker) - scale).abs() < 1e-5, "{scale}");
+            assert!(
+                (inner_scale(center, x, y, marker) - scale).abs() < 1e-5,
+                "{scale}"
+            );
         }
     }
 

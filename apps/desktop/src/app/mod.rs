@@ -83,6 +83,7 @@ mod events;
 mod gpu;
 #[path = "lifecycle.rs"]
 mod lifecycle;
+mod masks;
 mod tools;
 
 use camera_look::CameraLookState;
@@ -163,6 +164,8 @@ struct Document {
     frame: Option<Arc<RawFrame>>,
     edits: EditSession,
     texture: Option<PreviewTexture>,
+    /// The selected mask's alpha as a red tint, kept while the next frame renders.
+    mask_overlay: Option<egui::TextureHandle>,
     preview_pixels: Option<DisplayPreviewPixels>,
     preview_source: Option<PreviewSource>,
     histogram: Option<Histogram>,
@@ -208,6 +211,7 @@ impl Document {
             frame: None,
             edits: EditSession::from_saved(recipe),
             texture: None,
+            mask_overlay: None,
             preview_pixels: None,
             preview_source: None,
             histogram: None,
@@ -589,9 +593,12 @@ impl RohditorApp {
 
     /// Show why the CPU renders this recipe although the GPU is available.
     /// This is a routing choice, not a GPU failure: the GPU stays enabled.
-    fn note_cpu_only_stage(&mut self, recipe: &EditRecipe) {
+    fn note_cpu_only_stage(&mut self, recipe: &EditRecipe, mask_overlay: bool) {
         const PREFIX: &str = "CPU-only stage: ";
-        match rohditor_core::cpu_only_stage_reason(recipe) {
+        // The mask overlay is only rendered by the CPU pipeline (the GPU port is #88).
+        let reason = rohditor_core::cpu_only_stage_reason(recipe)
+            .or_else(|| mask_overlay.then_some("mask overlay"));
+        match reason {
             Some(reason) if self.gpu.is_some() => {
                 self.processor_note = Some(format!("{PREFIX}{reason}"));
             }
@@ -674,7 +681,7 @@ impl RohditorApp {
             }
             return;
         }
-        self.note_cpu_only_stage(&recipe);
+        self.note_cpu_only_stage(&recipe, options.render.mask_overlay.is_some());
         // Only the CPU pipeline renders the mask overlay (the GPU port is #88), so asking for it
         // sends this preview to the CPU, even for a mask whose sliders are still neutral.
         if self.gpu.is_some()
@@ -1846,6 +1853,14 @@ impl RohditorApp {
             });
         let output = if let Some(document) = self.document.as_mut() {
             let preparing = document.open_status.is_some() || document.preview_status.is_some();
+            let masks = self.tool.masks().and_then(|session| {
+                masks::overlay_model(
+                    session,
+                    &document.edits,
+                    document.frame.as_deref(),
+                    document.mask_overlay.as_ref(),
+                )
+            });
             viewport::show(
                 context,
                 ViewportModel {
@@ -1855,6 +1870,7 @@ impl RohditorApp {
                     source: document.preview_source,
                     picker_mode: self.tool.picker(),
                     crop: crop_overlay,
+                    masks,
                 },
                 &mut document.view,
             )
@@ -1869,6 +1885,7 @@ impl RohditorApp {
                     source: None,
                     picker_mode: None,
                     crop: None,
+                    masks: None,
                 },
                 &mut empty_view,
             )
@@ -1894,6 +1911,7 @@ impl RohditorApp {
         {
             session.finish_drag();
         }
+        self.apply_mask_pointer(context, &output.masks);
     }
 
     fn apply_white_balance_pick(&mut self, context: &egui::Context, normalized: egui::Pos2) {

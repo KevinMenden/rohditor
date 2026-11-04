@@ -7,7 +7,7 @@
 use rohditor_core::OutputGeometry;
 use rohditor_edit::{
     BrushMask, BrushStroke, EditRecipe, LinearGradient, MAX_BRUSH_POINTS, MAX_BRUSH_STROKES,
-    MAX_MASK_LAYERS, MaskPoint, MaskShape, NormalizedCropRect, RadialGradient,
+    MAX_MASK_LAYERS, MaskMode, MaskPoint, MaskShape, NormalizedCropRect, RadialGradient,
 };
 use rohditor_image::Orientation;
 
@@ -242,6 +242,29 @@ fn creating_with_a_layer_selected_adds_a_component_to_it() {
     harness.gesture((0.1, 0.1), &[(0.4, 0.4)]);
     assert_eq!(harness.recipe().local.layers.len(), 2);
     assert_eq!(harness.session.selected_layer, Some(1));
+}
+
+#[test]
+fn a_gradient_drawn_into_a_layer_takes_the_requested_mode_but_a_new_layer_stays_add() {
+    let mut harness = Harness::selecting(linear_shape());
+    harness
+        .session
+        .create_component(MaskEditMode::CreateRadial, MaskMode::Subtract);
+    harness.gesture((0.5, 0.5), &[(0.6, 0.5)]);
+    let components = &harness.recipe().local.layer(0).expect("layer").components;
+    assert_eq!(components[0].mode, MaskMode::Add);
+    assert_eq!(components[1].mode, MaskMode::Subtract);
+    assert!(harness.recipe().validate().is_ok());
+
+    // Even with Subtract pending, the first component of a new layer has to be Add.
+    harness.session.selected_layer = None;
+    harness
+        .session
+        .create_component(MaskEditMode::CreateLinear, MaskMode::Subtract);
+    harness.gesture((0.1, 0.1), &[(0.4, 0.4)]);
+    let new_layer = harness.recipe().local.layer(1).expect("new layer");
+    assert_eq!(new_layer.components[0].mode, MaskMode::Add);
+    assert!(harness.recipe().validate().is_ok());
 }
 
 #[test]

@@ -12,7 +12,7 @@ use rohditor_engine::coordinator::{JobKind, PreviewResolution, WorkerEvent};
 
 use super::{
     DocumentPreviewDiagnostics, RohditorApp, default_recipe_for_document, document_as_shot_colour,
-    install_texture,
+    install_texture, masks,
 };
 
 impl RohditorApp {
@@ -112,8 +112,7 @@ impl RohditorApp {
                 resolution,
                 image,
                 histogram,
-                // Drawn by the desktop Masks tool (#85).
-                mask_overlay: _,
+                mask_overlay,
                 diagnostics,
             } => {
                 let intent = match resolution {
@@ -164,6 +163,11 @@ impl RohditorApp {
                         PreviewSource::developed(diagnostics.algorithm, false)
                     };
                     install_texture(context, document, image, source);
+                    // Replace the tint only with a new one: until then the last one stays, so a
+                    // drag does not flicker between frames.
+                    if let Some(alpha) = mask_overlay.as_deref() {
+                        masks::install_overlay(context, document, alpha);
+                    }
                     if resolution != PreviewResolution::CropToolFullFrame {
                         document.histogram = Some(*histogram);
                         document.histogram_revision = Some(ticket.revision);
