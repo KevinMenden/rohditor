@@ -92,6 +92,48 @@ impl OutputGeometry {
         self.orientation
             .source_coordinate_in_bounds(self.crop.left + output_x, self.crop.top + output_y)
     }
+
+    /// Size of the developed frame: the image as it enters the adjustment stage, before
+    /// orientation and crop. Mask layers live in this frame.
+    #[must_use]
+    pub const fn developed_dimensions(self) -> (usize, usize) {
+        self.orientation.source_dimensions()
+    }
+
+    /// Length of the developed frame's long edge in pixels: one long-edge unit (the unit of
+    /// mask radii) is this many output pixels, since orientation and crop do not scale.
+    #[must_use]
+    pub fn developed_long_edge(self) -> f64 {
+        let (width, height) = self.developed_dimensions();
+        width.max(height) as f64
+    }
+
+    /// Normalized position over the displayed (oriented, cropped) image, `0..1` on both axes,
+    /// to the normalized position over the developed frame. Continuous, and extends linearly
+    /// outside the image so a pointer dragged past an edge still maps to a mask point.
+    ///
+    /// Agrees with [`Self::source_coordinate_in_bounds`] at pixel centres. This is the one
+    /// place to change when straighten/rotation is added.
+    #[must_use]
+    pub fn display_to_developed(self, point: (f64, f64)) -> (f64, f64) {
+        let (full_width, full_height) = self.full_dimensions();
+        let canvas = (
+            (self.crop.left as f64 + point.0 * self.crop.width() as f64) / full_width as f64,
+            (self.crop.top as f64 + point.1 * self.crop.height() as f64) / full_height as f64,
+        );
+        self.orientation.source_point(canvas)
+    }
+
+    /// Inverse of [`Self::display_to_developed`].
+    #[must_use]
+    pub fn developed_to_display(self, point: (f64, f64)) -> (f64, f64) {
+        let (full_width, full_height) = self.full_dimensions();
+        let canvas = self.orientation.output_point(point);
+        (
+            (canvas.0 * full_width as f64 - self.crop.left as f64) / self.crop.width() as f64,
+            (canvas.1 * full_height as f64 - self.crop.top as f64) / self.crop.height() as f64,
+        )
+    }
 }
 
 fn validate_normalized_crop(crop: NormalizedCropRect) -> Result<(), PipelineError> {
@@ -147,6 +189,110 @@ mod tests {
         );
         assert_eq!(geometry.output_dimensions(), (3, 3));
         assert_eq!(geometry.source_coordinate_in_bounds(0, 0), (0, 3));
+    }
+
+    const ORIENTATIONS: [Orientation; 9] = [
+        Orientation::Normal,
+        Orientation::HorizontalFlip,
+        Orientation::Rotate180,
+        Orientation::VerticalFlip,
+        Orientation::Transpose,
+        Orientation::Rotate90,
+        Orientation::Transverse,
+        Orientation::Rotate270,
+        Orientation::Unknown,
+    ];
+
+    /// A developed frame that is neither square nor symmetric under any orientation, with an
+    /// off-centre crop, so a wrong axis, flip or crop offset cannot go unnoticed.
+    fn cropped_geometry(orientation: Orientation) -> OutputGeometry {
+        OutputGeometry::new(
+            11,
+            7,
+            orientation,
+            Some(NormalizedCropRect {
+                left: 0.2,
+                top: 0.1,
+                right: 0.9,
+                bottom: 0.7,
+            }),
+        )
+        .expect("valid crop")
+    }
+
+    #[test]
+    fn display_to_developed_agrees_with_the_pixel_mapping_for_every_orientation() {
+        for orientation in ORIENTATIONS {
+            let geometry = cropped_geometry(orientation);
+            let (width, height) = geometry.output_dimensions();
+            let (developed_width, developed_height) = geometry.developed_dimensions();
+            for y in 0..height {
+                for x in 0..width {
+                    let (source_x, source_y) = geometry.source_coordinate_in_bounds(x, y);
+                    let developed = geometry.display_to_developed((
+                        (x as f64 + 0.5) / width as f64,
+                        (y as f64 + 0.5) / height as f64,
+                    ));
+                    // The centre of the source pixel in normalized developed coordinates.
+                    let expected = (
+                        (source_x as f64 + 0.5) / developed_width as f64,
+                        (source_y as f64 + 0.5) / developed_height as f64,
+                    );
+                    assert!(
+                        (developed.0 - expected.0).abs() < 1e-12
+                            && (developed.1 - expected.1).abs() < 1e-12,
+                        "{orientation} at ({x}, {y}): got {developed:?}, want {expected:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn display_and_developed_round_trip_including_outside_the_image() {
+        for orientation in ORIENTATIONS {
+            let geometry = cropped_geometry(orientation);
+            for point in [(0.0, 0.0), (0.3, 0.9), (1.0, 1.0), (-0.5, 1.4), (1.8, -0.7)] {
+                let back = geometry.developed_to_display(geometry.display_to_developed(point));
+                assert!(
+                    (back.0 - point.0).abs() < 1e-12 && (back.1 - point.1).abs() < 1e-12,
+                    "{orientation}: {point:?} came back as {back:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_displayed_corners_map_to_the_crop_corners_of_the_developed_frame() {
+        // Rotate90 on a 3x5 source: the oriented canvas is 5x3 and the crop keeps columns
+        // 1..4. Display (0, 0) is the top-left corner of oriented pixel (1, 0), which is source
+        // pixel (0, 3) (see `crop_resolves_edges_in_oriented_canvas_before_mapping_to_source`);
+        // that corner is the source pixel's bottom-left one, at x = 0, y = 4/5.
+        let geometry = OutputGeometry::new(
+            3,
+            5,
+            Orientation::Rotate90,
+            Some(NormalizedCropRect {
+                left: 0.2,
+                top: 0.0,
+                right: 0.8,
+                bottom: 1.0,
+            }),
+        )
+        .expect("valid crop");
+        let corner = geometry.display_to_developed((0.0, 0.0));
+        assert!((corner.0 - 0.0).abs() < 1e-12 && (corner.1 - 4.0 / 5.0).abs() < 1e-12);
+        let opposite = geometry.display_to_developed((1.0, 1.0));
+        assert!((opposite.0 - 1.0).abs() < 1e-12 && (opposite.1 - 1.0 / 5.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn the_long_edge_is_the_developed_frames_regardless_of_orientation() {
+        for orientation in ORIENTATIONS {
+            let geometry = cropped_geometry(orientation);
+            assert_eq!(geometry.developed_dimensions(), (11, 7));
+            assert!((geometry.developed_long_edge() - 11.0).abs() < f64::EPSILON);
+        }
     }
 
     #[test]
