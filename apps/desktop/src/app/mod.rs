@@ -61,7 +61,7 @@ use rohditor_engine::document::{EditSession, PreviewIntent, PreviewTicket};
 use rohditor_engine::preview_cache::PreviewCacheHits;
 use rohditor_engine::session;
 use rohditor_engine::settings::{self, AppSettings};
-use rohditor_engine::tools::{ActiveTool, Picker, ToolKind};
+use rohditor_engine::tools::{ActiveTool, MaskToolSession, Picker, ToolKind};
 use rohditor_engine::wake::WakeFn;
 
 const GPU_HISTOGRAM_DEBOUNCE: Duration = Duration::from_millis(75);
@@ -578,8 +578,11 @@ impl RohditorApp {
     }
 
     fn preview_options(&self) -> PreviewOptions {
+        let mut render = self.settings.render_options();
+        // The Masks tool asks for the selected mask's alpha to draw over the preview.
+        render.mask_overlay = self.tool.masks().and_then(MaskToolSession::overlay_layer);
         PreviewOptions {
-            render: self.settings.render_options(),
+            render,
             ..PreviewOptions::default()
         }
     }
@@ -672,7 +675,12 @@ impl RohditorApp {
             return;
         }
         self.note_cpu_only_stage(&recipe);
-        if self.gpu.is_some() && gpu_supports_recipe(&recipe) {
+        // Only the CPU pipeline renders the mask overlay (the GPU port is #88), so asking for it
+        // sends this preview to the CPU, even for a mask whose sliders are still neutral.
+        if self.gpu.is_some()
+            && options.render.mask_overlay.is_none()
+            && gpu_supports_recipe(&recipe)
+        {
             let gpu_base_is_current = self
                 .document
                 .as_ref()
