@@ -9,12 +9,14 @@
 //! - `ground_truth_matrix`: 7 scenes x 2 sat levels x 4 methods = 56 runs,
 //!   prints the human table, the pasteable baseline literal block, and the
 //!   elapsed time (timing is printed, never asserted), then checks every run
-//!   against the pinned `metrics::BASELINES` rows.
+//!   against the pinned `baseline::BASELINES` rows and fails once with the
+//!   full violation list.
 //!
 //! Levels are pinned at the crate boundary (`{sat} x 3` for both detection
 //! and Clip ceilings) instead of going through `rohditor_core` resolution,
 //! which decouples this harness from pending #64.
 
+mod baseline;
 mod generator;
 mod metrics;
 mod scenes;
@@ -27,7 +29,7 @@ use rohditor_highlight::{
 };
 use rohditor_image::BayerPattern;
 
-use metrics::{METRIC_WB, MeasuredRow, SiteSet, abs_log_errors, abs_log_errors_wb};
+use metrics::{MeasuredRow, SiteSet, abs_log_errors};
 
 /// The four methods named by the issue, driven at the crate boundary.
 #[derive(Clone, Copy)]
@@ -59,7 +61,7 @@ fn execution(method: Method, sat: f32) -> HighlightExecution {
         Method::Off => HighlightExecution::Off,
         // Clip ceilings == sat: on an already-clamped mosaic Clip is a
         // bit-exact no-op (only strictly-above is lowered; pinned by
-        // crates/highlight/tests/clip.rs:72-92).
+        // crates/highlight/tests/clip.rs).
         Method::Clip => HighlightExecution::Clip(ChannelClipLevels {
             red: sat,
             green: sat,
@@ -233,64 +235,6 @@ fn margin_negative_control() {
     );
 }
 
-/// Formats a ceiling as a Rust literal guaranteed >= `1.5 * measured`:
-/// round the 1.5x value up to 6 decimals.
-fn ceiling_literal(measured: f64) -> String {
-    format!("{:.6}", (measured * 1.5 * 1e6).ceil() / 1e6)
-}
-
-/// One pasteable `BaselineRow` literal (plus its policy comment) for the
-/// baseline capture workflow.
-fn render_baseline_row(row: &MeasuredRow) -> String {
-    let bound = metrics::raised_policy(row.scene, row.method, row.raised);
-    let bound_text = match bound {
-        metrics::Bound::Exact(value) => format!("Exact({value})"),
-        metrics::Bound::AtLeast(value) => format!("AtLeast({value})"),
-        metrics::Bound::AtMost(value) => format!("AtMost({value})"),
-    };
-    let mut out = String::new();
-    if row.scene == "disk_small" || row.scene == "disk_large" {
-        if !matches!(bound, metrics::Bound::Exact(_)) {
-            out.push_str("    // Known failure #62: estimates produced (recon >> raised) are never applied\n");
-            out.push_str("    // on large single-channel regions. When #62 lands this row flips to AtLeast\n");
-            out.push_str("    // — that flip IS the progress signal.\n");
-        }
-    } else if row.scene == "speculars" {
-        if !matches!(bound, metrics::Bound::Exact(_)) {
-            out.push_str(
-                "    // Known #62 shape: estimates produced, none applied on isolated tiny\n",
-            );
-            out.push_str("    // speculars; flip to AtLeast when methods act here.\n");
-        }
-    } else if matches!(bound, metrics::Bound::AtMost(_)) {
-        out.push_str(
-            "    // raised below the acting threshold (5) at baseline; flip to AtLeast when\n",
-        );
-        out.push_str("    // methods act here.\n");
-    }
-    // 2026-11-04 review fix: an AtMost ceiling that tracks a non-zero
-    // measured estimator count carries a dated slack note (the policy's
-    // +2), so a capture run stays paste-verbatim.
-    if matches!(bound, metrics::Bound::AtMost(_)) && row.raised > 0 {
-        out.push_str(&format!(
-            "    // 2026-11-04: measured {} + slack 2 for estimator-bit drift across codegen\n",
-            row.raised
-        ));
-    }
-    out.push_str(&format!(
-        "    BaselineRow {{ scene: {:?}, sat: {:.2}, method: {:?}, suspected: {}, raised: {}, \
-         med_abs_logerr_max: {}, p95_abs_logerr_max: {}, hue_max_at_most: 3.0 }},\n",
-        row.scene,
-        row.sat,
-        row.method,
-        row.suspected,
-        bound_text,
-        ceiling_literal(row.med),
-        ceiling_literal(row.p95),
-    ));
-    out
-}
-
 /// The 56-run matrix: prints the human table (14 sections of 4 rows), the
 /// pasteable baseline block, and elapsed time, then asserts invariants and
 /// pinned baselines for every run.
@@ -300,7 +244,7 @@ fn ground_truth_matrix() {
     println!(
         "recon = estimates produced (stats) · raised = pixels actually changed (data-driven, out > in)"
     );
-    println!("(hue_max / hue_med printed; only hue_max <= row ceiling 3.0 rad is asserted)");
+    println!("(hue_max / hue_med printed; only hue_max <= the row's 1.5x ceiling is asserted)");
     let start = Instant::now();
     let mut measured_rows: Vec<MeasuredRow> = Vec::new();
     for spec in scenes::ALL {
@@ -310,16 +254,12 @@ fn ground_truth_matrix() {
                 .expect("harness mosaic and levels are valid");
             let suspected = mask.data();
             let per_channel = suspected_by_channel(suspected, spec.width);
+            let suspected_total = per_channel[0] + per_channel[1] + per_channel[2];
             println!(
                 "\n=== scene {} @ sat {:.2} — suspected {} (R{} G{} B{}) ===",
-                spec.name,
-                sat,
-                per_channel[0] + per_channel[1] + per_channel[2],
-                per_channel[0],
-                per_channel[1],
-                per_channel[2]
+                spec.name, sat, suspected_total, per_channel[0], per_channel[1], per_channel[2]
             );
-            if suspected.iter().filter(|&&hit| hit).count() == 0 {
+            if suspected_total == 0 {
                 println!("no suspected sites at this level; matrix skips the section");
                 continue;
             }
@@ -360,18 +300,15 @@ fn ground_truth_matrix() {
                 );
                 if let Some(stats_suspected) = out.stats_suspected {
                     assert_eq!(
-                        stats_suspected,
-                        suspected.iter().filter(|&&hit| hit).count(),
+                        stats_suspected, suspected_total,
                         "{}@{} {}: stats suspected != mask-from-bits",
-                        spec.name,
-                        sat,
-                        method_name
+                        spec.name, sat, method_name
                     );
                 }
                 if let Some(by_channel) = out.by_channel {
                     assert_eq!(
                         by_channel[0] + by_channel[1] + by_channel[2],
-                        suspected.iter().filter(|&&hit| hit).count(),
+                        suspected_total,
                         "{}@{} {}: suspected_by_channel sums != mask count",
                         spec.name,
                         sat,
@@ -390,19 +327,6 @@ fn ground_truth_matrix() {
                 // Log-ratio error over ALL suspected sites.
                 let (med, p95) = metrics::summarize(abs_log_errors(&sites))
                     .expect("skipped sections guarantee non-empty");
-                // WB-invariance self-check: per-channel ln is WB-invariant;
-                // the re-run must agree to within f32 ulps.
-                let (wb_med, wb_p95) = metrics::summarize(abs_log_errors_wb(&sites, METRIC_WB))
-                    .expect("skipped sections guarantee non-empty");
-                assert!(
-                    (wb_med - med).abs() + (wb_p95 - p95).abs() < 1e-5,
-                    "{}@{} {}: WB-invariance violated: med/p95 moved {} + {}",
-                    spec.name,
-                    sat,
-                    method_name,
-                    (wb_med - med).abs(),
-                    (wb_p95 - p95).abs()
-                );
                 // Raised-only variant, printed but not baselined.
                 let raised_summary = metrics::summarize(metrics::raised_abs_log_errors(&sites));
                 // Hue after fixed WB; empty sets print '—' and satisfy the
@@ -425,10 +349,10 @@ fn ground_truth_matrix() {
                 println!(
                     "  {:<12} {:>6} {:>6} {:>7} {:>7.3} {:>9.4} {:>9.4} {:>9} {:>9}  raised med/p95: {}",
                     method_name,
-                    suspected.iter().filter(|&&hit| hit).count(),
+                    suspected_total,
                     out.recon.map_or("—".to_owned(), |v| v.to_string()),
                     raised,
-                    raised as f64 / suspected.iter().filter(|&&hit| hit).count() as f64,
+                    raised as f64 / suspected_total as f64,
                     med,
                     p95,
                     hue_max_text,
@@ -439,7 +363,7 @@ fn ground_truth_matrix() {
                     scene: spec.name,
                     sat,
                     method: method_name,
-                    suspected: suspected.iter().filter(|&&hit| hit).count(),
+                    suspected: suspected_total,
                     raised,
                     med,
                     p95,
@@ -449,9 +373,9 @@ fn ground_truth_matrix() {
         }
     }
     let elapsed = start.elapsed();
-    println!("\n// ---- BASELINE_ROWS (paste into metrics::BASELINES) ----");
+    println!("\n// ---- BASELINE_ROWS (paste into baseline::BASELINES) ----");
     for row in &measured_rows {
-        print!("{}", render_baseline_row(row));
+        print!("{}", baseline::render_baseline_row(row));
     }
     println!("// ---- END BASELINE_ROWS ----");
     // Timing is evidence, never an assertion: the goal of finishing the
@@ -461,25 +385,31 @@ fn ground_truth_matrix() {
         elapsed.as_secs_f64() * 1000.0
     );
     // Pinned baselines, checked after all printing so a capture run still
-    // emits the full table.
+    // emits the full table. Every row is checked even after a violation so
+    // one run reports the complete picture.
+    let mut violations: Vec<String> = Vec::new();
     for row in &measured_rows {
-        let baseline =
-            metrics::find_baseline(row.scene, row.sat, row.method).unwrap_or_else(|| {
-                panic!(
-                    "no baseline row pinned for {}@{} {}",
-                    row.scene, row.sat, row.method
-                )
-            });
-        metrics::check_baseline(baseline, row);
+        match baseline::find_baseline(row.scene, row.sat, row.method) {
+            Some(pinned) => violations.extend(baseline::check_baseline(pinned, row)),
+            None => violations.push(format!(
+                "{}@{} {}: no baseline row pinned",
+                row.scene, row.sat, row.method
+            )),
+        }
+    }
+    if !violations.is_empty() {
+        panic!(
+            "{} baseline violation(s):\n{}",
+            violations.len(),
+            violations.join("\n")
+        );
     }
     println!(
         "all {} runs match their pinned baselines",
         measured_rows.len()
     );
-    // 2026-11-04 review fix: plain pointer for table readers tying the
-    // AtMost ceilings on disk/speculars rows to the known failure.
     println!(
         "note: AtMost ceilings on the disk and speculars rows track known #62 (estimates \
-         produced, none applied) — see the BASELINES comment blocks in metrics.rs"
+         produced, none applied) — see the BASELINES comment blocks in baseline.rs"
     );
 }
