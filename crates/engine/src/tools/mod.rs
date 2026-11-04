@@ -5,8 +5,12 @@
 //! caller owns undo (via `EditSession::set_discrete`) and preview scheduling.
 
 mod crop;
+mod masks;
 
 pub use crop::{CropAspect, CropHandle, CropToolSession};
+pub use masks::{
+    BrushSettings, HandleMarker, MaskEditMode, MaskHandle, MaskLimit, MaskToolSession, MaskView,
+};
 
 use rohditor_edit::EditRecipe;
 
@@ -15,6 +19,7 @@ use rohditor_edit::EditRecipe;
 pub enum ToolKind {
     Edit,
     Crop,
+    Masks,
 }
 
 /// Viewport sampling modes of the Edit tool. They are mutually exclusive, so
@@ -30,6 +35,7 @@ pub enum Picker {
 pub enum ActiveTool {
     Edit { picker: Option<Picker> },
     Crop(CropToolSession),
+    Masks(MaskToolSession),
 }
 
 impl Default for ActiveTool {
@@ -43,13 +49,14 @@ impl ActiveTool {
         match self {
             Self::Edit { .. } => ToolKind::Edit,
             Self::Crop(_) => ToolKind::Crop,
+            Self::Masks(_) => ToolKind::Masks,
         }
     }
 
     pub const fn picker(&self) -> Option<Picker> {
         match self {
             Self::Edit { picker } => *picker,
-            Self::Crop(_) => None,
+            Self::Crop(_) | Self::Masks(_) => None,
         }
     }
 
@@ -64,20 +71,39 @@ impl ActiveTool {
     pub const fn crop(&self) -> Option<&CropToolSession> {
         match self {
             Self::Crop(session) => Some(session),
-            Self::Edit { .. } => None,
+            Self::Edit { .. } | Self::Masks(_) => None,
         }
     }
 
     pub fn crop_mut(&mut self) -> Option<&mut CropToolSession> {
         match self {
             Self::Crop(session) => Some(session),
-            Self::Edit { .. } => None,
+            Self::Edit { .. } | Self::Masks(_) => None,
+        }
+    }
+
+    pub const fn masks(&self) -> Option<&MaskToolSession> {
+        match self {
+            Self::Masks(session) => Some(session),
+            Self::Edit { .. } | Self::Crop(_) => None,
+        }
+    }
+
+    pub fn masks_mut(&mut self) -> Option<&mut MaskToolSession> {
+        match self {
+            Self::Masks(session) => Some(session),
+            Self::Edit { .. } | Self::Crop(_) => None,
         }
     }
 
     /// Switches to the Crop tool; an active picker is dropped.
     pub fn enter_crop(&mut self, session: CropToolSession) {
         *self = Self::Crop(session);
+    }
+
+    /// Switches to the Masks tool; an active picker is dropped.
+    pub fn enter_masks(&mut self, session: MaskToolSession) {
+        *self = Self::Masks(session);
     }
 
     /// Rail click on `requested`: the active tool's own button returns to Edit.
@@ -93,7 +119,8 @@ impl ActiveTool {
     ///
     /// Pure over `EditRecipe`: the caller owns undo and revisions. A crop is
     /// only committed when the full frame was available to author against and
-    /// the draft differs from the recipe's crop.
+    /// the draft differs from the recipe's crop. Masks have nothing to commit:
+    /// every mask edit already went into the recipe as it happened.
     #[must_use]
     pub fn leave(self, recipe: &EditRecipe, commit: bool) -> Option<EditRecipe> {
         match self {
@@ -104,7 +131,7 @@ impl ActiveTool {
                 next.geometry.crop = session.committed_crop();
                 Some(next)
             }
-            Self::Crop(_) | Self::Edit { .. } => None,
+            Self::Crop(_) | Self::Masks(_) | Self::Edit { .. } => None,
         }
     }
 }
@@ -152,6 +179,45 @@ mod tests {
         let crop = ActiveTool::Crop(modified_session(true));
         assert_eq!(crop.toggle_target(ToolKind::Crop), ToolKind::Edit);
         assert_eq!(crop.toggle_target(ToolKind::Edit), ToolKind::Edit);
+    }
+
+    #[test]
+    fn entering_masks_drops_an_active_picker() {
+        let mut tool = ActiveTool::Edit {
+            picker: Some(Picker::ColorMixer),
+        };
+        tool.enter_masks(MaskToolSession::default());
+        assert_eq!(tool.kind(), ToolKind::Masks);
+        assert_eq!(tool.picker(), None);
+        assert!(tool.masks().is_some() && tool.crop().is_none());
+        // Pickers do not exist in the Masks tool.
+        tool.set_picker(Some(Picker::WhiteBalance));
+        assert_eq!(tool.picker(), None);
+        // Returning to Edit starts without a picker.
+        assert_eq!(ActiveTool::default().picker(), None);
+    }
+
+    #[test]
+    fn leaving_masks_commits_nothing() {
+        let mut session = MaskToolSession::default();
+        session.selected_layer = Some(2);
+        session.mode = MaskEditMode::CreateLinear;
+        let tool = ActiveTool::Masks(session);
+        // Committing or not, there is nothing to add: every edit already went into the recipe.
+        let recipe = EditRecipe::default();
+        assert_eq!(tool.clone().leave(&recipe, true), None);
+        assert_eq!(tool.leave(&recipe, false), None);
+    }
+
+    #[test]
+    fn the_masks_button_toggles_like_the_crop_button() {
+        let masks = ActiveTool::Masks(MaskToolSession::default());
+        assert_eq!(masks.toggle_target(ToolKind::Masks), ToolKind::Edit);
+        assert_eq!(masks.toggle_target(ToolKind::Crop), ToolKind::Crop);
+        assert_eq!(
+            ActiveTool::default().toggle_target(ToolKind::Masks),
+            ToolKind::Masks
+        );
     }
 
     #[test]

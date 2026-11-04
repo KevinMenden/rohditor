@@ -20,6 +20,7 @@ pub(super) fn tool_panel_model(document: Option<&Document>, tool: ToolKind) -> T
     let (title, subtitle) = match tool {
         ToolKind::Edit => ("Develop", "NON-DESTRUCTIVE RAW ADJUSTMENTS"),
         ToolKind::Crop => ("Crop", "NON-DESTRUCTIVE GEOMETRY"),
+        ToolKind::Masks => ("Masks", "LOCAL ADJUSTMENTS"),
     };
     ToolPanelModel {
         title,
@@ -48,7 +49,9 @@ impl RohditorApp {
     pub(super) fn show_tool_panel(&mut self, context: &egui::Context) {
         self.handle_tool_shortcuts(context);
         match self.tool.kind() {
-            ToolKind::Edit => self.show_adjustment_panel(context),
+            // The rail does not offer Masks yet; its panel arrives with the desktop Masks tool
+            // (#85). Until then the Edit panel is the safe fallback.
+            ToolKind::Edit | ToolKind::Masks => self.show_adjustment_panel(context),
             ToolKind::Crop => self.show_crop_controls(context),
         }
     }
