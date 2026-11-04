@@ -286,6 +286,10 @@ mod tests {
         })
     }
 
+    fn layer(recipe: &EditRecipe) -> &MaskLayer {
+        recipe.local.layer(0).expect("layer 0 exists")
+    }
+
     /// Layer 0 with `components` gradients, then layer 1 with one.
     fn recipe(components: usize) -> EditRecipe {
         let mut recipe = EditRecipe::default();
@@ -315,7 +319,7 @@ mod tests {
                 .apply(&base, 0)
                 .expect("a value in range");
             assert!(next.validate().is_ok());
-            assert_eq!(slider.get(next.local.layer(0).unwrap()), target);
+            assert_eq!(slider.get(layer(&next)), target);
             assert!(
                 LayerEdit::Slider(slider, range.maximum + 1.0)
                     .apply(&base, 0)
@@ -337,7 +341,7 @@ mod tests {
             .apply(&recipe(1), 0)
             .expect("renamed");
         assert!(next.validate().is_ok());
-        assert_eq!(next.local.layer(0).unwrap().name.len(), MAX_MASK_NAME_BYTES);
+        assert_eq!(layer(&next).name.len(), MAX_MASK_NAME_BYTES);
     }
 
     #[test]
@@ -350,17 +354,14 @@ mod tests {
         assert!(subtract(0).apply(&base, 0).is_none());
         let next = subtract(1).apply(&base, 0).expect("second component");
         assert!(next.validate().is_ok());
-        assert_eq!(
-            next.local.layer(0).unwrap().components[1].mode,
-            MaskMode::Subtract
-        );
+        assert_eq!(layer(&next).components[1].mode, MaskMode::Subtract);
         let inverted = LayerEdit::ComponentInvert {
             component: 0,
             invert: true,
         }
         .apply(&base, 0)
         .expect("invert");
-        assert!(inverted.local.layer(0).unwrap().components[0].invert);
+        assert!(layer(&inverted).components[0].invert);
     }
 
     #[test]
@@ -405,18 +406,15 @@ mod tests {
         // Deleting the first component makes the next one first, and that one must be Add.
         let next = session.delete_component(&base, 0, 0).expect("deleted");
         assert!(next.validate().is_ok());
-        assert_eq!(next.local.layer(0).unwrap().components.len(), 2);
-        assert_eq!(
-            next.local.layer(0).unwrap().components[0].mode,
-            MaskMode::Add
-        );
+        assert_eq!(layer(&next).components.len(), 2);
+        assert_eq!(layer(&next).components[0].mode, MaskMode::Add);
         assert_eq!(session.selected_component, Some(0));
 
         // Deleting the selected last component moves the selection up.
         session.select_component(&next, 1);
         let next = session.delete_component(&next, 0, 1).expect("deleted");
         assert_eq!(session.selected_component, Some(0));
-        assert_eq!(next.local.layer(0).unwrap().components.len(), 1);
+        assert_eq!(layer(&next).components.len(), 1);
     }
 
     #[test]
@@ -427,7 +425,7 @@ mod tests {
         session.select_component(&base, 2);
         let next = session.delete_component(&base, 0, 0).expect("deleted");
         assert_eq!(session.selected_component, Some(1));
-        assert_eq!(next.local.layer(0).unwrap().components.len(), 2);
+        assert_eq!(layer(&next).components.len(), 2);
     }
 
     #[test]

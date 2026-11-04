@@ -9,7 +9,8 @@ use rohditor_core::{MaskAlphaImage, OutputGeometry};
 use rohditor_edit::EditRecipe;
 use rohditor_engine::document::EditSession;
 use rohditor_engine::tools::{LayerEdit, MaskToolSession, MaskView, ToolKind};
-use rohditor_raw::RawFileInfo;
+use rohditor_image::Orientation;
+use rohditor_raw::{RawFileInfo, RawFrame};
 
 use super::tools::tool_panel_model;
 use super::{Document, RohditorApp};
@@ -23,26 +24,40 @@ const OVERLAY_TINT_OPACITY: f32 = 0.5;
 /// Orientation and crop of the displayed image over the developed frame. Only the aspect of
 /// the frame matters to the Masks tool, so the RAW's own size stands in for the developed one.
 fn output_geometry(info: &RawFileInfo, recipe: &EditRecipe) -> Option<OutputGeometry> {
-    let orientation = recipe.geometry.orientation_override.unwrap_or(info.orientation);
-    OutputGeometry::new(info.width, info.height, orientation, recipe.geometry.crop).ok()
+    geometry_for((info.width, info.height), info.orientation, recipe)
+}
+
+fn geometry_for(
+    (width, height): (usize, usize),
+    source_orientation: Orientation,
+    recipe: &EditRecipe,
+) -> Option<OutputGeometry> {
+    let orientation = recipe
+        .geometry
+        .orientation_override
+        .unwrap_or(source_orientation);
+    OutputGeometry::new(width, height, orientation, recipe.geometry.crop).ok()
 }
 
 /// What the viewport needs to draw and drive the Masks tool, or `None` while the photo has
 /// no frame to map pointer positions onto.
 pub(super) fn overlay_model<'a>(
     session: &'a MaskToolSession,
-    document: &'a Document,
+    edits: &'a EditSession,
+    frame: Option<&RawFrame>,
+    mask_overlay: Option<&'a egui::TextureHandle>,
 ) -> Option<MaskOverlayModel<'a>> {
-    let recipe = document.edits.recipe();
-    let geometry = output_geometry(&document.frame.as_ref()?.info, recipe)?;
+    let recipe = edits.recipe();
+    let geometry = output_geometry(&frame?.info, recipe)?;
     Some(MaskOverlayModel {
         session,
         recipe,
         geometry,
-        tint: document
-            .mask_overlay
-            .as_ref()
-            .filter(|_| session.show_overlay),
+        // A tint belongs to the layer it was rendered for: not drawn once that layer is gone.
+        tint: session
+            .overlay_layer()
+            .filter(|id| recipe.local.layer(*id).is_some())
+            .and(mask_overlay),
     })
 }
 
@@ -198,9 +213,7 @@ impl RohditorApp {
     }
 
     fn requested_overlay(&self) -> Option<u32> {
-        self.tool
-            .masks()
-            .and_then(MaskToolSession::overlay_layer)
+        self.tool.masks().and_then(MaskToolSession::overlay_layer)
     }
 
     /// One panel action. Returns whether the recipe changed.
@@ -255,14 +268,16 @@ impl RohditorApp {
                 session.show_overlay = !session.show_overlay;
             }
         } else if pressed(egui::Key::Delete) || pressed(egui::Key::Backspace) {
-            if let (Some(document), Some(session)) =
-                (self.document.as_mut(), self.tool.masks_mut())
+            if let (Some(document), Some(session)) = (self.document.as_mut(), self.tool.masks_mut())
             {
                 let recipe = document.edits.recipe().clone();
                 changed = install_discrete(&mut document.edits, session.delete_selected(&recipe));
             }
         } else if pressed(egui::Key::Escape) {
-            used = self.tool.masks_mut().is_some_and(MaskToolSession::cancel_create);
+            used = self
+                .tool
+                .masks_mut()
+                .is_some_and(MaskToolSession::cancel_create);
         } else {
             used = false;
         }
@@ -308,11 +323,9 @@ impl RohditorApp {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use rohditor_edit::{LinearGradient, MaskPoint, MaskShape};
     use rohditor_engine::tools::LocalSlider;
-    use rohditor_image::Orientation;
-
-    use super::*;
 
     fn recipe_with_layer() -> EditRecipe {
         let mut recipe = EditRecipe::default();
@@ -348,14 +361,21 @@ mod tests {
     fn a_slider_drag_is_one_undo_step_and_undo_restores_the_value() {
         let mut edits = EditSession::from_saved(recipe_with_layer());
         let step = |edits: &mut EditSession, value, phase| {
-            let next = LayerEdit::Slider(LocalSlider::Exposure, value)
-                .apply(&edits.recipe().clone(), 0);
+            let next =
+                LayerEdit::Slider(LocalSlider::Exposure, value).apply(&edits.recipe().clone(), 0);
             apply_slider(edits, next, phase)
         };
         assert!(step(&mut edits, 0.2, drag(true, false)));
         assert!(step(&mut edits, 0.5, drag(false, false)));
         // Releasing without moving ends the gesture without a further change.
-        assert!(!step(&mut edits, 0.5, SliderPhase { drag_stopped: true, ..SliderPhase::default() }));
+        assert!(!step(
+            &mut edits,
+            0.5,
+            SliderPhase {
+                drag_stopped: true,
+                ..SliderPhase::default()
+            }
+        ));
         assert_eq!(edits.recipe().local.layers[0].settings.exposure_ev, 0.5);
         assert!(edits.undo());
         assert_eq!(edits.recipe().local.layers[0].settings.exposure_ev, 0.0);
@@ -377,17 +397,11 @@ mod tests {
 
     #[test]
     fn geometry_follows_the_orientation_override_and_the_crop() {
-        let info = RawFileInfo {
-            width: 600,
-            height: 400,
-            orientation: Orientation::Normal,
-            ..RawFileInfo::default()
-        };
         let mut recipe = EditRecipe::default();
-        let upright = output_geometry(&info, &recipe).expect("geometry");
+        let upright = geometry_for((600, 400), Orientation::Normal, &recipe).expect("geometry");
         assert_eq!(upright.output_dimensions(), (600, 400));
         recipe.geometry.orientation_override = Some(Orientation::Rotate90);
-        let turned = output_geometry(&info, &recipe).expect("geometry");
+        let turned = geometry_for((600, 400), Orientation::Normal, &recipe).expect("geometry");
         assert_eq!(turned.output_dimensions(), (400, 600));
     }
 }

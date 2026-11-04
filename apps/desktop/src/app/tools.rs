@@ -49,29 +49,41 @@ impl RohditorApp {
     pub(super) fn show_tool_panel(&mut self, context: &egui::Context) {
         self.handle_tool_shortcuts(context);
         match self.tool.kind() {
-            // The rail does not offer Masks yet; its panel arrives with the desktop Masks tool
-            // (#85). Until then the Edit panel is the safe fallback.
-            ToolKind::Edit | ToolKind::Masks => self.show_adjustment_panel(context),
+            ToolKind::Edit => self.show_adjustment_panel(context),
             ToolKind::Crop => self.show_crop_controls(context),
+            ToolKind::Masks => self.show_masks_controls(context),
         }
     }
 
     /// Rail or shortcut request. The active tool's own button returns to Edit;
-    /// leaving Crop commits its draft.
+    /// leaving Crop commits its draft, and leaving Masks has nothing to commit.
     fn select_tool(&mut self, context: &egui::Context, requested: ToolKind) {
         let target = self.tool.toggle_target(requested);
         if target == self.tool.kind() {
             return;
         }
         self.leave_tool(context, true);
-        if target == ToolKind::Crop {
-            self.enter_crop_tool(context);
+        let left_masks = self.exit_masks_tool();
+        match target {
+            ToolKind::Crop => self.enter_crop_tool(context),
+            ToolKind::Masks => self.enter_masks_tool(context),
+            // The overlay request ends with the tool, so the preview is rendered again.
+            ToolKind::Edit if left_masks => {
+                if let Some(document_id) = self.document.as_ref().map(|document| document.id) {
+                    self.queue_preview(context, document_id);
+                }
+            }
+            ToolKind::Edit => {}
         }
     }
 
-    /// E, C, Esc and Enter, unless a text field is being edited.
+    /// E, C, M, Esc and Enter, plus the Masks tool's own keys, unless a text field is being
+    /// edited.
     fn handle_tool_shortcuts(&mut self, context: &egui::Context) {
         if self.document.is_none() || context.wants_keyboard_input() {
+            return;
+        }
+        if self.handle_mask_shortcuts(context) {
             return;
         }
         let pressed =
@@ -80,6 +92,8 @@ impl RohditorApp {
             self.select_tool(context, ToolKind::Edit);
         } else if pressed(egui::Key::C) {
             self.select_tool(context, ToolKind::Crop);
+        } else if pressed(egui::Key::M) {
+            self.select_tool(context, ToolKind::Masks);
         } else if pressed(egui::Key::Escape) {
             self.leave_tool(context, false);
         } else if pressed(egui::Key::Enter) {
