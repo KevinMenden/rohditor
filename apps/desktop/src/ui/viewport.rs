@@ -6,6 +6,7 @@ use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_engine::tools::Picker;
 
 use super::crop::{CropOverlayModel, CropOverlayOutput, interact_and_paint};
+use super::mask_overlay::{self, MaskOverlayModel, MaskOverlayOutput};
 use super::theme::{self, colors};
 
 #[derive(Clone)]
@@ -233,12 +234,14 @@ pub(crate) struct ViewportModel<'a> {
     pub source: Option<PreviewSource>,
     pub picker_mode: Option<Picker>,
     pub crop: Option<CropOverlayModel>,
+    pub masks: Option<MaskOverlayModel<'a>>,
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct ViewportOutput {
     pub picker_sample: Option<(Picker, egui::Pos2)>,
     pub crop: CropOverlayOutput,
+    pub masks: MaskOverlayOutput,
 }
 
 pub(crate) fn show(
@@ -261,8 +264,16 @@ pub(crate) fn show(
             let image_size = texture.size_vec2();
             let fit_scale = fit_scale(padded.size(), image_size);
             let now = context.input(|input| input.time);
+            // A mask gesture owns the drag it starts on a handle; any other drag pans. The grab
+            // is judged against the image as it is on screen before this frame's pan.
+            let masks_capture = model.masks.as_ref().is_some_and(|masks| {
+                let size = image_size * if view.fit { fit_scale } else { view.zoom };
+                let rect = egui::Rect::from_center_size(viewport.center() + view.pan, size);
+                mask_overlay::captures_drag(ui, &response, rect, masks)
+            });
             if model.picker_mode.is_none()
                 && model.crop.is_none()
+                && !masks_capture
                 && response.dragged_by(egui::PointerButton::Primary)
             {
                 view.pan_by(fit_scale, viewport, image_size, response.drag_delta());
@@ -320,6 +331,11 @@ pub(crate) fn show(
 
             if let Some(crop) = model.crop {
                 output.crop = interact_and_paint(context, ui, &response, image_rect, crop);
+            }
+
+            if let Some(masks) = model.masks.as_ref() {
+                output.masks =
+                    mask_overlay::interact_and_paint(context, ui, &response, image_rect, masks);
             }
 
             if let Some(source) = model.source
