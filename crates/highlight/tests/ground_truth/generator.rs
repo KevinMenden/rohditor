@@ -113,7 +113,9 @@ pub struct Object {
 #[derive(Debug, Clone, Copy)]
 pub struct SceneSpec {
     pub name: &'static str,
-    /// Odd width so the Bayer phase shifts at a non-2 period between rows.
+    /// Odd width (all scenes): with an odd row stride the `(x & 1, y & 1)`
+    /// Bayer phase shifts at every row start, so width/height/stride
+    /// mix-ups and edge handling at odd boundaries cannot hide.
     pub width: usize,
     pub height: usize,
     /// Per-channel background `b0 + b1*u + b2*v` with `u, v` in `[0, 1]`.
@@ -170,9 +172,9 @@ pub fn generate(spec: &SceneSpec, sat: f32) -> Generated {
             scaled[2] * spec.wb_scale[2],
         ];
     }
-    // Mosaic builder copied (not imported — scripts/check.sh:17 forbids
-    // highlight -> demosaic) from
-    // crates/demosaic/tests/demosaic_quality.rs:241-255. The `min(sat)`
+    // Mosaic builder copied (not imported — scripts/check.sh's
+    // dependency-direction asserts forbid highlight -> demosaic) from
+    // crates/demosaic/tests/demosaic_quality.rs. The `min(sat)`
     // clamp is applied per site through the Bayer phase.
     let data = truth
         .iter()
@@ -192,10 +194,11 @@ pub fn generate(spec: &SceneSpec, sat: f32) -> Generated {
 /// `(x, y, channel, value)`.
 pub type Violation = (usize, usize, usize, f32);
 
-/// Guard A (exact-sat): truth values landing exactly on `sat` would make the
-/// `>= level` predicate depend on rounding history — the hazard proven by
-/// `smoothstep(0.5) == 0.5`. Checked first for an actionable
-/// failure message naming the offending site.
+/// Guard A (exact-sat): truth landing bit-exactly on `sat` would leave the
+/// `sample >= level` predicate to rounding history, so it is checked first,
+/// with the offending sites named in the failure message. The real guard is
+/// [`margin_violations`]: it keeps every truth value at least [`MARGIN`]
+/// away from `sat`, so no codegen drift can flip the predicate.
 // The comparison is deliberately exact: landing bit-exactly on `sat` IS the
 // defect, so clippy's approximate-float lint does not apply here.
 #[allow(clippy::float_cmp)]

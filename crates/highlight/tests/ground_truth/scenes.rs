@@ -1,10 +1,12 @@
 //! The seven named ground-truth scenes of the issue #63 harness.
 //!
-//! Every scene has odd dimensions (Bayer phase shifts at a non-2 period
-//! between rows), off-center asymmetric geometry, and backgrounds whose
-//! per-channel maxima outside the objects stay <= 0.40. Design rules
-//! (checked by `scene_guards` at BOTH sat levels): channels that clip have
-//! scaled peaks >= 1.2; channels that must not clip peak <= 0.90 globally.
+//! Every scene has odd dimensions (the Bayer phase comes from
+//! `(x & 1, y & 1)`, so an odd row stride shifts the phase at every row
+//! start — stride and width/height mix-ups cannot hide), off-center
+//! asymmetric geometry, and backgrounds whose per-channel maxima outside
+//! the objects stay <= 0.40. Design rules (checked by `scene_guards` at
+//! BOTH sat levels): channels that clip have scaled peaks >= 1.2; channels
+//! that must not clip peak <= 0.90 globally.
 
 use super::generator::{Object, Profile, SceneSpec, Shape};
 
@@ -39,25 +41,34 @@ pub const DISK_SMALL: SceneSpec = SceneSpec {
     clips: [false, true, false],
 };
 
-/// The #62 repro scene: ~66 px G disc with a flat-top core so a wide
-/// super-saturated region has near-but-below-sat falloff. Single-channel
-/// regions are where estimates stop being applied today (raised ~= 0).
+/// The #62 repro scene, sized to the issue's radius reading: a ~148 px G
+/// disc in a 181x177 frame reproduces the issue's ~8k suspected sites at
+/// sat 1.0 (G holds half of the RGGB grid, so a nearly fully blown disc of
+/// radius ~72 px measures pi*r^2/2 ~ 8.1k sites). The flat-top profile
+/// keeps a super-saturated core with a near-but-below-sat edge falloff.
+/// Single-channel regions are where estimates stop being applied today:
+/// `recon` (estimates produced) far exceeds `raised` (sites actually
+/// lifted at the clipping edge).
 pub const DISK_LARGE: SceneSpec = SceneSpec {
     name: "disk_large",
-    width: 97,
-    height: 93,
+    width: 181,
+    height: 177,
     bg: BG,
     wb_scale: NO_WB,
     objects: &[Object {
-        // Center phase ((46&1)<<1)|(48&1) = 0 = Red; the disc is wide enough
-        // that the suspected set is dominated by interior G sites anyway.
+        // Center phase ((82&1)<<1)|(86&1) = 0 = Red; the disc is wide
+        // enough that the suspected set is dominated by interior G sites
+        // anyway. Peak 6.0 blows nearly the whole disc so the suspected
+        // G count reaches the issue's ~8k scale; at that steepness the
+        // below-sat edge ring is narrow and stays clear of the margin
+        // guard without jitter.
         shape: Shape::Disc {
-            cx: 48.0,
-            cy: 46.0,
-            r: 33.5,
+            cx: 86.0,
+            cy: 82.0,
+            r: 74.0,
             profile: Profile::FlatTop,
         },
-        peak: [0.30, 2.40, 0.18],
+        peak: [0.30, 6.00, 0.18],
     }],
     clips: [false, true, false],
 };
@@ -111,8 +122,8 @@ pub const SUN_CORE_HALO: SceneSpec = SceneSpec {
                 r: 19.0,
                 profile: Profile::Smooth,
             },
-            // Jittered 2026-11-04 from 0.65 -> 0.6437: the smoothstep-style
-            // halo falloff landed B truth on 0.9800638 at (32, 17), tripping
+            // Jittered 2026-11-04 from 0.65 -> 0.6437: the halo's (1 - t²)²
+            // falloff landed B truth on 0.9800638 at (32, 17), tripping
             // the 1e-4 margin guard at sat = 0.98.
             peak: [0.75, 0.80, 0.6437],
         },
@@ -174,8 +185,9 @@ pub const BORDER_CLIP: SceneSpec = SceneSpec {
     clips: [false, true, false],
 };
 
-/// Many tiny speculars (mostly 1-3 site objects): LocalRatios' expected
-/// strength case and support-poor isolated sites. Each object center is
+/// Many tiny speculars (mostly 1-3 site objects): isolated clipped sites
+/// with no same-channel support — the estimator produces values there, but
+/// none get applied. Each object center is
 /// placed on the Bayer phase of its clipping channel; no two objects
 /// overlap; exactly two sit within 3 px of the image border
 /// ((34, 12) right edge, (29, 27) bottom edge). The non-identity WB scale
