@@ -1,15 +1,14 @@
-//! Mask overlay output: one layer's alpha as an 8-bit image in display geometry.
+//! Mask overlay: one layer's alpha as an 8-bit image in display geometry.
 //!
-//! The Masks tool shows the selected mask on top of the preview. The overlay is produced in the
-//! output stage, from the same [`PreparedMask`] maths as the adjustment stage, and is oriented
-//! and cropped exactly like the colour image, so the UI can tint and draw it without knowing
-//! about the developed frame.
-
-use std::mem::size_of;
+//! The Masks tool shows the selected mask on top of the preview. A frontend asks for it with
+//! [`render_mask_overlay_preview`], separately from the preview render, so the tint can follow a
+//! drag without waiting for one. It uses the same [`PreparedMask`] maths as the adjustment stage
+//! and is oriented and cropped like the colour image, so the UI can tint and draw it without
+//! knowing about the developed frame.
 
 use rayon::prelude::*;
 use rohditor_edit::EditRecipe;
-use rohditor_image::allocate_zeroed_u8;
+use rohditor_image::{Orientation, allocate_zeroed_u8};
 use rohditor_mask::{MaskFrame, PreparedMask};
 
 use super::local_stage::mask_error;
@@ -42,9 +41,41 @@ impl MaskAlphaImage {
     }
 }
 
+/// The overlay of layer `layer_id` at a small size, for a frontend that wants the tint to follow
+/// a drag without waiting for a render.
+///
+/// `frame` is the developed frame and `source_orientation` the file's; the recipe's orientation
+/// override and crop apply as in a render. Mask lengths are in long-edge units, so the mask is
+/// prepared on a copy of the frame scaled to `long_edge` pixels and gives the same shape as the
+/// full-size overlay at a fraction of the cost. `Ok(None)` when the recipe has no such layer.
+///
+/// # Errors
+/// An invalid recipe or geometry, or an allocation failure.
+pub fn render_mask_overlay_preview(
+    recipe: &EditRecipe,
+    layer_id: u32,
+    frame: (usize, usize),
+    source_orientation: Orientation,
+    long_edge: usize,
+) -> Result<Option<MaskAlphaImage>, PipelineError> {
+    let scale = (long_edge.max(1) as f64 / frame.0.max(frame.1).max(1) as f64).min(1.0);
+    let small = (
+        ((frame.0 as f64 * scale).round() as usize).max(1),
+        ((frame.1 as f64 * scale).round() as usize).max(1),
+    );
+    let orientation = recipe
+        .geometry
+        .orientation_override
+        .unwrap_or(source_orientation);
+    let geometry = OutputGeometry::new(small.0, small.1, orientation, recipe.geometry.crop)?;
+    MaskOverlayPlan::prepare(recipe, layer_id, small, geometry)?
+        .map(|plan| plan.render(&CancellationToken::new()))
+        .transpose()
+}
+
 /// A requested overlay, resolved for one render: the layer's mask and the geometry to present it in.
 #[derive(Debug)]
-pub(crate) struct MaskOverlayPlan {
+pub(super) struct MaskOverlayPlan {
     mask: PreparedMask,
     frame: (usize, usize),
     geometry: OutputGeometry,
@@ -55,7 +86,7 @@ impl MaskOverlayPlan {
     ///
     /// The overlay shows the *shape* of the mask at full strength, whether or not the layer is
     /// enabled or has non-neutral sliders, so a layer can be inspected while it is being set up.
-    pub(crate) fn prepare(
+    pub(super) fn prepare(
         recipe: &EditRecipe,
         layer_id: u32,
         frame: (usize, usize),
@@ -81,23 +112,7 @@ impl MaskOverlayPlan {
         }))
     }
 
-    /// Bytes this overlay needs while rendering: the prepared mask, the developed-frame alpha
-    /// plane, the output image and one f32 row per worker thread.
-    pub(crate) fn bytes(&self) -> usize {
-        let (width, height) = self.frame;
-        let (output_width, output_height) = self.geometry.output_dimensions();
-        self.mask
-            .bytes()
-            .saturating_add(width.saturating_mul(height))
-            .saturating_add(output_width.saturating_mul(output_height))
-            .saturating_add(
-                width
-                    .saturating_mul(size_of::<f32>())
-                    .saturating_mul(rayon::current_num_threads()),
-            )
-    }
-
-    pub(crate) fn render(
+    pub(super) fn render(
         &self,
         cancellation: &CancellationToken,
     ) -> Result<MaskAlphaImage, PipelineError> {

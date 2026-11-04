@@ -61,7 +61,7 @@ use rohditor_engine::document::{EditSession, PreviewIntent, PreviewTicket};
 use rohditor_engine::preview_cache::PreviewCacheHits;
 use rohditor_engine::session;
 use rohditor_engine::settings::{self, AppSettings};
-use rohditor_engine::tools::{ActiveTool, MaskToolSession, Picker, ToolKind};
+use rohditor_engine::tools::{ActiveTool, Picker, ToolKind};
 use rohditor_engine::wake::WakeFn;
 
 const GPU_HISTOGRAM_DEBOUNCE: Duration = Duration::from_millis(75);
@@ -83,6 +83,7 @@ mod events;
 mod gpu;
 #[path = "lifecycle.rs"]
 mod lifecycle;
+mod masks;
 mod tools;
 
 use camera_look::CameraLookState;
@@ -163,6 +164,8 @@ struct Document {
     frame: Option<Arc<RawFrame>>,
     edits: EditSession,
     texture: Option<PreviewTexture>,
+    /// The Masks tool's red tint of the selected mask.
+    mask_overlay: Option<masks::MaskTint>,
     preview_pixels: Option<DisplayPreviewPixels>,
     preview_source: Option<PreviewSource>,
     histogram: Option<Histogram>,
@@ -208,6 +211,7 @@ impl Document {
             frame: None,
             edits: EditSession::from_saved(recipe),
             texture: None,
+            mask_overlay: None,
             preview_pixels: None,
             preview_source: None,
             histogram: None,
@@ -578,11 +582,8 @@ impl RohditorApp {
     }
 
     fn preview_options(&self) -> PreviewOptions {
-        let mut render = self.settings.render_options();
-        // The Masks tool asks for the selected mask's alpha to draw over the preview.
-        render.mask_overlay = self.tool.masks().and_then(MaskToolSession::overlay_layer);
         PreviewOptions {
-            render,
+            render: self.settings.render_options(),
             ..PreviewOptions::default()
         }
     }
@@ -675,12 +676,7 @@ impl RohditorApp {
             return;
         }
         self.note_cpu_only_stage(&recipe);
-        // Only the CPU pipeline renders the mask overlay (the GPU port is #88), so asking for it
-        // sends this preview to the CPU, even for a mask whose sliders are still neutral.
-        if self.gpu.is_some()
-            && options.render.mask_overlay.is_none()
-            && gpu_supports_recipe(&recipe)
-        {
+        if self.gpu.is_some() && gpu_supports_recipe(&recipe) {
             let gpu_base_is_current = self
                 .document
                 .as_ref()
@@ -1846,6 +1842,19 @@ impl RohditorApp {
             });
         let output = if let Some(document) = self.document.as_mut() {
             let preparing = document.open_status.is_some() || document.preview_status.is_some();
+            let crop_policy = self.settings.render_options().raw_crop_policy;
+            if let Some(session) = self.tool.masks() {
+                masks::refresh_tint(context, document, session, crop_policy);
+            }
+            let masks = self.tool.masks().and_then(|session| {
+                masks::overlay_model(
+                    session,
+                    &document.edits,
+                    document.frame.as_deref(),
+                    crop_policy,
+                    document.mask_overlay.as_ref(),
+                )
+            });
             viewport::show(
                 context,
                 ViewportModel {
@@ -1855,6 +1864,7 @@ impl RohditorApp {
                     source: document.preview_source,
                     picker_mode: self.tool.picker(),
                     crop: crop_overlay,
+                    masks,
                 },
                 &mut document.view,
             )
@@ -1869,6 +1879,7 @@ impl RohditorApp {
                     source: None,
                     picker_mode: None,
                     crop: None,
+                    masks: None,
                 },
                 &mut empty_view,
             )
@@ -1894,6 +1905,7 @@ impl RohditorApp {
         {
             session.finish_drag();
         }
+        self.apply_mask_pointer(context, &output.masks);
     }
 
     fn apply_white_balance_pick(&mut self, context: &egui::Context, normalized: egui::Pos2) {

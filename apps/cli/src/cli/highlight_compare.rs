@@ -170,7 +170,6 @@ pub(super) fn highlight_compare(
         raw_crop_policy: RawCropPolicy::Recommended,
         demosaic,
         output_policy: OutputPolicy::ClipToSrgb,
-        mask_overlay: None,
     };
     let png = ExportSettings {
         format: ExportFormat::Png {

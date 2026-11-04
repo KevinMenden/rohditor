@@ -33,8 +33,7 @@ pub(crate) use display::{
     render_display_srgb16_with_geometry_and_diagnostics,
 };
 pub(crate) use local_stage::LocalStage;
-pub use mask_overlay::MaskAlphaImage;
-pub(crate) use mask_overlay::MaskOverlayPlan;
+pub use mask_overlay::{MaskAlphaImage, render_mask_overlay_preview};
 pub(crate) use normalize::preview_dimensions;
 pub(crate) use sharpened_output::{render_sharpened_export, sharpened_output_bytes};
 pub use stages::raw_crop_dimensions;
