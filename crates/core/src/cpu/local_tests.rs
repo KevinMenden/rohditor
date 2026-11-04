@@ -10,7 +10,7 @@ use rohditor_mask::{MaskFrame, PreparedMask};
 
 use super::adjustments::apply_adjustments;
 use super::local_stage::LocalStage;
-use super::mask_overlay::MaskOverlayPlan;
+use super::mask_overlay::{MaskOverlayPlan, render_mask_overlay_preview};
 use crate::{CancellationToken, OutputGeometry};
 
 const WIDTH: usize = 23;
@@ -471,5 +471,66 @@ fn overlay_has_display_geometry_and_follows_orientation_and_crop() {
         )
         .expect("valid test fixture")
         .is_none()
+    );
+}
+
+#[test]
+fn the_small_overlay_matches_the_full_size_one_under_orientation_and_crop() {
+    const FULL: (usize, usize) = (400, 240);
+    let mut recipe = EditRecipe::default();
+    recipe
+        .local
+        .layers
+        .push(layer(3, linear(0.2, 0.8), LocalSettings::default()));
+    recipe.geometry.crop = Some(rohditor_edit::NormalizedCropRect {
+        left: 0.1,
+        top: 0.2,
+        right: 0.9,
+        bottom: 0.85,
+    });
+    for orientation in [Orientation::Normal, Orientation::Rotate90] {
+        recipe.geometry.orientation_override = Some(orientation);
+        let geometry = OutputGeometry::new(FULL.0, FULL.1, orientation, recipe.geometry.crop)
+            .expect("valid test fixture");
+        let full = MaskOverlayPlan::prepare(&recipe, 3, FULL, geometry)
+            .expect("valid test fixture")
+            .expect("layer exists")
+            .render(&CancellationToken::new())
+            .expect("valid test fixture");
+        let small = render_mask_overlay_preview(&recipe, 3, FULL, Orientation::Normal, 100)
+            .expect("valid test fixture")
+            .expect("layer exists");
+
+        // Smaller, with the same aspect up to rounding to whole pixels.
+        assert!(small.width().max(small.height()) < full.width().max(full.height()) / 3);
+        let aspect = |width: usize, height: usize| width as f64 / height as f64;
+        let (a, b) = (
+            aspect(small.width(), small.height()),
+            aspect(full.width(), full.height()),
+        );
+        assert!((a - b).abs() / b < 0.05, "{orientation:?}: {a} vs {b}");
+
+        // Every small pixel agrees with the full-size overlay where it lands, within the ramp
+        // across the pixels in between.
+        let mut ramp_pixels = 0;
+        for y in 0..small.height() {
+            for x in 0..small.width() {
+                let fx = (x as f64 + 0.5) / small.width() as f64 * full.width() as f64;
+                let fy = (y as f64 + 0.5) / small.height() as f64 * full.height() as f64;
+                let expected = full.data()[fy as usize * full.width() + fx as usize];
+                let actual = small.data()[y * small.width() + x];
+                assert!(
+                    actual.abs_diff(expected) <= 24,
+                    "{orientation:?} {x},{y}: {actual} vs {expected}"
+                );
+                ramp_pixels += usize::from(actual > 0 && actual < 255);
+            }
+        }
+        assert!(ramp_pixels > 0, "{orientation:?}: the soft edge is visible");
+    }
+    assert!(
+        render_mask_overlay_preview(&recipe, 99, FULL, Orientation::Normal, 100)
+            .expect("valid test fixture")
+            .is_none()
     );
 }
