@@ -2,6 +2,10 @@
 //!
 //! Rows are evaluated in parallel into a per-thread row buffer, the way a pipeline stage
 //! consumes a mask (no full-resolution alpha plane is ever allocated).
+//!
+//! The `brush-N` cases are what painting produces: N strokes of a 5 % radius, each simplified
+//! to about a dozen points. A brush layer is prepared again on every render, so `mask_prepare`
+//! at fit size is the cost every preview of a painted photo pays.
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use rayon::prelude::*;
@@ -65,8 +69,38 @@ fn brush() -> MaskShape {
     MaskShape::Brush(BrushMask { strokes })
 }
 
-fn cases() -> [(&'static str, MaskLayer); 3] {
-    [
+/// `count` strokes as the Masks tool records them: a 5 % brush, a dozen points per stroke
+/// (after simplification), scattered over the frame, one in twelve erasing.
+fn painted(count: usize) -> MaskShape {
+    let strokes = (0..count)
+        .map(|s| {
+            let (x0, y0) = (
+                0.1 + 0.8 * ((s * 37) % 101) as f32 / 101.0,
+                0.1 + 0.8 * ((s * 11) % 103) as f32 / 103.0,
+            );
+            let phase = s as f32 * 0.7;
+            BrushStroke {
+                points: (0..12)
+                    .map(|i| {
+                        let t = i as f32 / 11.0 - 0.5;
+                        point(
+                            x0 + 0.2 * t * phase.cos(),
+                            y0 + 0.2 * t * phase.sin() + 0.02 * (t * 9.0 + phase).sin(),
+                        )
+                    })
+                    .collect(),
+                radius: 0.05,
+                feather: 0.5,
+                flow: 0.8,
+                erase: s % 12 == 11,
+            }
+        })
+        .collect();
+    MaskShape::Brush(BrushMask { strokes })
+}
+
+fn cases() -> Vec<(&'static str, MaskLayer)> {
+    vec![
         (
             "linear",
             layer(MaskShape::Linear(LinearGradient {
@@ -85,6 +119,9 @@ fn cases() -> [(&'static str, MaskLayer); 3] {
             })),
         ),
         ("brush-50x200", layer(brush())),
+        ("brush-10", layer(painted(10))),
+        ("brush-100", layer(painted(100))),
+        ("brush-500", layer(painted(500))),
     ]
 }
 
