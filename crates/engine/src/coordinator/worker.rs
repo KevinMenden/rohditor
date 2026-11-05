@@ -358,6 +358,7 @@ pub struct RenderCoordinator {
     requests: mpsc::Sender<WorkerRequest>,
     events: mpsc::Receiver<WorkerEvent>,
     previews: Arc<PreviewMailbox>,
+    range_jobs: range_jobs::RangeJobControl,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -417,6 +418,7 @@ impl RenderCoordinator {
             requests: request_sender,
             events: event_receiver,
             previews,
+            range_jobs: range_jobs::RangeJobControl::default(),
             worker: Some(worker),
         })
     }
@@ -552,6 +554,7 @@ impl RenderCoordinator {
             position,
             pick,
             options,
+            liveness: self.range_jobs.sample(ticket.document_id),
         })))
     }
 
@@ -572,6 +575,7 @@ impl RenderCoordinator {
             recipe,
             layer,
             options,
+            liveness: self.range_jobs.overlay(ticket.document_id),
         })))
     }
 
@@ -620,6 +624,7 @@ impl RenderCoordinator {
 
     pub fn abandon(&self, document_id: u64) {
         self.previews.abandon(document_id);
+        self.range_jobs.cancel_document(document_id);
         drop(
             self.requests
                 .send(WorkerRequest::AbandonDocument(document_id)),

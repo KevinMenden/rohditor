@@ -437,12 +437,7 @@ pub(super) mod adjustments {
                                 *value *= gain;
                             }
                         }
-                        if let Some(base_rendering_lut) = &reference_chain.base_rendering_lut {
-                            apply_base_rendering(pixel, base_rendering_lut);
-                        }
-                        if let Some(camera_chroma) = &reference_chain.camera_chroma {
-                            apply_camera_chroma(pixel, camera_chroma);
-                        }
+                        reference_chain.apply_rendering(pixel);
                         if let Some(light_tone_lut) = &light_tone_lut {
                             apply_light_tone(pixel, light_tone_lut);
                         }
@@ -480,9 +475,12 @@ pub(super) mod adjustments {
     /// The part of the adjustment chain that range masks measure: the global exposure and the
     /// base rendering (tone and camera colourfulness), before Light, Color and every local term.
     ///
-    /// The render loop applies these same steps itself, interleaved with the local scene terms
-    /// (which add to the exposure and sit between exposure and base rendering), so the order
-    /// here and in `apply_adjustments_with_local` must stay the same.
+    /// The base-rendering half is one function, [`Self::apply_rendering`], that the render loop
+    /// and the reference both call, so a stage added there reaches both. Only the exposure is
+    /// written twice: the loop adds the local exposure and white balance to it, which the
+    /// reference must not see. The test
+    /// `the_reference_chain_matches_what_the_stage_does_without_light_color_or_local_edits`
+    /// pins the two together for every rendering profile.
     pub(crate) struct ReferenceChain {
         exposure_gain: f32,
         base_rendering_lut: Option<std::borrow::Cow<'static, crate::BaseRenderingLut>>,
@@ -505,6 +503,11 @@ pub(super) mod adjustments {
                     *value *= self.exposure_gain;
                 }
             }
+            self.apply_rendering(pixel);
+        }
+
+        /// The base rendering of the recipe's profile: the tone curve, then the camera chroma.
+        fn apply_rendering(&self, pixel: &mut [f32]) {
             if let Some(base_rendering_lut) = &self.base_rendering_lut {
                 apply_base_rendering(pixel, base_rendering_lut);
             }

@@ -45,12 +45,10 @@ pub fn sample_color_range(
         for column in
             centre_x.saturating_sub(PATCH_RADIUS)..=(centre_x + PATCH_RADIUS).min(width - 1)
         {
-            let start = row * image.row_stride() + column * 3;
-            let mut pixel = [
-                image.data()[start],
-                image.data()[start + 1],
-                image.data()[start + 2],
-            ];
+            let Some(&[red, green, blue]) = image.pixel(column, row) else {
+                continue;
+            };
+            let mut pixel = [red, green, blue];
             chain.apply(&mut pixel);
             if pixel.iter().all(|value| value.is_finite()) {
                 for (total, value) in total.iter_mut().zip(pixel) {

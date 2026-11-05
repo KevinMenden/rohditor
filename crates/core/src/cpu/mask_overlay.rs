@@ -188,7 +188,14 @@ impl MaskOverlayPlan {
             None => None,
         };
         let mut plane = allocate_zeroed_u8(width * height)?;
-        let row_stride = reference.map_or(0, |reference| reference.image.row_stride());
+        // Rows of the image the reference is measured on, by the image's own stride.
+        let image_rows: Vec<&[f32]> = reference.map_or_else(Vec::new, |reference| {
+            reference
+                .image
+                .data()
+                .chunks(reference.image.row_stride())
+                .collect()
+        });
         // Quantize in the developed frame, then gather through the output geometry.
         plane.par_chunks_mut(width).enumerate().try_for_each_init(
             || (Vec::<f32>::new(), ReferenceRows::default()),
@@ -197,8 +204,16 @@ impl MaskOverlayPlan {
                 row.resize(width, 0.0);
                 let reference_row = match reference {
                     Some(reference) if needs.any() => {
-                        let start = y * row_stride;
-                        let pixels = &reference.image.data()[start..start + width * 3];
+                        let pixels = image_rows
+                            .get(y)
+                            .and_then(|row| row.get(..width * 3))
+                            .ok_or_else(|| PipelineError::InvalidDimensions {
+                                width,
+                                height,
+                                row_stride: reference.image.row_stride(),
+                                reason: "the reference image is shorter than its dimensions"
+                                    .to_owned(),
+                            })?;
                         measured.measure(needs, pixels, |pixel| reference.chain.apply(pixel));
                         measured.row()
                     }

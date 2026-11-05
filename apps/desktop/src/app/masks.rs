@@ -508,13 +508,12 @@ impl RohditorApp {
         context.request_repaint();
     }
 
-    /// The overlay could not be measured: show no tint for this revision rather than a stale one.
+    /// The overlay could not be measured: show no tint rather than one that no longer matches.
+    /// A failure for a recipe the user has since edited says nothing about the current one.
     pub(super) fn fail_range_overlay(&mut self, ticket: PreviewTicket) {
-        if let Some(document) = self
-            .document
-            .as_mut()
-            .filter(|document| document.id == ticket.document_id)
-        {
+        if let Some(document) = self.document.as_mut().filter(|document| {
+            document.id == ticket.document_id && document.edits.revision() == ticket.revision
+        }) {
             document.mask_overlay = None;
         }
     }
