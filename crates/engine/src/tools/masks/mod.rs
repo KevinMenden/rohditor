@@ -134,6 +134,13 @@ impl MaskToolSession {
         }
     }
 
+    /// Back to `Select`. A request for a new brush component belongs to the painting that
+    /// asked for it, so it ends here too and cannot make a later stroke start a component.
+    fn return_to_select(&mut self) {
+        self.mode = MaskEditMode::Select;
+        self.new_brush_component = false;
+    }
+
     /// Whether a pointer gesture is in progress (between a press that grabbed or started
     /// something and its release).
     pub const fn is_dragging(&self) -> bool {

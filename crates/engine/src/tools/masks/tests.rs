@@ -781,6 +781,30 @@ fn adding_a_brush_starts_a_new_component_even_with_a_brush_selected() {
 }
 
 #[test]
+fn a_pending_new_brush_component_does_not_outlive_painting() {
+    // Add -> Brush asks for a new component; leaving painting cancels the request, so painting
+    // again later joins the selected brush as usual, whichever way the mode comes back.
+    for how in ["cancel", "select the layer", "select the component"] {
+        let mut harness = Harness::selecting(brush_shape(vec![stroke_with(2)]));
+        harness
+            .session
+            .create_component(MaskEditMode::Paint { erase: false }, MaskMode::Add);
+        match how {
+            "cancel" => assert!(harness.session.cancel_create()),
+            "select the layer" => harness.session.select_layer(harness.edits.recipe(), 0),
+            _ => harness.session.select_component(harness.edits.recipe(), 0),
+        }
+        assert_eq!(harness.session.mode, MaskEditMode::Select, "{how}");
+
+        harness.session.mode = MaskEditMode::Paint { erase: false };
+        harness.gesture((0.3, 0.4), &[(0.4, 0.4)]);
+        let layer = harness.recipe().local.layer(0).expect("layer");
+        assert_eq!(layer.components.len(), 1, "{how}: no new component");
+        assert_eq!(harness.strokes(0, 0).len(), 2, "{how}: joined the brush");
+    }
+}
+
+#[test]
 fn the_erase_modifier_inverts_the_painting_mode_for_a_stroke() {
     let mut harness = Harness::new(EditRecipe::default());
     harness.session.mode = MaskEditMode::Paint { erase: false };
