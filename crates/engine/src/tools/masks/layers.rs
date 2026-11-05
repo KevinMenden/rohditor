@@ -194,18 +194,21 @@ impl MaskToolSession {
     }
 
     /// The next press-drag-release draws a gradient into a new layer (`shape` is
-    /// `CreateLinear` or `CreateRadial`).
+    /// `CreateLinear` or `CreateRadial`), or the next stroke starts a brush there (`Paint`).
     pub fn create_layer(&mut self, shape: MaskEditMode) {
         self.selected_layer = None;
         self.selected_component = None;
         self.component_mode = MaskMode::Add;
+        self.new_brush_component = false;
         self.mode = shape;
     }
 
     /// The next press-drag-release draws a gradient into the selected layer, combined as
-    /// `component_mode`. Without a selected layer it starts a new one.
+    /// `component_mode`; with `Paint`, the next stroke starts a new brush component there, and
+    /// the strokes after it join that one. Without a selected layer it starts a new one.
     pub fn create_component(&mut self, shape: MaskEditMode, component_mode: MaskMode) {
         self.component_mode = component_mode;
+        self.new_brush_component = matches!(shape, MaskEditMode::Paint { .. });
         self.mode = shape;
     }
 

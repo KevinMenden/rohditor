@@ -728,6 +728,153 @@ fn painting_over_a_gradient_adds_a_brush_component_to_its_layer() {
 }
 
 #[test]
+fn a_brush_subtracted_from_a_gradient_is_a_subtract_component_and_keeps_painting_into_itself() {
+    let mut harness = Harness::selecting(linear_shape());
+    harness
+        .session
+        .create_component(MaskEditMode::Paint { erase: false }, MaskMode::Subtract);
+    harness.gesture((0.3, 0.4), &[(0.4, 0.4)]);
+    harness.gesture((0.3, 0.6), &[(0.4, 0.6)]);
+
+    let layer = harness.recipe().local.layer(0).expect("layer");
+    assert_eq!(layer.components.len(), 2);
+    assert_eq!(layer.components[1].mode, MaskMode::Subtract);
+    assert_eq!(harness.strokes(0, 1).len(), 2);
+    assert!(harness.recipe().validate().is_ok());
+}
+
+#[test]
+fn a_new_brush_layer_is_an_add_whatever_the_component_mode_was() {
+    let mut harness = Harness::selecting(linear_shape());
+    harness
+        .session
+        .create_component(MaskEditMode::Paint { erase: false }, MaskMode::Subtract);
+    harness
+        .session
+        .create_layer(MaskEditMode::Paint { erase: false });
+    harness.gesture((0.3, 0.4), &[(0.4, 0.4)]);
+
+    assert_eq!(harness.recipe().local.layers.len(), 2);
+    let layer = harness.recipe().local.layer(1).expect("new layer");
+    assert_eq!(layer.components.len(), 1);
+    assert_eq!(layer.components[0].mode, MaskMode::Add);
+}
+
+#[test]
+fn adding_a_brush_starts_a_new_component_even_with_a_brush_selected() {
+    let mut harness = Harness::new(EditRecipe::default());
+    harness.session.mode = MaskEditMode::Paint { erase: false };
+    harness.gesture((0.2, 0.2), &[(0.3, 0.2)]);
+
+    // Add -> Brush: not the selected brush, a second component after it.
+    harness
+        .session
+        .create_component(MaskEditMode::Paint { erase: false }, MaskMode::Subtract);
+    harness.gesture((0.2, 0.6), &[(0.3, 0.6)]);
+    harness.gesture((0.2, 0.7), &[(0.3, 0.7)]);
+
+    let layer = harness.recipe().local.layer(0).expect("layer");
+    assert_eq!(layer.components.len(), 2);
+    assert_eq!(layer.components[1].mode, MaskMode::Subtract);
+    assert_eq!(harness.strokes(0, 0).len(), 1);
+    assert_eq!(harness.strokes(0, 1).len(), 2, "the strokes after join it");
+}
+
+#[test]
+fn the_erase_modifier_inverts_the_painting_mode_for_a_stroke() {
+    let mut harness = Harness::new(EditRecipe::default());
+    harness.session.mode = MaskEditMode::Paint { erase: false };
+    harness.gesture((0.2, 0.2), &[(0.3, 0.2)]);
+
+    harness.session.erase_held = true;
+    assert!(harness.session.is_erasing());
+    harness.gesture((0.22, 0.2), &[(0.25, 0.2)]);
+    // In erase mode the modifier paints again.
+    harness.session.mode = MaskEditMode::Paint { erase: true };
+    assert!(!harness.session.is_erasing());
+    harness.gesture((0.2, 0.5), &[(0.3, 0.5)]);
+    harness.session.erase_held = false;
+    assert!(harness.session.is_erasing());
+
+    let erases: Vec<bool> = harness.strokes(0, 0).iter().map(|s| s.erase).collect();
+    assert_eq!(erases, [false, true, false]);
+    // The mode itself was never changed by the modifier.
+    assert_eq!(harness.session.mode, MaskEditMode::Paint { erase: true });
+}
+
+#[test]
+fn erasing_is_toggled_only_while_painting() {
+    let mut session = MaskToolSession::default();
+    session.toggle_erase();
+    assert_eq!(session.mode, MaskEditMode::Select);
+    assert!(!session.is_painting() && !session.is_erasing());
+
+    session.mode = MaskEditMode::Paint { erase: false };
+    session.toggle_erase();
+    assert_eq!(session.mode, MaskEditMode::Paint { erase: true });
+    assert!(session.is_painting() && session.is_erasing());
+    session.toggle_erase();
+    assert_eq!(session.mode, MaskEditMode::Paint { erase: false });
+}
+
+#[test]
+fn painting_resumes_on_a_selected_brush_only() {
+    let mut gradient = Harness::selecting(linear_shape());
+    assert!(!gradient.session.paint_selected(gradient.edits.recipe()));
+    assert_eq!(gradient.session.mode, MaskEditMode::Select);
+
+    let mut brush = Harness::selecting(brush_shape(vec![stroke_with(2)]));
+    assert!(brush.session.paint_selected(brush.edits.recipe()));
+    assert_eq!(brush.session.mode, MaskEditMode::Paint { erase: false });
+    // It paints into that brush, and erases from it.
+    brush.gesture((0.3, 0.4), &[(0.4, 0.4)]);
+    brush.session.toggle_erase();
+    brush.gesture((0.3, 0.4), &[(0.35, 0.4)]);
+    assert_eq!(brush.strokes(0, 0).len(), 3);
+    assert!(brush.strokes(0, 0)[2].erase);
+}
+
+#[test]
+fn painting_shows_the_overlay_and_leaves_the_setting_alone() {
+    let mut session = MaskToolSession {
+        selected_layer: Some(2),
+        show_overlay: false,
+        ..MaskToolSession::default()
+    };
+    assert_eq!(session.overlay_layer(), None);
+    session.mode = MaskEditMode::Paint { erase: false };
+    assert_eq!(session.overlay_layer(), Some(2));
+    session.mode = MaskEditMode::Select;
+    assert_eq!(session.overlay_layer(), None);
+    assert!(!session.show_overlay);
+}
+
+#[test]
+fn a_stroke_leaving_the_crop_keeps_its_points_outside_it() {
+    // Crop to the middle: display x 0..1 is developed x 0.25..0.75.
+    let crop = NormalizedCropRect {
+        left: 0.25,
+        top: 0.0,
+        right: 0.75,
+        bottom: 1.0,
+    };
+    let mut harness =
+        Harness::with_view(EditRecipe::default(), view(Orientation::Normal, Some(crop)));
+    harness.session.mode = MaskEditMode::Paint { erase: false };
+    // From inside the crop to past its right edge, and past the frame's too.
+    harness.gesture((0.9, 0.5), &[(1.0, 0.5), (1.5, 0.5), (3.0, 0.5)]);
+
+    let points = &harness.strokes(0, 0)[0].points;
+    assert_point(points[0], (0.25 + 0.9 * 0.5, 0.5));
+    // The pointer went beyond the crop; the stroke follows it there, up to the range the
+    // recipe accepts.
+    let last = *points.last().expect("points");
+    assert!(last.x > 1.0, "kept outside the frame: {last:?}");
+    assert!(last.x <= rohditor_edit::MASK_POINT_RANGE.maximum);
+    assert!(harness.recipe().validate().is_ok());
+}
+
+#[test]
 fn a_stroke_stops_recording_at_the_brush_point_limit_and_says_so() {
     // 199,998 points elsewhere leave room for two more.
     let (recipe, _) = edit::add_component(

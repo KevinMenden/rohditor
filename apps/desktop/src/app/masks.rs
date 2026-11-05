@@ -1,4 +1,4 @@
-//! Masks tool wiring: panel actions, viewport gestures and the mask overlay texture.
+//! Masks tool wiring: panel actions, viewport gestures, shortcuts and the mask overlay texture.
 //!
 //! The tool's behaviour lives in `rohditor_engine::tools` (`MaskToolSession`, `LayerEdit`);
 //! this module connects it to egui input, the edit history and preview scheduling. Every change
@@ -8,7 +8,7 @@ use eframe::egui;
 use rohditor_core::{OutputGeometry, RawCropPolicy};
 use rohditor_edit::{EditRecipe, GeometryAdjustments, MaskComponent, MaskLayer};
 use rohditor_engine::document::EditSession;
-use rohditor_engine::tools::{LayerEdit, MaskToolSession, MaskView, ToolKind};
+use rohditor_engine::tools::{LayerEdit, MaskEditMode, MaskToolSession, MaskView, ToolKind};
 use rohditor_image::Orientation;
 use rohditor_raw::{RawFileInfo, RawFrame};
 
@@ -221,9 +221,9 @@ fn apply_slider(edits: &mut EditSession, next: Option<EditRecipe>, phase: Slider
 /// Forwards one frame of viewport pointer events to the session as edit gestures. Returns
 /// whether the recipe changed.
 ///
-/// A drag is one gesture: opened by the press, closed by the release. A press that grabs nothing
-/// (or a brush press that hits a limit) opens none, so no release follows and the gesture must
-/// not stay open. `begin_gesture` and `finish_gesture` are no-ops when one is already open or
+/// A drag or a stroke is one gesture: opened by the press, closed by the release. A press that
+/// grabs nothing (or a brush press that hits a limit) opens none, so no release follows and the
+/// gesture must not stay open. `begin_gesture` and `finish_gesture` are no-ops when one is already open or
 /// none is, so a release without a press is harmless.
 fn drive_pointer(
     edits: &mut EditSession,
@@ -234,6 +234,8 @@ fn drive_pointer(
     if let Some(layer) = output.select_layer {
         session.select_layer(edits.recipe(), layer);
     }
+    // Read at the press, where a stroke takes it as its mode.
+    session.erase_held = output.erase_held;
     let mut changed = false;
     if let Some(position) = output.press {
         edits.begin_gesture();
@@ -243,8 +245,8 @@ fn drive_pointer(
             edits.finish_gesture();
         }
     }
-    if let Some(position) = output.drag_to {
-        let next = session.drag_to(edits.recipe(), view, position);
+    for position in &output.drag_to {
+        let next = session.drag_to(edits.recipe(), view, *position);
         changed |= install_during_gesture(edits, next);
     }
     if output.release {
@@ -253,6 +255,49 @@ fn drive_pointer(
         edits.finish_gesture();
     }
     changed
+}
+
+/// Net brush steps asked for by the `[` and `]` presses of one frame.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct BrushKeySteps {
+    /// `]` grows the brush, `[` shrinks it.
+    size: i32,
+    /// Shift+`]` softens the edge, Shift+`[` hardens it.
+    feather: i32,
+}
+
+/// Reads the brush keys from the frame's key events, so held keys (which repeat) and several
+/// presses in one frame all count. `{` and `}` are what Shift+`[` and Shift+`]` produce on many
+/// layouts, so they mean the same as the shifted brackets.
+fn brush_key_steps(input: &egui::InputState) -> BrushKeySteps {
+    let mut steps = BrushKeySteps::default();
+    for event in &input.events {
+        let egui::Event::Key {
+            key,
+            pressed: true,
+            modifiers,
+            ..
+        } = event
+        else {
+            continue;
+        };
+        if modifiers.ctrl || modifiers.command {
+            continue;
+        }
+        let (direction, curly) = match key {
+            egui::Key::CloseBracket => (1, false),
+            egui::Key::OpenBracket => (-1, false),
+            egui::Key::CloseCurlyBracket => (1, true),
+            egui::Key::OpenCurlyBracket => (-1, true),
+            _ => continue,
+        };
+        if modifiers.shift || curly {
+            steps.feather += direction;
+        } else {
+            steps.size += direction;
+        }
+    }
+    steps
 }
 
 impl RohditorApp {
@@ -265,6 +310,7 @@ impl RohditorApp {
             selected_layer: session.selected_layer,
             selected_component: session.selected_component,
             mode: session.mode,
+            brush: session.brush,
             show_overlay: session.show_overlay,
             limit: session.limit_reached(),
         };
@@ -325,8 +371,17 @@ impl RohditorApp {
             MasksAction::SelectComponent(component) => session.select_component(&recipe, component),
             MasksAction::NewLayer(shape) => session.create_layer(shape),
             MasksAction::NewComponent(shape, mode) => session.create_component(shape, mode),
+            MasksAction::PaintSelected => {
+                session.paint_selected(&recipe);
+            }
             MasksAction::CancelCreate => {
                 session.cancel_create();
+            }
+            MasksAction::SetBrush(brush) => session.brush = brush,
+            MasksAction::SetErase(erase) => {
+                if session.is_painting() {
+                    session.mode = MaskEditMode::Paint { erase };
+                }
             }
             MasksAction::SetOverlay(show) => session.show_overlay = show,
             MasksAction::DeleteLayer(layer) => {
@@ -349,18 +404,33 @@ impl RohditorApp {
         false
     }
 
-    /// O, Delete, Backspace and Esc inside the Masks tool (the tool's own key, M, is handled with
-    /// the other tool shortcuts). True when a key was used. A running drag owns the keyboard: the
-    /// keys only count once it ends.
+    /// O, Delete, Backspace and Esc inside the Masks tool, and while painting `[`, `]` (size),
+    /// Shift+`[`, Shift+`]` (feather) and E (erase). The tool's own key, M, is handled with the
+    /// other tool shortcuts. True when a key was used. A running drag owns the keyboard: the keys
+    /// only count once it ends.
+    ///
+    /// E is the Edit tool's key everywhere else. Painting takes it for the eraser, so Esc (leave
+    /// painting) comes first there; the rail's Edit button works at any time.
     pub(super) fn handle_mask_shortcuts(&mut self, context: &egui::Context) -> bool {
         if self.tool.masks().is_none_or(MaskToolSession::is_dragging) {
             return false;
         }
         let pressed =
             |key| context.input(|input| input.modifiers.is_none() && input.key_pressed(key));
+        let painting = self.tool.masks().is_some_and(MaskToolSession::is_painting);
+        let brush_steps = context.input(brush_key_steps);
         let mut changed = false;
         let mut used = true;
-        if pressed(egui::Key::O) {
+        if painting && brush_steps != BrushKeySteps::default() {
+            if let Some(session) = self.tool.masks_mut() {
+                session.brush.step_radius(brush_steps.size);
+                session.brush.step_feather(brush_steps.feather);
+            }
+        } else if painting && pressed(egui::Key::E) {
+            if let Some(session) = self.tool.masks_mut() {
+                session.toggle_erase();
+            }
+        } else if pressed(egui::Key::O) {
             if let Some(session) = self.tool.masks_mut() {
                 session.show_overlay = !session.show_overlay;
             }
@@ -418,7 +488,7 @@ impl RohditorApp {
 mod tests {
     use super::*;
     use rohditor_edit::{LinearGradient, MaskPoint, MaskShape};
-    use rohditor_engine::tools::{LocalSlider, MaskEditMode};
+    use rohditor_engine::tools::LocalSlider;
 
     fn recipe_with_layer() -> EditRecipe {
         let mut recipe = EditRecipe::default();
@@ -514,7 +584,7 @@ mod tests {
         // nothing.
         let output = MaskOverlayOutput {
             press: Some((0.5, 0.5)),
-            drag_to: Some((0.6, 0.6)),
+            drag_to: vec![(0.6, 0.6)],
             ..MaskOverlayOutput::default()
         };
         assert!(!drive_pointer(&mut edits, &mut session, &output, &view()));
@@ -536,13 +606,13 @@ mod tests {
         session.create_layer(MaskEditMode::CreateLinear);
         let press = MaskOverlayOutput {
             press: Some((0.2, 0.5)),
-            drag_to: Some((0.4, 0.5)),
+            drag_to: vec![(0.4, 0.5)],
             ..MaskOverlayOutput::default()
         };
         assert!(drive_pointer(&mut edits, &mut session, &press, &view()));
         assert!(edits.gesture_active());
         let drag = MaskOverlayOutput {
-            drag_to: Some((0.8, 0.5)),
+            drag_to: vec![(0.8, 0.5)],
             ..MaskOverlayOutput::default()
         };
         assert!(drive_pointer(&mut edits, &mut session, &drag, &view()));
@@ -556,6 +626,170 @@ mod tests {
         assert!(edits.undo());
         assert!(edits.recipe().local.layers.is_empty());
         assert!(!edits.can_undo());
+    }
+
+    fn paint_session() -> MaskToolSession {
+        let mut session = MaskToolSession::default();
+        session.create_layer(MaskEditMode::Paint { erase: false });
+        session
+    }
+
+    #[test]
+    fn a_stroke_is_one_undo_step_through_the_pointer() {
+        let mut edits = EditSession::from_saved(EditRecipe::default());
+        let mut session = paint_session();
+        let press = MaskOverlayOutput {
+            press: Some((0.2, 0.5)),
+            drag_to: vec![(0.3, 0.5), (0.4, 0.5)],
+            ..MaskOverlayOutput::default()
+        };
+        assert!(drive_pointer(&mut edits, &mut session, &press, &view()));
+        assert!(edits.gesture_active());
+        let release = MaskOverlayOutput {
+            drag_to: vec![(0.6, 0.5)],
+            release: true,
+            ..MaskOverlayOutput::default()
+        };
+        assert!(drive_pointer(&mut edits, &mut session, &release, &view()));
+        assert!(!edits.gesture_active());
+        assert_eq!(edits.recipe().local.layers.len(), 1);
+        // The tool stays in painting for the next stroke.
+        assert!(session.is_painting());
+
+        assert!(edits.undo());
+        assert_eq!(*edits.recipe(), EditRecipe::default());
+        assert!(!edits.can_undo());
+    }
+
+    #[test]
+    fn a_click_that_is_pressed_and_released_in_one_frame_paints_a_dab() {
+        let mut edits = EditSession::from_saved(EditRecipe::default());
+        let mut session = paint_session();
+        let click = MaskOverlayOutput {
+            press: Some((0.5, 0.5)),
+            release: true,
+            ..MaskOverlayOutput::default()
+        };
+        assert!(drive_pointer(&mut edits, &mut session, &click, &view()));
+        assert!(!edits.gesture_active());
+        assert!(!session.is_dragging());
+        let MaskShape::Brush(brush) = &edits.recipe().local.layers[0].components[0].shape else {
+            panic!("a brush layer");
+        };
+        assert_eq!(brush.strokes[0].points.len(), 1);
+    }
+
+    #[test]
+    fn holding_alt_at_the_press_erases_from_the_selected_brush() {
+        let mut edits = EditSession::from_saved(EditRecipe::default());
+        let mut session = paint_session();
+        let paint = MaskOverlayOutput {
+            press: Some((0.2, 0.5)),
+            drag_to: vec![(0.6, 0.5)],
+            release: true,
+            ..MaskOverlayOutput::default()
+        };
+        drive_pointer(&mut edits, &mut session, &paint, &view());
+        let erase = MaskOverlayOutput {
+            press: Some((0.3, 0.5)),
+            drag_to: vec![(0.4, 0.5)],
+            release: true,
+            erase_held: true,
+            ..MaskOverlayOutput::default()
+        };
+        assert!(drive_pointer(&mut edits, &mut session, &erase, &view()));
+        let MaskShape::Brush(brush) = &edits.recipe().local.layers[0].components[0].shape else {
+            panic!("a brush layer");
+        };
+        let erases: Vec<bool> = brush.strokes.iter().map(|stroke| stroke.erase).collect();
+        assert_eq!(erases, [false, true]);
+        // Letting go of Alt is back to painting; the mode was never changed.
+        assert_eq!(session.mode, MaskEditMode::Paint { erase: false });
+    }
+
+    #[test]
+    fn a_brush_press_that_hits_a_limit_leaves_no_gesture_open() {
+        let mut recipe = EditRecipe::default();
+        recipe.local.layers.push(rohditor_edit::MaskLayer {
+            components: vec![rohditor_edit::MaskComponent {
+                mode: rohditor_edit::MaskMode::Add,
+                invert: false,
+                shape: MaskShape::Brush(rohditor_edit::BrushMask {
+                    strokes: vec![rohditor_edit::BrushStroke {
+                        points: vec![MaskPoint { x: 0.5, y: 0.5 }; rohditor_edit::MAX_BRUSH_POINTS],
+                        radius: 0.05,
+                        feather: 0.5,
+                        flow: 1.0,
+                        erase: false,
+                    }],
+                }),
+            }],
+            ..recipe_with_layer().local.layers.remove(0)
+        });
+        let mut edits = EditSession::from_saved(recipe);
+        let mut session = paint_session();
+        let press = MaskOverlayOutput {
+            press: Some((0.5, 0.5)),
+            drag_to: vec![(0.6, 0.5)],
+            ..MaskOverlayOutput::default()
+        };
+        assert!(!drive_pointer(&mut edits, &mut session, &press, &view()));
+        assert!(!edits.gesture_active());
+        assert!(session.limit_reached().is_some());
+        assert!(!edits.can_undo());
+    }
+
+    fn keys(events: Vec<(egui::Key, egui::Modifiers)>) -> BrushKeySteps {
+        let events = events
+            .into_iter()
+            .map(|(key, modifiers)| egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            })
+            .collect();
+        let mut input = egui::InputState::default();
+        input.events = events;
+        brush_key_steps(&input)
+    }
+
+    #[test]
+    fn brackets_resize_and_shifted_brackets_change_the_feather() {
+        let none = egui::Modifiers::NONE;
+        let shift = egui::Modifiers::SHIFT;
+        assert_eq!(
+            keys(vec![
+                (egui::Key::CloseBracket, none),
+                (egui::Key::CloseBracket, none),
+                (egui::Key::OpenBracket, none),
+            ]),
+            BrushKeySteps {
+                size: 1,
+                feather: 0
+            }
+        );
+        assert_eq!(
+            keys(vec![(egui::Key::OpenBracket, shift)]),
+            BrushKeySteps {
+                size: 0,
+                feather: -1
+            }
+        );
+        // Layouts that report Shift+] as `}` (and may not set the shift modifier on it).
+        assert_eq!(
+            keys(vec![(egui::Key::CloseCurlyBracket, none)]),
+            BrushKeySteps {
+                size: 0,
+                feather: 1
+            }
+        );
+        // Shortcuts with Ctrl are not ours.
+        assert_eq!(
+            keys(vec![(egui::Key::CloseBracket, egui::Modifiers::CTRL)]),
+            BrushKeySteps::default()
+        );
     }
 
     #[test]

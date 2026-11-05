@@ -1,8 +1,27 @@
-//! Brush authoring: the settings copied into each stroke, and stroke simplification.
+//! Brush authoring: the settings copied into each stroke, the painting modes of the session,
+//! and stroke simplification.
 
-use rohditor_edit::{BrushStroke, MASK_RADIUS_RANGE, MASK_UNIT_RANGE, MaskPoint};
+use rohditor_edit::{
+    BrushStroke, EditRecipe, MASK_RADIUS_RANGE, MASK_UNIT_RANGE, MaskPoint, MaskShape,
+    ParameterRange,
+};
 
 use super::view::{Vec2, distance_to_segment};
+use super::{MaskEditMode, MaskToolSession};
+
+/// Brush sizes the tool offers, as radii in long-edge units. The recipe accepts far more (up to
+/// `MASK_RADIUS_RANGE`), but a brush beyond this is a gradient in practice.
+pub const BRUSH_RADIUS_RANGE: ParameterRange = ParameterRange {
+    minimum: 0.002,
+    maximum: 0.3,
+    neutral: 0.05,
+};
+
+/// One size step (a `[` or `]` press) scales the radius by this factor.
+const RADIUS_STEP_FACTOR: f32 = 1.15;
+
+/// One feather step (a `Shift+[` or `Shift+]` press).
+const FEATHER_STEP: f32 = 0.05;
 
 /// While recording, a point is added once the pointer is this far (as a fraction of the brush
 /// radius) from the last one. The mask crate places its dabs a quarter radius apart, so
@@ -31,7 +50,7 @@ pub struct BrushSettings {
 impl Default for BrushSettings {
     fn default() -> Self {
         Self {
-            radius: 0.05,
+            radius: BRUSH_RADIUS_RANGE.neutral,
             feather: MASK_UNIT_RANGE.neutral,
             flow: 1.0,
         }
@@ -39,6 +58,18 @@ impl Default for BrushSettings {
 }
 
 impl BrushSettings {
+    /// Grows (`steps > 0`) or shrinks the brush by whole size steps, within the offered sizes.
+    /// Steps are relative, so they feel the same at any size.
+    pub fn step_radius(&mut self, steps: i32) {
+        self.radius = (self.radius * RADIUS_STEP_FACTOR.powi(steps))
+            .clamp(BRUSH_RADIUS_RANGE.minimum, BRUSH_RADIUS_RANGE.maximum);
+    }
+
+    /// Softens (`steps > 0`) or hardens the brush edge by whole feather steps.
+    pub fn step_feather(&mut self, steps: i32) {
+        self.feather = (self.feather + FEATHER_STEP * steps as f32).clamp(0.0, 1.0);
+    }
+
     /// A new stroke with its first point, the settings clamped to what the recipe accepts.
     pub(super) fn begin_stroke(self, erase: bool, first: MaskPoint) -> BrushStroke {
         BrushStroke {
@@ -50,6 +81,36 @@ impl BrushSettings {
             flow: self.flow.clamp(0.0, 1.0),
             erase,
         }
+    }
+}
+
+impl MaskToolSession {
+    pub const fn is_painting(&self) -> bool {
+        matches!(self.mode, MaskEditMode::Paint { .. })
+    }
+
+    /// Whether a stroke that started now would erase: the painting mode, inverted while the
+    /// erase modifier is held.
+    pub const fn is_erasing(&self) -> bool {
+        matches!(self.mode, MaskEditMode::Paint { erase } if erase != self.erase_held)
+    }
+
+    /// Switches between painting and erasing. Does nothing outside painting.
+    pub fn toggle_erase(&mut self) {
+        if let MaskEditMode::Paint { erase } = &mut self.mode {
+            *erase = !*erase;
+        }
+    }
+
+    /// Paints more strokes into the selected component. False, and nothing changes, when the
+    /// selected component is not a brush.
+    pub fn paint_selected(&mut self, recipe: &EditRecipe) -> bool {
+        let is_brush = matches!(self.selected_shape(recipe), Some((_, MaskShape::Brush(_))));
+        if is_brush {
+            self.mode = MaskEditMode::Paint { erase: false };
+            self.new_brush_component = false;
+        }
+        is_brush
     }
 }
 
@@ -129,6 +190,30 @@ mod tests {
         let kept = simplify(&points, 0.01);
         assert!(kept.len() > 8, "a loop must not collapse: {kept:?}");
         assert_eq!((kept[0], *kept.last().expect("non-empty")), (0, 16));
+    }
+
+    #[test]
+    fn size_steps_are_relative_and_stay_within_the_offered_sizes() {
+        let mut brush = BrushSettings::default();
+        brush.step_radius(1);
+        assert!((brush.radius - 0.05 * RADIUS_STEP_FACTOR).abs() < 1e-6);
+        brush.step_radius(-1);
+        assert!((brush.radius - 0.05).abs() < 1e-6);
+        brush.step_radius(1000);
+        assert_eq!(brush.radius, BRUSH_RADIUS_RANGE.maximum);
+        brush.step_radius(-1000);
+        assert_eq!(brush.radius, BRUSH_RADIUS_RANGE.minimum);
+    }
+
+    #[test]
+    fn feather_steps_stay_within_zero_and_one() {
+        let mut brush = BrushSettings::default();
+        brush.step_feather(2);
+        assert!((brush.feather - 0.6).abs() < 1e-6);
+        brush.step_feather(100);
+        assert_eq!(brush.feather, 1.0);
+        brush.step_feather(-100);
+        assert_eq!(brush.feather, 0.0);
     }
 
     #[test]

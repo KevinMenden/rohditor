@@ -5,8 +5,11 @@
 //! `MaskToolSession` and `LayerEdit`.
 
 use eframe::egui;
+use rohditor_edit::{MASK_UNIT_RANGE, ParameterRange};
 use rohditor_edit::{MaskLayer, MaskMode, MaskShape};
-use rohditor_engine::tools::{LayerEdit, LocalSlider, MaskEditMode, MaskLimit};
+use rohditor_engine::tools::{
+    BRUSH_RADIUS_RANGE, BrushSettings, LayerEdit, LocalSlider, MaskEditMode, MaskLimit,
+};
 
 use super::theme::colors;
 use super::widgets::{self, AdjustmentSpec, ValueScale};
@@ -15,8 +18,11 @@ pub(crate) struct MasksPanelModel<'a> {
     pub layers: &'a [MaskLayer],
     pub selected_layer: Option<u32>,
     pub selected_component: Option<usize>,
-    /// What the next drag on the image does; anything but `Select` is a creation in progress.
+    /// What the next drag on the image does; anything but `Select` is a creation in progress
+    /// (or, for `Paint`, painting).
     pub mode: MaskEditMode,
+    /// What the next stroke is painted with.
+    pub brush: BrushSettings,
     pub show_overlay: bool,
     /// The recipe limit that stopped the last edit, if any.
     pub limit: Option<MaskLimit>,
@@ -36,11 +42,17 @@ pub(crate) struct SliderPhase {
 pub(crate) enum MasksAction {
     SelectLayer(u32),
     SelectComponent(usize),
-    /// Start drawing a gradient into a new layer.
+    /// Start drawing a gradient (or painting a brush) into a new layer.
     NewLayer(MaskEditMode),
-    /// Start drawing a gradient into the selected layer.
+    /// Start drawing a gradient (or painting a brush) into the selected layer.
     NewComponent(MaskEditMode, MaskMode),
+    /// Paint more strokes into the selected brush component.
+    PaintSelected,
     CancelCreate,
+    /// New brush settings, from the brush sliders.
+    SetBrush(BrushSettings),
+    /// Paint (`false`) or erase (`true`) with the brush.
+    SetErase(bool),
     DeleteLayer(u32),
     DeleteComponent(usize),
     Edit(u32, LayerEdit),
@@ -54,6 +66,10 @@ pub(crate) fn show(ui: &mut egui::Ui, model: &MasksPanelModel<'_>) -> Vec<MasksA
     widgets::section_header(ui, "Masks");
     show_layer_list(ui, model, &mut actions);
     show_new_mask(ui, model, &mut actions);
+    if painting(model.mode).is_some() {
+        widgets::section_header(ui, "Brush");
+        show_brush(ui, model, &mut actions);
+    }
 
     let selected = model
         .selected_layer
@@ -66,10 +82,12 @@ pub(crate) fn show(ui: &mut egui::Ui, model: &MasksPanelModel<'_>) -> Vec<MasksA
     }
 
     ui.add_space(6.0);
-    let mut overlay = model.show_overlay;
+    // Painting always shows the overlay, whatever the setting says.
+    let painting = painting(model.mode).is_some();
+    let mut overlay = model.show_overlay || painting;
     if ui
-        .checkbox(&mut overlay, "Show overlay")
-        .on_hover_text("Tint the selected mask red on the image (O)")
+        .add_enabled(!painting, egui::Checkbox::new(&mut overlay, "Show overlay"))
+        .on_hover_text("Tint the selected mask red on the image (O). Always on while painting.")
         .changed()
     {
         actions.push(MasksAction::SetOverlay(overlay));
@@ -84,7 +102,7 @@ pub(crate) fn show(ui: &mut egui::Ui, model: &MasksPanelModel<'_>) -> Vec<MasksA
 fn show_layer_list(ui: &mut egui::Ui, model: &MasksPanelModel<'_>, actions: &mut Vec<MasksAction>) {
     if model.layers.is_empty() {
         ui.label(
-            egui::RichText::new("No masks yet. Create one below, then drag on the image.")
+            egui::RichText::new("No masks yet. Create one below, then use it on the image.")
                 .small()
                 .color(colors::TEXT_MUTED),
         );
@@ -160,6 +178,11 @@ fn show_layer_name(
 
 fn show_new_mask(ui: &mut egui::Ui, model: &MasksPanelModel<'_>, actions: &mut Vec<MasksAction>) {
     ui.add_space(4.0);
+    let (label, hint) = if painting(model.mode).is_some() {
+        ("Done", "Paint on the image. Esc stops.")
+    } else {
+        ("Cancel", "Drag on the image to draw it. Esc cancels.")
+    };
     ui.horizontal(|ui| {
         ui.menu_button("New mask", |ui| {
             for (label, shape) in SHAPES {
@@ -169,24 +192,95 @@ fn show_new_mask(ui: &mut egui::Ui, model: &MasksPanelModel<'_>, actions: &mut V
                 }
             }
         });
-        if model.mode != MaskEditMode::Select && ui.button("Cancel").clicked() {
+        if model.mode != MaskEditMode::Select && ui.button(label).clicked() {
             actions.push(MasksAction::CancelCreate);
         }
     });
     if model.mode != MaskEditMode::Select {
         ui.label(
-            egui::RichText::new("Drag on the image to draw it. Esc cancels.")
+            egui::RichText::new(hint)
                 .small()
                 .color(colors::ACCENT_HOVER),
         );
     }
 }
 
-/// The shapes a gradient can be created as. Brush joins them with its own tool.
-const SHAPES: [(&str, MaskEditMode); 2] = [
+/// The shapes a mask or component can be created as.
+const SHAPES: [(&str, MaskEditMode); 3] = [
     ("Linear gradient", MaskEditMode::CreateLinear),
     ("Radial gradient", MaskEditMode::CreateRadial),
+    ("Brush", MaskEditMode::Paint { erase: false }),
 ];
+
+/// Whether the brush is active, and if so whether it erases.
+const fn painting(mode: MaskEditMode) -> Option<bool> {
+    match mode {
+        MaskEditMode::Paint { erase } => Some(erase),
+        _ => None,
+    }
+}
+
+/// Size, feather and flow of the brush, and whether it erases. These are authoring state: the
+/// next stroke copies them, strokes already painted keep theirs.
+fn show_brush(ui: &mut egui::Ui, model: &MasksPanelModel<'_>, actions: &mut Vec<MasksAction>) {
+    let mut erase = painting(model.mode).unwrap_or(false);
+    if ui
+        .checkbox(&mut erase, "Erase")
+        .on_hover_text("Remove from the mask instead of adding to it (E). Hold Alt to flip it.")
+        .changed()
+    {
+        actions.push(MasksAction::SetErase(erase));
+    }
+
+    let mut brush = model.brush;
+    let spec = |label, range: ParameterRange, decimals, step| AdjustmentSpec {
+        label,
+        minimum: range.minimum,
+        maximum: range.maximum,
+        neutral: range.neutral,
+        decimals,
+        step,
+        suffix: "%",
+        scale: ValueScale::Percent,
+    };
+    // Size is the radius, as a percentage of the image's long edge. The slider snaps its value
+    // to the step on every frame, and the `[` and `]` keys change it by a factor: with a coarser
+    // step than this, a factor-1.15 increase at the smallest sizes would snap back and the
+    // brush could not grow.
+    let mut changed = brush_slider(
+        ui,
+        &mut brush.radius,
+        spec("Size", BRUSH_RADIUS_RANGE, 1, 0.0005),
+    );
+    changed |= brush_slider(
+        ui,
+        &mut brush.feather,
+        spec("Feather", MASK_UNIT_RANGE, 0, 0.01),
+    );
+    let flow = ParameterRange {
+        neutral: 1.0,
+        ..MASK_UNIT_RANGE
+    };
+    changed |= brush_slider(ui, &mut brush.flow, spec("Flow", flow, 0, 0.01));
+    if changed {
+        actions.push(MasksAction::SetBrush(brush));
+    }
+    ui.label(
+        egui::RichText::new("[ ] size · Shift+[ ] feather · E erase")
+            .small()
+            .color(colors::TEXT_MUTED),
+    );
+}
+
+/// A brush slider with the same widget and reset button as the others. True when the value
+/// changed.
+fn brush_slider(ui: &mut egui::Ui, value: &mut f32, spec: AdjustmentSpec<'_>) -> bool {
+    let response = widgets::adjustment_slider(ui, value, spec);
+    if response.reset_clicked {
+        *value = spec.neutral;
+    }
+    response.reset_clicked || response.response.changed()
+}
 
 const fn shape_name(shape: &MaskShape) -> &'static str {
     match shape {
@@ -276,6 +370,20 @@ fn show_components(
                     }
                 }
             });
+        }
+        // Back to painting on a brush that is selected (after Done, say).
+        let on_brush = model
+            .selected_component
+            .and_then(|index| layer.components.get(index))
+            .is_some_and(|component| matches!(component.shape, MaskShape::Brush(_)));
+        if on_brush
+            && painting(model.mode).is_none()
+            && ui
+                .button("Paint")
+                .on_hover_text("Paint more strokes into the selected brush")
+                .clicked()
+        {
+            actions.push(MasksAction::PaintSelected);
         }
     });
 }
