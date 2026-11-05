@@ -163,7 +163,7 @@ impl MaskToolSession {
             MaskDrag::Handle(_) => None,
             MaskDrag::Create(create) => {
                 if create.placed.is_some() {
-                    self.mode = MaskEditMode::Select;
+                    self.return_to_select();
                 }
                 None
             }

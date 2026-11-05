@@ -266,7 +266,7 @@ fn show_brush(ui: &mut egui::Ui, model: &MasksPanelModel<'_>, actions: &mut Vec<
         actions.push(MasksAction::SetBrush(brush));
     }
     ui.label(
-        egui::RichText::new("[ ] size · Shift+[ ] feather · E erase")
+        egui::RichText::new("[ ] size · Shift+[ ] feather · E erase · hold Alt to flip erase")
             .small()
             .color(colors::TEXT_MUTED),
     );

@@ -178,7 +178,7 @@ impl MaskToolSession {
         };
         self.selected_layer = Some(layer);
         self.selected_component = (!found.components.is_empty()).then_some(0);
-        self.mode = MaskEditMode::Select;
+        self.return_to_select();
     }
 
     /// Selects a component of the selected layer, so its handles are shown.
@@ -189,7 +189,7 @@ impl MaskToolSession {
             .is_some_and(|layer| component < layer.components.len());
         if in_range {
             self.selected_component = Some(component);
-            self.mode = MaskEditMode::Select;
+            self.return_to_select();
         }
     }
 
@@ -217,7 +217,7 @@ impl MaskToolSession {
     pub fn cancel_create(&mut self) -> bool {
         let creating = self.mode != MaskEditMode::Select && !self.is_dragging();
         if creating {
-            self.mode = MaskEditMode::Select;
+            self.return_to_select();
         }
         creating
     }
