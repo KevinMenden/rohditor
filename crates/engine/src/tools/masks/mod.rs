@@ -31,7 +31,7 @@ mod view;
 #[cfg(test)]
 mod tests;
 
-pub use brush::BrushSettings;
+pub use brush::{BRUSH_RADIUS_RANGE, BrushSettings};
 pub use handles::MaskHandle;
 pub use layers::{LayerEdit, LocalSlider};
 pub use view::MaskView;
@@ -93,8 +93,14 @@ pub struct MaskToolSession {
     pub component_mode: MaskMode,
     /// Authoring state, copied into each new stroke.
     pub brush: BrushSettings,
-    /// Whether the selected layer's alpha is drawn over the preview.
+    /// Whether the selected layer's alpha is drawn over the preview. Painting shows it
+    /// regardless (see `overlay_layer`), and leaves this setting alone.
     pub show_overlay: bool,
+    /// The temporary erase modifier (Alt) is held: a stroke that starts now does the opposite
+    /// of the painting mode. The frontend sets it from the keyboard before each press.
+    pub erase_held: bool,
+    /// The next stroke starts a new brush component instead of joining the selected brush.
+    new_brush_component: bool,
     drag: Option<MaskDrag>,
     limit: Option<MaskLimit>,
 }
@@ -108,6 +114,8 @@ impl Default for MaskToolSession {
             component_mode: MaskMode::Add,
             brush: BrushSettings::default(),
             show_overlay: true,
+            erase_held: false,
+            new_brush_component: false,
             drag: None,
             limit: None,
         }
@@ -116,13 +124,21 @@ impl Default for MaskToolSession {
 
 impl MaskToolSession {
     /// The layer whose mask is tinted over the preview: the selected layer while the overlay is
-    /// on. The id may be stale (the layer was deleted or undone away), so check it in the recipe.
+    /// on, or while painting, so a brush is never painted blind. The id may be stale (the layer
+    /// was deleted or undone away), so check it in the recipe.
     pub const fn overlay_layer(&self) -> Option<u32> {
-        if self.show_overlay {
+        if self.show_overlay || self.is_painting() {
             self.selected_layer
         } else {
             None
         }
+    }
+
+    /// Back to `Select`. A request for a new brush component belongs to the painting that
+    /// asked for it, so it ends here too and cannot make a later stroke start a component.
+    fn return_to_select(&mut self) {
+        self.mode = MaskEditMode::Select;
+        self.new_brush_component = false;
     }
 
     /// Whether a pointer gesture is in progress (between a press that grabbed or started

@@ -1,5 +1,5 @@
 //! The Masks tool's layer on top of the viewport: the red mask tint, the handles of the selected
-//! mask, the pins of the other masks, and the pointer events that drive them.
+//! mask, the pins of the other masks, the brush cursor, and the pointer events that drive them.
 //!
 //! Handle positions, hit tests and drag maths come from `MaskToolSession`; this module maps
 //! them through the viewport's current zoom/pan (`image_rect`) and reports semantic events
@@ -30,10 +30,14 @@ pub(crate) struct MaskOverlayModel<'a> {
 #[derive(Debug, Default)]
 pub(crate) struct MaskOverlayOutput {
     /// The pointer pressed on something the tool grabs, at a display position (`0..1` over the
-    /// image). Always accompanied by `drag_to` for the current pointer position.
+    /// image).
     pub press: Option<(f64, f64)>,
-    pub drag_to: Option<(f64, f64)>,
+    /// Display positions the pointer moved through during the gesture this frame, oldest first;
+    /// the last is where it is now. A stroke follows all of them, so a fast one stays smooth.
+    pub drag_to: Vec<(f64, f64)>,
     pub release: bool,
+    /// The erase modifier (Alt) is down.
+    pub erase_held: bool,
     /// A click on another mask's pin.
     pub select_layer: Option<u32>,
     /// A mask gesture owns the primary drag, so the viewport must not pan with it.
@@ -65,7 +69,8 @@ fn to_screen(image_rect: egui::Rect, position: (f64, f64)) -> egui::Pos2 {
 }
 
 /// Whether a primary press at `pointer` would start a mask gesture, so the viewport knows not to
-/// pan with it. Drawing a gradient grabs any press; otherwise only a handle of the selection.
+/// pan with it. Drawing a gradient or painting grabs any press; otherwise only a handle of the
+/// selection.
 fn press_grabs(model: &MaskOverlayModel<'_>, image_rect: egui::Rect, pointer: egui::Pos2) -> bool {
     match model.session.mode {
         MaskEditMode::Select => model
@@ -97,14 +102,94 @@ fn grabbing_press(
 }
 
 /// Whether a mask gesture owns the primary drag (one is running, or one starts this frame), so
-/// the viewport must not pan with it. `image_rect` is where the image is on screen.
+/// the viewport must not pan with it. `image_rect` is where the image is on screen. Painting
+/// owns every drag, even one whose press the session refused (a limit was reached), so the image
+/// never slides under the brush.
 pub(crate) fn captures_drag(
     ui: &egui::Ui,
     response: &egui::Response,
     image_rect: egui::Rect,
     model: &MaskOverlayModel<'_>,
 ) -> bool {
-    model.session.is_dragging() || grabbing_press(ui, response, image_rect, model).is_some()
+    model.session.is_painting()
+        || model.session.is_dragging()
+        || grabbing_press(ui, response, image_rect, model).is_some()
+}
+
+/// What the pointer did to a stroke during one frame.
+#[derive(Debug, Default, PartialEq)]
+struct StrokeEvents {
+    /// Where the primary button went down, if a stroke started.
+    press: Option<egui::Pos2>,
+    /// Pointer positions while the stroke was running, oldest first.
+    moves: Vec<egui::Pos2>,
+    /// The primary button went up while the stroke was running.
+    release: bool,
+}
+
+/// Reads one frame of pointer events for painting, in the order they happened. `running` is
+/// whether a stroke was already going at the start of the frame; otherwise a press at a position
+/// `starts_stroke` accepts begins one.
+///
+/// Painting reads the raw events instead of egui's drag detection: that starts a drag only after
+/// the pointer has moved a few pixels, so a click would never dab and every stroke would begin
+/// late. It also keeps every pointer position of the frame, not just the last.
+fn stroke_events(
+    input: &egui::InputState,
+    mut running: bool,
+    starts_stroke: impl Fn(egui::Pos2) -> bool,
+) -> StrokeEvents {
+    let mut found = StrokeEvents::default();
+    for event in &input.events {
+        match event {
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                ..
+            } if !running && starts_stroke(*pos) => {
+                found.press = Some(*pos);
+                running = true;
+            }
+            egui::Event::PointerButton {
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                ..
+            } if running => {
+                found.release = true;
+                running = false;
+            }
+            egui::Event::PointerMoved(pos) if running => found.moves.push(*pos),
+            _ => {}
+        }
+    }
+    found
+}
+
+/// Fills the press, move and release of `output` from this frame's painting events.
+fn read_stroke(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    image_rect: egui::Rect,
+    model: &MaskOverlayModel<'_>,
+    output: &mut MaskOverlayOutput,
+) {
+    let running = model.session.is_dragging();
+    let (events, button_down) = ui.input(|input| {
+        let starts_stroke = |pos: egui::Pos2| response.hovered() && image_rect.contains(pos);
+        (
+            stroke_events(input, running, starts_stroke),
+            input.pointer.primary_down(),
+        )
+    });
+    output.press = events.press.map(|pos| to_display(image_rect, pos));
+    output.drag_to = events
+        .moves
+        .into_iter()
+        .map(|pos| to_display(image_rect, pos))
+        .collect();
+    // A release the window never saw (focus was lost mid-stroke) ends the stroke too.
+    output.release = events.release || (running && !button_down);
 }
 
 /// The pin of a mask in the viewport: where a click selects it.
@@ -166,21 +251,28 @@ pub(crate) fn interact_and_paint(
     let primary = egui::PointerButton::Primary;
     let pointer = response.interact_pointer_pos();
 
-    output.press = grabbing_press(ui, response, image_rect, model)
-        .map(|origin| to_display(image_rect, origin));
+    output.erase_held = ui.input(|input| input.modifiers.alt);
     output.captures_drag = captures_drag(ui, response, image_rect, model);
-    if output.captures_drag
-        && response.dragged_by(primary)
-        && let Some(pointer) = pointer
-    {
-        output.drag_to = Some(to_display(image_rect, pointer));
-    }
-    if response.drag_stopped_by(primary) && model.session.is_dragging() {
-        output.release = true;
+    let painting = model.session.is_painting();
+    if painting {
+        read_stroke(ui, response, image_rect, model, &mut output);
+    } else {
+        output.press = grabbing_press(ui, response, image_rect, model)
+            .map(|origin| to_display(image_rect, origin));
+        if output.captures_drag
+            && response.dragged_by(primary)
+            && let Some(pointer) = pointer
+        {
+            output.drag_to = vec![to_display(image_rect, pointer)];
+        }
+        if response.drag_stopped_by(primary) && model.session.is_dragging() {
+            output.release = true;
+        }
     }
 
     let hover = response.hover_pos();
-    let hovered_pin = hover.and_then(|hover| {
+    // Painting takes every press, so the pins of other masks cannot be clicked then.
+    let hovered_pin = hover.filter(|_| !painting).and_then(|hover| {
         other_pins(model, image_rect)
             .find(|(_, pin)| pin.distance(hover) <= PIN_HIT_RADIUS)
             .map(|(layer, _)| layer)
@@ -194,7 +286,10 @@ pub(crate) fn interact_and_paint(
         context.set_cursor_icon(egui::CursorIcon::PointingHand);
         let _ = response.clone().on_hover_text_at_pointer(&layer.name);
     } else if let Some(hover) = hover.filter(|hover| image_rect.contains(*hover)) {
-        if model.session.mode != MaskEditMode::Select {
+        if painting {
+            // The brush outline is the cursor.
+            context.set_cursor_icon(egui::CursorIcon::None);
+        } else if model.session.mode != MaskEditMode::Select {
             context.set_cursor_icon(egui::CursorIcon::Crosshair);
         } else if let Some(handle) =
             model
@@ -207,7 +302,49 @@ pub(crate) fn interact_and_paint(
 
     paint_pins(ui, model, image_rect, hovered_pin.map(|layer| layer.id));
     paint_selection(ui, model, &view, image_rect);
+    if painting {
+        // During a stroke the pointer may be past the image edge; the outline follows it there.
+        let at = if model.session.is_dragging() {
+            ui.input(|input| input.pointer.latest_pos())
+        } else {
+            hover.filter(|hover| image_rect.contains(*hover))
+        };
+        if let Some(at) = at {
+            paint_brush_cursor(ui.painter(), model.session, &view, at);
+        }
+    }
     output
+}
+
+/// The brush at the pointer: an outer ring at the brush radius and an inner ring where the
+/// feather starts (full strength inside it). Both are sized from the radius in the developed
+/// frame, so they match the stroke at any zoom. Erasing is drawn in the warning colour.
+fn paint_brush_cursor(
+    painter: &egui::Painter,
+    session: &MaskToolSession,
+    view: &MaskView,
+    center: egui::Pos2,
+) {
+    let outer = view.units_to_screen(f64::from(session.brush.radius)) as f32;
+    let inner = outer * (1.0 - session.brush.feather);
+    let color = if session.is_erasing() {
+        colors::WARNING
+    } else {
+        egui::Color32::WHITE
+    };
+    let ring = |radius: f32, width: f32, color: egui::Color32| {
+        painter.circle_stroke(
+            center,
+            radius,
+            egui::Stroke::new(width + 2.0, egui::Color32::from_black_alpha(150)),
+        );
+        painter.circle_stroke(center, radius, egui::Stroke::new(width, color));
+    };
+    ring(outer, 1.5, color);
+    // A feather of 0 has no ramp, and a ring under a pixel would only blur the outer one.
+    if inner >= 1.0 && inner < outer {
+        ring(inner, 1.0, color.gamma_multiply(0.7));
+    }
 }
 
 const fn cursor_for(handle: MaskHandle) -> egui::CursorIcon {
@@ -375,6 +512,68 @@ fn paint_radial(painter: &egui::Painter, [center, x, y, feather]: [egui::Pos2; 4
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn input_with(events: Vec<egui::Event>) -> egui::InputState {
+        let mut input = egui::InputState::default();
+        input.events = events;
+        input
+    }
+
+    fn button(x: f32, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos: egui::pos2(x, 10.0),
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    fn moved(x: f32) -> egui::Event {
+        egui::Event::PointerMoved(egui::pos2(x, 10.0))
+    }
+
+    #[test]
+    fn a_click_inside_one_frame_is_a_press_and_a_release() {
+        // Press and release before egui reports a single frame: the dab must still happen.
+        let input = input_with(vec![moved(5.0), button(5.0, true), button(5.0, false)]);
+        let found = stroke_events(&input, false, |_| true);
+        assert_eq!(found.press, Some(egui::pos2(5.0, 10.0)));
+        assert!(found.release);
+        // The move before the press is not part of the stroke.
+        assert!(found.moves.is_empty());
+    }
+
+    #[test]
+    fn a_stroke_keeps_every_position_of_the_frame_in_order() {
+        let input = input_with(vec![moved(1.0), moved(2.0), moved(3.0)]);
+        let found = stroke_events(&input, true, |_| true);
+        assert_eq!(found.press, None);
+        assert_eq!(
+            found.moves,
+            [
+                egui::pos2(1.0, 10.0),
+                egui::pos2(2.0, 10.0),
+                egui::pos2(3.0, 10.0)
+            ]
+        );
+        assert!(!found.release);
+    }
+
+    #[test]
+    fn moves_after_the_release_are_not_part_of_the_stroke() {
+        let input = input_with(vec![moved(1.0), button(1.0, false), moved(9.0)]);
+        let found = stroke_events(&input, true, |_| true);
+        assert_eq!(found.moves, [egui::pos2(1.0, 10.0)]);
+        assert!(found.release);
+    }
+
+    #[test]
+    fn a_press_the_tool_refuses_starts_no_stroke() {
+        // Pressed off the image: no stroke, so the moves and the release that follow are ignored.
+        let input = input_with(vec![button(5.0, true), moved(6.0), button(6.0, false)]);
+        let found = stroke_events(&input, false, |_| false);
+        assert_eq!(found, StrokeEvents::default());
+    }
 
     #[test]
     fn the_inner_scale_follows_the_feather_marker_along_the_diagonal() {

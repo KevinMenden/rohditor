@@ -178,7 +178,7 @@ impl MaskToolSession {
         };
         self.selected_layer = Some(layer);
         self.selected_component = (!found.components.is_empty()).then_some(0);
-        self.mode = MaskEditMode::Select;
+        self.return_to_select();
     }
 
     /// Selects a component of the selected layer, so its handles are shown.
@@ -189,23 +189,26 @@ impl MaskToolSession {
             .is_some_and(|layer| component < layer.components.len());
         if in_range {
             self.selected_component = Some(component);
-            self.mode = MaskEditMode::Select;
+            self.return_to_select();
         }
     }
 
     /// The next press-drag-release draws a gradient into a new layer (`shape` is
-    /// `CreateLinear` or `CreateRadial`).
+    /// `CreateLinear` or `CreateRadial`), or the next stroke starts a brush there (`Paint`).
     pub fn create_layer(&mut self, shape: MaskEditMode) {
         self.selected_layer = None;
         self.selected_component = None;
         self.component_mode = MaskMode::Add;
+        self.new_brush_component = false;
         self.mode = shape;
     }
 
     /// The next press-drag-release draws a gradient into the selected layer, combined as
-    /// `component_mode`. Without a selected layer it starts a new one.
+    /// `component_mode`; with `Paint`, the next stroke starts a new brush component there, and
+    /// the strokes after it join that one. Without a selected layer it starts a new one.
     pub fn create_component(&mut self, shape: MaskEditMode, component_mode: MaskMode) {
         self.component_mode = component_mode;
+        self.new_brush_component = matches!(shape, MaskEditMode::Paint { .. });
         self.mode = shape;
     }
 
@@ -214,7 +217,7 @@ impl MaskToolSession {
     pub fn cancel_create(&mut self) -> bool {
         let creating = self.mode != MaskEditMode::Select && !self.is_dragging();
         if creating {
-            self.mode = MaskEditMode::Select;
+            self.return_to_select();
         }
         creating
     }

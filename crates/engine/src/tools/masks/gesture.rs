@@ -163,7 +163,7 @@ impl MaskToolSession {
             MaskDrag::Handle(_) => None,
             MaskDrag::Create(create) => {
                 if create.placed.is_some() {
-                    self.mode = MaskEditMode::Select;
+                    self.return_to_select();
                 }
                 None
             }
@@ -172,7 +172,10 @@ impl MaskToolSession {
     }
 
     /// The selected component, if the selection still points at one.
-    fn selected_shape<'a>(&self, recipe: &'a EditRecipe) -> Option<(Placement, &'a MaskShape)> {
+    pub(super) fn selected_shape<'a>(
+        &self,
+        recipe: &'a EditRecipe,
+    ) -> Option<(Placement, &'a MaskShape)> {
         let layer = recipe.local.layer(self.selected_layer?)?;
         let component = self.selected_component?;
         let shape = &layer.components.get(component)?.shape;
@@ -263,6 +266,8 @@ impl MaskToolSession {
         at: Vec2,
         erase: bool,
     ) -> Option<EditRecipe> {
+        // The erase modifier turns painting into erasing and the other way round.
+        let erase = erase != self.erase_held;
         let budget = edit::brush_point_budget(recipe);
         if budget == 0 {
             self.limit = Some(MaskLimit::BrushPoints);
@@ -271,10 +276,12 @@ impl MaskToolSession {
         let stroke = self.brush.begin_stroke(erase, space.space_to_point(at));
         let radius = f64::from(stroke.radius);
 
-        // Paint into the selected brush component. Without one, a new brush component takes
-        // the stroke; erasing has nothing to erase from then.
+        // Paint into the selected brush component, unless a new one was asked for. Without a
+        // brush to join, a new brush component takes the stroke; erasing has nothing to erase
+        // from then.
         let selected_brush = self
             .selected_shape(recipe)
+            .filter(|_| !self.new_brush_component)
             .and_then(|(target, shape)| match shape {
                 MaskShape::Brush(brush) => Some((target, brush.strokes.len())),
                 _ => None,
@@ -297,7 +304,13 @@ impl MaskToolSession {
                 strokes: vec![stroke],
             });
             match edit::add_component(recipe, self.selected_layer, shape) {
-                Ok((next, target)) => (next, target, 0),
+                Ok((mut next, target)) => {
+                    // As for a gradient: only a component joining a layer combines with it.
+                    if target.component > 0 {
+                        edit::set_component_mode(&mut next, target, self.component_mode);
+                    }
+                    (next, target, 0)
+                }
                 Err(limit) => {
                     self.limit = Some(limit);
                     return None;
@@ -305,6 +318,7 @@ impl MaskToolSession {
             }
         };
 
+        self.new_brush_component = false;
         self.select(target);
         self.drag = Some(MaskDrag::Stroke(StrokeDrag {
             target,
