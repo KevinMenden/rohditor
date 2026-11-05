@@ -367,13 +367,12 @@ pub(super) mod adjustments {
                 "the local adjustment stage was prepared for another frame size",
             ));
         }
-        let exposure_gain = recipe.light.exposure_ev.exp2();
+        let reference_chain = ReferenceChain::new(recipe);
+        let exposure_gain = reference_chain.exposure_gain;
         let width_samples = image.width() * 3;
         let row_stride = image.row_stride();
         let light = recipe.light.clone();
         let color = recipe.color.clone();
-        let base_rendering_lut = base_rendering_lut(&recipe.rendering);
-        let camera_chroma = recipe.rendering.matched_look().and_then(|look| look.chroma);
         // Resolve stage participation once per recipe instead of repeatedly
         // checking all neutral controls for every pixel. This is especially
         // useful for the common global-adjustment path, where HSL and grading are
@@ -395,6 +394,7 @@ pub(super) mod adjustments {
         let has_grading = color.grading.shadows != [0.0; 3]
             || color.grading.midtones != [0.0; 3]
             || color.grading.highlights != [0.0; 3];
+        let reference_pixel = |pixel: &mut [f32; 3]| reference_chain.apply(pixel);
         image
             .data_mut()
             .par_chunks_mut(row_stride)
@@ -404,7 +404,7 @@ pub(super) mod adjustments {
                 |alphas, (y, row)| -> Result<(), PipelineError> {
                     cancellation.checkpoint()?;
                     if let Some(local) = local {
-                        local.evaluate_row(y, alphas);
+                        local.evaluate_row(y, &row[..width_samples], reference_pixel, alphas);
                     }
                     for (x, pixel) in row[..width_samples]
                         .as_chunks_mut::<3>()
@@ -437,10 +437,10 @@ pub(super) mod adjustments {
                                 *value *= gain;
                             }
                         }
-                        if let Some(base_rendering_lut) = &base_rendering_lut {
+                        if let Some(base_rendering_lut) = &reference_chain.base_rendering_lut {
                             apply_base_rendering(pixel, base_rendering_lut);
                         }
-                        if let Some(camera_chroma) = &camera_chroma {
+                        if let Some(camera_chroma) = &reference_chain.camera_chroma {
                             apply_camera_chroma(pixel, camera_chroma);
                         }
                         if let Some(light_tone_lut) = &light_tone_lut {
@@ -475,6 +475,43 @@ pub(super) mod adjustments {
             )?;
         cancellation.checkpoint()?;
         Ok(())
+    }
+
+    /// The part of the adjustment chain that range masks measure: the global exposure and the
+    /// base rendering (tone and camera colourfulness), before Light, Color and every local term.
+    ///
+    /// The render loop applies these same steps itself, interleaved with the local scene terms
+    /// (which add to the exposure and sit between exposure and base rendering), so the order
+    /// here and in `apply_adjustments_with_local` must stay the same.
+    pub(crate) struct ReferenceChain {
+        exposure_gain: f32,
+        base_rendering_lut: Option<std::borrow::Cow<'static, crate::BaseRenderingLut>>,
+        camera_chroma: Option<CameraChroma>,
+    }
+
+    impl ReferenceChain {
+        pub(crate) fn new(recipe: &EditRecipe) -> Self {
+            Self {
+                exposure_gain: recipe.light.exposure_ev.exp2(),
+                base_rendering_lut: base_rendering_lut(&recipe.rendering),
+                camera_chroma: recipe.rendering.matched_look().and_then(|look| look.chroma),
+            }
+        }
+
+        /// Turns a pixel as it enters the adjustment stage into its reference pixel.
+        pub(crate) fn apply(&self, pixel: &mut [f32; 3]) {
+            if self.exposure_gain != 1.0 {
+                for value in pixel.iter_mut() {
+                    *value *= self.exposure_gain;
+                }
+            }
+            if let Some(base_rendering_lut) = &self.base_rendering_lut {
+                apply_base_rendering(pixel, base_rendering_lut);
+            }
+            if let Some(camera_chroma) = &self.camera_chroma {
+                apply_camera_chroma(pixel, camera_chroma);
+            }
+        }
     }
 
     fn apply_base_rendering(pixel: &mut [f32], lut: &crate::BaseRenderingLut) {

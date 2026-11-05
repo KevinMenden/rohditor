@@ -5,13 +5,20 @@
 //! drag without waiting for one. It uses the same [`PreparedMask`] maths as the adjustment stage
 //! and is oriented and cropped like the colour image, so the UI can tint and draw it without
 //! knowing about the developed frame.
+//!
+//! Layers with luminance or colour range components select on what the image looks like, so
+//! their overlay needs pixels: [`render_mask_overlay_from_image`] measures the reference from the
+//! developed image, at that image's size. The image-free [`render_mask_overlay_preview`] is for
+//! gradients and brushes, where the small size keeps the tint following a drag.
 
 use rayon::prelude::*;
 use rohditor_edit::EditRecipe;
-use rohditor_image::{Orientation, allocate_zeroed_u8};
-use rohditor_mask::{MaskFrame, PreparedMask};
+use rohditor_image::{LinearRgbImage, Orientation, allocate_zeroed_u8};
+use rohditor_mask::{MaskFrame, PreparedMask, ReferenceRow};
 
+use super::ReferenceChain;
 use super::local_stage::mask_error;
+use super::range_reference::ReferenceRows;
 use crate::{CancellationToken, OutputGeometry, PipelineError};
 
 /// An 8-bit alpha image (`0` = outside the mask, `255` = fully inside) in the geometry of the
@@ -50,7 +57,8 @@ impl MaskAlphaImage {
 /// full-size overlay at a fraction of the cost. `Ok(None)` when the recipe has no such layer.
 ///
 /// # Errors
-/// An invalid recipe or geometry, or an allocation failure.
+/// An invalid recipe or geometry, or an allocation failure. A layer with range components has
+/// no overlay without an image; use [`render_mask_overlay_from_image`] for those.
 pub fn render_mask_overlay_preview(
     recipe: &EditRecipe,
     layer_id: u32,
@@ -69,8 +77,47 @@ pub fn render_mask_overlay_preview(
         .unwrap_or(source_orientation);
     let geometry = OutputGeometry::new(small.0, small.1, orientation, recipe.geometry.crop)?;
     MaskOverlayPlan::prepare(recipe, layer_id, small, geometry)?
-        .map(|plan| plan.render(&CancellationToken::new()))
+        .map(|plan| plan.render(None, &CancellationToken::new()))
         .transpose()
+}
+
+/// The overlay of layer `layer_id` measured on the developed image itself, which layers with
+/// luminance or colour range components need. Works for every layer.
+///
+/// `image` is the linear Rec.2020 image as it enters the adjustment stage (a preview base) and
+/// `source_orientation` the file's. The overlay has the size of `image`, oriented and cropped as
+/// in a render, and shows the layer at full strength like [`render_mask_overlay_preview`].
+/// `Ok(None)` when the recipe has no such layer.
+///
+/// # Errors
+/// An invalid recipe or geometry, or an allocation failure.
+pub fn render_mask_overlay_from_image(
+    image: &LinearRgbImage<f32>,
+    source_orientation: Orientation,
+    recipe: &EditRecipe,
+    layer_id: u32,
+) -> Result<Option<MaskAlphaImage>, PipelineError> {
+    let frame = (image.width(), image.height());
+    let orientation = recipe
+        .geometry
+        .orientation_override
+        .unwrap_or(source_orientation);
+    let geometry = OutputGeometry::new(frame.0, frame.1, orientation, recipe.geometry.crop)?;
+    let chain = ReferenceChain::new(recipe);
+    let reference = OverlayReference {
+        image,
+        chain: &chain,
+    };
+    MaskOverlayPlan::prepare(recipe, layer_id, frame, geometry)?
+        .map(|plan| plan.render(Some(&reference), &CancellationToken::new()))
+        .transpose()
+}
+
+/// The image a range mask is measured on: its pixels and the chain that turns them into the
+/// reference pixels the masks read.
+pub(super) struct OverlayReference<'a> {
+    pub(super) image: &'a LinearRgbImage<f32>,
+    pub(super) chain: &'a ReferenceChain,
 }
 
 /// A requested overlay, resolved for one render: the layer's mask and the geometry to present it in.
@@ -112,19 +159,52 @@ impl MaskOverlayPlan {
         }))
     }
 
+    /// Renders the overlay. A mask with range components needs `reference` (an image of the
+    /// plan's frame size); without it the render fails rather than guess.
     pub(super) fn render(
         &self,
+        reference: Option<&OverlayReference<'_>>,
         cancellation: &CancellationToken,
     ) -> Result<MaskAlphaImage, PipelineError> {
         let (width, height) = self.frame;
+        let needs = self.mask.reference_needs();
+        let reference = match reference {
+            Some(reference)
+                if (reference.image.width(), reference.image.height()) != self.frame =>
+            {
+                return Err(PipelineError::InvalidRecipe {
+                    field: "local.layers",
+                    reason: "the mask overlay was prepared for another frame size".to_owned(),
+                });
+            }
+            Some(reference) => Some(reference),
+            None if needs.any() => {
+                return Err(PipelineError::InvalidRecipe {
+                    field: "local.layers",
+                    reason: "a luminance or color range needs the image to show its overlay"
+                        .to_owned(),
+                });
+            }
+            None => None,
+        };
         let mut plane = allocate_zeroed_u8(width * height)?;
+        let row_stride = reference.map_or(0, |reference| reference.image.row_stride());
         // Quantize in the developed frame, then gather through the output geometry.
         plane.par_chunks_mut(width).enumerate().try_for_each_init(
-            Vec::<f32>::new,
-            |row, (y, out)| -> Result<(), PipelineError> {
+            || (Vec::<f32>::new(), ReferenceRows::default()),
+            |(row, measured), (y, out)| -> Result<(), PipelineError> {
                 cancellation.checkpoint()?;
                 row.resize(width, 0.0);
-                self.mask.evaluate_row(y, 0..width, row);
+                let reference_row = match reference {
+                    Some(reference) if needs.any() => {
+                        let start = y * row_stride;
+                        let pixels = &reference.image.data()[start..start + width * 3];
+                        measured.measure(needs, pixels, |pixel| reference.chain.apply(pixel));
+                        measured.row()
+                    }
+                    _ => ReferenceRow::NONE,
+                };
+                self.mask.evaluate_row(y, 0..width, reference_row, row);
                 for (byte, alpha) in out.iter_mut().zip(row.iter()) {
                     *byte = (alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
                 }

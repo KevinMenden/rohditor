@@ -13,18 +13,27 @@
 //! coordinates. All maths runs in *pixel space* (recipe point times frame size), so angles stay
 //! true on non-square frames. Lengths in the recipe are in long-edge units and are multiplied by
 //! `max(width, height)`.
+//!
+//! # Range components
+//!
+//! Luminance and colour ranges select by image content. The pipeline measures a per-pixel
+//! reference (see [`ReferenceRow`]) and passes it in; this crate stays free of images.
 
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 mod brush;
+mod color_range;
 mod linear;
+mod luminance;
 mod math;
 mod prepared;
 mod radial;
+mod reference;
 #[cfg(test)]
 mod test_support;
 
 pub use prepared::PreparedMask;
+pub use reference::{ReferenceNeeds, ReferenceRow};
 
 use thiserror::Error;
 

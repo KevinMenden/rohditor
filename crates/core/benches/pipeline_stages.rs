@@ -5,8 +5,9 @@ use rohditor_core::{
     OutputPolicy, RawCropPolicy, apply_adjustments, normalize_raw_preview, render_display_srgb8,
 };
 use rohditor_edit::{
-    BrushMask, BrushStroke, EditRecipe, LinearGradient, LocalSettings, MaskComponent, MaskLayer,
-    MaskMode, MaskPoint, MaskShape, RenderingProfileSelection,
+    BrushMask, BrushStroke, ColorRange, ColorSample, EditRecipe, LinearGradient, LocalSettings,
+    LuminanceRange, MaskComponent, MaskLayer, MaskMode, MaskPoint, MaskShape,
+    RenderingProfileSelection,
 };
 use rohditor_image::{LinearRgbImage, LinearRgbSpace, Orientation};
 
@@ -112,6 +113,29 @@ fn benchmark_local_adjustments(criterion: &mut Criterion) {
             .map(|count| (format!("{count}_gradients"), gradient_layers(count)))
             .collect();
         cases.push(("1_brush".to_owned(), brush_layer()));
+        // A range measures the reference (global exposure and base rendering) of every pixel.
+        cases.push((
+            "1_gradient_x_luminance".to_owned(),
+            gradient_with_range(MaskShape::Luminance(LuminanceRange {
+                low: 0.2,
+                high: 0.8,
+                feather_low: 0.1,
+                feather_high: 0.1,
+            })),
+        ));
+        cases.push((
+            "1_gradient_x_color_3".to_owned(),
+            gradient_with_range(MaskShape::Color(ColorRange {
+                samples: (0..3)
+                    .map(|i| ColorSample {
+                        lightness: 0.4 + 0.15 * i as f32,
+                        a: 0.05 * i as f32,
+                        b: 0.05,
+                    })
+                    .collect(),
+                tolerance: 0.4,
+            })),
+        ));
         for (name, recipe) in cases {
             group.bench_function(name, |bencher| {
                 bencher.iter_batched(
@@ -171,6 +195,17 @@ fn gradient_layers(count: u32) -> EditRecipe {
             }),
         ));
     }
+    recipe
+}
+
+/// One gradient layer refined (intersected) by a range component, the typical use of a range.
+fn gradient_with_range(range: MaskShape) -> EditRecipe {
+    let mut recipe = gradient_layers(1);
+    recipe.local.layers[0].components.push(MaskComponent {
+        mode: MaskMode::Intersect,
+        invert: false,
+        shape: range,
+    });
     recipe
 }
 

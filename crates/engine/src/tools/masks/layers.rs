@@ -11,6 +11,7 @@ use rohditor_edit::{
     MAX_MASK_NAME_BYTES, MaskLayer, MaskMode, ParameterRange, SHADOWS_RANGE, WHITES_RANGE,
 };
 
+use super::range::RangeSlider;
 use super::{MaskEditMode, MaskToolSession};
 
 /// A numeric control of a mask layer: its opacity or one of its adjustment sliders.
@@ -107,6 +108,12 @@ pub enum LayerEdit {
         component: usize,
         invert: bool,
     },
+    /// A slider of a luminance or colour range component; ignored for other shapes.
+    RangeSlider {
+        component: usize,
+        slider: RangeSlider,
+        value: f32,
+    },
     /// One step earlier in the order the layers are applied.
     MoveUp,
     /// One step later in the order the layers are applied.
@@ -144,6 +151,19 @@ impl LayerEdit {
                     .components
                     .get_mut(*component)?
                     .invert = *invert;
+            }
+            Self::RangeSlider {
+                component,
+                slider,
+                value,
+            } => {
+                let shape = &mut next.local.layers[index]
+                    .components
+                    .get_mut(*component)?
+                    .shape;
+                if !slider.set(shape, *value) {
+                    return None;
+                }
             }
             Self::MoveUp => {
                 let to = index.checked_sub(1)?;
@@ -313,6 +333,64 @@ mod tests {
             .0;
         }
         add_component(&recipe, None, gradient()).expect("room").0
+    }
+
+    #[test]
+    fn range_sliders_edit_the_addressed_range_and_refuse_anything_else() {
+        let mut base = recipe(1);
+        base.local.layers[0]
+            .components
+            .push(rohditor_edit::MaskComponent {
+                mode: MaskMode::Intersect,
+                invert: false,
+                shape: MaskShape::Luminance(rohditor_edit::LuminanceRange::default()),
+            });
+        let edit = |component, slider, value| LayerEdit::RangeSlider {
+            component,
+            slider,
+            value,
+        };
+
+        let moved = edit(1, RangeSlider::LuminanceHigh, 0.7)
+            .apply(&base, 0)
+            .expect("changes the range");
+        assert_eq!(
+            RangeSlider::LuminanceHigh.get(&layer(&moved).components[1].shape),
+            Some(0.7)
+        );
+        assert!(moved.validate().is_ok());
+        // Same value, a value outside the slider, the gradient, a missing component and a
+        // missing layer: nothing to install.
+        assert!(
+            edit(1, RangeSlider::LuminanceHigh, 1.0)
+                .apply(&base, 0)
+                .is_none()
+        );
+        assert!(
+            edit(1, RangeSlider::LuminanceHigh, 1.5)
+                .apply(&base, 0)
+                .is_none()
+        );
+        assert!(
+            edit(0, RangeSlider::LuminanceHigh, 0.5)
+                .apply(&base, 0)
+                .is_none()
+        );
+        assert!(
+            edit(1, RangeSlider::ColorTolerance, 0.5)
+                .apply(&base, 0)
+                .is_none()
+        );
+        assert!(
+            edit(7, RangeSlider::LuminanceHigh, 0.5)
+                .apply(&base, 0)
+                .is_none()
+        );
+        assert!(
+            edit(1, RangeSlider::LuminanceHigh, 0.5)
+                .apply(&base, 9)
+                .is_none()
+        );
     }
 
     #[test]
