@@ -8,8 +8,8 @@ use rohditor_core::{
     CpuPipeline, DitherMode, ExportImage, OutputBitDepth, OutputSize, PreviewOptions, RenderOptions,
 };
 use rohditor_edit::{
-    EditRecipe, LinearGradient, LocalSettings, MaskComponent, MaskLayer, MaskMode, MaskPoint,
-    MaskShape, NormalizedCropRect, RadialGradient,
+    BrushMask, BrushStroke, EditRecipe, LinearGradient, LocalSettings, MaskComponent, MaskLayer,
+    MaskMode, MaskPoint, MaskShape, NormalizedCropRect, RadialGradient,
 };
 use rohditor_image::{CfaColor, Orientation};
 use rohditor_raw::{
@@ -213,6 +213,124 @@ fn crop_and_orientation_do_not_move_the_mask_relative_to_the_content() -> Result
             assert_eq!(
                 green(&rotated.image, x, y),
                 green(&full.image, WIDTH - 1 - x, HEIGHT - 1 - y),
+                "{x},{y}"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// One brush stroke along y = 0.5 from the left edge of the frame to its right edge, so it
+/// runs through the crop used below and well outside it on both sides.
+fn brushed_recipe() -> EditRecipe {
+    let mut recipe = EditRecipe::default();
+    recipe.local.layers.push(MaskLayer {
+        id: LAYER_ID,
+        name: "Brush".to_owned(),
+        enabled: true,
+        opacity: 1.0,
+        components: vec![MaskComponent {
+            mode: MaskMode::Add,
+            invert: false,
+            shape: MaskShape::Brush(BrushMask {
+                strokes: vec![BrushStroke {
+                    points: vec![MaskPoint { x: 0.0, y: 0.5 }, MaskPoint { x: 1.0, y: 0.5 }],
+                    radius: 0.08,
+                    feather: 0.5,
+                    flow: 1.0,
+                    erase: false,
+                }],
+            }),
+        }],
+        settings: LocalSettings {
+            exposure_ev: -2.0,
+            ..LocalSettings::default()
+        },
+    });
+    recipe
+}
+
+#[test]
+fn a_brush_stroke_looks_the_same_in_the_fit_preview_and_the_full_resolution_export()
+-> Result<(), Box<dyn Error>> {
+    let (frame, recipe) = (flat_frame(), brushed_recipe());
+    let pipeline = CpuPipeline::default();
+    let preview = pipeline.render_preview(
+        &frame,
+        &recipe,
+        PreviewOptions {
+            render: RenderOptions::default(),
+            max_long_edge: 32,
+        },
+    )?;
+    let export = pipeline.render_export(
+        &frame,
+        &recipe,
+        RenderOptions::default(),
+        OutputBitDepth::Eight,
+        DitherMode::None,
+        OutputSize::Original,
+        None,
+    )?;
+    let ExportImage::Rgb8(export_image) = &export.image else {
+        panic!("8-bit export expected");
+    };
+    // Down the stroke's middle, through its feathered edge, and out into the clear: the same
+    // normalized positions must be about equally dark at both resolutions. The frame is 4:3, so
+    // 0.06 long-edge units below the stroke's centre line is 0.08 of the height.
+    let at = |image: &rohditor_image::DisplayRgbImage<u8>, x: f32, y: f32| {
+        let column = ((x * image.width() as f32) as usize).min(image.width() - 1);
+        let row = ((y * image.height() as f32) as usize).min(image.height() - 1);
+        i32::from(green(image, column, row))
+    };
+    for x in [0.25, 0.5, 0.75] {
+        let clear = at(export_image, x, 0.1);
+        let mut previous = None;
+        for y in [0.5, 0.58, 0.66, 0.74] {
+            let (small, large) = (at(&preview.image, x, y), at(export_image, x, y));
+            assert!(
+                (small - large).abs() <= 12,
+                "x {x} y {y}: preview {small} vs export {large}"
+            );
+            // Darkest on the stroke, brightening away from it.
+            if let Some(before) = previous {
+                assert!(large >= before, "x {x} y {y}: {large} < {before}");
+            }
+            previous = Some(large);
+        }
+        assert!(at(export_image, x, 0.5) + 20 < clear);
+    }
+    Ok(())
+}
+
+#[test]
+fn a_brush_stroke_outside_the_crop_is_still_there_when_the_crop_is_widened()
+-> Result<(), Box<dyn Error>> {
+    let frame = flat_frame();
+    let pipeline = CpuPipeline::default();
+    let full = pipeline.render(&frame, &brushed_recipe(), RenderOptions::default())?;
+    // The stroke darkens its band across the whole frame, including near both edges.
+    let band = HEIGHT / 2;
+    let edge_dark = green(&full.image, 2, band);
+    let edge_clear = green(&full.image, 2, 4);
+    assert!(
+        edge_dark + 20 < edge_clear,
+        "stroke at the frame edge: {edge_dark} vs {edge_clear}"
+    );
+
+    let mut cropped_recipe = brushed_recipe();
+    cropped_recipe.geometry.crop = Some(NormalizedCropRect {
+        left: 0.25,
+        top: 0.25,
+        right: 0.75,
+        bottom: 0.75,
+    });
+    let cropped = pipeline.render(&frame, &cropped_recipe, RenderOptions::default())?;
+    for y in 0..cropped.image.height() {
+        for x in 0..cropped.image.width() {
+            assert_eq!(
+                green(&cropped.image, x, y),
+                green(&full.image, x + WIDTH / 4, y + HEIGHT / 4),
                 "{x},{y}"
             );
         }

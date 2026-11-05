@@ -130,9 +130,20 @@ impl MaskView {
             .developed_to_display(self.space().space_to_normalized(point))
     }
 
+    /// Screen pixels per long-edge unit.
+    fn pixels_per_unit(self) -> f64 {
+        self.screen_scale * self.geometry.developed_long_edge()
+    }
+
     /// A length in screen pixels in long-edge units.
     pub(super) fn screen_to_units(self, pixels: f64) -> f64 {
-        pixels / (self.screen_scale * self.geometry.developed_long_edge())
+        pixels / self.pixels_per_unit()
+    }
+
+    /// A length in long-edge units (a brush radius, say) in screen pixels, for drawing it.
+    #[must_use]
+    pub fn units_to_screen(self, units: f64) -> f64 {
+        units * self.pixels_per_unit()
     }
 }
 
@@ -174,6 +185,8 @@ mod tests {
         // so 12 screen px are 60 image px, which is 0.01 long-edge units.
         assert!((at(0.2).screen_to_units(12.0) - 0.01).abs() < 1e-12);
         assert!((at(0.4).screen_to_units(12.0) - 0.005).abs() < 1e-12);
+        // And back: a 0.05 radius is 300 image px, 60 screen px.
+        assert!((at(0.2).units_to_screen(0.05) - 60.0).abs() < 1e-9);
     }
 
     #[test]
