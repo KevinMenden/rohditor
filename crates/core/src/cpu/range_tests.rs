@@ -6,8 +6,8 @@
 
 use rohditor_color::rec2020_to_oklab;
 use rohditor_edit::{
-    ColorRange, ColorSample, EditRecipe, LuminanceRange, MaskComponent, MaskLayer, MaskMode,
-    MaskShape,
+    CameraChroma, CameraTone, ColorRange, ColorSample, EditRecipe, LuminanceRange, MaskComponent,
+    MaskLayer, MaskMode, MaskShape, RenderingProfileSelection,
 };
 use rohditor_image::{LinearRgbImage, Orientation};
 
@@ -204,33 +204,65 @@ fn a_color_range_selects_a_hue_and_leaves_the_others() {
     assert_eq!(columns, (0..WIDTH / 2).collect());
 }
 
-#[test]
-fn the_reference_chain_matches_what_the_stage_does_without_light_color_or_local_edits() {
-    // Standard rendering has a base tone curve and may have camera chroma: the chain must
-    // reproduce exactly what the loop does with only an exposure change.
-    let image = varied_image();
-    let mut recipe = EditRecipe::default();
-    recipe.light.exposure_ev = 0.7;
-    let chain = ReferenceChain::new(&recipe);
-    let result = adjusted(&image, &recipe);
-    for y in 0..HEIGHT {
-        for x in 0..WIDTH {
-            let mut expected = pixel(image.data(), x, y);
-            chain.apply(&mut expected);
-            assert_eq!(pixel(&result, x, y), expected, "{x},{y}");
-        }
-    }
-    // And the base rendering really did something, so the comparison is not vacuous.
-    assert_ne!(
-        pixel(&result, 3, 3),
-        pixel(&adjusted(&image, &neutral_exposure(0.7)), 3, 3)
-    );
+/// Dark to far above white, and colourful, so the tone curve, its highlight roll-off and the
+/// camera chroma all have something to do.
+fn wide_range_image() -> LinearRgbImage<f32> {
+    image_of(|x, y| {
+        let level = 0.01 * 1.5f32.powi(((x * 7 + y * 13) % 17) as i32);
+        [level, level * 0.7 + 0.01, level * 0.4 + 0.02]
+    })
 }
 
-fn neutral_exposure(ev: f32) -> EditRecipe {
-    let mut recipe = neutral_recipe();
-    recipe.light.exposure_ev = ev;
-    recipe
+/// One recipe per kind of base rendering: none, the standard curve, and a matched camera look
+/// with its own tone and chroma.
+fn recipes_of_every_rendering_profile() -> Vec<(&'static str, EditRecipe)> {
+    let mut matched = EditRecipe::default();
+    matched.rendering.profile = RenderingProfileSelection::MATCHED;
+    matched.rendering.camera_tone = Some(CameraTone {
+        knots: vec![[0.0, 0.0], [0.2, 0.3], [0.6, 0.75], [1.0, 1.0]],
+    });
+    matched.rendering.camera_chroma = Some(CameraChroma {
+        gains: [2.0, 1.8, 1.6, 1.4, 1.2, 1.0, 0.8, 0.6, 0.5],
+    });
+    vec![
+        ("neutral", neutral_recipe()),
+        ("standard", EditRecipe::default()),
+        ("matched with chroma", matched),
+    ]
+}
+
+/// The range reference duplicates only the exposure of the render loop; the base rendering is
+/// shared code. This pins the two together: with Light and Color neutral and no local layers,
+/// the stage's output is exactly the reference pixel, whatever the profile and exposure.
+#[test]
+fn the_reference_chain_matches_what_the_stage_does_without_light_color_or_local_edits() {
+    let image = wide_range_image();
+    for (name, base) in recipes_of_every_rendering_profile() {
+        for exposure_ev in [-1.5, 0.0, 0.7, 2.0] {
+            let mut recipe = base.clone();
+            recipe.light.exposure_ev = exposure_ev;
+            let chain = ReferenceChain::new(&recipe);
+            let result = adjusted(&image, &recipe);
+            let mut rendering_changed_something = false;
+            for y in 0..HEIGHT {
+                for x in 0..WIDTH {
+                    let source = pixel(image.data(), x, y);
+                    let mut expected = source;
+                    chain.apply(&mut expected);
+                    assert_eq!(
+                        pixel(&result, x, y),
+                        expected,
+                        "{name} at {exposure_ev} EV, pixel {x},{y}"
+                    );
+                    let exposure_only = source.map(|v| v * exposure_ev.exp2());
+                    rendering_changed_something |= exposure_only != expected;
+                }
+            }
+            // The comparison is not vacuous: a profile with rendering moves pixels beyond the
+            // exposure gain.
+            assert_eq!(rendering_changed_something, name != "neutral", "{name}");
+        }
+    }
 }
 
 #[test]

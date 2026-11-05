@@ -266,7 +266,8 @@ fn combine(mode: MaskMode, acc: &mut [f32], component: &[f32]) {
 #[cfg(test)]
 mod tests {
     use rohditor_edit::{
-        ColorRange, LinearGradient, LocalSettings, LuminanceRange, MaskPoint, RadialGradient,
+        ColorRange, ColorSample, LinearGradient, LocalSettings, LuminanceRange, MaskPoint,
+        RadialGradient,
     };
 
     use super::*;
@@ -476,6 +477,138 @@ mod tests {
                 .zip(&gradient)
                 .any(|(c, g)| *g == 1.0 && *c == 1.0)
         );
+    }
+
+    /// Reference values of pixels `xs` of row `y`, computed from the absolute position so that
+    /// every pixel has its own value and a row offset shows as a different result.
+    fn reference_of(y: usize, xs: Range<usize>) -> (Vec<f32>, Vec<[f32; 3]>) {
+        let luminance: Vec<f32> = xs
+            .clone()
+            .map(|x| ((x * 7 + y * 13) % 17) as f32 / 16.0)
+            .collect();
+        let oklab = xs
+            .zip(&luminance)
+            .map(|(x, lum)| [*lum, 0.1 - 0.2 * lum, 0.05 * (x % 5) as f32])
+            .collect();
+        (luminance, oklab)
+    }
+
+    fn evaluate_span(mask: &PreparedMask, y: usize, xs: Range<usize>) -> Vec<f32> {
+        let (luminance, oklab) = reference_of(y, xs.clone());
+        let mut out = vec![0.0; xs.len()];
+        mask.evaluate_row(
+            y,
+            xs,
+            ReferenceRow {
+                luminance: &luminance,
+                oklab: &oklab,
+            },
+            &mut out,
+        );
+        out
+    }
+
+    #[test]
+    fn a_sub_range_uses_the_reference_of_its_own_pixels() {
+        // A position-dependent component and both kinds of range, on the asymmetric frame, so
+        // an offset mixed up between the geometry and the reference changes the result.
+        let range_layer = layer(
+            0.9,
+            vec![
+                component(MaskMode::Add, false, left()),
+                component(
+                    MaskMode::Intersect,
+                    false,
+                    MaskShape::Luminance(LuminanceRange {
+                        low: 0.2,
+                        high: 0.8,
+                        feather_low: 0.1,
+                        feather_high: 0.1,
+                    }),
+                ),
+                component(
+                    MaskMode::Intersect,
+                    true,
+                    MaskShape::Color(ColorRange {
+                        samples: vec![
+                            ColorSample {
+                                lightness: 0.2,
+                                a: 0.0,
+                                b: 0.05,
+                            },
+                            ColorSample {
+                                lightness: 0.9,
+                                a: -0.1,
+                                b: 0.1,
+                            },
+                        ],
+                        tolerance: 0.2,
+                    }),
+                ),
+            ],
+        );
+        let mask = PreparedMask::prepare(&range_layer, FRAME).expect("valid layer");
+        for y in [0, 9, FRAME.height - 1] {
+            let whole = evaluate_span(&mask, y, 0..FRAME.width);
+            // The row is neither empty nor flat, so the comparison means something.
+            assert!(whole.iter().any(|alpha| *alpha > 0.0));
+            assert!(whole.windows(2).any(|pair| pair[0] != pair[1]));
+            for xs in [7..18, 30..FRAME.width, 0..1, FRAME.width - 1..FRAME.width] {
+                assert_eq!(
+                    evaluate_span(&mask, y, xs.clone()),
+                    whole[xs.clone()],
+                    "row {y}, columns {xs:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "luminance reference must match")]
+    fn a_full_width_luminance_reference_for_a_sub_range_is_rejected() {
+        let mask = PreparedMask::prepare(
+            &layer(
+                1.0,
+                vec![component(
+                    MaskMode::Add,
+                    false,
+                    MaskShape::Luminance(LuminanceRange::default()),
+                )],
+            ),
+            FRAME,
+        )
+        .expect("valid layer");
+        // The reference of the whole row, not of the columns asked for: it must not be read
+        // from column 0 as if it were aligned.
+        let (luminance, oklab) = reference_of(3, 0..FRAME.width);
+        let reference = ReferenceRow {
+            luminance: &luminance,
+            oklab: &oklab,
+        };
+        mask.evaluate_row(3, 7..18, reference, &mut [0.0; 11]);
+    }
+
+    #[test]
+    #[should_panic(expected = "OkLab reference must match")]
+    fn a_full_width_color_reference_for_a_sub_range_is_rejected() {
+        let mask = PreparedMask::prepare(
+            &layer(
+                1.0,
+                vec![component(
+                    MaskMode::Add,
+                    false,
+                    MaskShape::Color(ColorRange::default()),
+                )],
+            ),
+            FRAME,
+        )
+        .expect("valid layer");
+        let (luminance, oklab) = reference_of(3, 0..FRAME.width);
+        let reference = ReferenceRow {
+            luminance: &luminance,
+            oklab: &oklab,
+        };
+        mask.evaluate_row(3, 7..18, reference, &mut [0.0; 11]);
     }
 
     #[test]
