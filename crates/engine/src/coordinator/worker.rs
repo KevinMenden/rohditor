@@ -34,8 +34,11 @@ use super::scheduler::{PreviewCompletion, PreviewMailbox};
 mod camera_look_worker;
 #[path = "export_worker.rs"]
 mod export_worker;
+#[path = "range_jobs.rs"]
+mod range_jobs;
 
 pub use camera_look_worker::CameraLookJob;
+pub use range_jobs::{ColorSampleJob, MaskOverlayJob};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobKind {
@@ -243,6 +246,28 @@ pub enum WorkerEvent {
         ticket: PreviewTicket,
         message: String,
     },
+    /// The colour under a click of the colour-range picker.
+    ColorRangeSampleReady {
+        ticket: PreviewTicket,
+        pick: crate::tools::ColorPick,
+        sample: rohditor_edit::ColorSample,
+    },
+    ColorRangeSampleFailed {
+        ticket: PreviewTicket,
+        message: String,
+    },
+    /// The overlay of a mask layer measured on the developed image (layers with range
+    /// components).
+    MaskOverlayReady {
+        ticket: PreviewTicket,
+        layer: u32,
+        overlay: Box<rohditor_core::MaskAlphaImage>,
+    },
+    MaskOverlayFailed {
+        ticket: PreviewTicket,
+        layer: u32,
+        message: String,
+    },
     /// The fitted camera look for a document, or why it could not be fitted.
     CameraLookReady {
         document_id: u64,
@@ -321,6 +346,8 @@ pub enum WorkerRequest {
     },
     PreviewAvailable,
     SampleWhiteBalance(Box<WhiteBalanceSampleJob>),
+    SampleColorRange(Box<ColorSampleJob>),
+    RenderMaskOverlay(Box<MaskOverlayJob>),
     FitCameraLook(Box<CameraLookJob>),
     Export(Box<ExportJob>),
     AbandonDocument(u64),
@@ -505,6 +532,47 @@ impl RenderCoordinator {
                 options,
             },
         )))
+    }
+
+    /// Sample the colour under `position` (`0..1` over the image as shown) for a colour range.
+    /// The result arrives as [`WorkerEvent::ColorRangeSampleReady`] with `pick` echoed back.
+    pub fn sample_color_range(
+        &self,
+        ticket: PreviewTicket,
+        frame: Arc<RawFrame>,
+        recipe: EditRecipe,
+        position: (f64, f64),
+        pick: crate::tools::ColorPick,
+        options: PreviewOptions,
+    ) -> Result<(), String> {
+        self.send(WorkerRequest::SampleColorRange(Box::new(ColorSampleJob {
+            ticket,
+            frame,
+            recipe,
+            position,
+            pick,
+            options,
+        })))
+    }
+
+    /// Render the overlay of mask layer `layer` on the developed image, which layers with
+    /// luminance or colour ranges need. The result arrives as
+    /// [`WorkerEvent::MaskOverlayReady`].
+    pub fn render_mask_overlay(
+        &self,
+        ticket: PreviewTicket,
+        frame: Arc<RawFrame>,
+        recipe: EditRecipe,
+        layer: u32,
+        options: PreviewOptions,
+    ) -> Result<(), String> {
+        self.send(WorkerRequest::RenderMaskOverlay(Box::new(MaskOverlayJob {
+            ticket,
+            frame,
+            recipe,
+            layer,
+            options,
+        })))
     }
 
     /// Fit the photo's camera look (tone and colour) to its embedded JPEG in
@@ -701,6 +769,28 @@ fn worker_loop(
                     );
                 }
             }
+            WorkerRequest::SampleColorRange(job) => {
+                if !abandoned.contains(&job.ticket.document_id) {
+                    range_jobs::process_color_sample(
+                        *job,
+                        &sender,
+                        &wake,
+                        &pipeline,
+                        &mut preview_cache,
+                    );
+                }
+            }
+            WorkerRequest::RenderMaskOverlay(job) => {
+                if !abandoned.contains(&job.ticket.document_id) {
+                    range_jobs::process_mask_overlay(
+                        *job,
+                        &sender,
+                        &wake,
+                        &pipeline,
+                        &mut preview_cache,
+                    );
+                }
+            }
             WorkerRequest::FitCameraLook(job) => {
                 let (document_id, camera_profile) = (job.document_id, job.camera_profile.clone());
                 let submitted = camera_looks
@@ -761,6 +851,8 @@ impl WorkerRequest {
             Self::Export(job) => Some(job.document_id),
             Self::FitCameraLook(job) => Some(job.document_id),
             Self::SampleWhiteBalance(job) => Some(job.ticket.document_id),
+            Self::SampleColorRange(job) => Some(job.ticket.document_id),
+            Self::RenderMaskOverlay(job) => Some(job.ticket.document_id),
             Self::PreviewAvailable | Self::Shutdown | Self::CaptureDevice { .. } => None,
         }
     }
@@ -2715,7 +2807,7 @@ mod tests {
         }
     }
 
-    fn fake_frame() -> RawFrame {
+    pub(super) fn fake_frame() -> RawFrame {
         let width = 4;
         let height = 4;
         let mosaic = (0..width * height)

@@ -8,9 +8,10 @@ use eframe::egui;
 use rohditor_edit::{MASK_UNIT_RANGE, ParameterRange};
 use rohditor_edit::{MaskLayer, MaskMode, MaskShape};
 use rohditor_engine::tools::{
-    BRUSH_RADIUS_RANGE, BrushSettings, LayerEdit, LocalSlider, MaskEditMode, MaskLimit,
+    BRUSH_RADIUS_RANGE, BrushSettings, LayerEdit, LocalSlider, MaskEditMode, MaskLimit, RangeSlider,
 };
 
+use super::range_controls::{self, ComponentRef};
 use super::theme::colors;
 use super::widgets::{self, AdjustmentSpec, ValueScale};
 
@@ -38,6 +39,24 @@ pub(crate) struct SliderPhase {
     pub reset: bool,
 }
 
+/// The two ways to select by what the image looks like instead of where things are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RangeKind {
+    Luminance,
+    Color,
+}
+
+impl RangeKind {
+    const ALL: [Self; 2] = [Self::Luminance, Self::Color];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Luminance => "Luminance range",
+            Self::Color => "Color range",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum MasksAction {
     SelectLayer(u32),
@@ -48,6 +67,22 @@ pub(crate) enum MasksAction {
     NewComponent(MaskEditMode, MaskMode),
     /// Paint more strokes into the selected brush component.
     PaintSelected,
+    /// Add a luminance or color range, as a new mask or as a component of the selected one.
+    /// A color range starts by picking its colors on the image.
+    NewRange {
+        kind: RangeKind,
+        new_layer: bool,
+    },
+    /// Pick the colors of the selected color range on the image.
+    PickColor,
+    /// A slider event of a range component (the luminance bar or the color tolerance).
+    RangeSlider {
+        layer: u32,
+        component: usize,
+        slider: RangeSlider,
+        value: f32,
+        phase: SliderPhase,
+    },
     CancelCreate,
     /// New brush settings, from the brush sliders.
     SetBrush(BrushSettings),
@@ -178,16 +213,29 @@ fn show_layer_name(
 
 fn show_new_mask(ui: &mut egui::Ui, model: &MasksPanelModel<'_>, actions: &mut Vec<MasksAction>) {
     ui.add_space(4.0);
-    let (label, hint) = if painting(model.mode).is_some() {
-        ("Done", "Paint on the image. Esc stops.")
-    } else {
-        ("Cancel", "Drag on the image to draw it. Esc cancels.")
+    let (label, hint) = match model.mode {
+        MaskEditMode::Paint { .. } => ("Done", "Paint on the image. Esc stops."),
+        MaskEditMode::PickColor => (
+            "Done",
+            "Click the image to pick a color. Shift adds, Alt removes. Esc stops.",
+        ),
+        _ => ("Cancel", "Drag on the image to draw it. Esc cancels."),
     };
     ui.horizontal(|ui| {
         ui.menu_button("New mask", |ui| {
             for (label, shape) in SHAPES {
                 if ui.button(label).clicked() {
                     actions.push(MasksAction::NewLayer(shape));
+                    ui.close();
+                }
+            }
+            ui.separator();
+            for kind in RangeKind::ALL {
+                if ui.button(kind.label()).clicked() {
+                    actions.push(MasksAction::NewRange {
+                        kind,
+                        new_layer: true,
+                    });
                     ui.close();
                 }
             }
@@ -287,6 +335,8 @@ const fn shape_name(shape: &MaskShape) -> &'static str {
         MaskShape::Linear(_) => "Linear gradient",
         MaskShape::Radial(_) => "Radial gradient",
         MaskShape::Brush(_) => "Brush",
+        MaskShape::Luminance(_) => "Luminance range",
+        MaskShape::Color(_) => "Color range",
     }
 }
 
@@ -359,6 +409,7 @@ fn show_components(
             });
         });
     }
+    show_range_controls(ui, model, layer, actions);
     ui.add_space(2.0);
     ui.horizontal(|ui| {
         for mode in [MaskMode::Add, MaskMode::Subtract] {
@@ -371,6 +422,18 @@ fn show_components(
                 }
             });
         }
+        // Ranges refine what the other components select, so they intersect by default.
+        ui.menu_button("Refine", |ui| {
+            for kind in RangeKind::ALL {
+                if ui.button(kind.label()).clicked() {
+                    actions.push(MasksAction::NewRange {
+                        kind,
+                        new_layer: false,
+                    });
+                    ui.close();
+                }
+            }
+        });
         // Back to painting on a brush that is selected (after Done, say).
         let on_brush = model
             .selected_component
@@ -386,6 +449,37 @@ fn show_components(
             actions.push(MasksAction::PaintSelected);
         }
     });
+}
+
+/// The controls of the selected component when it is a luminance or color range.
+fn show_range_controls(
+    ui: &mut egui::Ui,
+    model: &MasksPanelModel<'_>,
+    layer: &MaskLayer,
+    actions: &mut Vec<MasksAction>,
+) {
+    let Some(index) = model.selected_component else {
+        return;
+    };
+    let Some(component) = layer.components.get(index) else {
+        return;
+    };
+    let at = ComponentRef {
+        layer: layer.id,
+        component: index,
+    };
+    ui.add_space(4.0);
+    match &component.shape {
+        MaskShape::Luminance(range) => range_controls::show_luminance(ui, at, range, actions),
+        MaskShape::Color(range) => range_controls::show_color(
+            ui,
+            at,
+            range,
+            model.mode == MaskEditMode::PickColor,
+            actions,
+        ),
+        _ => {}
+    }
 }
 
 /// Label, unit and precision of a slider, matching the global sliders of the same name.

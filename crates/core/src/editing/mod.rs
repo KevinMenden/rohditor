@@ -4,10 +4,12 @@
 //! caller owns undo/revision handling.
 
 mod auto_tone;
+mod range_sampling;
 mod sampling;
 mod white_balance;
 
 pub use auto_tone::auto_tone;
+pub use range_sampling::sample_color_range;
 pub use sampling::sample_rgb_patch;
 pub use white_balance::{
     WhiteBalanceMode, WhiteBalanceModeMemory, white_balance_from_camera_sample,

@@ -22,6 +22,7 @@ pub(crate) mod icons;
 pub(crate) mod mask_overlay;
 pub(crate) mod masks;
 pub(crate) mod optics;
+pub(crate) mod range_controls;
 pub(crate) mod settings;
 pub(crate) mod theme;
 pub(crate) mod tool_panel;
