@@ -22,7 +22,8 @@ pub(super) fn start(
     let worker = thread::Builder::new()
         .name("rohditor-noise-worker".to_owned())
         .spawn(move || {
-            while let Ok(job) = receiver.recv() {
+            while let Ok(first) = receiver.recv() {
+                let job = newest(first, &receiver);
                 let document_id = job.document_id;
                 let result = catch_unwind(AssertUnwindSafe(|| estimate(&job, &pipeline)))
                     .unwrap_or_else(|payload| {
@@ -50,6 +51,14 @@ pub(super) fn start(
     }
 }
 
+/// Skip jobs that queued up behind `first`, keeping the newest. A frontend shows
+/// one document at a time and ignores profiles of any other, so a job that a
+/// later one has overtaken (the user moved on to another photo) would cost a
+/// full-resolution demosaic for a result nobody uses.
+fn newest<T>(first: T, receiver: &mpsc::Receiver<T>) -> T {
+    receiver.try_iter().last().unwrap_or(first)
+}
+
 /// `Ok(None)`: the frame is too small to profile.
 fn estimate(job: &NoiseProfileJob, pipeline: &CpuPipeline) -> Result<Option<NoiseProfile>, String> {
     estimate_noise_profile(
@@ -59,4 +68,25 @@ fn estimate(job: &NoiseProfileJob, pipeline: &CpuPipeline) -> Result<Option<Nois
         job.render_options,
     )
     .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_newest_queued_job_runs() {
+        let (sender, receiver) = mpsc::channel();
+        for job in [2, 3, 4] {
+            sender.send(job).expect("queue job");
+        }
+        assert_eq!(newest(1, &receiver), 4);
+        assert!(receiver.try_recv().is_err(), "the queue is drained");
+    }
+
+    #[test]
+    fn a_lone_job_runs_as_is() {
+        let (_sender, receiver) = mpsc::channel();
+        assert_eq!(newest(1, &receiver), 1);
+    }
 }
