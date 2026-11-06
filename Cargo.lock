@@ -3029,6 +3029,7 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "rayon",
+ "rohditor-color",
  "rohditor-edit",
  "thiserror 2.0.20",
 ]
@@ -3063,8 +3064,10 @@ dependencies = [
 name = "rohditor-reference"
 version = "0.1.0"
 dependencies = [
+ "rohditor-core",
  "rohditor-demosaic",
  "rohditor-detail",
+ "rohditor-edit",
  "rohditor-image",
  "rohditor-raw",
  "thiserror 2.0.20",

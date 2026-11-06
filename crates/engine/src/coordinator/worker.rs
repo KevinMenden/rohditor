@@ -34,8 +34,14 @@ use super::scheduler::{PreviewCompletion, PreviewMailbox};
 mod camera_look_worker;
 #[path = "export_worker.rs"]
 mod export_worker;
+#[path = "noise_worker.rs"]
+mod noise_worker;
+#[path = "range_jobs.rs"]
+mod range_jobs;
 
 pub use camera_look_worker::CameraLookJob;
+pub use noise_worker::NoiseProfileJob;
+pub use range_jobs::{ColorSampleJob, MaskOverlayJob};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobKind {
@@ -243,6 +249,34 @@ pub enum WorkerEvent {
         ticket: PreviewTicket,
         message: String,
     },
+    /// The colour under a click of the colour-range picker.
+    ColorRangeSampleReady {
+        ticket: PreviewTicket,
+        pick: crate::tools::ColorPick,
+        sample: rohditor_edit::ColorSample,
+    },
+    ColorRangeSampleFailed {
+        ticket: PreviewTicket,
+        message: String,
+    },
+    /// The overlay of a mask layer measured on the developed image (layers with range
+    /// components).
+    MaskOverlayReady {
+        ticket: PreviewTicket,
+        layer: u32,
+        overlay: Box<rohditor_core::MaskAlphaImage>,
+    },
+    MaskOverlayFailed {
+        ticket: PreviewTicket,
+        layer: u32,
+        message: String,
+    },
+    /// The luma noise profile of a document's demosaiced frame. `Ok(None)`
+    /// means the frame is too small to profile.
+    NoiseProfileReady {
+        document_id: u64,
+        result: Result<Option<rohditor_core::NoiseProfile>, String>,
+    },
     /// The fitted camera look for a document, or why it could not be fitted.
     CameraLookReady {
         document_id: u64,
@@ -321,7 +355,10 @@ pub enum WorkerRequest {
     },
     PreviewAvailable,
     SampleWhiteBalance(Box<WhiteBalanceSampleJob>),
+    SampleColorRange(Box<ColorSampleJob>),
+    RenderMaskOverlay(Box<MaskOverlayJob>),
     FitCameraLook(Box<CameraLookJob>),
+    EstimateNoise(Box<NoiseProfileJob>),
     Export(Box<ExportJob>),
     AbandonDocument(u64),
     Shutdown,
@@ -331,6 +368,7 @@ pub struct RenderCoordinator {
     requests: mpsc::Sender<WorkerRequest>,
     events: mpsc::Receiver<WorkerEvent>,
     previews: Arc<PreviewMailbox>,
+    range_jobs: range_jobs::RangeJobControl,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -390,6 +428,7 @@ impl RenderCoordinator {
             requests: request_sender,
             events: event_receiver,
             previews,
+            range_jobs: range_jobs::RangeJobControl::default(),
             worker: Some(worker),
         })
     }
@@ -507,6 +546,49 @@ impl RenderCoordinator {
         )))
     }
 
+    /// Sample the colour under `position` (`0..1` over the image as shown) for a colour range.
+    /// The result arrives as [`WorkerEvent::ColorRangeSampleReady`] with `pick` echoed back.
+    pub fn sample_color_range(
+        &self,
+        ticket: PreviewTicket,
+        frame: Arc<RawFrame>,
+        recipe: EditRecipe,
+        position: (f64, f64),
+        pick: crate::tools::ColorPick,
+        options: PreviewOptions,
+    ) -> Result<(), String> {
+        self.send(WorkerRequest::SampleColorRange(Box::new(ColorSampleJob {
+            ticket,
+            frame,
+            recipe,
+            position,
+            pick,
+            options,
+            liveness: self.range_jobs.sample(ticket.document_id),
+        })))
+    }
+
+    /// Render the overlay of mask layer `layer` on the developed image, which layers with
+    /// luminance or colour ranges need. The result arrives as
+    /// [`WorkerEvent::MaskOverlayReady`].
+    pub fn render_mask_overlay(
+        &self,
+        ticket: PreviewTicket,
+        frame: Arc<RawFrame>,
+        recipe: EditRecipe,
+        layer: u32,
+        options: PreviewOptions,
+    ) -> Result<(), String> {
+        self.send(WorkerRequest::RenderMaskOverlay(Box::new(MaskOverlayJob {
+            ticket,
+            frame,
+            recipe,
+            layer,
+            options,
+            liveness: self.range_jobs.overlay(ticket.document_id),
+        })))
+    }
+
     /// Fit the photo's camera look (tone and colour) to its embedded JPEG in
     /// the background. The result arrives as [`WorkerEvent::CameraLookReady`].
     pub fn fit_camera_look(
@@ -521,6 +603,21 @@ impl RenderCoordinator {
             path,
             frame,
             camera_profile,
+        })))
+    }
+
+    /// Profile the photo's noise in the background. The result arrives as
+    /// [`WorkerEvent::NoiseProfileReady`].
+    pub fn estimate_noise(
+        &self,
+        document_id: u64,
+        frame: Arc<RawFrame>,
+        render_options: RenderOptions,
+    ) -> Result<(), String> {
+        self.send(WorkerRequest::EstimateNoise(Box::new(NoiseProfileJob {
+            document_id,
+            frame,
+            render_options,
         })))
     }
 
@@ -552,6 +649,7 @@ impl RenderCoordinator {
 
     pub fn abandon(&self, document_id: u64) {
         self.previews.abandon(document_id);
+        self.range_jobs.cancel_document(document_id);
         drop(
             self.requests
                 .send(WorkerRequest::AbandonDocument(document_id)),
@@ -608,6 +706,7 @@ fn worker_loop(
             CpuPipeline::default()
         }
     };
+    let noise_profiles = noise_worker::start(pipeline.clone(), sender.clone(), wake.clone());
     let exports = export_worker::start(pipeline.clone(), sender.clone(), wake.clone());
     let camera_looks = camera_look_worker::start(
         pipeline.clone(),
@@ -701,6 +800,28 @@ fn worker_loop(
                     );
                 }
             }
+            WorkerRequest::SampleColorRange(job) => {
+                if !abandoned.contains(&job.ticket.document_id) {
+                    range_jobs::process_color_sample(
+                        *job,
+                        &sender,
+                        &wake,
+                        &pipeline,
+                        &mut preview_cache,
+                    );
+                }
+            }
+            WorkerRequest::RenderMaskOverlay(job) => {
+                if !abandoned.contains(&job.ticket.document_id) {
+                    range_jobs::process_mask_overlay(
+                        *job,
+                        &sender,
+                        &wake,
+                        &pipeline,
+                        &mut preview_cache,
+                    );
+                }
+            }
             WorkerRequest::FitCameraLook(job) => {
                 let (document_id, camera_profile) = (job.document_id, job.camera_profile.clone());
                 let submitted = camera_looks
@@ -714,6 +835,22 @@ fn worker_loop(
                             document_id,
                             camera_profile,
                             result: Err("The camera look worker is unavailable".to_owned()),
+                        },
+                    );
+                }
+            }
+            WorkerRequest::EstimateNoise(job) => {
+                let document_id = job.document_id;
+                let submitted = noise_profiles
+                    .as_ref()
+                    .is_some_and(|worker| worker.send(job).is_ok());
+                if !submitted {
+                    send_event(
+                        &sender,
+                        &wake,
+                        WorkerEvent::NoiseProfileReady {
+                            document_id,
+                            result: Err("The noise worker is unavailable".to_owned()),
                         },
                     );
                 }
@@ -760,7 +897,10 @@ impl WorkerRequest {
             }
             Self::Export(job) => Some(job.document_id),
             Self::FitCameraLook(job) => Some(job.document_id),
+            Self::EstimateNoise(job) => Some(job.document_id),
             Self::SampleWhiteBalance(job) => Some(job.ticket.document_id),
+            Self::SampleColorRange(job) => Some(job.ticket.document_id),
+            Self::RenderMaskOverlay(job) => Some(job.ticket.document_id),
             Self::PreviewAvailable | Self::Shutdown | Self::CaptureDevice { .. } => None,
         }
     }
@@ -2676,6 +2816,59 @@ mod tests {
         }
     }
 
+    #[test]
+    fn noise_estimate_of_a_tiny_frame_reports_no_profile() {
+        let coordinator = RenderCoordinator::new(crate::wake::noop()).expect("worker starts");
+        coordinator
+            .estimate_noise(70, Arc::new(fake_frame()), RenderOptions::default())
+            .expect("request is accepted");
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            for event in coordinator.try_events() {
+                if let WorkerEvent::NoiseProfileReady {
+                    document_id,
+                    result,
+                } = event
+                {
+                    assert_eq!(document_id, 70);
+                    assert_eq!(result, Ok(None), "too small to profile");
+                    return;
+                }
+            }
+            assert!(Instant::now() < deadline, "no noise profile arrived");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the ignored Sony ARW corpus in testdata/private"]
+    fn private_noise_estimate_runs_in_the_background() -> Result<(), Box<dyn Error>> {
+        let source =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/private/DSC01166.ARW");
+        let frame = Arc::new(RawlerDecoder::default().decode(&source)?);
+        let coordinator =
+            RenderCoordinator::new(crate::wake::noop()).map_err(std::io::Error::other)?;
+        coordinator
+            .estimate_noise(71, frame, RenderOptions::default())
+            .map_err(std::io::Error::other)?;
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            for event in coordinator.try_events() {
+                if let WorkerEvent::NoiseProfileReady { result, .. } = event {
+                    let profile = result?.ok_or("a 24 MP frame must be profiled")?;
+                    // ISO 2000 on this body: noisy enough for the default to act.
+                    assert!(profile.sigma(0.18) > 0.004, "{}", profile.sigma(0.18));
+                    return Ok(());
+                }
+            }
+            if Instant::now() >= deadline {
+                return Err("timed out waiting for the noise profile".into());
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     #[derive(Debug)]
     struct FailingPreviewDecoder {
         opens: Arc<AtomicUsize>,
@@ -2715,7 +2908,7 @@ mod tests {
         }
     }
 
-    fn fake_frame() -> RawFrame {
+    pub(super) fn fake_frame() -> RawFrame {
         let width = 4;
         let height = 4;
         let mosaic = (0..width * height)

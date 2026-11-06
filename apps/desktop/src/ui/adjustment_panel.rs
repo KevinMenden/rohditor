@@ -142,6 +142,20 @@ pub(crate) struct DocumentPanelModel {
     pub noise_reduction: rohditor_edit::NoiseReduction,
     pub capture_sharpening: rohditor_edit::CaptureSharpening,
     pub defringe: rohditor_edit::Defringe,
+    pub noise_suggestion: NoiseSuggestion,
+}
+
+/// The noise-reduction strength Auto would set, as far as it is known.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum NoiseSuggestion {
+    /// Not estimated yet; clicking Auto estimates first.
+    Unknown,
+    Estimating,
+    /// The frame is too small to profile, or the estimate failed.
+    Unavailable,
+    Suggested {
+        chroma: f32,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -169,6 +183,8 @@ pub(crate) struct AdjustmentPanelOutput {
     pub optics_filter: Option<String>,
     pub interactions: Vec<AdjustmentInteraction>,
     pub auto_tone: bool,
+    /// The Auto button of the noise-reduction section.
+    pub auto_noise_reduction: bool,
     pub reset_all: bool,
     pub export: bool,
 }

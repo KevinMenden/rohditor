@@ -21,8 +21,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BLACKS_RANGE, CONTRAST_RANGE, EXPOSURE_EV_RANGE, EditError, HIGHLIGHTS_RANGE, ParameterRange,
-    SHADOWS_RANGE, WHITES_RANGE,
+    BLACKS_RANGE, CONTRAST_RANGE, ColorRange, EXPOSURE_EV_RANGE, EditError, HIGHLIGHTS_RANGE,
+    LuminanceRange, ParameterRange, SHADOWS_RANGE, WHITES_RANGE,
 };
 
 /// Most mask layers in one recipe.
@@ -132,6 +132,10 @@ pub enum MaskShape {
     Linear(LinearGradient),
     Radial(RadialGradient),
     Brush(BrushMask),
+    /// Selects by sRGB-encoded luminance of the reference pixel; see `local_range`.
+    Luminance(LuminanceRange),
+    /// Selects by OkLab distance of the reference pixel to sampled colours.
+    Color(ColorRange),
 }
 
 /// Normalized position in the developed frame; see the module docs.
@@ -363,6 +367,13 @@ impl MaskLayer {
 }
 
 impl MaskShape {
+    /// True for shapes that select by image content and so need the pipeline's reference
+    /// pixels; they are usually Intersect components that refine a gradient or brush.
+    #[must_use]
+    pub const fn is_range(&self) -> bool {
+        matches!(self, Self::Luminance(_) | Self::Color(_))
+    }
+
     fn validate(&self) -> Result<(), EditError> {
         match self {
             Self::Linear(gradient) => {
@@ -402,6 +413,8 @@ impl MaskShape {
                     MASK_UNIT_RANGE,
                 )?;
             }
+            Self::Luminance(range) => range.validate()?,
+            Self::Color(range) => range.validate()?,
             Self::Brush(brush) => {
                 if brush.strokes.len() > MAX_BRUSH_STROKES {
                     return Err(error(
@@ -461,11 +474,15 @@ impl BrushStroke {
     }
 }
 
-fn error(field: &'static str, reason: String) -> EditError {
+pub(crate) fn error(field: &'static str, reason: String) -> EditError {
     EditError { field, reason }
 }
 
-fn check(field: &'static str, value: f32, range: ParameterRange) -> Result<(), EditError> {
+pub(crate) fn check(
+    field: &'static str,
+    value: f32,
+    range: ParameterRange,
+) -> Result<(), EditError> {
     if range.contains(value) {
         Ok(())
     } else {

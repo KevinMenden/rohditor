@@ -34,6 +34,7 @@ use serde::{Deserialize, Serialize};
 use tracing_subscriber::EnvFilter;
 
 use super::detail_compare::{DetailStage, StageSettings, detail_compare};
+use super::detail_corpus::detail_corpus;
 use super::highlight_compare::highlight_compare;
 use super::look_report::{fit_recipe_camera_tone, look_report};
 
@@ -347,6 +348,31 @@ enum Command {
         /// Also score every readable RAW file in this directory.
         #[arg(long, value_name = "RAW_DIR")]
         raw_dir: Option<PathBuf>,
+    },
+
+    /// Render a grid of detail settings (noise reduction, false colour,
+    /// defringe, capture sharpening) on the quality-crop manifest, and write
+    /// 1:1 before/after sheets with the noise profile and timings per file.
+    DetailCorpus {
+        /// JSON manifest containing private source names and crop coordinates.
+        #[arg(value_name = "MANIFEST")]
+        manifest: PathBuf,
+
+        /// Directory containing the private RAW sources named by the manifest.
+        #[arg(value_name = "CORPUS_DIR")]
+        corpus: PathBuf,
+
+        /// Destination directory for the sheet PNGs and report.json.
+        #[arg(value_name = "OUTPUT_DIR")]
+        output: PathBuf,
+
+        /// CPU demosaic algorithm used for every preset.
+        #[arg(long, value_enum, default_value_t = CliDemosaic::Amaze)]
+        demosaic: CliDemosaic,
+
+        /// Replace existing generated files and report.json.
+        #[arg(long)]
+        force: bool,
     },
 
     /// Render every highlight method on the quality-crop manifest and report
@@ -768,6 +794,13 @@ pub(crate) fn run() -> Result<()> {
             },
             raw_dir.as_deref(),
         ),
+        Command::DetailCorpus {
+            manifest,
+            corpus,
+            output,
+            demosaic,
+            force,
+        } => detail_corpus(&manifest, &corpus, &output, demosaic.into(), force),
         Command::HighlightCompare {
             manifest,
             corpus,

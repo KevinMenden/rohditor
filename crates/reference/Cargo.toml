@@ -14,5 +14,9 @@ rohditor-raw = { path = "../raw" }
 thiserror.workspace = true
 tiff.workspace = true
 
+[dev-dependencies]
+rohditor-core = { path = "../core" }
+rohditor-edit = { path = "../edit" }
+
 [lints]
 workspace = true

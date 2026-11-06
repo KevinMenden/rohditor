@@ -14,6 +14,7 @@ use rohditor_core::{
     WhiteBalanceCoordinates, WhiteBalanceMode, WhiteBalanceModeMemory, auto_tone,
     camera_color_transform, default_recipe, hsl_channel_weights_from_display_rgb,
     paths_refer_to_same_file, resolve_camera_colour, sample_rgb_patch,
+    with_default_noise_reduction,
 };
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_edit::{
@@ -84,6 +85,7 @@ mod gpu;
 #[path = "lifecycle.rs"]
 mod lifecycle;
 mod masks;
+mod noise_reduction;
 mod tools;
 
 use camera_look::CameraLookState;
@@ -91,6 +93,7 @@ use gpu::{
     GpuDocumentPreview, GpuDocumentSource, GpuRuntime, PendingGpuHistogram, gpu_output_size,
     initialize_gpu_runtime, register_or_update_gpu_texture,
 };
+use noise_reduction::NoiseState;
 
 #[derive(Debug, Clone, Copy)]
 struct DocumentPreviewDiagnostics {
@@ -166,6 +169,9 @@ struct Document {
     texture: Option<PreviewTexture>,
     /// The Masks tool's red tint of the selected mask.
     mask_overlay: Option<masks::MaskTint>,
+    /// The (recipe revision, layer) whose range overlay was asked of the worker. It stays set
+    /// after a failure, so a failing request is not repeated every frame.
+    range_overlay_requested: Option<(u64, u32)>,
     preview_pixels: Option<DisplayPreviewPixels>,
     preview_source: Option<PreviewSource>,
     histogram: Option<Histogram>,
@@ -192,6 +198,7 @@ struct Document {
     notice: Option<String>,
     initialize_white_balance_from_metadata: bool,
     camera_look: CameraLookState,
+    noise: NoiseState,
 }
 
 #[derive(Debug, Clone)]
@@ -212,6 +219,7 @@ impl Document {
             edits: EditSession::from_saved(recipe),
             texture: None,
             mask_overlay: None,
+            range_overlay_requested: None,
             preview_pixels: None,
             preview_source: None,
             histogram: None,
@@ -238,6 +246,7 @@ impl Document {
             notice: None,
             initialize_white_balance_from_metadata: false,
             camera_look: CameraLookState::default(),
+            noise: NoiseState::default(),
         }
     }
 
@@ -342,6 +351,8 @@ pub(crate) struct RohditorApp {
     tool: ActiveTool,
     color_mixer_channel: usize,
     pending_white_balance_pick: Option<PreviewTicket>,
+    /// A click of the color-range picker waiting for its sample from the worker.
+    pending_color_pick: Option<PreviewTicket>,
     white_balance_memory: WhiteBalanceModeMemory,
     view_mode: ViewMode,
     /// Folder of the last applied scan, used to reset library selection when
@@ -472,6 +483,7 @@ impl RohditorApp {
             tool: ActiveTool::default(),
             color_mixer_channel: 0,
             pending_white_balance_pick: None,
+            pending_color_pick: None,
             white_balance_memory: WhiteBalanceModeMemory::default(),
             view_mode,
             library_folder: None,
@@ -791,6 +803,8 @@ impl RohditorApp {
             draft_output_policy: dialog.draft.output_policy(),
             active_cpu_only: self.settings.cpu_only(),
             draft_cpu_only: dialog.draft.cpu_only(),
+            active_auto_noise_reduction: self.settings.auto_noise_reduction(),
+            draft_auto_noise_reduction: dialog.draft.auto_noise_reduction(),
             warning: self.settings_warning.as_deref(),
         };
         let mut open = true;
@@ -813,6 +827,11 @@ impl RohditorApp {
             && let Some(dialog) = self.settings_dialog.as_mut()
         {
             dialog.draft.set_cpu_only(cpu_only);
+        }
+        if let Some(enabled) = output.selected_auto_noise_reduction
+            && let Some(dialog) = self.settings_dialog.as_mut()
+        {
+            dialog.draft.set_auto_noise_reduction(enabled);
         }
         if output.apply {
             self.apply_settings(context);
@@ -1790,7 +1809,8 @@ impl RohditorApp {
                 }
             }
             if output.reset_all {
-                changed |= document.edits.reset_to(default_recipe(as_shot_coordinates));
+                let defaults = default_recipe_for_document(document);
+                changed |= document.edits.reset_to(defaults);
                 // Hidden values are UI state, but reset-all should reset them
                 // too; otherwise switching away from As-shot after a reset
                 // would unexpectedly resurrect an older manual WB choice.
@@ -1820,6 +1840,9 @@ impl RohditorApp {
         if output.import_camera_profile {
             self.import_camera_profile(context);
         }
+        if output.auto_noise_reduction {
+            self.apply_noise_suggestion(context);
+        }
         if let Some(picker) = picker_mode {
             self.tool.set_picker(picker);
         }
@@ -1844,7 +1867,18 @@ impl RohditorApp {
             let preparing = document.open_status.is_some() || document.preview_status.is_some();
             let crop_policy = self.settings.render_options().raw_crop_policy;
             if let Some(session) = self.tool.masks() {
-                masks::refresh_tint(context, document, session, crop_policy);
+                let options = PreviewOptions {
+                    render: self.settings.render_options(),
+                    ..PreviewOptions::default()
+                };
+                masks::refresh_tint(
+                    context,
+                    document,
+                    session,
+                    crop_policy,
+                    &self.coordinator,
+                    options,
+                );
             }
             let masks = self.tool.masks().and_then(|session| {
                 masks::overlay_model(
@@ -3112,6 +3146,7 @@ fn document_panel_model(
         noise_reduction: document.edits.recipe().noise_reduction,
         capture_sharpening: document.edits.recipe().capture_sharpening,
         defringe: document.edits.recipe().defringe,
+        noise_suggestion: document.noise.suggestion(),
     }
 }
 
@@ -3231,8 +3266,13 @@ fn has_user_adjustments(document: &Document) -> bool {
     current != default_recipe_for_document(document)
 }
 
+/// The recipe a document is reset to: camera-specific white balance, plus the
+/// noise reduction derived from its own noise estimate when it has one.
 fn default_recipe_for_document(document: &Document) -> EditRecipe {
-    default_recipe(document_as_shot_coordinates(document))
+    with_default_noise_reduction(
+        default_recipe(document_as_shot_coordinates(document)),
+        document.noise.default_profile(),
+    )
 }
 
 fn set_highlight_method(edits: &mut EditSession, method: HighlightMethod) -> bool {
