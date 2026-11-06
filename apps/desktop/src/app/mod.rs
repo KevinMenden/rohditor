@@ -2991,6 +2991,10 @@ fn document_panel_model(
         revision: document.edits.revision(),
         dirty: document.is_dirty(),
         has_adjustments: has_user_adjustments(document),
+        white_balance_changed: document.edits.recipe().color.white_balance
+            != default_recipe(document_as_shot_coordinates(document))
+                .color
+                .white_balance,
         camera_profile,
         camera_profile_choices,
         rendering_profile: document.edits.recipe().rendering.profile,

@@ -50,19 +50,19 @@ impl Histogram {
     /// Return the luminance bin containing the requested cumulative fraction.
     #[must_use]
     pub fn luminance_percentile(&self, fraction: f32) -> u8 {
-        let total = self.luminance.iter().sum::<u64>();
-        if total == 0 {
-            return 0;
-        }
-        let target = (f64::from(fraction.clamp(0.0, 1.0)) * (total - 1) as f64) as u64;
-        let mut cumulative = 0_u64;
-        for (index, count) in self.luminance.iter().enumerate() {
-            cumulative = cumulative.saturating_add(*count);
-            if cumulative > target {
-                return index as u8;
-            }
-        }
-        u8::MAX
+        percentile(&self.luminance, fraction)
+    }
+
+    /// Return the highest bin any of red, green, or blue has at the requested
+    /// cumulative fraction. Unlike luminance, this sees a saturated colour
+    /// approaching clipping in a single channel.
+    #[must_use]
+    pub fn brightest_channel_percentile(&self, fraction: f32) -> u8 {
+        [&self.red, &self.green, &self.blue]
+            .into_iter()
+            .map(|counts| percentile(counts, fraction))
+            .max()
+            .unwrap_or(0)
     }
 
     fn add_pixel(&mut self, red: u8, green: u8, blue: u8) {
@@ -83,6 +83,22 @@ impl Histogram {
             }
         }
     }
+}
+
+fn percentile(counts: &[u64; HISTOGRAM_BINS], fraction: f32) -> u8 {
+    let total = counts.iter().sum::<u64>();
+    if total == 0 {
+        return 0;
+    }
+    let target = (f64::from(fraction.clamp(0.0, 1.0)) * (total - 1) as f64) as u64;
+    let mut cumulative = 0_u64;
+    for (index, count) in counts.iter().enumerate() {
+        cumulative = cumulative.saturating_add(*count);
+        if cumulative > target {
+            return index as u8;
+        }
+    }
+    u8::MAX
 }
 
 impl Default for Histogram {
@@ -144,5 +160,20 @@ mod tests {
         assert_eq!(histogram.luminance_percentile(-1.0), 0);
         assert_eq!(histogram.luminance_percentile(1.0), 255);
         assert!(histogram.luminance_percentile(0.25) <= histogram.luminance_percentile(0.75));
+    }
+
+    #[test]
+    fn brightest_channel_percentile_sees_a_single_saturated_channel() {
+        let image = DisplayRgbImage::new(
+            2,
+            1,
+            6,
+            DisplayTransfer::Srgb,
+            vec![10, 20, 250, 12, 22, 252],
+        )
+        .expect("valid image");
+        let histogram = Histogram::from_display_rgb8(&image);
+        assert_eq!(histogram.brightest_channel_percentile(1.0), 252);
+        assert!(histogram.luminance_percentile(1.0) < 50);
     }
 }
