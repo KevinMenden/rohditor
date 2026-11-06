@@ -10,34 +10,24 @@ use super::adjustment_panel::{
 };
 use super::widgets::{AdjustmentSpec, ValueScale};
 
-/// The Detail section: source-resolution steps in pipeline order.
-pub(super) fn show(
-    ui: &mut egui::Ui,
-    document: &mut DocumentPanelModel,
-    output: &mut AdjustmentPanelOutput,
-) {
-    false_color(ui, document, output);
-    ui.separator();
-    noise_reduction(ui, document, output);
-    ui.separator();
-    capture_sharpening(ui, document, output);
-    ui.separator();
-    defringe(ui, document, output);
-}
+/// Shown on the Noise reduction section's header.
+pub(super) const NOISE_REDUCTION_HINT: &str = "Removes colour noise, then luminance (grain) noise, at source resolution and before \
+     sharpening. Inspect at Source 1:1. Runs on the CPU, so the preview and export use the CPU \
+     path while it is on.";
+
+/// Shown on the Defringe section's header.
+pub(super) const DEFRINGE_HINT: &str = "Removes purple and green colour fringes along high-contrast edges (branches against sky, \
+     bright highlights). Only pixels next to strong edges whose hue falls in the range are \
+     touched; they lose colour but keep their brightness. Inspect at Source 1:1. Runs on the \
+     CPU, so the preview and export use the CPU path while it is on.";
 
 /// Purple and green fringe removal, each with an amount and a hue range
 /// (two sliders: the range ends).
-fn defringe(
+pub(super) fn defringe(
     ui: &mut egui::Ui,
     document: &mut DocumentPanelModel,
     output: &mut AdjustmentPanelOutput,
 ) {
-    ui.label("Defringe").on_hover_text(
-        "Removes purple and green colour fringes along high-contrast edges (branches against \
-         sky, bright highlights). Only pixels next to strong edges whose hue falls in the range \
-         are touched; they lose colour but keep their brightness. Inspect at Source 1:1. Runs \
-         on the CPU, so the preview and export use the CPU path while it is on.",
-    );
     let settings = &mut document.defringe;
     let purple_active = settings.purple_active();
     let green_active = settings.green_active();
@@ -98,7 +88,7 @@ fn defringe(
     }
 }
 
-fn false_color(
+pub(super) fn false_color(
     ui: &mut egui::Ui,
     document: &mut DocumentPanelModel,
     output: &mut AdjustmentPanelOutput,
@@ -111,7 +101,7 @@ fn false_color(
         AdjustmentTarget::FalseColorSteps,
         &mut steps,
         AdjustmentSpec {
-            label: "Moiré / false colour",
+            label: "Steps",
             minimum: 0.0,
             maximum: f32::from(FALSE_COLOR_MAX_STEPS),
             neutral: 0.0,
@@ -130,17 +120,13 @@ fn false_color(
     document.false_color.steps = steps.round() as u8;
 }
 
-fn noise_reduction(
+pub(super) fn noise_reduction(
     ui: &mut egui::Ui,
     document: &mut DocumentPanelModel,
     output: &mut AdjustmentPanelOutput,
 ) {
+    // `horizontal` keeps the right-to-left row to one line tall.
     ui.horizontal(|ui| {
-        ui.label("Noise reduction").on_hover_text(
-            "Removes colour noise, then luminance (grain) noise, at source resolution and \
-             before sharpening. Inspect at Source 1:1. Runs on the CPU, so the preview and \
-             export use the CPU path while it is on.",
-        );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             auto_button(ui, document.noise_suggestion, output);
         });
@@ -219,13 +205,13 @@ fn slider(label: &'static str, range: ParameterRange) -> AdjustmentSpec<'static>
     }
 }
 
-fn capture_sharpening(
+pub(super) fn capture_sharpening(
     ui: &mut egui::Ui,
     document: &mut DocumentPanelModel,
     output: &mut AdjustmentPanelOutput,
 ) {
     let settings = &mut document.capture_sharpening;
-    if ui.checkbox(&mut settings.enabled, "Capture sharpening").on_hover_text(
+    if ui.checkbox(&mut settings.enabled, "Enabled").on_hover_text(
         "Recover fine detail before resizing. Inspect at Source 1:1; sharpening can amplify noise."
     ).changed() {
         output.capture_enabled = Some(settings.enabled);

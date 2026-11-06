@@ -4,13 +4,15 @@ use rohditor_core::{
     WhiteBalanceMode, evaluate_tone_curve,
 };
 use rohditor_edit::{
-    CameraProfileSelection, HighlightMethod, OpticsAction, RenderingProfileSelection, ToneCurve,
+    CameraProfileSelection, HighlightAdjustments, HighlightMethod, LensProfileSelection,
+    OpticsAction, RenderingProfileSelection, ToneCurve,
 };
 use rohditor_engine::tools::Picker;
 
+use super::detail;
 use super::optics::{self, OpticsPanelModel};
 use super::theme::{self, colors, metrics};
-use super::widgets::{self, AdjustmentSpec, ValueScale};
+use super::widgets::{self, AdjustmentSpec, CollapsibleSection, ValueScale};
 
 pub(crate) const COLOR_MIXER_LABELS: [&str; 8] = [
     "Red", "Orange", "Yellow", "Green", "Aqua", "Blue", "Purple", "Magenta",
@@ -127,6 +129,9 @@ pub(crate) struct DocumentPanelModel {
     pub revision: u64,
     pub dirty: bool,
     pub has_adjustments: bool,
+    /// White balance differs from this photo's as-shot default, which the
+    /// panel cannot tell from the values alone.
+    pub white_balance_changed: bool,
     pub values: AdjustmentValues,
     pub camera_profile: CameraProfileSelection,
     pub camera_profile_choices: Vec<CameraProfileChoice>,
@@ -260,54 +265,173 @@ pub(crate) fn show_body(
     };
 
     document_summary(ui, &document);
-
-    widgets::adjustment_section(ui, "Light", |ui| {
-        show_light_controls(ui, &mut document, &mut output);
-        show_tone_curve_controls(ui, &mut document, &mut output);
-    });
-    widgets::adjustment_section(ui, "Detail", |ui| {
-        super::detail::show(ui, &mut document, &mut output);
-    });
-    widgets::adjustment_section(ui, "Color", |ui| {
-        show_color_controls(ui, &mut document, &mut output);
-        ui.separator();
-        show_color_mixer_controls(ui, &mut document, &mut output);
-        ui.separator();
-        show_color_grading_controls(ui, &mut document, &mut output);
-        output.reset_all = ui
-            .add_enabled(
-                document.has_adjustments,
-                egui::Button::new("Reset all adjustments").frame(false),
-            )
-            .on_hover_text("Restore Rohditor Standard defaults")
-            .clicked();
-    });
-    output.optics_filter = widgets::adjustment_section(ui, "Optics", |ui| {
-        optics::show(ui, &mut document.optics, &mut output.optics_action)
-    });
-    widgets::adjustment_section(ui, "Export", |ui| {
-        show_export_settings(ui, export_settings);
-        let export_label = if document.export_in_progress {
-            "Exporting…"
-        } else {
-            "Export image…"
-        };
-        output.export = widgets::primary_button(
-            ui,
-            export_label,
-            document.export_ready && !document.export_in_progress,
+    output.reset_all = ui
+        .add_enabled(
+            document.has_adjustments,
+            egui::Button::new("Reset all adjustments").frame(false),
         )
-        .on_hover_text("Export the full-resolution CPU-developed image")
+        .on_hover_text("Restore Rohditor Standard defaults")
         .clicked();
-        if !document.export_ready && !document.export_in_progress {
-            ui.label(
-                egui::RichText::new("Available after RAW decoding completes")
-                    .small()
-                    .color(colors::TEXT_MUTED),
-            );
-        }
-    });
+    ui.add_space(4.0);
+    show_sections(ui, &mut document, export_settings, &mut output);
     output
+}
+
+/// The panel's flat list of sections. The everyday controls start open; the
+/// rest stay out of the way, and flag their header while they hold an edit.
+fn show_sections(
+    ui: &mut egui::Ui,
+    document: &mut DocumentPanelModel,
+    export_settings: &mut ExportUiSettings,
+    output: &mut AdjustmentPanelOutput,
+) {
+    let changed = SectionChanges::of(document);
+    CollapsibleSection::new("Tone")
+        .default_open()
+        .changed(changed.tone)
+        .show(ui, |ui| show_tone_controls(ui, document, output));
+    CollapsibleSection::new("White balance")
+        .default_open()
+        .changed(changed.white_balance)
+        .show(ui, |ui| show_white_balance_controls(ui, document, output));
+    CollapsibleSection::new("Saturation & vibrance")
+        .default_open()
+        .changed(changed.saturation)
+        .show(ui, |ui| show_saturation_controls(ui, document, output));
+    CollapsibleSection::new("Tone curve")
+        .changed(changed.tone_curve)
+        .show(ui, |ui| show_tone_curve_controls(ui, document, output));
+    CollapsibleSection::new("Highlight reconstruction")
+        .changed(changed.highlights)
+        .show(ui, |ui| show_highlight_controls(ui, document, output));
+    CollapsibleSection::new("Color profile")
+        .changed(changed.profile)
+        .show(ui, |ui| show_profile_controls(ui, document, output));
+    CollapsibleSection::new("Color mixer")
+        .changed(changed.color_mixer)
+        .show(ui, |ui| show_color_mixer_controls(ui, document, output));
+    CollapsibleSection::new("Three-way RGB tint")
+        .changed(changed.grading)
+        .show(ui, |ui| show_color_grading_controls(ui, document, output));
+    CollapsibleSection::new("Noise reduction")
+        .changed(document.noise_reduction.is_active())
+        .tooltip(detail::NOISE_REDUCTION_HINT)
+        .show(ui, |ui| detail::noise_reduction(ui, document, output));
+    CollapsibleSection::new("Capture sharpening")
+        .changed(document.capture_sharpening.enabled)
+        .show(ui, |ui| detail::capture_sharpening(ui, document, output));
+    CollapsibleSection::new("Moiré / false colour")
+        .changed(document.false_color.is_active())
+        .show(ui, |ui| detail::false_color(ui, document, output));
+    CollapsibleSection::new("Defringe")
+        .changed(document.defringe.is_active())
+        .tooltip(detail::DEFRINGE_HINT)
+        .show(ui, |ui| detail::defringe(ui, document, output));
+    output.optics_filter = CollapsibleSection::new("Optics")
+        .changed(!matches!(
+            document.optics.profile,
+            LensProfileSelection::Off
+        ))
+        .show(ui, |ui| {
+            optics::show(ui, &mut document.optics, &mut output.optics_action)
+        })
+        .flatten();
+    CollapsibleSection::new("Export").show(ui, |ui| {
+        show_export_controls(ui, document, export_settings, output);
+    });
+}
+
+/// Which sections differ from a fresh photo's defaults. The Detail and Optics
+/// settings answer this themselves, so they are not repeated here.
+struct SectionChanges {
+    tone: bool,
+    white_balance: bool,
+    saturation: bool,
+    tone_curve: bool,
+    highlights: bool,
+    profile: bool,
+    color_mixer: bool,
+    grading: bool,
+}
+
+impl SectionChanges {
+    fn of(document: &DocumentPanelModel) -> Self {
+        let values = &document.values;
+        let ranges = &document.ranges;
+        let any_moved = |entries: &[(f32, AdjustmentRange)]| {
+            entries
+                .iter()
+                .any(|(value, range)| !widgets::approximately_equal(*value, range.neutral))
+        };
+        let highlight_defaults = HighlightAdjustments::default();
+        Self {
+            tone: any_moved(&[
+                (values.exposure, ranges.exposure),
+                (values.contrast, ranges.contrast),
+                (values.highlights, ranges.highlights),
+                (values.shadows, ranges.shadows),
+                (values.whites, ranges.whites),
+                (values.blacks, ranges.blacks),
+            ]),
+            white_balance: document.white_balance_changed,
+            saturation: any_moved(&[
+                (values.saturation, ranges.saturation),
+                (values.vibrance, ranges.vibrance),
+            ]),
+            tone_curve: any_moved(&[
+                (values.tone_curve_shadows, ranges.tone_curve),
+                (values.tone_curve_darks, ranges.tone_curve),
+                (values.tone_curve_lights, ranges.tone_curve),
+                (values.tone_curve_highlights, ranges.tone_curve),
+            ]),
+            highlights: values.highlight_method != highlight_defaults.method
+                || !widgets::approximately_equal(
+                    values.highlight_threshold,
+                    highlight_defaults.clip.threshold,
+                ),
+            profile: document.camera_profile != CameraProfileSelection::Automatic
+                || document.rendering_profile != RenderingProfileSelection::MATCHED,
+            color_mixer: values.hsl.iter().any(|channel| {
+                channel
+                    .iter()
+                    .zip([ranges.hsl_hue, ranges.hsl_saturation, ranges.hsl_luminance])
+                    .any(|(value, range)| !widgets::approximately_equal(*value, range.neutral))
+            }),
+            grading: values
+                .grading
+                .iter()
+                .flatten()
+                .any(|value| !widgets::approximately_equal(*value, ranges.grading.neutral)),
+        }
+    }
+}
+
+fn show_export_controls(
+    ui: &mut egui::Ui,
+    document: &DocumentPanelModel,
+    export_settings: &mut ExportUiSettings,
+    output: &mut AdjustmentPanelOutput,
+) {
+    show_export_settings(ui, export_settings);
+    let export_label = if document.export_in_progress {
+        "Exporting…"
+    } else {
+        "Export image…"
+    };
+    output.export = widgets::primary_button(
+        ui,
+        export_label,
+        document.export_ready && !document.export_in_progress,
+    )
+    .on_hover_text("Export the full-resolution CPU-developed image")
+    .clicked();
+    if !document.export_ready && !document.export_in_progress {
+        ui.label(
+            egui::RichText::new("Available after RAW decoding completes")
+                .small()
+                .color(colors::TEXT_MUTED),
+        );
+    }
 }
 
 fn show_tone_curve_controls(
@@ -315,7 +439,6 @@ fn show_tone_curve_controls(
     document: &mut DocumentPanelModel,
     output: &mut AdjustmentPanelOutput,
 ) {
-    widgets::subsection_header(ui, "Tone curve");
     let mut values = [
         document.values.tone_curve_shadows,
         document.values.tone_curve_darks,
@@ -613,7 +736,7 @@ fn histogram_bin_height(count: u64, vertical_scale: f32) -> f32 {
     ((count as f32).ln_1p() / vertical_scale.max(1.0).ln_1p()).clamp(0.0, 1.0)
 }
 
-fn show_light_controls(
+fn show_highlight_controls(
     ui: &mut egui::Ui,
     document: &mut DocumentPanelModel,
     output: &mut AdjustmentPanelOutput,
@@ -622,7 +745,7 @@ fn show_light_controls(
     widgets::dropdown(
         ui,
         "highlight_reconstruction_method",
-        "Highlight reconstruction",
+        "Method",
         match highlight_method {
             HighlightMethod::Off => "Off",
             HighlightMethod::Clip => "Clip",
@@ -685,6 +808,13 @@ fn show_light_controls(
         );
         let _ = threshold_response.on_hover_text(tooltip);
     }
+}
+
+fn show_tone_controls(
+    ui: &mut egui::Ui,
+    document: &mut DocumentPanelModel,
+    output: &mut AdjustmentPanelOutput,
+) {
     let auto_tone_response = widgets::full_width_primary_button(
         ui,
         "Auto tone",
@@ -773,7 +903,7 @@ fn show_light_controls(
     }
 }
 
-fn show_color_controls(
+fn show_profile_controls(
     ui: &mut egui::Ui,
     document: &mut DocumentPanelModel,
     output: &mut AdjustmentPanelOutput,
@@ -874,13 +1004,18 @@ fn show_color_controls(
         output.rendering_profile = Some(rendering);
         document.rendering_profile = rendering;
     }
-    ui.add_space(4.0);
-    widgets::subsection_header(ui, "White balance");
+}
+
+fn show_white_balance_controls(
+    ui: &mut egui::Ui,
+    document: &mut DocumentPanelModel,
+    output: &mut AdjustmentPanelOutput,
+) {
     let mut mode = document.values.white_balance_mode;
     widgets::dropdown(
         ui,
         "white_balance_mode",
-        "White balance",
+        "Mode",
         match mode {
             WhiteBalanceMode::AsShot => "As shot",
             WhiteBalanceMode::TemperatureTint => "Temperature / tint",
@@ -1006,8 +1141,13 @@ fn show_color_controls(
             );
         }
     }
+}
 
-    widgets::subsection_header(ui, "Saturation & vibrance");
+fn show_saturation_controls(
+    ui: &mut egui::Ui,
+    document: &mut DocumentPanelModel,
+    output: &mut AdjustmentPanelOutput,
+) {
     record_slider(
         ui,
         &mut output.interactions,
@@ -1047,82 +1187,78 @@ fn show_color_mixer_controls(
     document: &mut DocumentPanelModel,
     output: &mut AdjustmentPanelOutput,
 ) {
-    egui::CollapsingHeader::new("Color mixer")
-        .default_open(false)
-        .show(ui, |ui| {
-            const CHANNEL_COLORS: [egui::Color32; 8] = [
-                egui::Color32::from_rgb(220, 66, 67),
-                egui::Color32::from_rgb(232, 132, 48),
-                egui::Color32::from_rgb(220, 190, 50),
-                egui::Color32::from_rgb(72, 174, 91),
-                egui::Color32::from_rgb(52, 181, 178),
-                egui::Color32::from_rgb(65, 116, 220),
-                egui::Color32::from_rgb(139, 87, 213),
-                egui::Color32::from_rgb(205, 75, 164),
-            ];
-            let selected = document
-                .color_mixer_channel
-                .min(COLOR_MIXER_LABELS.len() - 1);
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                for (index, (label, color)) in COLOR_MIXER_LABELS
-                    .into_iter()
-                    .zip(CHANNEL_COLORS)
-                    .enumerate()
-                {
-                    if color_swatch(ui, label, color, index == selected).clicked() {
-                        output.color_mixer_channel = Some(index);
-                    }
-                }
-                ui.add_space(2.0);
-                let picker_active = document.picker_mode == Some(Picker::ColorMixer);
-                if color_picker_swatch(ui, picker_active, CHANNEL_COLORS).clicked() {
-                    output.picker_mode = Some(if picker_active {
-                        None
-                    } else {
-                        Some(Picker::ColorMixer)
-                    });
-                }
-            });
-            ui.add_space(3.0);
-            ui.label(
-                egui::RichText::new(COLOR_MIXER_LABELS[selected])
-                    .strong()
-                    .color(colors::TEXT),
-            );
-            ui.add_space(3.0);
-
-            let ranges = [
-                document.ranges.hsl_hue,
-                document.ranges.hsl_saturation,
-                document.ranges.hsl_luminance,
-            ];
-            let labels = ["Hue", "Saturation", "Luminance"];
-            for component in 0..3 {
-                let target = match component {
-                    0 => AdjustmentTarget::HslHue(selected),
-                    1 => AdjustmentTarget::HslSaturation(selected),
-                    _ => AdjustmentTarget::HslLuminance(selected),
-                };
-                let range = ranges[component];
-                record_slider(
-                    ui,
-                    &mut output.interactions,
-                    target,
-                    &mut document.values.hsl[selected][component],
-                    AdjustmentSpec {
-                        label: labels[component],
-                        minimum: range.minimum,
-                        maximum: range.maximum,
-                        neutral: range.neutral,
-                        decimals: 0,
-                        step: 0.01,
-                        suffix: "%",
-                        scale: ValueScale::OffsetPercent,
-                    },
-                );
+    const CHANNEL_COLORS: [egui::Color32; 8] = [
+        egui::Color32::from_rgb(220, 66, 67),
+        egui::Color32::from_rgb(232, 132, 48),
+        egui::Color32::from_rgb(220, 190, 50),
+        egui::Color32::from_rgb(72, 174, 91),
+        egui::Color32::from_rgb(52, 181, 178),
+        egui::Color32::from_rgb(65, 116, 220),
+        egui::Color32::from_rgb(139, 87, 213),
+        egui::Color32::from_rgb(205, 75, 164),
+    ];
+    let selected = document
+        .color_mixer_channel
+        .min(COLOR_MIXER_LABELS.len() - 1);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        for (index, (label, color)) in COLOR_MIXER_LABELS
+            .into_iter()
+            .zip(CHANNEL_COLORS)
+            .enumerate()
+        {
+            if color_swatch(ui, label, color, index == selected).clicked() {
+                output.color_mixer_channel = Some(index);
             }
-        });
+        }
+        ui.add_space(2.0);
+        let picker_active = document.picker_mode == Some(Picker::ColorMixer);
+        if color_picker_swatch(ui, picker_active, CHANNEL_COLORS).clicked() {
+            output.picker_mode = Some(if picker_active {
+                None
+            } else {
+                Some(Picker::ColorMixer)
+            });
+        }
+    });
+    ui.add_space(3.0);
+    ui.label(
+        egui::RichText::new(COLOR_MIXER_LABELS[selected])
+            .strong()
+            .color(colors::TEXT),
+    );
+    ui.add_space(3.0);
+
+    let ranges = [
+        document.ranges.hsl_hue,
+        document.ranges.hsl_saturation,
+        document.ranges.hsl_luminance,
+    ];
+    let labels = ["Hue", "Saturation", "Luminance"];
+    for component in 0..3 {
+        let target = match component {
+            0 => AdjustmentTarget::HslHue(selected),
+            1 => AdjustmentTarget::HslSaturation(selected),
+            _ => AdjustmentTarget::HslLuminance(selected),
+        };
+        let range = ranges[component];
+        record_slider(
+            ui,
+            &mut output.interactions,
+            target,
+            &mut document.values.hsl[selected][component],
+            AdjustmentSpec {
+                label: labels[component],
+                minimum: range.minimum,
+                maximum: range.maximum,
+                neutral: range.neutral,
+                decimals: 0,
+                step: 0.01,
+                suffix: "%",
+                scale: ValueScale::OffsetPercent,
+            },
+        );
+    }
 }
 
 fn color_swatch(
@@ -1180,53 +1316,45 @@ fn show_color_grading_controls(
     document: &mut DocumentPanelModel,
     output: &mut AdjustmentPanelOutput,
 ) {
-    egui::CollapsingHeader::new("Three-way RGB tint")
-        .default_open(false)
-        .show(ui, |ui| {
-            ui.label(
-                egui::RichText::new("Luminance-preserving tint; values are not lift/gamma/gain")
-                    .small()
-                    .color(colors::TEXT_MUTED),
-            );
-            for (group, label, target) in [
-                (0, "Shadows", AdjustmentTarget::GradingShadows(0)),
-                (1, "Midtones", AdjustmentTarget::GradingMidtones(0)),
-                (2, "Highlights", AdjustmentTarget::GradingHighlights(0)),
-            ] {
-                ui.label(egui::RichText::new(label).small().color(colors::TEXT_MUTED));
-                for channel in 0..3 {
-                    let target = match target {
-                        AdjustmentTarget::GradingShadows(_) => {
-                            AdjustmentTarget::GradingShadows(channel)
-                        }
-                        AdjustmentTarget::GradingMidtones(_) => {
-                            AdjustmentTarget::GradingMidtones(channel)
-                        }
-                        AdjustmentTarget::GradingHighlights(_) => {
-                            AdjustmentTarget::GradingHighlights(channel)
-                        }
-                        _ => unreachable!("color grading group is fixed"),
-                    };
-                    let label = ["Red", "Green", "Blue"][channel];
-                    record_slider(
-                        ui,
-                        &mut output.interactions,
-                        target,
-                        &mut document.values.grading[group][channel],
-                        AdjustmentSpec {
-                            label,
-                            minimum: document.ranges.grading.minimum,
-                            maximum: document.ranges.grading.maximum,
-                            neutral: document.ranges.grading.neutral,
-                            decimals: 0,
-                            step: 0.01,
-                            suffix: "%",
-                            scale: ValueScale::OffsetPercent,
-                        },
-                    );
+    ui.label(
+        egui::RichText::new("Luminance-preserving tint; values are not lift/gamma/gain")
+            .small()
+            .color(colors::TEXT_MUTED),
+    );
+    for (group, label, target) in [
+        (0, "Shadows", AdjustmentTarget::GradingShadows(0)),
+        (1, "Midtones", AdjustmentTarget::GradingMidtones(0)),
+        (2, "Highlights", AdjustmentTarget::GradingHighlights(0)),
+    ] {
+        ui.label(egui::RichText::new(label).small().color(colors::TEXT_MUTED));
+        for channel in 0..3 {
+            let target = match target {
+                AdjustmentTarget::GradingShadows(_) => AdjustmentTarget::GradingShadows(channel),
+                AdjustmentTarget::GradingMidtones(_) => AdjustmentTarget::GradingMidtones(channel),
+                AdjustmentTarget::GradingHighlights(_) => {
+                    AdjustmentTarget::GradingHighlights(channel)
                 }
-            }
-        });
+                _ => unreachable!("color grading group is fixed"),
+            };
+            let label = ["Red", "Green", "Blue"][channel];
+            record_slider(
+                ui,
+                &mut output.interactions,
+                target,
+                &mut document.values.grading[group][channel],
+                AdjustmentSpec {
+                    label,
+                    minimum: document.ranges.grading.minimum,
+                    maximum: document.ranges.grading.maximum,
+                    neutral: document.ranges.grading.neutral,
+                    decimals: 0,
+                    step: 0.01,
+                    suffix: "%",
+                    scale: ValueScale::OffsetPercent,
+                },
+            );
+        }
+    }
 }
 
 pub(super) fn record_slider(

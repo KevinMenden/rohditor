@@ -36,8 +36,13 @@ pub(crate) mod metrics {
     pub(crate) const TOOLBAR_HEIGHT: f32 = 48.0;
     pub(crate) const STATUS_HEIGHT: f32 = 27.0;
     pub(crate) const ADJUSTMENT_PANEL_WIDTH: f32 = 312.0;
-    pub(crate) const TOOL_RAIL_WIDTH: f32 = 44.0;
+    pub(crate) const TOOL_RAIL_WIDTH: f32 = 46.0;
     pub(crate) const ADJUSTMENT_SECTION_GAP: f32 = 9.0;
+    pub(crate) const SECTION_HEADER_HEIGHT: f32 = 20.0;
+    /// egui's wheel step (40 pt) is less than one slider row (about 66 pt), so
+    /// the tool panel scrolls this much further per notch. Local to the panel
+    /// because the viewport turns the same scroll input into zoom.
+    pub(crate) const TOOL_PANEL_SCROLL_MULTIPLIER: f32 = 2.5;
     pub(crate) const FILE_PANEL_WIDTH: f32 = 190.0;
     pub(crate) const FILE_PANEL_BREAKPOINT: f32 = 1_120.0;
     pub(crate) const NARROW_TOOLBAR_BREAKPOINT: f32 = 1_020.0;

@@ -31,6 +31,7 @@ pub(crate) fn show<R>(
         .show(context, |ui| {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
+                .wheel_scroll_multiplier(egui::vec2(1.0, metrics::TOOL_PANEL_SCROLL_MULTIPLIER))
                 .show(ui, |ui| {
                     ui.heading(model.title);
                     ui.label(
