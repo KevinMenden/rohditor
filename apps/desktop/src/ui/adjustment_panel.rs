@@ -821,7 +821,7 @@ fn show_tone_controls(
         document.auto_tone_available,
     )
     .on_hover_text(if document.auto_tone_available {
-        "Display-referred heuristic: set exposure and clipping guards from the current histogram"
+        "Refine exposure, shadows, highlights and blacks from the current histogram, keeping the photo's overall brightness character"
     } else {
         "Auto tone becomes available when the current preview histogram is ready"
     });
