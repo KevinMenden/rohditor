@@ -67,10 +67,11 @@ pub use pipeline::{
     CPU_WORKING_SET_LIMIT_BYTES, CapturedCameraSource, CpuPipeline, CpuPreviewWorkspace,
     DEFAULT_PREVIEW_LONG_EDGE, DEFRINGE_ALGORITHM_VERSION, DefringeContract, DefringeProvenance,
     DemosaicedBase, DemosaicedCameraSource, DetailContract, DetailProvenance, ExportRenderResult,
-    FALSE_COLOR_ALGORITHM_VERSION, MemoryEstimate, NOISE_REDUCTION_ALGORITHM_VERSION,
-    NormalizationContract, OutputPolicy, PreviewOptions, RawCropPolicy, ReconstructedPreview,
-    RenderOptions, RenderResult, SensorCameraMetadata, SensorCrop, SensorDevelopmentDescription,
-    SpatialCompletionDescription, SpatialOptics, StageTimings, detail_is_active,
+    FALSE_COLOR_ALGORITHM_VERSION, LocalDetailImage, MemoryEstimate,
+    NOISE_REDUCTION_ALGORITHM_VERSION, NormalizationContract, OutputPolicy, PreviewOptions,
+    RawCropPolicy, ReconstructedPreview, RenderOptions, RenderResult, SensorCameraMetadata,
+    SensorCrop, SensorDevelopmentDescription, SpatialCompletionDescription, SpatialOptics,
+    StageTimings, detail_is_active, local_detail_variants,
 };
 pub use rendering::{
     BASE_RENDERING_LUT_SIZE, BaseRenderingLut, ROHDITOR_STANDARD_MIDDLE_GRAY, base_rendering_lut,

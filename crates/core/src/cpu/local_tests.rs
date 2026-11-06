@@ -1,9 +1,11 @@
 //! Tests for the local-adjustment terms of the adjustment stage and the mask overlay.
 
+use std::sync::Arc;
+
 use rayon::ThreadPoolBuilder;
 use rohditor_edit::{
-    EditRecipe, LinearGradient, LocalSettings, MaskComponent, MaskLayer, MaskMode, MaskPoint,
-    MaskShape, RenderingProfileSelection,
+    EditRecipe, LinearGradient, LocalDetail, LocalSettings, LuminanceRange, MaskComponent,
+    MaskLayer, MaskMode, MaskPoint, MaskShape, RenderingProfileSelection,
 };
 use rohditor_image::{LinearRgbImage, LinearRgbSpace, Orientation};
 use rohditor_mask::{MaskFrame, PreparedMask, ReferenceRow};
@@ -121,7 +123,7 @@ fn neutral_disabled_zero_opacity_and_empty_layers_are_bit_identical_to_no_layers
 
     assert!(!recipe.local.is_active());
     assert!(
-        LocalStage::prepare(&recipe, WIDTH, HEIGHT)
+        LocalStage::prepare(&recipe, WIDTH, HEIGHT, &|_| None)
             .expect("prepares")
             .is_none()
     );
@@ -382,7 +384,7 @@ fn stage_bytes_grow_with_layers_and_frame_width() {
         .local
         .layers
         .push(layer(0, linear(0.2, 0.8), settings));
-    let one = LocalStage::prepare(&recipe, 100, 50)
+    let one = LocalStage::prepare(&recipe, 100, 50, &|_| None)
         .expect("valid test fixture")
         .expect("valid test fixture")
         .bytes();
@@ -390,11 +392,11 @@ fn stage_bytes_grow_with_layers_and_frame_width() {
         .local
         .layers
         .push(layer(1, linear(0.2, 0.8), settings));
-    let two = LocalStage::prepare(&recipe, 100, 50)
+    let two = LocalStage::prepare(&recipe, 100, 50, &|_| None)
         .expect("valid test fixture")
         .expect("valid test fixture")
         .bytes();
-    let wide = LocalStage::prepare(&recipe, 1000, 50)
+    let wide = LocalStage::prepare(&recipe, 1000, 50, &|_| None)
         .expect("valid test fixture")
         .expect("valid test fixture")
         .bytes();
@@ -533,4 +535,203 @@ fn the_small_overlay_matches_the_full_size_one_under_orientation_and_crop() {
             .expect("valid test fixture")
             .is_none()
     );
+}
+
+/// The stage with `copy` as the local detail image of every layer that has detail settings.
+fn adjusted_with_copy(
+    image: &LinearRgbImage<f32>,
+    recipe: &EditRecipe,
+    copies: &[(u32, LinearRgbImage<f32>)],
+) -> LinearRgbImage<f32> {
+    let copies: Vec<(u32, Arc<LinearRgbImage<f32>>)> = copies
+        .iter()
+        .map(|(id, copy)| (*id, Arc::new(copy.clone())))
+        .collect();
+    let stage = LocalStage::prepare(recipe, image.width(), image.height(), &|layer| {
+        copies
+            .iter()
+            .find(|(id, _)| *id == layer.id)
+            .map(|(_, copy)| Arc::clone(copy))
+    })
+    .expect("prepares")
+    .expect("active");
+    let mut working = image.clone();
+    super::adjustments::apply_adjustments_with_local(
+        &mut working,
+        recipe,
+        Some(&stage),
+        &CancellationToken::new(),
+    )
+    .expect("adjusts");
+    working
+}
+
+fn detail_settings() -> LocalSettings {
+    LocalSettings {
+        detail: LocalDetail {
+            luminance_noise: 0.5,
+            ..LocalDetail::default()
+        },
+        ..LocalSettings::default()
+    }
+}
+
+#[test]
+fn the_detail_copy_is_blended_in_by_alpha_at_the_right_pixel_and_row() {
+    let image = varied_image();
+    // A different value in every row, column and channel, so a mix-up shows.
+    let copy = image_of(|x, y| {
+        [
+            0.1 + 0.03 * x as f32,
+            0.2 + 0.04 * y as f32,
+            0.3 + 0.001 * (x * y) as f32,
+        ]
+    });
+    let mut recipe = neutral_recipe();
+    recipe
+        .local
+        .layers
+        .push(layer(3, linear(0.25, 0.75), detail_settings()));
+    let result = adjusted_with_copy(&image, &recipe, &[(3, copy.clone())]);
+
+    let mask = PreparedMask::prepare(
+        &recipe.local.layers[0],
+        MaskFrame {
+            width: WIDTH,
+            height: HEIGHT,
+        },
+    )
+    .expect("prepares");
+    let mut alphas = vec![0.0; WIDTH];
+    let mut partial = 0;
+    for y in 0..HEIGHT {
+        mask.evaluate_row(y, 0..WIDTH, ReferenceRow::NONE, &mut alphas);
+        for (x, &alpha) in alphas.iter().enumerate() {
+            partial += usize::from(alpha > 0.0 && alpha < 1.0);
+            for channel in 0..3 {
+                let at = y * WIDTH * 3 + x * 3 + channel;
+                let (from, to) = (image.data()[at], copy.data()[at]);
+                let expected = from + alpha * (to - from);
+                assert!(
+                    (result.data()[at] - expected).abs() < 1e-5,
+                    "({x}, {y}) channel {channel}: {} vs {expected}",
+                    result.data()[at]
+                );
+            }
+        }
+    }
+    assert!(partial > 0, "the gradient must also test partial alpha");
+}
+
+#[test]
+fn later_detail_layers_blend_over_earlier_ones() {
+    let image = flat_image(0.2);
+    let mut recipe = neutral_recipe();
+    // Both cover the left half fully; the second one wins there.
+    for id in [0, 1] {
+        recipe
+            .local
+            .layers
+            .push(layer(id, linear(0.5, 0.5001), detail_settings()));
+    }
+    let result = adjusted_with_copy(
+        &image,
+        &recipe,
+        &[(0, flat_image(0.4)), (1, flat_image(0.6))],
+    );
+    assert_eq!(result.data()[0], 0.6);
+    assert_eq!(result.data()[(WIDTH - 1) * 3], 0.2);
+}
+
+#[test]
+fn a_detail_copy_does_not_change_what_range_masks_select() {
+    // Dark pixels on the left, bright ones on the right. The copy swaps them, so a range mask
+    // reading blended pixels would select the opposite side.
+    let image = image_of(|x, _| [if x < WIDTH / 2 { 0.01 } else { 0.9 }; 3]);
+    let copy = image_of(|x, _| [if x < WIDTH / 2 { 0.9 } else { 0.01 }; 3]);
+    let everywhere = linear(1.9, 2.0);
+
+    let mut recipe = neutral_recipe();
+    recipe
+        .local
+        .layers
+        .push(layer(0, everywhere.clone(), detail_settings()));
+    let mut ranged = layer(
+        1,
+        everywhere,
+        LocalSettings {
+            exposure_ev: 1.0,
+            ..LocalSettings::default()
+        },
+    );
+    ranged.components.push(MaskComponent {
+        mode: MaskMode::Intersect,
+        invert: false,
+        shape: MaskShape::Luminance(LuminanceRange {
+            low: 0.0,
+            high: 0.3,
+            feather_low: 0.0,
+            feather_high: 0.0,
+        }),
+    });
+    recipe.local.layers.push(ranged);
+
+    let result = adjusted_with_copy(&image, &recipe, &[(0, copy)]);
+    // Left was dark when it entered the stage, so it is selected: 0.9, then one stop up.
+    assert!(
+        (result.data()[0] - 1.8).abs() < 1e-4,
+        "{}",
+        result.data()[0]
+    );
+    // Right was bright, so it isn't, although it is dark after the blend.
+    let right = result.data()[(WIDTH - 1) * 3];
+    assert!((right - 0.01).abs() < 1e-4, "{right}");
+}
+
+#[test]
+fn non_finite_copy_pixels_leave_the_base_pixel_alone() {
+    let image = flat_image(0.2);
+    let copy = image_of(|x, _| [if x == 0 { f32::NAN } else { 0.4 }; 3]);
+    let mut recipe = neutral_recipe();
+    recipe
+        .local
+        .layers
+        .push(layer(0, linear(1.9, 2.0), detail_settings()));
+    let result = adjusted_with_copy(&image, &recipe, &[(0, copy)]);
+    assert_eq!(result.data()[0], 0.2);
+    assert_eq!(result.data()[3], 0.4);
+}
+
+#[test]
+fn a_copy_of_another_size_is_refused() {
+    let wrong = Arc::new(
+        LinearRgbImage::new(1, 1, 3, LinearRgbSpace::Rec2020D65, vec![0.0; 3])
+            .expect("valid test image"),
+    );
+    let mut recipe = neutral_recipe();
+    recipe
+        .local
+        .layers
+        .push(layer(0, linear(0.2, 0.8), detail_settings()));
+    assert!(LocalStage::prepare(&recipe, WIDTH, HEIGHT, &|_| Some(Arc::clone(&wrong))).is_err());
+}
+
+#[test]
+fn the_standalone_stage_refuses_local_detail_rather_than_dropping_it() {
+    let original = varied_image();
+    let mut recipe = neutral_recipe();
+    recipe
+        .local
+        .layers
+        .push(layer(0, linear(0.2, 0.8), detail_settings()));
+    let mut image = original.clone();
+    assert!(matches!(
+        apply_adjustments(&mut image, &recipe),
+        Err(crate::PipelineError::InvalidRecipe { .. })
+    ));
+    assert_eq!(image.data(), original.data());
+
+    // Taking away noise reduction the global settings don't have needs no copy, so nothing is lost.
+    recipe.local.layers[0].settings.detail.luminance_noise = -0.5;
+    assert_eq!(adjusted(&original, &recipe), original.data());
 }

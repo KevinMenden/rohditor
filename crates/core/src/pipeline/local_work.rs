@@ -1,11 +1,12 @@
 //! Per-render preparation of local adjustments (mask layers).
 //!
-//! Resolved before the working-set check, so the bytes of prepared masks, tone tables and
-//! per-thread row scratch count towards `MemoryEstimate` and the CPU limit.
+//! Resolved before the working-set check, so the bytes of prepared masks, tone tables,
+//! per-thread row scratch and local detail copies count towards `MemoryEstimate` and the CPU
+//! limit.
 
 use rohditor_edit::EditRecipe;
-use rohditor_image::LinearRgbImage;
 
+use super::{DemosaicedBase, local_detail};
 use crate::PipelineError;
 use crate::cpu::LocalStage;
 
@@ -13,20 +14,31 @@ use crate::cpu::LocalStage;
 #[derive(Debug, Default)]
 pub(super) struct LocalWork {
     pub(super) stage: Option<LocalStage>,
+    detail_bytes: usize,
 }
 
 impl LocalWork {
     pub(super) fn prepare(
-        image: &LinearRgbImage<f32>,
+        base: &DemosaicedBase,
         recipe: &EditRecipe,
     ) -> Result<Self, PipelineError> {
+        let images = &base.local_detail;
         Ok(Self {
-            stage: LocalStage::prepare(recipe, image.width(), image.height())?,
+            stage: LocalStage::prepare(
+                recipe,
+                base.image.width(),
+                base.image.height(),
+                &|layer| local_detail::image_for_layer(images, recipe, layer),
+            )?,
+            detail_bytes: local_detail::images_bytes(images),
         })
     }
 
     /// Bytes held beyond the image buffers while this work renders.
     pub(super) fn bytes(&self) -> usize {
-        self.stage.as_ref().map_or(0, LocalStage::bytes)
+        self.stage
+            .as_ref()
+            .map_or(0, LocalStage::bytes)
+            .saturating_add(self.detail_bytes)
     }
 }

@@ -148,6 +148,7 @@ fn every_slider() -> LocalSettings {
         whites: 0.2,
         blacks: -0.2,
         saturation: 0.6,
+        detail: rohditor_edit::LocalDetail::default(),
     }
 }
 

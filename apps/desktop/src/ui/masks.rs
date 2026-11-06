@@ -5,7 +5,9 @@
 //! `MaskToolSession` and `LayerEdit`.
 
 use eframe::egui;
-use rohditor_edit::{MASK_UNIT_RANGE, ParameterRange};
+use rohditor_edit::{
+    MASK_UNIT_RANGE, MAX_LOCAL_DETAIL_VARIANTS, ParameterRange, local_detail_count,
+};
 use rohditor_edit::{MaskLayer, MaskMode, MaskShape};
 use rohditor_engine::tools::{
     BRUSH_RADIUS_RANGE, BrushSettings, LayerEdit, LocalSlider, MaskEditMode, MaskLimit, RangeSlider,
@@ -113,7 +115,7 @@ pub(crate) fn show(ui: &mut egui::Ui, model: &MasksPanelModel<'_>) -> Vec<MasksA
         widgets::section_header(ui, "Components");
         show_components(ui, model, layer, &mut actions);
         widgets::section_header(ui, "Adjustments");
-        show_sliders(ui, layer, &mut actions);
+        show_sliders(ui, model.layers, layer, &mut actions);
     }
 
     ui.add_space(6.0);
@@ -496,6 +498,10 @@ fn slider_spec(slider: LocalSlider) -> AdjustmentSpec<'static> {
         LocalSlider::Whites => ("Whites", 0, "%", ValueScale::OffsetPercent),
         LocalSlider::Blacks => ("Blacks", 0, "%", ValueScale::OffsetPercent),
         LocalSlider::Saturation => ("Saturation", 0, "%", ValueScale::OffsetPercent),
+        LocalSlider::ChromaNoise => ("Colour noise", 0, "%", ValueScale::OffsetPercent),
+        LocalSlider::LuminanceNoise => ("Luminance noise", 0, "%", ValueScale::OffsetPercent),
+        LocalSlider::FalseColor => ("Moiré", 0, "", ValueScale::Raw),
+        LocalSlider::Sharpening => ("Sharpening", 0, "%", ValueScale::OffsetPercent),
     };
     AdjustmentSpec {
         label,
@@ -503,18 +509,51 @@ fn slider_spec(slider: LocalSlider) -> AdjustmentSpec<'static> {
         maximum: range.maximum,
         neutral: range.neutral,
         decimals,
-        step: 0.01,
+        step: if slider == LocalSlider::FalseColor {
+            1.0
+        } else {
+            0.01
+        },
         suffix,
         scale,
     }
 }
 
-fn show_sliders(ui: &mut egui::Ui, layer: &MaskLayer, actions: &mut Vec<MasksAction>) {
+fn show_sliders(
+    ui: &mut egui::Ui,
+    layers: &[MaskLayer],
+    layer: &MaskLayer,
+    actions: &mut Vec<MasksAction>,
+) {
+    // A layer that already has detail settings may keep changing them; another one would need
+    // a further copy of the image.
+    let detail_full = layer.settings.detail.is_neutral()
+        && local_detail_count(layers) >= MAX_LOCAL_DETAIL_VARIANTS;
     for slider in LocalSlider::ALL {
+        if slider == LocalSlider::ChromaNoise {
+            ui.add_space(4.0);
+            ui.label("Detail").on_hover_text(format!(
+                "Noise reduction, moiré suppression and capture sharpening inside this mask, as \
+                 an offset on the global Detail settings. They use the CPU path and develop the \
+                 image again for each different setting, up to \
+                 {MAX_LOCAL_DETAIL_VARIANTS} per photo."
+            ));
+            if detail_full {
+                ui.weak(format!(
+                    "This photo has {MAX_LOCAL_DETAIL_VARIANTS} different settings already. \
+                     Masks with equal settings don't count twice."
+                ));
+            }
+        }
         let spec = slider_spec(slider);
         let mut value = slider.get(layer);
         // The same widget, reset button and drag events as the global sliders.
-        let response = widgets::adjustment_slider(ui, &mut value, spec);
+        let enabled = !(detail_full && slider.is_detail());
+        let response = ui
+            .add_enabled_ui(enabled, |ui| {
+                widgets::adjustment_slider(ui, &mut value, spec)
+            })
+            .inner;
         if response.reset_clicked {
             value = spec.neutral;
         }

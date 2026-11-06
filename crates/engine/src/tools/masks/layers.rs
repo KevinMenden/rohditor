@@ -7,7 +7,8 @@
 
 use rohditor_edit::{
     BLACKS_RANGE, CONTRAST_RANGE, EXPOSURE_EV_RANGE, EditRecipe, HIGHLIGHTS_RANGE,
-    LOCAL_SATURATION_RANGE, LOCAL_TEMPERATURE_RANGE, LOCAL_TINT_RANGE, MASK_OPACITY_RANGE,
+    LOCAL_FALSE_COLOR_RANGE, LOCAL_NOISE_REDUCTION_RANGE, LOCAL_SATURATION_RANGE,
+    LOCAL_SHARPENING_RANGE, LOCAL_TEMPERATURE_RANGE, LOCAL_TINT_RANGE, MASK_OPACITY_RANGE,
     MAX_MASK_NAME_BYTES, MaskLayer, MaskMode, ParameterRange, SHADOWS_RANGE, WHITES_RANGE,
 };
 
@@ -27,11 +28,15 @@ pub enum LocalSlider {
     Whites,
     Blacks,
     Saturation,
+    ChromaNoise,
+    LuminanceNoise,
+    FalseColor,
+    Sharpening,
 }
 
 impl LocalSlider {
     /// In the order the panel shows them.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 14] = [
         Self::Opacity,
         Self::Exposure,
         Self::Temperature,
@@ -42,7 +47,21 @@ impl LocalSlider {
         Self::Whites,
         Self::Blacks,
         Self::Saturation,
+        Self::ChromaNoise,
+        Self::LuminanceNoise,
+        Self::FalseColor,
+        Self::Sharpening,
     ];
+
+    /// Whether this slider makes the pipeline develop another copy of the image, which a recipe
+    /// has a limit of.
+    #[must_use]
+    pub const fn is_detail(self) -> bool {
+        matches!(
+            self,
+            Self::ChromaNoise | Self::LuminanceNoise | Self::FalseColor | Self::Sharpening
+        )
+    }
 
     pub const fn range(self) -> ParameterRange {
         match self {
@@ -56,6 +75,9 @@ impl LocalSlider {
             Self::Whites => WHITES_RANGE,
             Self::Blacks => BLACKS_RANGE,
             Self::Saturation => LOCAL_SATURATION_RANGE,
+            Self::ChromaNoise | Self::LuminanceNoise => LOCAL_NOISE_REDUCTION_RANGE,
+            Self::FalseColor => LOCAL_FALSE_COLOR_RANGE,
+            Self::Sharpening => LOCAL_SHARPENING_RANGE,
         }
     }
 
@@ -72,6 +94,10 @@ impl LocalSlider {
             Self::Whites => settings.whites,
             Self::Blacks => settings.blacks,
             Self::Saturation => settings.saturation,
+            Self::ChromaNoise => settings.detail.chroma_noise,
+            Self::LuminanceNoise => settings.detail.luminance_noise,
+            Self::FalseColor => settings.detail.false_color_steps as f32,
+            Self::Sharpening => settings.detail.sharpening,
         }
     }
 
@@ -88,6 +114,11 @@ impl LocalSlider {
             Self::Whites => settings.whites = value,
             Self::Blacks => settings.blacks = value,
             Self::Saturation => settings.saturation = value,
+            Self::ChromaNoise => settings.detail.chroma_noise = value,
+            Self::LuminanceNoise => settings.detail.luminance_noise = value,
+            // Whole passes; `range` has checked that this fits.
+            Self::FalseColor => settings.detail.false_color_steps = value.round() as i8,
+            Self::Sharpening => settings.detail.sharpening = value,
         }
     }
 }
@@ -136,6 +167,9 @@ impl LayerEdit {
                     return None;
                 }
                 slider.set(&mut next.local.layers[index], *value);
+                if slider.is_detail() && next.local.validate().is_err() {
+                    return None;
+                }
             }
             Self::ComponentMode { component, mode } => {
                 if *component == 0 && *mode != MaskMode::Add {
@@ -391,6 +425,44 @@ mod tests {
                 .apply(&base, 9)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn detail_sliders_stop_at_the_recipes_limit_of_different_settings() {
+        use rohditor_edit::MAX_LOCAL_DETAIL_VARIANTS;
+
+        let mut next = EditRecipe::default();
+        for _ in 0..=MAX_LOCAL_DETAIL_VARIANTS {
+            next = add_component(&next, None, gradient()).expect("room").0;
+        }
+        let set = |recipe: &EditRecipe, layer, value| {
+            LayerEdit::Slider(LocalSlider::LuminanceNoise, value).apply(recipe, layer)
+        };
+        for layer in 0..MAX_LOCAL_DETAIL_VARIANTS {
+            next = set(&next, layer as u32, 0.1 + layer as f32 * 0.1).expect("under the limit");
+        }
+        let over = MAX_LOCAL_DETAIL_VARIANTS as u32;
+        assert!(set(&next, over, 0.9).is_none());
+        // A value another layer already has needs no further copy.
+        let shared = set(&next, over, 0.1).expect("shares a copy");
+        assert!(shared.validate().is_ok());
+        // Neither does changing a layer that already has its own copy.
+        assert!(set(&next, 0, 0.9).is_some());
+        // Other sliders of the layer over the limit keep working.
+        assert!(
+            LayerEdit::Slider(LocalSlider::Contrast, 0.5)
+                .apply(&next, over)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn the_moire_slider_stores_whole_median_passes() {
+        let next = LayerEdit::Slider(LocalSlider::FalseColor, -2.4)
+            .apply(&recipe(1), 0)
+            .expect("in range");
+        assert_eq!(layer(&next).settings.detail.false_color_steps, -2);
+        assert_eq!(LocalSlider::FalseColor.get(layer(&next)), -2.0);
     }
 
     #[test]

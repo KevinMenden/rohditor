@@ -316,10 +316,20 @@ pub(super) mod adjustments {
     ///
     /// Exposure is scene-referred and precedes the selected base rendering. The
     /// remaining Light and Color controls operate on that rendered linear result.
+    ///
+    /// A recipe with effective local detail settings is refused rather than rendered without
+    /// them: their copies of the image belong to a `DemosaicedBase`, so only the render paths of
+    /// `CpuPipeline` can apply them.
     pub fn apply_adjustments(
         image: &mut LinearRgbImage<f32>,
         recipe: &EditRecipe,
     ) -> Result<(), PipelineError> {
+        if !crate::local_detail_variants(recipe).is_empty() {
+            return Err(PipelineError::InvalidRecipe {
+                field: "local.layers.settings.detail",
+                reason: "local detail settings need the render paths of CpuPipeline".to_owned(),
+            });
+        }
         apply_adjustments_cancellable(image, recipe, &CancellationToken::new())
     }
 
@@ -328,7 +338,7 @@ pub(super) mod adjustments {
         recipe: &EditRecipe,
         cancellation: &CancellationToken,
     ) -> Result<(), PipelineError> {
-        let local = LocalStage::prepare(recipe, image.width(), image.height())?;
+        let local = LocalStage::prepare(recipe, image.width(), image.height(), &|_| None)?;
         apply_adjustments_with_local(image, recipe, local.as_ref(), cancellation)
     }
 
@@ -405,6 +415,7 @@ pub(super) mod adjustments {
                     cancellation.checkpoint()?;
                     if let Some(local) = local {
                         local.evaluate_row(y, &row[..width_samples], reference_pixel, alphas);
+                        local.blend_detail(y, &mut row[..width_samples], alphas);
                     }
                     for (x, pixel) in row[..width_samples]
                         .as_chunks_mut::<3>()
