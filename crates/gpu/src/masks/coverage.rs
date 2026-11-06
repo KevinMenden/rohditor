@@ -29,6 +29,7 @@ impl FrameRect {
     /// and crop are axis aligned, so two opposite corners decide it; on a rotated image output
     /// rows are source columns.
     fn of_output_rows(geometry: OutputGeometry, first_row: u32, rows: u32) -> Self {
+        debug_assert!(rows > 0, "a band always has rows");
         let width = geometry.output_dimensions().0;
         let a = geometry.source_coordinate_in_bounds(0, first_row as usize);
         let b = geometry.source_coordinate_in_bounds(width - 1, (first_row + rows - 1) as usize);

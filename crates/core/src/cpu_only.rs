@@ -76,7 +76,12 @@ mod tests {
             .local
             .layers
             .push(recipe_with_brushes(1).local.layers.remove(0));
-        assert!(cpu_only_stage_reason(&recipe).is_some());
+        let reason = cpu_only_stage_reason(&recipe).expect("one brush over the limit");
+        // A `&'static str` cannot format the constant, so hold the two together here.
+        assert!(
+            reason.contains(&format!("more than {GPU_MAX_BRUSH_COMPONENTS} ")),
+            "{reason}"
+        );
         // Only active layers need planes.
         recipe.local.layers[1].enabled = false;
         assert_eq!(cpu_only_stage_reason(&recipe), None);
