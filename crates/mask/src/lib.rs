@@ -29,11 +29,13 @@ mod math;
 mod prepared;
 mod radial;
 mod reference;
+mod resolved;
 #[cfg(test)]
 mod test_support;
 
 pub use prepared::PreparedMask;
 pub use reference::{ReferenceNeeds, ReferenceRow};
+pub use resolved::{BrushCoverage, ResolvedComponent, ResolvedShape, resolve_component};
 
 use thiserror::Error;
 

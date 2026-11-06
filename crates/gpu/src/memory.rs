@@ -80,6 +80,11 @@ impl Reservation {
         }
     }
 
+    /// Bytes currently held by this reservation.
+    pub(crate) const fn bytes(&self) -> u64 {
+        self.0
+    }
+
     /// Release a completed operation's transient allocation while retaining
     /// ownership of its resident result.
     ///

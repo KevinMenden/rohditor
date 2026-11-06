@@ -24,7 +24,7 @@ fn develop_spatial_full(@builtin(global_invocation_id) invocation: vec3<u32>) {
         corrected_channel(source, 1u),
         corrected_channel(source, 2u),
     );
-    let adjusted = develop_camera_color(camera_native);
+    let adjusted = develop_camera_color(camera_native, source);
     textureStore(
         spatial_display_srgb,
         vec2<i32>(output),

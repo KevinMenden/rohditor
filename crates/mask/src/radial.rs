@@ -14,14 +14,14 @@ use crate::{MaskError, MaskFrame};
 /// (y points down). The component's `invert` flag gives the outside; it is applied by the caller.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PreparedRadial {
-    center: [f32; 2],
+    pub(crate) center: [f32; 2],
     /// Rotation of the ellipse, as cosine and sine.
-    cos: f32,
-    sin: f32,
+    pub(crate) cos: f32,
+    pub(crate) sin: f32,
     /// Reciprocal radii in pixels.
-    inv_radius_x: f32,
-    inv_radius_y: f32,
-    feather: f32,
+    pub(crate) inv_radius_x: f32,
+    pub(crate) inv_radius_y: f32,
+    pub(crate) feather: f32,
 }
 
 impl PreparedRadial {

@@ -11,10 +11,10 @@ use crate::math::smoothstep;
 /// with a smoothstep over `feather_low` below `low` and `feather_high` above `high`.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PreparedLuminance {
-    low: f32,
-    high: f32,
-    feather_low: f32,
-    feather_high: f32,
+    pub(crate) low: f32,
+    pub(crate) high: f32,
+    pub(crate) feather_low: f32,
+    pub(crate) feather_high: f32,
 }
 
 impl PreparedLuminance {
