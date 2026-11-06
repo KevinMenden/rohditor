@@ -2242,14 +2242,17 @@ mod tests {
     }
 
     #[test]
-    fn only_recipes_with_an_active_mask_are_routed_to_the_cpu() {
+    fn masks_render_on_the_gpu_unless_their_brushes_would_exhaust_it() {
         let mut recipe = recipe_with_mask_layer();
         assert!(gpu_may_render(&EditRecipe::default()));
-        assert!(!gpu_may_render(&recipe));
-        // A layer with neutral sliders changes nothing, so the GPU can render it.
-        recipe.local.layers[0].settings = rohditor_edit::LocalSettings::default();
-        assert!(!recipe.local.is_active());
         assert!(gpu_may_render(&recipe));
+        let brush = rohditor_edit::MaskComponent {
+            mode: rohditor_edit::MaskMode::Add,
+            invert: false,
+            shape: rohditor_edit::MaskShape::Brush(rohditor_edit::BrushMask::default()),
+        };
+        recipe.local.layers[0].components = vec![brush; 17];
+        assert!(!gpu_may_render(&recipe));
     }
 
     #[test]

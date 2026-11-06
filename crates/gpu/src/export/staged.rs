@@ -29,6 +29,17 @@ struct Pass {
     source_rows: (u32, u32),
 }
 
+impl Pass {
+    /// The cropped-image rows this pass develops, if it is the band's first pass.
+    const fn developed_rows(&self, band: BandRows) -> (u32, u32) {
+        if self.mode == mode::REDUCE_HORIZONTAL {
+            self.source_rows
+        } else {
+            band.held
+        }
+    }
+}
+
 /// The rows of one band: the ones written (`core`) and the ones held.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct BandRows {
@@ -94,7 +105,8 @@ impl GpuExportProcessor {
     pub(super) fn render_staged(
         &self,
         source: &crate::GpuSpatialFullSource,
-        cropped: (usize, usize),
+        geometry: OutputGeometry,
+        brushes: &[&rohditor_edit::BrushMask],
         target: (usize, usize),
         depth: OutputBitDepth,
         dithering: DitherMode,
@@ -105,6 +117,7 @@ impl GpuExportProcessor {
         let description = &source.description;
         let device = &self.processor.device;
         let queue = &self.processor.queue;
+        let cropped = geometry.output_dimensions();
         self.processor
             .capabilities
             .validate_dimensions(target.0, target.1)?;
@@ -135,6 +148,22 @@ impl GpuExportProcessor {
                 scratch_rows = scratch_rows.max(count as u64);
             }
         }
+        // Rows of the cropped image one band develops: the reduction reads
+        // `scratch_rows` of them, otherwise a band's rows are cropped rows.
+        let developed_rows = if plan.is_some() {
+            scratch_rows as u32
+        } else {
+            held_rows
+        };
+        let source_dimensions = description.source_dimensions();
+        let mut coverage = BandCoverage::new(
+            device,
+            brushes,
+            (source_dimensions.0 as u32, source_dimensions.1 as u32),
+            geometry,
+            developed_rows,
+            MEMORY_BUDGET,
+        )?;
         let pixels = |rows: u64| u64::from(width) * rows;
         // One buffer holds the reduction scratch, the encoded band and the
         // sharpening planes (see `staged_output.wgsl`).
@@ -171,6 +200,7 @@ impl GpuExportProcessor {
         let estimated_gpu_bytes = source
             .estimated_bytes()
             .saturating_add(working_bytes)
+            .saturating_add(coverage.reserved_bytes())
             .max(spatial_metrics.estimated_gpu_bytes)
             .max(spatial_metrics.capture.estimated_gpu_bytes);
         if estimated_gpu_bytes > MEMORY_BUDGET {
@@ -192,7 +222,8 @@ impl GpuExportProcessor {
                 source_pixels * 12
             }
             + output_pixels * 3 * u64::from(depth.bits() / 8)
-            + band_bytes;
+            + band_bytes
+            + coverage.cpu_bytes();
         if estimated_cpu_bytes > rohditor_core::CPU_WORKING_SET_LIMIT_BYTES as u64 {
             return Err(GpuPreviewError::Unsupported {
                 reason: format!(
@@ -249,7 +280,7 @@ impl GpuExportProcessor {
             vertical_weights: tables.vertical_weights,
             gaussian: tables.gaussian,
         };
-        let shared = self.shared_bindings(&self.staged_pipeline, source);
+        let shared = self.shared_bindings(&self.staged_pipeline, source, coverage.view());
         let layout = self.staged_pipeline.get_bind_group_layout(1);
         let params = sharpen.as_ref().map(|(params, _)| *params);
 
@@ -264,6 +295,14 @@ impl GpuExportProcessor {
             |encoder, first, rows, maximum| {
                 let band = BandRows::new(first, rows, radius, height);
                 let passes = band_passes(width, band, plan.as_ref(), sharpen.is_some())?;
+                // Only the first pass develops pixels; it runs on these rows.
+                let (first_developed, developed) = passes[0].developed_rows(band);
+                coverage.write_rows(
+                    queue,
+                    &self.processor.parameters,
+                    first_developed,
+                    developed,
+                );
                 // Each pass has its own parameters; they are all written
                 // before this band's submission.
                 let groups: Vec<wgpu::BindGroup> = passes
@@ -340,7 +379,7 @@ impl GpuExportProcessor {
             color_and_readback_time: started.elapsed(),
             estimated_gpu_bytes,
             estimated_cpu_bytes,
-            uploaded_bytes: spatial_metrics.uploaded_bytes,
+            uploaded_bytes: spatial_metrics.uploaded_bytes + coverage.uploaded_bytes(),
             readback_bytes: output_pixels * 12 + 4 + spatial_metrics.readback_bytes,
             submissions: spatial_metrics.submissions + height.div_ceil(BAND_ROWS) + 1,
         })

@@ -948,3 +948,105 @@ fn defringe_timing_at_24mp() {
         );
     }
 }
+
+/// Source 1:1 has its own band loop and bindings, and bands that cross the frame in either
+/// direction depending on the orientation.
+#[test]
+#[ignore = "requires Vulkan; mask parity on the direct full-resolution display"]
+fn source_scale_display_masks_match_cpu_with_orientation_and_crop() {
+    use crate::masks::test_recipes::{colored_frame, mask_recipes};
+    use rohditor_edit::NormalizedCropRect;
+
+    let _guard = crate::preview::processor::tests::gpu_test_guard();
+    let (mut processor, preview_processor) = processors();
+    let cpu = CpuPipeline::default();
+    let token = CancellationToken::new();
+    let crops = [
+        None,
+        Some(NormalizedCropRect {
+            left: 0.08,
+            top: 0.12,
+            right: 0.8,
+            bottom: 0.95,
+        }),
+    ];
+    let mut base = EditRecipe::default();
+    base.raw.highlights.method = rohditor_edit::HighlightMethod::Off;
+    for orientation in [
+        Orientation::Normal,
+        Orientation::Rotate90,
+        Orientation::Transverse,
+    ] {
+        // Taller and wider than a display band, so every case spans several of them.
+        let frame = colored_frame(401, 297, orientation);
+        let options = PreviewOptions {
+            max_long_edge: frame.info.width.max(frame.info.height),
+            ..Default::default()
+        };
+        let source = cpu
+            .prepare_camera_source(&frame, &base, options, &token)
+            .expect("full camera source");
+        let description = cpu
+            .describe_spatial_completion(&source, &token)
+            .expect("full spatial description");
+        let (resident, _) = processor
+            .upload_captured_source(&cpu, &source, &token)
+            .expect("full resident source");
+        let full = processor
+            .full_resolution_source(&resident, description, &token)
+            .expect("full spatial source");
+        let reference = cpu
+            .prepare_preview_base(&frame, &base, options)
+            .expect("reference base");
+        let sample = rohditor_core::sample_color_range(
+            reference.image(),
+            reference.source_orientation(),
+            &base,
+            (0.35, 0.65),
+        )
+        .expect("the fixture has colour there");
+        for (name, mut recipe) in mask_recipes(&base, sample) {
+            let mut largest = 0;
+            for crop in crops {
+                recipe.geometry.crop = crop;
+                let gpu_frame = preview_processor
+                    .render_spatial_full(
+                        &full,
+                        &recipe,
+                        rohditor_core::OutputPolicy::ClipToSrgb,
+                        None,
+                    )
+                    .expect("direct full display");
+                let actual = preview_processor
+                    .readback_display(&gpu_frame)
+                    .expect("diagnostic display readback");
+                let expected = cpu
+                    .render_source_scale_preview_cancellable(
+                        &frame,
+                        &recipe,
+                        options.render,
+                        &token,
+                    )
+                    .expect("CPU source-scale reference");
+                assert_eq!(
+                    (actual.width as usize, actual.height as usize),
+                    (expected.image.width(), expected.image.height()),
+                    "{name} {orientation:?} {crop:?}"
+                );
+                for (actual, expected) in actual
+                    .rgba
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .zip(expected.image.data().as_chunks::<3>().0.iter())
+                {
+                    for channel in 0..3 {
+                        largest = largest.max(actual[channel].abs_diff(expected[channel]));
+                    }
+                }
+            }
+            eprintln!("source 1:1 {name} {orientation:?}: max {largest} codes");
+            assert!(largest <= 2, "{name} {orientation:?}: max {largest}");
+        }
+    }
+}

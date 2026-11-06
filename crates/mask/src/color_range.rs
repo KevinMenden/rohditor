@@ -7,7 +7,7 @@ use crate::math::smoothstep;
 
 /// How much a lightness difference counts compared with a chroma difference (`a`, `b`). Below
 /// 1 so that a shadowed and a lit patch of the same hue stay together: the range selects hue.
-const LIGHTNESS_WEIGHT: f32 = 0.25;
+pub(crate) const LIGHTNESS_WEIGHT: f32 = 0.25;
 /// Smallest selection radius, so a tolerance of 0 never divides by zero.
 const MIN_RADIUS: f32 = 1e-4;
 /// Alpha is 1 inside this fraction of the radius and falls to 0 at the radius.
@@ -20,9 +20,9 @@ const CORE_FRACTION: f32 = 0.5;
 /// smoothstep. With no samples nothing is selected.
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedColor {
-    samples: Vec<[f32; 3]>,
-    inner: f32,
-    outer: f32,
+    pub(crate) samples: Vec<[f32; 3]>,
+    pub(crate) inner: f32,
+    pub(crate) outer: f32,
 }
 
 impl PreparedColor {

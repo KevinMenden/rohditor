@@ -12,12 +12,14 @@ workspace = true
 bytemuck.workspace = true
 half.workspace = true
 pollster.workspace = true
+rayon.workspace = true
 rohditor-color = { path = "../color" }
 rohditor-core = { path = "../core" }
 rohditor-demosaic = { path = "../demosaic" }
 rohditor-detail = { path = "../detail" }
 rohditor-edit = { path = "../edit" }
 rohditor-image = { path = "../image" }
+rohditor-mask = { path = "../mask" }
 rohditor-raw = { path = "../raw" }
 thiserror.workspace = true
 wgpu.workspace = true
