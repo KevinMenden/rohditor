@@ -22,7 +22,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     BLACKS_RANGE, CONTRAST_RANGE, ColorRange, EXPOSURE_EV_RANGE, EditError, HIGHLIGHTS_RANGE,
-    LuminanceRange, ParameterRange, SHADOWS_RANGE, WHITES_RANGE,
+    LocalDetail, LuminanceRange, MAX_LOCAL_DETAIL_VARIANTS, ParameterRange, SHADOWS_RANGE,
+    WHITES_RANGE, local_detail_count,
 };
 
 /// Most mask layers in one recipe.
@@ -195,6 +196,7 @@ pub struct LocalSettings {
     pub whites: f32,
     pub blacks: f32,
     pub saturation: f32,
+    pub detail: LocalDetail,
 }
 
 impl MaskLayer {
@@ -244,7 +246,8 @@ impl LocalSettings {
             "local.layers.settings.saturation",
             self.saturation,
             LOCAL_SATURATION_RANGE,
-        )
+        )?;
+        self.detail.validate()
     }
 }
 
@@ -317,6 +320,12 @@ impl LocalAdjustments {
                     format!("at most {MAX_BRUSH_POINTS} brush points per recipe"),
                 ));
             }
+        }
+        if local_detail_count(&self.layers) > MAX_LOCAL_DETAIL_VARIANTS {
+            return Err(error(
+                "local.layers.settings.detail",
+                format!("at most {MAX_LOCAL_DETAIL_VARIANTS} different settings per recipe"),
+            ));
         }
         Ok(())
     }

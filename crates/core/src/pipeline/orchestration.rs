@@ -111,6 +111,8 @@ pub struct StageTimings {
     pub chroma_noise_reduction: Duration,
     pub luminance_noise_reduction: Duration,
     pub capture_sharpening: Duration,
+    /// Developing the copies of the image that mask layers blend in, all their stages together.
+    pub local_detail: Duration,
     pub optics: Duration,
     pub defringe: Duration,
     pub resampling: Duration,
@@ -554,6 +556,8 @@ pub struct DemosaicedBase {
     highlight_diagnostics: HighlightDiagnostics,
     detail: Option<crate::DetailProvenance>,
     detail_scratch_bytes: usize,
+    /// One developed copy per distinct local detail setting; see [`LocalDetailImage`].
+    local_detail: Vec<LocalDetailImage>,
     optics_provenance: Option<OpticsProvenance>,
     optics_output_bytes: usize,
     optics_scratch_bytes: usize,
@@ -656,10 +660,21 @@ impl DemosaicedBase {
         self.preparation_peak_bytes
     }
 
-    /// Bytes held by the scene-linear RGB image buffer itself.
+    /// Bytes held by the scene-linear RGB image buffer and its local detail copies.
     #[must_use]
     pub fn buffer_bytes(&self) -> usize {
-        self.image.data().len().saturating_mul(size_of::<f32>())
+        self.image
+            .data()
+            .len()
+            .saturating_mul(size_of::<f32>())
+            .saturating_add(local_detail::images_bytes(&self.local_detail))
+    }
+
+    /// This base with the developed copies its recipe's mask layers blend in.
+    #[must_use]
+    pub fn with_local_detail(mut self, images: Vec<LocalDetailImage>) -> Self {
+        self.local_detail = images;
+        self
     }
 }
 
@@ -796,6 +811,17 @@ pub(super) mod render {
             options: PreviewOptions,
             cancellation: &CancellationToken,
         ) -> Result<DemosaicedBase, PipelineError> {
+            let variants = local_detail_variants(recipe);
+            if !variants.is_empty() {
+                return local_detail::prepare_base(
+                    self.optics.as_deref(),
+                    frame,
+                    recipe,
+                    options,
+                    &variants,
+                    cancellation,
+                );
+            }
             let reconstructed = self.prepare_preview_reconstruction_cancellable(
                 frame,
                 recipe,
@@ -938,7 +964,7 @@ pub(super) mod render {
                 .checked_mul(size_of::<f32>())
                 .ok_or_else(|| dimension_overflow(base.image.width(), base.image.height()))?;
             let geometry = output_geometry(base.image(), base.source_orientation, recipe)?;
-            let local = LocalWork::prepare(base.image(), recipe)?;
+            let local = LocalWork::prepare(base, recipe)?;
             let mut memory = memory_estimate(
                 base,
                 size_of::<u8>(),
@@ -1026,7 +1052,7 @@ pub(super) mod render {
                 cancellation,
             )?;
             let geometry = output_geometry(&base.image, base.source_orientation, recipe)?;
-            let local = LocalWork::prepare(&base.image, recipe)?;
+            let local = LocalWork::prepare(&base, recipe)?;
             let memory = memory_estimate(
                 &base,
                 size_of::<u8>(),
@@ -1104,7 +1130,7 @@ pub(super) mod render {
             let mut geometry = output_geometry(&base.image, base.source_orientation, recipe)?;
             let (output_width, output_height) = geometry.output_dimensions();
             let target = size.resolve(output_width, output_height);
-            let local = LocalWork::prepare(&base.image, recipe)?;
+            let local = LocalWork::prepare(&base, recipe)?;
             let memory = memory_estimate(
                 &base,
                 bit_depth.bytes_per_sample(),
@@ -1121,6 +1147,9 @@ pub(super) mod render {
                 &CancellationToken::new(),
             )?;
             base.timings.adjustments = adjustments_started.elapsed();
+            // The local detail copies are blended in; don't hold them through encoding.
+            drop(local);
+            base.local_detail = Vec::new();
             let output_started = Instant::now();
             // Resize in linear light on the cropped, oriented image; the
             // result is already in output orientation, so encoding uses an
@@ -1188,10 +1217,13 @@ pub(super) mod render {
 
 #[path = "camera_source.rs"]
 mod camera_source;
+#[path = "local_detail.rs"]
+mod local_detail;
 #[path = "local_work.rs"]
 mod local_work;
 use camera_source::prepare_reconstructed_preview;
 pub use camera_source::{CapturedCameraSource, DemosaicedCameraSource};
+pub use local_detail::{LocalDetailImage, local_detail_variants};
 #[path = "sensor_source.rs"]
 mod sensor_source;
 pub use sensor_source::SensorCameraMetadata;
@@ -1276,6 +1308,7 @@ fn prepare_demosaiced_preview_owned(
         highlight_diagnostics: reconstructed.highlight_diagnostics,
         detail: reconstructed.detail,
         detail_scratch_bytes: reconstructed.detail_scratch_bytes,
+        local_detail: Vec::new(),
         optics_provenance: reconstructed.optics_provenance.clone(),
         optics_output_bytes: reconstructed.optics_output_bytes,
         optics_scratch_bytes: reconstructed.optics_scratch_bytes,
@@ -1304,6 +1337,20 @@ fn prepare_base_cancellable(
     options: RenderOptions,
     cancellation: &CancellationToken,
 ) -> Result<DemosaicedBase, PipelineError> {
+    let variants = local_detail_variants(recipe);
+    if !variants.is_empty() {
+        return local_detail::prepare_base(
+            optics,
+            frame,
+            recipe,
+            PreviewOptions {
+                render: options,
+                max_long_edge: frame.info.width.max(frame.info.height),
+            },
+            &variants,
+            cancellation,
+        );
+    }
     // Defringe sits in the spatial stage of the camera-source path.
     if super::detail::detail_is_active(recipe) || recipe.defringe.is_active() {
         return camera_source::prepare_full_capture_base(
@@ -1450,6 +1497,7 @@ fn prepare_base_cancellable(
         highlight_diagnostics,
         detail: capture.provenance,
         detail_scratch_bytes: capture.scratch_bytes,
+        local_detail: Vec::new(),
         optics_provenance,
         optics_output_bytes,
         optics_scratch_bytes,
@@ -1470,6 +1518,12 @@ fn validate_base_recipe(base: &DemosaicedBase, recipe: &EditRecipe) -> Result<()
         });
     }
     recipe.validate()?;
+    if !local_detail::matches_recipe(&base.local_detail, recipe) {
+        return Err(PipelineError::InvalidRecipe {
+            field: "local.layers.settings.detail",
+            reason: "local detail settings do not match the prepared base".to_owned(),
+        });
+    }
     if !highlight_adjustments_match(base.highlight_adjustments, recipe.raw.highlights) {
         Err(PipelineError::InvalidRecipe {
             field: "raw.highlights",
@@ -1559,7 +1613,7 @@ fn render_base(
     validate_base_recipe(&base, recipe)?;
     let output_policy = options.output_policy;
     let geometry = output_geometry(&base.image, base.source_orientation, recipe)?;
-    let local = LocalWork::prepare(&base.image, recipe)?;
+    let local = LocalWork::prepare(&base, recipe)?;
     let memory = memory_estimate(
         &base,
         size_of::<u8>(),
@@ -1594,6 +1648,7 @@ fn render_base(
         + base.timings.chroma_noise_reduction
         + base.timings.luminance_noise_reduction
         + base.timings.capture_sharpening
+        + base.timings.local_detail
         + base.timings.demosaic
         + base.timings.optics
         + base.timings.defringe

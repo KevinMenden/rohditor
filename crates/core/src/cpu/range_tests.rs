@@ -306,7 +306,7 @@ fn a_range_component_adds_reference_scratch_to_the_working_set_estimate() {
         .local
         .layers
         .push(layer(0, linear(0.2, 0.8), exposure()));
-    let plain = super::local_stage::LocalStage::prepare(&recipe, 1000, 50)
+    let plain = super::local_stage::LocalStage::prepare(&recipe, 1000, 50, &|_| None)
         .expect("prepares")
         .expect("active")
         .bytes();
@@ -315,7 +315,7 @@ fn a_range_component_adds_reference_scratch_to_the_working_set_estimate() {
         invert: false,
         shape: MaskShape::Color(ColorRange::default()),
     });
-    let ranged = super::local_stage::LocalStage::prepare(&recipe, 1000, 50)
+    let ranged = super::local_stage::LocalStage::prepare(&recipe, 1000, 50, &|_| None)
         .expect("prepares")
         .expect("active")
         .bytes();

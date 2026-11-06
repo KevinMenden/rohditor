@@ -18,6 +18,9 @@ const GPU_MAX_BRUSH_COMPONENTS: usize = 16;
 /// A stage that lands on the CPU first is listed here until its port.
 #[must_use]
 pub fn cpu_only_stage_reason(recipe: &EditRecipe) -> Option<&'static str> {
+    if !crate::local_detail_variants(recipe).is_empty() {
+        return Some("local noise reduction, moiré and sharpening are not available on the GPU");
+    }
     let brushes = recipe
         .local
         .layers
@@ -42,6 +45,16 @@ mod tests {
         recipe.false_color.steps = 1;
         recipe.noise_reduction.chroma = 0.3;
         recipe.defringe.green_amount = 0.2;
+        assert_eq!(cpu_only_stage_reason(&recipe), None);
+    }
+
+    #[test]
+    fn local_detail_runs_on_the_cpu_only_when_it_changes_something() {
+        let mut recipe = recipe_with_brushes(1);
+        recipe.local.layers[0].settings.detail.luminance_noise = 0.5;
+        assert!(cpu_only_stage_reason(&recipe).is_some());
+        // Taking away noise reduction the global settings don't have is no work at all.
+        recipe.local.layers[0].settings.detail.luminance_noise = -0.5;
         assert_eq!(cpu_only_stage_reason(&recipe), None);
     }
 

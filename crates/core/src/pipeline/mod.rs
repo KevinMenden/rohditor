@@ -13,7 +13,10 @@ mod prepare;
 mod render;
 pub(crate) mod sensor;
 mod types;
-pub use orchestration::{CapturedCameraSource, DemosaicedCameraSource, SensorCameraMetadata};
+pub use orchestration::{
+    CapturedCameraSource, DemosaicedCameraSource, LocalDetailImage, SensorCameraMetadata,
+    local_detail_variants,
+};
 pub use sensor::{NormalizationContract, SensorCrop, SensorDevelopmentDescription};
 
 pub use defringe::{DEFRINGE_ALGORITHM_VERSION, DefringeContract, DefringeProvenance};

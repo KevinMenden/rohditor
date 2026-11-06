@@ -12,7 +12,8 @@ use rohditor_detail::{
     luma_scratch_bytes, suppress_false_color,
 };
 use rohditor_edit::{
-    CaptureSharpening, EditRecipe, FalseColorSuppression, HighlightMethod, NoiseReduction,
+    CaptureSharpening, DetailSettings, EditRecipe, FalseColorSuppression, HighlightMethod,
+    NoiseReduction,
 };
 use rohditor_image::LinearRgbImage;
 use rohditor_raw::RawFrame;
@@ -41,21 +42,33 @@ impl DetailProvenance {
     /// `None` when the recipe has no active detail step.
     #[must_use]
     pub fn for_recipe(recipe: &EditRecipe) -> Option<Self> {
+        Self::for_settings(recipe.detail_settings())
+    }
+
+    /// `None` when no step of `settings` is active.
+    #[must_use]
+    pub fn for_settings(settings: DetailSettings) -> Option<Self> {
         // The texture setting is parked while luminance reduction is off, so
         // it must not make otherwise identical work look different.
-        let noise_reduction = recipe.noise_reduction.is_active().then(|| NoiseReduction {
-            luminance_detail: if recipe.noise_reduction.luminance_active() {
-                recipe.noise_reduction.luminance_detail
-            } else {
-                NoiseReduction::default().luminance_detail
-            },
-            ..recipe.noise_reduction
-        });
-        let capture_sharpening = recipe
+        let noise_reduction = settings
+            .noise_reduction
+            .is_active()
+            .then(|| NoiseReduction {
+                luminance_detail: if settings.noise_reduction.luminance_active() {
+                    settings.noise_reduction.luminance_detail
+                } else {
+                    NoiseReduction::default().luminance_detail
+                },
+                ..settings.noise_reduction
+            });
+        let capture_sharpening = settings
             .capture_sharpening
             .is_active()
-            .then_some(recipe.capture_sharpening);
-        let false_color = recipe.false_color.is_active().then_some(recipe.false_color);
+            .then_some(settings.capture_sharpening);
+        let false_color = settings
+            .false_color
+            .is_active()
+            .then_some(settings.false_color);
         (false_color.is_some() || noise_reduction.is_some() || capture_sharpening.is_some())
             .then_some(Self {
                 false_color,

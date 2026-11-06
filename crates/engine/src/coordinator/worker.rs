@@ -34,6 +34,8 @@ use super::scheduler::{PreviewCompletion, PreviewMailbox};
 mod camera_look_worker;
 #[path = "export_worker.rs"]
 mod export_worker;
+#[path = "local_detail.rs"]
+mod local_detail;
 #[path = "noise_worker.rs"]
 mod noise_worker;
 #[path = "range_jobs.rs"]
@@ -1643,7 +1645,15 @@ fn ensure_preview_base(
             cancellation,
         )?;
         add_stage_timings(&mut timings, base.timings());
-        preview_cache.insert_demosaiced(keys, base);
+        let images = local_detail::prepare_images(
+            job,
+            options,
+            cancellation,
+            pipeline,
+            preview_cache,
+            &mut timings,
+        )?;
+        preview_cache.insert_demosaiced(keys, base.with_local_detail(images));
     }
     cancellation.checkpoint()?;
     Ok(timings)
@@ -1832,6 +1842,7 @@ fn add_stage_timings(target: &mut StageTimings, additional: StageTimings) {
     target.chroma_noise_reduction += additional.chroma_noise_reduction;
     target.luminance_noise_reduction += additional.luminance_noise_reduction;
     target.capture_sharpening += additional.capture_sharpening;
+    target.local_detail += additional.local_detail;
     target.optics += additional.optics;
     target.defringe += additional.defringe;
     target.resampling += additional.resampling;
@@ -1879,6 +1890,7 @@ fn log_preview_diagnostics(
         chroma_noise_reduction_us = diagnostics.timings.chroma_noise_reduction.as_micros(),
         luminance_noise_reduction_us = diagnostics.timings.luminance_noise_reduction.as_micros(),
         capture_sharpening_us = diagnostics.timings.capture_sharpening.as_micros(),
+        local_detail_us = diagnostics.timings.local_detail.as_micros(),
         detail = ?diagnostics.detail,
         optics_us = diagnostics.timings.optics.as_micros(),
         defringe_us = diagnostics.timings.defringe.as_micros(),

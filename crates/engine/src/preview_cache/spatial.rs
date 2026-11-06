@@ -163,6 +163,33 @@ impl SpatialCache {
         cpu.complete_camera_source(captured, cancellation)
     }
 
+    /// A local detail copy of the image: the same camera source, other detail settings.
+    pub fn prepare_local_detail(
+        &self,
+        cpu: &CpuPipeline,
+        frame: &RawFrame,
+        variant: &EditRecipe,
+        options: PreviewOptions,
+        keys: &PreviewCacheKeys,
+        cancellation: &CancellationToken,
+    ) -> Result<ReconstructedPreview, PipelineError> {
+        let key = PreCaptureKey {
+            decoded: keys.decoded.clone(),
+            crop: options.render.raw_crop_policy,
+            demosaic: options.render.demosaic,
+            highlight: keys.reconstructed.highlight.clone(),
+            profile: camera_profile_key(&variant.color.camera_profile),
+            version: keys.reconstructed.reconstruction_version,
+        };
+        let source = match &self.source {
+            Some((stored, source)) if *stored == key => {
+                source.clone().with_recipe(variant, options)?
+            }
+            _ => cpu.prepare_camera_source(frame, variant, options, cancellation)?,
+        };
+        cpu.complete_camera_source(source.capture_cpu(cancellation)?, cancellation)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn prepare_gpu(
         &mut self,
