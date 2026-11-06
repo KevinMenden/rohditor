@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use eframe::egui;
 use rohditor_core::default_recipe;
 
+use super::noise_reduction::NoiseState;
 use super::{Document, RohditorApp};
 use rohditor_engine::persistence::{self, SaveJob, SaveResult};
 use rohditor_engine::tools::ActiveTool;
@@ -72,6 +73,10 @@ impl RohditorApp {
         self.next_document_id = self.next_document_id.saturating_add(1);
         let mut document = Document::opening(document_id, path.clone(), recipe, warning);
         document.initialize_white_balance_from_metadata = initialize_white_balance_from_metadata;
+        // Only a photo without saved edits starts from the automatic default.
+        document.noise = NoiseState::for_new_photo(
+            initialize_white_balance_from_metadata && self.settings.auto_noise_reduction(),
+        );
         self.document = Some(document);
         if self.gpu_required_but_unavailable() {
             if let Some(document) = self.document.as_mut() {
