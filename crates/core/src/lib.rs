@@ -35,20 +35,22 @@ pub use color::{
     LINEAR_REC2020_TO_XYZ_D65, Matrix3, ProfileLook, ResolvedCameraColour,
     XYZ_D65_TO_LINEAR_REC2020, XYZ_D65_TO_LINEAR_SRGB, adapt_xyz_to_d65, camera_color_transform,
     camera_profile_key, clip_linear_srgb_for_output, convert_rec2020_to_display_srgb,
-    linear_srgb_to_srgb, resolve_camera_colour, srgb_to_linear_srgb,
+    linear_srgb_to_srgb, oklab_to_linear_srgb, resolve_camera_colour, srgb_to_linear_srgb,
 };
 pub use cpu::{
-    HSL_CHANNEL_CENTERS, HSL_HUE_SHIFT_PER_FULL_VALUE, apply_adjustments, evaluate_tone_curve,
-    hsl_channel_weights, hsl_channel_weights_from_display_rgb, normalize_raw,
+    HSL_CHANNEL_CENTERS, HSL_HUE_SHIFT_PER_FULL_VALUE, MaskAlphaImage, apply_adjustments,
+    evaluate_tone_curve, hsl_channel_weights, hsl_channel_weights_from_display_rgb, normalize_raw,
     normalize_raw_preview, raw_crop_dimensions, render_display_srgb8,
     render_display_srgb8_dithered, render_display_srgb8_dithered_with_geometry,
     render_display_srgb8_with_geometry, render_display_srgb16, render_display_srgb16_with_geometry,
-    white_balance_gains, white_balance_gains_from_calibration,
+    render_mask_overlay_from_image, render_mask_overlay_preview, white_balance_gains,
+    white_balance_gains_from_calibration,
 };
 pub use cpu_only::cpu_only_stage_reason;
 pub use editing::{
     WhiteBalanceMode, WhiteBalanceModeMemory, auto_tone, default_recipe, estimate_noise_profile,
-    sample_rgb_patch, white_balance_from_camera_sample, with_default_noise_reduction,
+    sample_color_range, sample_rgb_patch, white_balance_from_camera_sample,
+    with_default_noise_reduction,
 };
 pub use error::PipelineError;
 pub use export::{
@@ -63,12 +65,12 @@ pub use optics::optics_query_from_info;
 pub use output::{paths_refer_to_same_file, write_output_bytes};
 pub use pipeline::{
     CPU_WORKING_SET_LIMIT_BYTES, CapturedCameraSource, CpuPipeline, CpuPreviewWorkspace,
-    DEFAULT_PREVIEW_LONG_EDGE, DEFRINGE_ALGORITHM_VERSION, DefringeProvenance, DemosaicedBase,
-    DemosaicedCameraSource, DetailProvenance, ExportRenderResult, FALSE_COLOR_ALGORITHM_VERSION,
-    MemoryEstimate, NOISE_REDUCTION_ALGORITHM_VERSION, NormalizationContract, OutputPolicy,
-    PreviewOptions, RawCropPolicy, ReconstructedPreview, RenderOptions, RenderResult,
-    SensorCameraMetadata, SensorCrop, SensorDevelopmentDescription, SpatialCompletionDescription,
-    SpatialOptics, StageTimings, detail_is_active,
+    DEFAULT_PREVIEW_LONG_EDGE, DEFRINGE_ALGORITHM_VERSION, DefringeContract, DefringeProvenance,
+    DemosaicedBase, DemosaicedCameraSource, DetailContract, DetailProvenance, ExportRenderResult,
+    FALSE_COLOR_ALGORITHM_VERSION, MemoryEstimate, NOISE_REDUCTION_ALGORITHM_VERSION,
+    NormalizationContract, OutputPolicy, PreviewOptions, RawCropPolicy, ReconstructedPreview,
+    RenderOptions, RenderResult, SensorCameraMetadata, SensorCrop, SensorDevelopmentDescription,
+    SpatialCompletionDescription, SpatialOptics, StageTimings, detail_is_active,
 };
 pub use rendering::{
     BASE_RENDERING_LUT_SIZE, BaseRenderingLut, ROHDITOR_STANDARD_MIDDLE_GRAY, base_rendering_lut,

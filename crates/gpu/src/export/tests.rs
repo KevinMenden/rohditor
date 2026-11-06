@@ -1,7 +1,8 @@
 use super::super::tests::{gpu_control_matrix, gpu_test_guard, neutral_recipe, synthetic_frame};
 use super::*;
 use rohditor_core::{
-    OutputSize, apply_adjustments, render_display_srgb8_dithered, render_display_srgb16,
+    OutputSharpening, OutputSize, apply_adjustments, render_display_srgb8_dithered,
+    render_display_srgb16,
 };
 use rohditor_raw::{RawDecoder, RawlerDecoder};
 use std::sync::Arc;
@@ -90,6 +91,8 @@ fn optics_export_reads_back_only_final_integer_bands() {
                 RenderOptions::default(),
                 depth,
                 DitherMode::Ordered8x8,
+                OutputSize::Original,
+                None,
                 &token,
             )
             .expect("resident GPU optics export");
@@ -166,6 +169,8 @@ fn rcd_export_matches_cpu_with_capture_and_both_gamut_policies() {
                         options,
                         depth,
                         DitherMode::None,
+                        OutputSize::Original,
+                        None,
                         &token,
                     )
                     .expect("GPU RCD export");
@@ -183,6 +188,105 @@ fn rcd_export_matches_cpu_with_capture_and_both_gamut_policies() {
                 );
             }
         }
+    }
+}
+
+/// A recipe with one radial mask layer that changes pixels (`exposure_ev` != 0).
+fn recipe_with_active_mask() -> EditRecipe {
+    use rohditor_edit::{
+        LocalSettings, MaskComponent, MaskLayer, MaskMode, MaskPoint, MaskShape, RadialGradient,
+    };
+    let mut recipe = neutral_recipe();
+    recipe.local.layers.push(MaskLayer {
+        id: 1,
+        name: "Spot".to_owned(),
+        enabled: true,
+        opacity: 1.0,
+        components: vec![MaskComponent {
+            mode: MaskMode::Add,
+            invert: false,
+            shape: MaskShape::Radial(RadialGradient {
+                center: MaskPoint { x: 0.5, y: 0.5 },
+                radius_x: 0.3,
+                radius_y: 0.2,
+                angle_degrees: 0.0,
+                feather: 0.5,
+            }),
+        }],
+        settings: LocalSettings {
+            exposure_ev: 0.5,
+            ..LocalSettings::default()
+        },
+    });
+    recipe
+}
+
+#[test]
+#[ignore = "requires Vulkan; local adjustments are routed to the CPU per recipe"]
+fn recipes_with_masks_are_refused_without_disabling_the_gpu() {
+    let _guard = gpu_test_guard();
+    let mut gpu = processor(false).expect("export device");
+    let cpu = CpuPipeline::default();
+    let frame = synthetic_frame(Orientation::Normal);
+    let plain = neutral_recipe();
+    let masked = recipe_with_active_mask();
+    let token = CancellationToken::new();
+    let render = |gpu: &mut GpuExportProcessor, recipe: &EditRecipe| {
+        gpu.render(
+            &cpu,
+            &frame,
+            recipe,
+            RenderOptions::default(),
+            OutputBitDepth::Eight,
+            DitherMode::None,
+            OutputSize::Original,
+            None,
+            &token,
+        )
+    };
+
+    render(&mut gpu, &plain).expect("GPU renders a recipe without masks");
+    assert!(matches!(
+        render(&mut gpu, &masked),
+        Err(GpuPreviewError::UnsupportedEdits { .. })
+    ));
+    // The refusal is a routing answer for that recipe, not a failure of the device.
+    let after = render(&mut gpu, &plain).expect("GPU still renders once the masks are gone");
+    assert!(after.sensor_gpu);
+
+    // The shared exporter falls back to the CPU for the masked recipe only.
+    let mut exporter = crate::FallbackExporter::default();
+    let export = |exporter: &mut crate::FallbackExporter, recipe: &EditRecipe| {
+        exporter
+            .render(
+                crate::ExportBackend::PreferGpu,
+                &cpu,
+                &frame,
+                recipe,
+                RenderOptions::default(),
+                OutputBitDepth::Eight,
+                DitherMode::None,
+                OutputSize::Original,
+                None,
+                |_| {},
+            )
+            .expect("export")
+    };
+    let crate::ExportRender::Cpu {
+        gpu_error: Some(reason),
+        ..
+    } = export(&mut exporter, &masked)
+    else {
+        panic!("a masked recipe must export on the CPU");
+    };
+    assert!(reason.contains("local adjustments"), "{reason}");
+    // The headless exporter only takes hardware adapters, so the return to the GPU can only be
+    // checked there; the direct processor check above covers software.
+    if processor(true).is_some() {
+        assert!(matches!(
+            export(&mut exporter, &plain),
+            crate::ExportRender::Gpu { .. }
+        ));
     }
 }
 
@@ -257,6 +361,8 @@ fn capture_bridge_precedes_reduction_and_matches_export() {
                     RenderOptions::default(),
                     OutputBitDepth::Eight,
                     DitherMode::None,
+                    OutputSize::Original,
+                    None,
                     &token
                 ),
                 Err(GpuPreviewError::UnsupportedEdits { .. })
@@ -282,7 +388,17 @@ fn capture_bridge_precedes_reduction_and_matches_export() {
                         )
                         .expect("CPU export");
                     let actual = gpu
-                        .render(&cpu, &frame, &recipe, options, depth, dither, &token)
+                        .render(
+                            &cpu,
+                            &frame,
+                            &recipe,
+                            options,
+                            depth,
+                            dither,
+                            OutputSize::Original,
+                            None,
+                            &token,
+                        )
                         .expect("GPU export");
                     assert!(actual.capture.tiles > 0);
                     let (max, mean) = difference(&actual.image, &reference.image);
@@ -433,6 +549,8 @@ fn export_bands_precision_geometry_and_cancellation() {
             RenderOptions::default(),
             OutputBitDepth::Eight,
             DitherMode::None,
+            OutputSize::Original,
+            None,
             &cancelled
         ),
         Err(GpuPreviewError::Cancelled)
@@ -577,6 +695,8 @@ fn private_export_parity(
                         },
                         depth,
                         DitherMode::Ordered8x8,
+                        OutputSize::Original,
+                        None,
                         &CancellationToken::new(),
                     )
                     .expect("export qualification fixture");
@@ -660,5 +780,175 @@ fn private_export_parity(
                 );
             }
         }
+    }
+}
+
+/// A frame with smooth gradients, two hard edges and grain, so resizing and
+/// sharpening both have something to do.
+fn textured_frame(width: usize, height: usize, orientation: Orientation) -> RawFrame {
+    let mut frame = synthetic_frame(orientation);
+    frame.info.width = width;
+    frame.info.height = height;
+    frame.row_stride = width;
+    frame.mosaic = (0..width * height)
+        .map(|index| {
+            let (x, y) = (index % width, index / width);
+            let mut value = 9_000.0 + 25_000.0 * x as f32 / width as f32;
+            value += 12_000.0 * y as f32 / height as f32;
+            if x > width / 3 && x < width / 3 + 90 {
+                value += 15_000.0;
+            }
+            if (y / 17) % 2 == 0 && x > width / 2 {
+                value -= 7_000.0;
+            }
+            let grain = ((index as u32).wrapping_mul(2_654_435_761) >> 20) as f32 - 2_048.0;
+            (value + 0.6 * grain).clamp(0.0, 65_535.0) as u16
+        })
+        .collect::<Vec<_>>()
+        .into();
+    frame
+}
+
+#[test]
+#[ignore = "requires Vulkan; GPU resize and output sharpening against the CPU reference"]
+fn resize_and_output_sharpening_match_cpu() {
+    use rohditor_core::{OutputMedium, OutputSharpeningStrength};
+    let _guard = gpu_test_guard();
+    let mut gpu = processor(false).expect("staged export device");
+    let cpu = CpuPipeline::default();
+    let token = CancellationToken::new();
+    let mut recipe = neutral_recipe();
+    recipe.geometry.crop = Some(rohditor_edit::NormalizedCropRect {
+        left: 0.05,
+        top: 0.1,
+        right: 0.95,
+        bottom: 0.8,
+    });
+    let screen = OutputSharpening {
+        medium: OutputMedium::Screen,
+        strength: OutputSharpeningStrength::Standard,
+    };
+    let matte = OutputSharpening {
+        medium: OutputMedium::Matte,
+        strength: OutputSharpeningStrength::High,
+    };
+    let cases = [
+        ("long edge", OutputSize::LongEdge { pixels: 100 }, None),
+        (
+            "fit box",
+            OutputSize::Fit {
+                width: 240,
+                height: 77,
+            },
+            None,
+        ),
+        ("sharpen only", OutputSize::Original, Some(screen)),
+        (
+            "resize and sharpen",
+            OutputSize::LongEdge { pixels: 150 },
+            Some(matte),
+        ),
+        (
+            "upscale sharpen",
+            OutputSize::LongEdge { pixels: 400 },
+            Some(screen),
+        ),
+    ];
+    for orientation in [Orientation::Normal, Orientation::Rotate90] {
+        let frame = textured_frame(301, 197, orientation);
+        for (name, size, sharpening) in cases {
+            for depth in [OutputBitDepth::Eight, OutputBitDepth::Sixteen] {
+                for dithering in [DitherMode::None, DitherMode::Ordered8x8] {
+                    let options = RenderOptions::default();
+                    let expected = cpu
+                        .render_export(&frame, &recipe, options, depth, dithering, size, sharpening)
+                        .expect("CPU export");
+                    let actual = gpu
+                        .render(
+                            &cpu, &frame, &recipe, options, depth, dithering, size, sharpening,
+                            &token,
+                        )
+                        .expect("GPU export");
+                    assert_eq!(
+                        (actual.image.width(), actual.image.height()),
+                        (expected.image.width(), expected.image.height()),
+                        "{name}"
+                    );
+                    let (max, mean) = difference(&actual.image, &expected.image);
+                    eprintln!(
+                        "{name} {orientation:?} {depth:?} {dithering:?}: max {max}, mean {mean:.4}"
+                    );
+                    let (max_limit, mean_limit) = if depth == OutputBitDepth::Eight {
+                        (1, 0.01)
+                    } else {
+                        (16, 1.0)
+                    };
+                    assert!(
+                        max <= max_limit && mean <= mean_limit,
+                        "{name} {orientation:?} {depth:?} {dithering:?}: max={max}, mean={mean}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires Vulkan; prints CPU and GPU export times for a synthetic 24 MP frame"]
+fn resize_and_sharpening_timings_at_24mp() {
+    use rohditor_core::{OutputMedium, OutputSharpeningStrength};
+    let _guard = gpu_test_guard();
+    let mut gpu = processor(false).expect("staged export device");
+    let cpu = CpuPipeline::default();
+    let frame = textured_frame(6000, 4000, Orientation::Normal);
+    let recipe = neutral_recipe();
+    let sharpening = Some(OutputSharpening {
+        medium: OutputMedium::Screen,
+        strength: OutputSharpeningStrength::Standard,
+    });
+    let token = CancellationToken::new();
+    for (name, size, sharpening) in [
+        ("original", OutputSize::Original, None),
+        ("2048 px", OutputSize::LongEdge { pixels: 2048 }, None),
+        (
+            "2048 px sharpened",
+            OutputSize::LongEdge { pixels: 2048 },
+            sharpening,
+        ),
+        ("original sharpened", OutputSize::Original, sharpening),
+    ] {
+        let started = Instant::now();
+        let actual = gpu
+            .render(
+                &cpu,
+                &frame,
+                &recipe,
+                RenderOptions::default(),
+                OutputBitDepth::Eight,
+                DitherMode::None,
+                size,
+                sharpening,
+                &token,
+            )
+            .expect("GPU export");
+        let gpu_time = started.elapsed();
+        let started = Instant::now();
+        let expected = cpu
+            .render_export(
+                &frame,
+                &recipe,
+                RenderOptions::default(),
+                OutputBitDepth::Eight,
+                DitherMode::None,
+                size,
+                sharpening,
+            )
+            .expect("CPU export");
+        eprintln!(
+            "{name}: GPU {gpu_time:?} ({} MiB GPU), CPU {:?}, max difference {}",
+            actual.estimated_gpu_bytes >> 20,
+            started.elapsed(),
+            difference(&actual.image, &expected.image).0,
+        );
     }
 }

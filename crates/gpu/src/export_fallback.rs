@@ -88,13 +88,7 @@ impl FallbackExporter {
         let mut gpu_error = None;
         // A CPU-only stage is a routing choice, not a GPU failure: skip the
         // GPU without touching (or discarding) its device.
-        // Export resize and output sharpening have no GPU path yet (#78).
-        let cpu_only = rohditor_core::cpu_only_stage_reason(recipe)
-            .or((size != OutputSize::Original).then_some("export resize runs on the CPU"))
-            .or(sharpening
-                .is_some()
-                .then_some("output sharpening runs on the CPU"));
-        if let Some(reason) = cpu_only
+        if let Some(reason) = rohditor_core::cpu_only_stage_reason(recipe)
             && backend != ExportBackend::Cpu
         {
             if backend == ExportBackend::RequireGpu {
@@ -103,7 +97,9 @@ impl FallbackExporter {
             on_fallback(reason);
             gpu_error = Some(reason.to_owned());
         } else if backend != ExportBackend::Cpu {
-            match self.render_gpu(pipeline, frame, recipe, options, bit_depth, dithering) {
+            match self.render_gpu(
+                pipeline, frame, recipe, options, bit_depth, dithering, size, sharpening,
+            ) {
                 Ok(rendered) => return Ok(rendered),
                 Err(error) if backend == ExportBackend::RequireGpu => {
                     return Err(ExportRenderError::GpuRequired(error));
@@ -120,6 +116,7 @@ impl FallbackExporter {
         Ok(ExportRender::Cpu { result, gpu_error })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_gpu(
         &mut self,
         pipeline: &CpuPipeline,
@@ -128,6 +125,8 @@ impl FallbackExporter {
         options: RenderOptions,
         bit_depth: OutputBitDepth,
         dithering: DitherMode,
+        size: OutputSize,
+        sharpening: Option<OutputSharpening>,
     ) -> Result<ExportRender, String> {
         let gpu = self
             .gpu
@@ -142,6 +141,8 @@ impl FallbackExporter {
             options,
             bit_depth,
             dithering,
+            size,
+            sharpening,
             &CancellationToken::new(),
         );
         match rendered {

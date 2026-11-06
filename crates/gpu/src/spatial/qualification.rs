@@ -56,7 +56,7 @@ fn private_spatial_display_parity_and_visual_crops() -> Result<(), Box<dyn Error
     let cpu_fit = cpu.render_preview(&frame, &recipe, fit_options)?.image;
     let fit_error = display_error("fit", &gpu_fit, &cpu_fit)?;
 
-    let full_source = spatial.full_resolution_source(&resident, full_description)?;
+    let full_source = spatial.full_resolution_source(&resident, full_description, &token)?;
     let full_frame = display.render_spatial_full_cancellable(
         &full_source,
         &recipe,

@@ -11,6 +11,8 @@ pub(crate) enum ValueScale {
     Raw,
     RawUnsigned,
     OffsetPercent,
+    /// The value itself as a percentage, for `0..=1` controls such as an opacity.
+    Percent,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -536,8 +538,9 @@ fn format_adjustment_value(value: f64, spec: AdjustmentSpec<'_>) -> String {
     let displayed = match spec.scale {
         ValueScale::Raw | ValueScale::RawUnsigned => value,
         ValueScale::OffsetPercent => (value - spec.neutral as f64) * 100.0,
+        ValueScale::Percent => value * 100.0,
     };
-    if displayed > 0.0 && spec.scale != ValueScale::RawUnsigned {
+    if displayed > 0.0 && !matches!(spec.scale, ValueScale::RawUnsigned | ValueScale::Percent) {
         format!("+{displayed:.precision$}", precision = spec.decimals)
     } else {
         format!("{displayed:.precision$}", precision = spec.decimals)
@@ -555,6 +558,7 @@ fn parse_adjustment_value(text: &str, spec: AdjustmentSpec<'_>) -> Option<f64> {
     Some(match spec.scale {
         ValueScale::Raw | ValueScale::RawUnsigned => displayed,
         ValueScale::OffsetPercent => displayed / 100.0 + spec.neutral as f64,
+        ValueScale::Percent => displayed / 100.0,
     })
 }
 

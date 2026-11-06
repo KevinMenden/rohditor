@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
 use rohditor_core::{
-    CancellationToken, CaptureSharpeningContract, RawCropPolicy, RenderOptions,
-    SensorDevelopmentDescription, normalize_raw,
+    CancellationToken, RawCropPolicy, RenderOptions, SensorDevelopmentDescription, normalize_raw,
 };
 use rohditor_demosaic::{ChannelBalance, DemosaicAlgorithm, WhiteBalanceGains, demosaic};
 use rohditor_edit::{CaptureSharpening, EditRecipe, HighlightMethod};
@@ -179,8 +178,8 @@ fn bilinear_and_mhc_match_cpu_at_borders_and_across_mosaic_tiles() {
     let _guard = crate::preview::processor::tests::gpu_test_guard();
     let mut gpu = processor();
     gpu.force_maximum_tile_edge(3);
-    let capture = CaptureSharpeningContract::new(CaptureSharpening::default(), [1.0; 3])
-        .expect("capture off");
+    let capture =
+        crate::capture_only_contract(CaptureSharpening::default(), [1.0; 3]).expect("capture off");
     for algorithm in [
         DemosaicAlgorithm::Bilinear,
         DemosaicAlgorithm::MalvarHeCutler,
@@ -229,8 +228,8 @@ fn bilinear_and_mhc_match_cpu_at_borders_and_across_mosaic_tiles() {
 fn rcd_matches_cpu_under_a_non_unit_channel_balance() {
     let _guard = crate::preview::processor::tests::gpu_test_guard();
     let gpu = processor();
-    let capture = CaptureSharpeningContract::new(CaptureSharpening::default(), [1.0; 3])
-        .expect("capture off");
+    let capture =
+        crate::capture_only_contract(CaptureSharpening::default(), [1.0; 3]).expect("capture off");
     for pattern in ["RGGB", "GBRG"] {
         for kind in [0, 2, 5] {
             let mut frame = frame(pattern, 199, 201, kind);
@@ -267,8 +266,8 @@ fn rcd_matches_cpu_with_mosaic_layer_seams_and_scratch_reuse() {
     let _guard = crate::preview::processor::tests::gpu_test_guard();
     let mut gpu = processor();
     gpu.force_maximum_tile_edge(31);
-    let capture = CaptureSharpeningContract::new(CaptureSharpening::default(), [1.0; 3])
-        .expect("capture off");
+    let capture =
+        crate::capture_only_contract(CaptureSharpening::default(), [1.0; 3]).expect("capture off");
     for pattern in ["RGGB", "BGGR", "GRBG", "GBRG"] {
         for (width, height) in [
             (24, 39),
@@ -434,8 +433,8 @@ fn rcd_intermediate_stages_match_signed_partial_tile_cpu_snapshot() {
             .expect("signed CPU mosaic");
     let reference = demosaic(&cpu_mosaic, desc.demosaic_balance(), DemosaicAlgorithm::Rcd)
         .expect("signed CPU RCD");
-    let capture = CaptureSharpeningContract::new(CaptureSharpening::default(), [1.0; 3])
-        .expect("capture off");
+    let capture =
+        crate::capture_only_contract(CaptureSharpening::default(), [1.0; 3]).expect("capture off");
     let (source, _) = gpu
         .demosaic(mosaic, &desc, &capture, &CancellationToken::new())
         .expect("signed GPU RCD");
@@ -473,7 +472,7 @@ fn rcd_and_amaze_capture_budget_failure_releases_all_reservations() {
     let before = crate::gpu_memory_reservations().current_bytes;
     gpu.set_budget(before + 1_150_000);
     let frame = frame("RGGB", 81, 67, 6);
-    let capture = CaptureSharpeningContract::new(
+    let capture = crate::capture_only_contract(
         CaptureSharpening {
             enabled: true,
             radius: 0.6,
@@ -500,8 +499,8 @@ fn rcd_and_amaze_nonfinite_output_does_not_publish_camera_planes() {
     let _guard = crate::preview::processor::tests::gpu_test_guard();
     let gpu = processor();
     let before = crate::gpu_memory_reservations().current_bytes;
-    let capture = CaptureSharpeningContract::new(CaptureSharpening::default(), [1.0; 3])
-        .expect("capture off");
+    let capture =
+        crate::capture_only_contract(CaptureSharpening::default(), [1.0; 3]).expect("capture off");
     // The bad sample lies inside each algorithm's reconstructed core.
     for (algorithm, size, bad) in [
         (DemosaicAlgorithm::Rcd, (29, 31), 12),
@@ -602,7 +601,7 @@ fn mhc_rcd_and_amaze_feed_capture_without_rgb_upload_or_readback() {
     let _guard = crate::preview::processor::tests::gpu_test_guard();
     let mut gpu = processor();
     gpu.force_maximum_tile_edge(16);
-    let capture = CaptureSharpeningContract::new(
+    let capture = crate::capture_only_contract(
         CaptureSharpening {
             enabled: true,
             radius: 0.6,
@@ -632,6 +631,7 @@ fn mhc_rcd_and_amaze_feed_capture_without_rgb_upload_or_readback() {
             let mut reference =
                 demosaic(&mosaic, WhiteBalanceGains::identity(), algorithm).expect("CPU demosaic");
             capture
+                .capture()
                 .apply_cpu(&mut reference, &CancellationToken::new())
                 .expect("CPU capture");
             let input = highlighted(&gpu, &frame, &description);
@@ -654,13 +654,113 @@ fn mhc_rcd_and_amaze_feed_capture_without_rgb_upload_or_readback() {
 }
 
 #[test]
+#[ignore = "requires Vulkan; whole detail stage on resident planes against the CPU stage"]
+fn detail_stage_runs_on_resident_planes_for_every_algorithm() {
+    let _guard = crate::preview::processor::tests::gpu_test_guard();
+    let mut gpu = processor();
+    gpu.force_maximum_tile_edge(48);
+    let mut recipe = rohditor_edit::EditRecipe::default();
+    recipe.false_color.steps = 2;
+    recipe.noise_reduction.chroma = 0.6;
+    recipe.noise_reduction.luminance = 0.5;
+    recipe.capture_sharpening.enabled = true;
+    recipe.capture_sharpening.radius = 0.6;
+    let balance = WhiteBalanceGains {
+        red: 2.0,
+        green: 1.0,
+        blue: 1.5,
+    };
+    let detail =
+        rohditor_core::DetailContract::new(&recipe, balance, WhiteBalanceGains::identity())
+            .expect("detail contract");
+    for algorithm in [
+        DemosaicAlgorithm::MalvarHeCutler,
+        DemosaicAlgorithm::Rcd,
+        DemosaicAlgorithm::Amaze,
+    ] {
+        let frame = frame("GRBG", 301, 187, 6);
+        let description = description(&frame, algorithm, false);
+        let mosaic = normalize_raw(&frame, RawCropPolicy::Recommended).expect("CPU normalize");
+        let mut reference =
+            demosaic(&mosaic, WhiteBalanceGains::identity(), algorithm).expect("CPU demosaic");
+        detail
+            .apply_cpu(&mut reference, &CancellationToken::new())
+            .expect("CPU detail stage");
+        let input = highlighted(&gpu, &frame, &description);
+        let (source, metrics) = gpu
+            .demosaic(input, &description, &detail, &CancellationToken::new())
+            .expect("resident demosaic and detail");
+        assert!(metrics.capture.tiles > 1);
+        // Only the profiled rows cross to the CPU; no RGB upload.
+        assert_eq!(metrics.capture.uploaded_bytes, 0);
+        let mut worst = 0.0_f32;
+        for (a, b) in readback(&gpu, &source).iter().zip(reference.data()) {
+            worst = worst.max((a - b).abs() / (1.0 + b.abs()));
+        }
+        eprintln!("{algorithm:?} detail stage: max error {worst:e}");
+        assert!(worst <= 1e-3, "{algorithm:?}: deviates by {worst:e}");
+    }
+}
+
+#[test]
+#[ignore = "requires Vulkan; prints timings of the detail stage on a synthetic 24 MP mosaic"]
+fn detail_stage_timings_at_24mp() {
+    let _guard = crate::preview::processor::tests::gpu_test_guard();
+    let gpu = processor();
+    let balance = WhiteBalanceGains {
+        red: 2.0,
+        green: 1.0,
+        blue: 1.5,
+    };
+    let frame = frame("RGGB", 6000, 4000, 6);
+    let description = description(&frame, DemosaicAlgorithm::Rcd, false);
+    type Configure = fn(&mut rohditor_edit::EditRecipe);
+    let cases: [(&str, Configure); 4] = [
+        ("no detail", |_| {}),
+        ("capture sharpening", |r| {
+            r.capture_sharpening.enabled = true;
+        }),
+        ("chroma + luma NR", |r| {
+            r.noise_reduction.chroma = 0.5;
+            r.noise_reduction.luminance = 0.5;
+        }),
+        ("everything", |r| {
+            r.false_color.steps = 2;
+            r.noise_reduction.chroma = 0.5;
+            r.noise_reduction.luminance = 0.5;
+            r.capture_sharpening.enabled = true;
+        }),
+    ];
+    for (name, configure) in cases {
+        let mut recipe = rohditor_edit::EditRecipe::default();
+        configure(&mut recipe);
+        let detail =
+            rohditor_core::DetailContract::new(&recipe, balance, WhiteBalanceGains::identity())
+                .expect("detail contract");
+        let input = highlighted(&gpu, &frame, &description);
+        let (_source, metrics) = gpu
+            .demosaic(input, &description, &detail, &CancellationToken::new())
+            .expect("resident demosaic and detail");
+        eprintln!(
+            "{name}: total {:?}, detail {:?} ({} tiles of {} + halo {}), gpu {} MiB",
+            metrics.total,
+            metrics.capture.total,
+            metrics.capture.tiles,
+            metrics.capture.tile_edge,
+            metrics.capture.halo,
+            metrics.estimated_gpu_bytes >> 20,
+        );
+    }
+}
+
+#[test]
 #[ignore = "requires Vulkan; rejection must never publish invalid camera RGB"]
 fn demosaic_rejects_mismatched_cancelled_overbudget_and_nonfinite_results() {
     let _guard = crate::preview::processor::tests::gpu_test_guard();
     let mut gpu = processor();
     let frame = frame("RGGB", 13, 11, 0);
     let capture =
-        CaptureSharpeningContract::new(CaptureSharpening::default(), [1.0; 3]).expect("off");
+        crate::capture_only_contract(CaptureSharpening::default(), [1.0; 3]).expect("off");
     let desc = description(&frame, DemosaicAlgorithm::MalvarHeCutler, false);
     let input = highlighted(&gpu, &frame, &desc);
     let different = description(&frame, DemosaicAlgorithm::MalvarHeCutler, true);
@@ -720,7 +820,7 @@ fn demosaic_capture_budget_counts_overlapping_lifetimes() {
     let frame = frame("RGGB", 81, 67, 6);
     let desc = description(&frame, DemosaicAlgorithm::MalvarHeCutler, false);
     let input = highlighted(&gpu, &frame, &desc);
-    let capture = CaptureSharpeningContract::new(
+    let capture = crate::capture_only_contract(
         CaptureSharpening {
             enabled: true,
             radius: 0.6,
@@ -780,7 +880,7 @@ fn private_camera_parity_and_timings(
         .join("../../testdata/private/DSC00851.ARW");
     let frame = RawlerDecoder::default().decode(&path)?;
     let desc = description(&frame, algorithm, true);
-    let capture = CaptureSharpeningContract::new(CaptureSharpening::default(), [1.0; 3])?;
+    let capture = crate::capture_only_contract(CaptureSharpening::default(), [1.0; 3])?;
     let token = CancellationToken::new();
     let mosaic = normalize_raw(&frame, RawCropPolicy::Recommended)?;
     let rohditor_core::HighlightExecution::Clip(levels) = desc.highlight_execution() else {

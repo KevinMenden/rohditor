@@ -2885,6 +2885,7 @@ dependencies = [
  "rohditor-highlight",
  "rohditor-image",
  "rohditor-look",
+ "rohditor-mask",
  "rohditor-optics",
  "rohditor-raw",
  "serde",
@@ -2984,6 +2985,7 @@ dependencies = [
  "rohditor-color",
  "rohditor-core",
  "rohditor-demosaic",
+ "rohditor-detail",
  "rohditor-edit",
  "rohditor-highlight",
  "rohditor-image",
@@ -3018,6 +3020,17 @@ dependencies = [
  "rohditor-color",
  "rohditor-edit",
  "rohditor-image",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "rohditor-mask"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "rayon",
+ "rohditor-color",
+ "rohditor-edit",
  "thiserror 2.0.20",
 ]
 

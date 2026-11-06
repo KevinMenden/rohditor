@@ -6,6 +6,7 @@ use rohditor_core::{CancellationToken, CpuPipeline, DemosaicedCameraSource};
 
 use crate::GpuPreviewError;
 
+mod defringe;
 #[cfg(test)]
 mod qualification;
 pub(crate) mod reduction;
@@ -37,6 +38,7 @@ pub struct GpuSpatialProcessor {
     materialize_pipeline: wgpu::ComputePipeline,
     capture: crate::GpuCaptureProcessor,
     scatter: CaptureScatter,
+    defringe: defringe::DefringePipelines,
     budget: u64,
     maximum_tile_edge: u32,
 }
@@ -77,6 +79,7 @@ impl GpuSpatialProcessor {
                 cache: None,
             });
         let scatter = CaptureScatter::new(device);
+        let defringe = defringe::DefringePipelines::new(device);
         let capture = crate::GpuCaptureProcessor::new(device, queue);
         let validation = pollster::block_on(device.pop_error_scope());
         let allocation = pollster::block_on(device.pop_error_scope());
@@ -93,6 +96,7 @@ impl GpuSpatialProcessor {
             materialize_pipeline,
             capture,
             scatter,
+            defringe,
             budget: resources::DEFAULT_BUDGET,
             maximum_tile_edge: device.limits().max_texture_dimension_2d,
         })
@@ -115,7 +119,7 @@ impl GpuSpatialProcessor {
     ) -> Result<(GpuCapturedSource, SpatialMetrics), GpuPreviewError> {
         check_cancel(cancellation)?;
         let contract = source
-            .capture_contract()
+            .detail_contract()
             .map_err(|error| invalid(&error.to_string()))?;
         let description = cpu
             .describe_spatial_completion(source, cancellation)
@@ -134,7 +138,7 @@ impl GpuSpatialProcessor {
             source.image().width(),
             source.image().height(),
             retained,
-            if contract.settings().is_active() {
+            if contract.is_active() {
                 32 * 1024 * 1024
             } else {
                 0
@@ -150,7 +154,7 @@ impl GpuSpatialProcessor {
         let operation = (|| {
             let planes =
                 std::sync::Arc::new(source::ResidentCameraPlanes::new(&self.device, layout)?);
-            let (uploaded_bytes, capture, upload) = if contract.settings().is_active() {
+            let (uploaded_bytes, capture, upload) = if contract.is_active() {
                 let remaining = self
                     .budget
                     .saturating_sub(layout.resident_bytes)
@@ -188,7 +192,7 @@ impl GpuSpatialProcessor {
             GpuCapturedSource {
                 planes,
                 description,
-                capture_contract: contract,
+                detail_contract: contract,
                 uploaded_bytes,
             },
             SpatialMetrics {
@@ -205,9 +209,14 @@ impl GpuSpatialProcessor {
         &self,
         source: &GpuCapturedSource,
         description: rohditor_core::SpatialCompletionDescription,
+        cancellation: &CancellationToken,
     ) -> Result<GpuSpatialFullSource, GpuPreviewError> {
+        if description.defringe_pending() && source.matches(&description, &source.detail_contract) {
+            let baked = self.baked_source(source, description, cancellation)?;
+            return self.full_resolution_source(&baked, baked.description.clone(), cancellation);
+        }
         if description.target_dimensions() != description.source_dimensions()
-            || !source.matches(&description, &source.capture_contract)
+            || !source.matches(&description, &source.detail_contract)
         {
             return Err(GpuPreviewError::BaseMismatch {
                 reason: "full-resolution spatial description does not match the resident source"

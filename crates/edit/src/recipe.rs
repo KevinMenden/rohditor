@@ -23,7 +23,7 @@ pub use rendering::{
     RenderingAdjustments, RenderingProfileSelection,
 };
 
-use crate::{CaptureSharpening, Defringe, FalseColorSuppression, NoiseReduction};
+use crate::{CaptureSharpening, Defringe, FalseColorSuppression, LocalAdjustments, NoiseReduction};
 use color_adjustments::*;
 use color_settings::WhiteBalance;
 use light_settings::*;
@@ -39,7 +39,7 @@ pub struct EditError {
 }
 
 /// Schema version of the current non-destructive edit recipe.
-pub const EDIT_RECIPE_SCHEMA_VERSION: u32 = 15;
+pub const EDIT_RECIPE_SCHEMA_VERSION: u32 = 17;
 const LEGACY_EDIT_RECIPE_SCHEMA_VERSION: u32 = 1;
 const PREVIOUS_EDIT_RECIPE_SCHEMA_VERSION: u32 = 2;
 const PREVIOUS_RAW_EDIT_RECIPE_SCHEMA_VERSION: u32 = 3;
@@ -532,6 +532,9 @@ pub struct EditRecipe {
     pub light: LightAdjustments,
     pub color: ColorAdjustments,
     pub geometry: GeometryAdjustments,
+    /// Mask layers applied on top of the global adjustments.
+    #[serde(default)]
+    pub local: LocalAdjustments,
 }
 
 impl Default for EditRecipe {
@@ -548,6 +551,7 @@ impl Default for EditRecipe {
             light: LightAdjustments::default(),
             color: ColorAdjustments::default(),
             geometry: GeometryAdjustments::default(),
+            local: LocalAdjustments::default(),
         }
     }
 }
@@ -683,6 +687,7 @@ impl EditRecipe {
         if let Some(crop) = self.geometry.crop {
             crop.validate()?;
         }
+        self.local.validate()?;
         Ok(())
     }
 }
@@ -710,6 +715,8 @@ struct RecipeFields {
     color: ColorAdjustments,
     #[serde(default)]
     geometry: GeometryAdjustments,
+    #[serde(default)]
+    local: LocalAdjustments,
     // v1 fields are accepted only to migrate old sidecars/recipes.
     #[serde(default, alias = "white_balance")]
     legacy_white_balance: Option<WhiteBalance>,
@@ -751,6 +758,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
                     orientation_override: fields.legacy_orientation_override,
                     crop: None,
                 },
+                local: LocalAdjustments::default(),
             }
         } else if matches!(
             fields.schema_version,
@@ -768,6 +776,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
                 light: fields.light,
                 color: fields.color,
                 geometry: fields.geometry,
+                local: LocalAdjustments::default(),
             }
         } else if matches!(
             fields.schema_version,
@@ -787,6 +796,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
                 light: fields.light,
                 color: fields.color,
                 geometry: fields.geometry,
+                local: LocalAdjustments::default(),
             }
         } else if matches!(
             fields.schema_version,
@@ -805,6 +815,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
                 light: fields.light,
                 color: fields.color,
                 geometry: fields.geometry,
+                local: LocalAdjustments::default(),
             }
         } else if fields.schema_version == PREVIOUS_WHITE_BALANCE_EDIT_RECIPE_SCHEMA_VERSION {
             if matches!(
@@ -827,10 +838,11 @@ impl<'de> Deserialize<'de> for EditRecipe {
                 light: fields.light,
                 color: fields.color,
                 geometry: fields.geometry,
+                local: LocalAdjustments::default(),
             }
         } else {
             Self {
-                schema_version: if matches!(fields.schema_version, 10..=14) {
+                schema_version: if matches!(fields.schema_version, 10..=16) {
                     EDIT_RECIPE_SCHEMA_VERSION
                 } else {
                     fields.schema_version
@@ -845,6 +857,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
                 light: fields.light,
                 color: fields.color,
                 geometry: fields.geometry,
+                local: fields.local,
             }
         };
         recipe.validate().map_err(D::Error::custom)?;

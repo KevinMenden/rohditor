@@ -84,6 +84,7 @@ mod events;
 mod gpu;
 #[path = "lifecycle.rs"]
 mod lifecycle;
+mod masks;
 mod noise_reduction;
 mod tools;
 
@@ -166,6 +167,11 @@ struct Document {
     frame: Option<Arc<RawFrame>>,
     edits: EditSession,
     texture: Option<PreviewTexture>,
+    /// The Masks tool's red tint of the selected mask.
+    mask_overlay: Option<masks::MaskTint>,
+    /// The (recipe revision, layer) whose range overlay was asked of the worker. It stays set
+    /// after a failure, so a failing request is not repeated every frame.
+    range_overlay_requested: Option<(u64, u32)>,
     preview_pixels: Option<DisplayPreviewPixels>,
     preview_source: Option<PreviewSource>,
     histogram: Option<Histogram>,
@@ -212,6 +218,8 @@ impl Document {
             frame: None,
             edits: EditSession::from_saved(recipe),
             texture: None,
+            mask_overlay: None,
+            range_overlay_requested: None,
             preview_pixels: None,
             preview_source: None,
             histogram: None,
@@ -343,6 +351,8 @@ pub(crate) struct RohditorApp {
     tool: ActiveTool,
     color_mixer_channel: usize,
     pending_white_balance_pick: Option<PreviewTicket>,
+    /// A click of the color-range picker waiting for its sample from the worker.
+    pending_color_pick: Option<PreviewTicket>,
     white_balance_memory: WhiteBalanceModeMemory,
     view_mode: ViewMode,
     /// Folder of the last applied scan, used to reset library selection when
@@ -473,6 +483,7 @@ impl RohditorApp {
             tool: ActiveTool::default(),
             color_mixer_channel: 0,
             pending_white_balance_pick: None,
+            pending_color_pick: None,
             white_balance_memory: WhiteBalanceModeMemory::default(),
             view_mode,
             library_folder: None,
@@ -1854,6 +1865,30 @@ impl RohditorApp {
             });
         let output = if let Some(document) = self.document.as_mut() {
             let preparing = document.open_status.is_some() || document.preview_status.is_some();
+            let crop_policy = self.settings.render_options().raw_crop_policy;
+            if let Some(session) = self.tool.masks() {
+                let options = PreviewOptions {
+                    render: self.settings.render_options(),
+                    ..PreviewOptions::default()
+                };
+                masks::refresh_tint(
+                    context,
+                    document,
+                    session,
+                    crop_policy,
+                    &self.coordinator,
+                    options,
+                );
+            }
+            let masks = self.tool.masks().and_then(|session| {
+                masks::overlay_model(
+                    session,
+                    &document.edits,
+                    document.frame.as_deref(),
+                    crop_policy,
+                    document.mask_overlay.as_ref(),
+                )
+            });
             viewport::show(
                 context,
                 ViewportModel {
@@ -1863,6 +1898,7 @@ impl RohditorApp {
                     source: document.preview_source,
                     picker_mode: self.tool.picker(),
                     crop: crop_overlay,
+                    masks,
                 },
                 &mut document.view,
             )
@@ -1877,6 +1913,7 @@ impl RohditorApp {
                     source: None,
                     picker_mode: None,
                     crop: None,
+                    masks: None,
                 },
                 &mut empty_view,
             )
@@ -1902,6 +1939,7 @@ impl RohditorApp {
         {
             session.finish_drag();
         }
+        self.apply_mask_pointer(context, &output.masks);
     }
 
     fn apply_white_balance_pick(&mut self, context: &egui::Context, normalized: egui::Pos2) {

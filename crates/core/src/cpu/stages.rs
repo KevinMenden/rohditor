@@ -1,6 +1,6 @@
 // The public CPU facade re-exports these processing stages.
 use rayon::prelude::*;
-use rohditor_color::linear_srgb_to_srgb;
+use rohditor_color::{REC2020_LUMINANCE, linear_srgb_to_srgb, local_white_balance_gains};
 use rohditor_demosaic::WhiteBalanceGains;
 use rohditor_edit::{
     CameraChroma, ColorGradingAdjustments, EditRecipe, HSL_CHANNEL_COUNT, HslAdjustments,
@@ -13,6 +13,7 @@ use rohditor_image::{
 };
 use rohditor_raw::{RawFileInfo, RawFrame};
 
+use super::local_stage::{LocalStage, RowAlphas};
 use crate::color::{
     CameraColorTransform, LINEAR_REC2020_TO_XYZ_D65, XYZ_D65_TO_LINEAR_SRGB,
     camera_color_transform, encode_rec2020_for_srgb_output,
@@ -23,7 +24,6 @@ use crate::{
     PipelineError, RawCropPolicy, base_rendering_lut,
 };
 
-const REC2020_LUMINANCE: [f32; 3] = [0.2627, 0.6780, 0.0593];
 /// Conventional Red, Orange, Yellow, Green, Aqua, Blue, Purple, and Magenta
 /// centers on a normalized hue circle. The unequal spacing is intentional:
 /// it matches the named color slices users see in mainstream RAW editors.
@@ -323,9 +323,21 @@ pub(super) mod adjustments {
         apply_adjustments_cancellable(image, recipe, &CancellationToken::new())
     }
 
-    pub(crate) fn apply_adjustments_cancellable(
+    fn apply_adjustments_cancellable(
         image: &mut LinearRgbImage<f32>,
         recipe: &EditRecipe,
+        cancellation: &CancellationToken,
+    ) -> Result<(), PipelineError> {
+        let local = LocalStage::prepare(recipe, image.width(), image.height())?;
+        apply_adjustments_with_local(image, recipe, local.as_ref(), cancellation)
+    }
+
+    /// The adjustment stage with its mask layers already resolved. Render paths prepare the
+    /// [`LocalStage`] themselves so its bytes are part of their working-set check.
+    pub(crate) fn apply_adjustments_with_local(
+        image: &mut LinearRgbImage<f32>,
+        recipe: &EditRecipe,
+        local: Option<&LocalStage>,
         cancellation: &CancellationToken,
     ) -> Result<(), PipelineError> {
         let span = tracing::info_span!(
@@ -347,13 +359,20 @@ pub(super) mod adjustments {
         cancellation.checkpoint()?;
         require_space(image, LinearRgbSpace::Rec2020D65)?;
         recipe.validate()?;
-        let exposure_gain = recipe.light.exposure_ev.exp2();
+        if local.is_some_and(|local| !local.matches_frame(image.width(), image.height())) {
+            return Err(invalid_dimensions(
+                image.width(),
+                image.height(),
+                image.row_stride(),
+                "the local adjustment stage was prepared for another frame size",
+            ));
+        }
+        let reference_chain = ReferenceChain::new(recipe);
+        let exposure_gain = reference_chain.exposure_gain;
         let width_samples = image.width() * 3;
         let row_stride = image.row_stride();
         let light = recipe.light.clone();
         let color = recipe.color.clone();
-        let base_rendering_lut = base_rendering_lut(&recipe.rendering);
-        let camera_chroma = recipe.rendering.matched_look().and_then(|look| look.chroma);
         // Resolve stage participation once per recipe instead of repeatedly
         // checking all neutral controls for every pixel. This is especially
         // useful for the common global-adjustment path, where HSL and grading are
@@ -375,49 +394,127 @@ pub(super) mod adjustments {
         let has_grading = color.grading.shadows != [0.0; 3]
             || color.grading.midtones != [0.0; 3]
             || color.grading.highlights != [0.0; 3];
-        image.data_mut().par_chunks_mut(row_stride).try_for_each(
-            |row| -> Result<(), PipelineError> {
-                cancellation.checkpoint()?;
-                for pixel in row[..width_samples].as_chunks_mut::<3>().0 {
-                    if light.exposure_ev != 0.0 {
-                        for value in pixel.iter_mut() {
-                            *value *= exposure_gain;
+        let reference_pixel = |pixel: &mut [f32; 3]| reference_chain.apply(pixel);
+        image
+            .data_mut()
+            .par_chunks_mut(row_stride)
+            .enumerate()
+            .try_for_each_init(
+                RowAlphas::default,
+                |alphas, (y, row)| -> Result<(), PipelineError> {
+                    cancellation.checkpoint()?;
+                    if let Some(local) = local {
+                        local.evaluate_row(y, &row[..width_samples], reference_pixel, alphas);
+                    }
+                    for (x, pixel) in row[..width_samples]
+                        .as_chunks_mut::<3>()
+                        .0
+                        .iter_mut()
+                        .enumerate()
+                    {
+                        // Scene-referred local terms join the global exposure gain: where a
+                        // mask has exposure, one exp2 of the summed stops replaces the global gain.
+                        let scene = local.and_then(|local| local.scene_terms(alphas, x));
+                        match scene {
+                            Some(scene) if scene.exposure_ev != 0.0 => {
+                                let gain = (light.exposure_ev + scene.exposure_ev).exp2();
+                                for value in pixel.iter_mut() {
+                                    *value *= gain;
+                                }
+                            }
+                            _ if light.exposure_ev != 0.0 => {
+                                for value in pixel.iter_mut() {
+                                    *value *= exposure_gain;
+                                }
+                            }
+                            _ => {}
                         }
-                    }
-                    if let Some(base_rendering_lut) = &base_rendering_lut {
-                        apply_base_rendering(pixel, base_rendering_lut);
-                    }
-                    if let Some(camera_chroma) = &camera_chroma {
-                        apply_camera_chroma(pixel, camera_chroma);
-                    }
-                    if let Some(light_tone_lut) = &light_tone_lut {
-                        apply_light_tone(pixel, light_tone_lut);
-                    }
-                    if has_tone_curve {
-                        apply_tone_curve(pixel, &light.tone_curve);
-                    }
-                    if has_saturation {
-                        let luminance = luminance(pixel);
-                        let saturation = color.saturation
-                            * (1.0 + color.vibrance * (1.0 - color_saturation(pixel, luminance)));
-                        if (saturation - 1.0).abs() > f32::EPSILON {
-                            for value in pixel.iter_mut() {
-                                *value = luminance + saturation * (*value - luminance);
+                        if let Some(scene) = scene
+                            && (scene.temperature != 0.0 || scene.tint != 0.0)
+                        {
+                            let gains = local_white_balance_gains(scene.temperature, scene.tint);
+                            for (value, gain) in pixel.iter_mut().zip(gains) {
+                                *value *= gain;
                             }
                         }
+                        reference_chain.apply_rendering(pixel);
+                        if let Some(light_tone_lut) = &light_tone_lut {
+                            apply_light_tone(pixel, light_tone_lut);
+                        }
+                        if has_tone_curve {
+                            apply_tone_curve(pixel, &light.tone_curve);
+                        }
+                        if let Some(local) = local {
+                            local.apply_display(pixel, alphas, x);
+                        }
+                        if has_saturation {
+                            let luminance = luminance(pixel);
+                            let saturation = color.saturation
+                                * (1.0
+                                    + color.vibrance * (1.0 - color_saturation(pixel, luminance)));
+                            if (saturation - 1.0).abs() > f32::EPSILON {
+                                for value in pixel.iter_mut() {
+                                    *value = luminance + saturation * (*value - luminance);
+                                }
+                            }
+                        }
+                        if has_hsl {
+                            apply_hsl_adjustments(pixel, &color.hsl);
+                        }
+                        if has_grading {
+                            apply_color_grading(pixel, &color.grading);
+                        }
                     }
-                    if has_hsl {
-                        apply_hsl_adjustments(pixel, &color.hsl);
-                    }
-                    if has_grading {
-                        apply_color_grading(pixel, &color.grading);
-                    }
-                }
-                Ok(())
-            },
-        )?;
+                    Ok(())
+                },
+            )?;
         cancellation.checkpoint()?;
         Ok(())
+    }
+
+    /// The part of the adjustment chain that range masks measure: the global exposure and the
+    /// base rendering (tone and camera colourfulness), before Light, Color and every local term.
+    ///
+    /// The base-rendering half is one function, [`Self::apply_rendering`], that the render loop
+    /// and the reference both call, so a stage added there reaches both. Only the exposure is
+    /// written twice: the loop adds the local exposure and white balance to it, which the
+    /// reference must not see. The test
+    /// `the_reference_chain_matches_what_the_stage_does_without_light_color_or_local_edits`
+    /// pins the two together for every rendering profile.
+    pub(crate) struct ReferenceChain {
+        exposure_gain: f32,
+        base_rendering_lut: Option<std::borrow::Cow<'static, crate::BaseRenderingLut>>,
+        camera_chroma: Option<CameraChroma>,
+    }
+
+    impl ReferenceChain {
+        pub(crate) fn new(recipe: &EditRecipe) -> Self {
+            Self {
+                exposure_gain: recipe.light.exposure_ev.exp2(),
+                base_rendering_lut: base_rendering_lut(&recipe.rendering),
+                camera_chroma: recipe.rendering.matched_look().and_then(|look| look.chroma),
+            }
+        }
+
+        /// Turns a pixel as it enters the adjustment stage into its reference pixel.
+        pub(crate) fn apply(&self, pixel: &mut [f32; 3]) {
+            if self.exposure_gain != 1.0 {
+                for value in pixel.iter_mut() {
+                    *value *= self.exposure_gain;
+                }
+            }
+            self.apply_rendering(pixel);
+        }
+
+        /// The base rendering of the recipe's profile: the tone curve, then the camera chroma.
+        fn apply_rendering(&self, pixel: &mut [f32]) {
+            if let Some(base_rendering_lut) = &self.base_rendering_lut {
+                apply_base_rendering(pixel, base_rendering_lut);
+            }
+            if let Some(camera_chroma) = &self.camera_chroma {
+                apply_camera_chroma(pixel, camera_chroma);
+            }
+        }
     }
 
     fn apply_base_rendering(pixel: &mut [f32], lut: &crate::BaseRenderingLut) {
@@ -446,7 +543,7 @@ pub(super) mod adjustments {
         }
     }
 
-    fn apply_light_tone(pixel: &mut [f32], light_tone_lut: &LightToneLut) {
+    pub(in crate::cpu) fn apply_light_tone(pixel: &mut [f32], light_tone_lut: &LightToneLut) {
         let current = luminance(pixel);
         let target = light_tone_lut.sample(current);
         if !target.is_finite() || (target - current).abs() <= f32::EPSILON {
@@ -742,7 +839,7 @@ pub(super) mod adjustments {
         [red + match_value, green + match_value, blue + match_value]
     }
 
-    pub(super) fn luminance(pixel: &[f32]) -> f32 {
+    pub(in crate::cpu) fn luminance(pixel: &[f32]) -> f32 {
         pixel[0] * REC2020_LUMINANCE[0]
             + pixel[1] * REC2020_LUMINANCE[1]
             + pixel[2] * REC2020_LUMINANCE[2]

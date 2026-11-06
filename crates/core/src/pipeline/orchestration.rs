@@ -17,7 +17,7 @@ use crate::color::{
     CameraCalibration, CameraProfileKey, camera_profile_key, resolve_camera_colour,
 };
 use crate::cpu::{
-    apply_adjustments_cancellable, apply_camera_color_transform_cancellable,
+    apply_adjustments_with_local, apply_camera_color_transform_cancellable,
     apply_white_balance_cancellable, preview_dimensions,
     render_display_srgb8_cancellable_with_geometry,
     render_display_srgb8_dithered_with_geometry_and_diagnostics,
@@ -29,8 +29,9 @@ use crate::highlight::{HighlightDiagnostics, apply_cancellable as apply_highligh
 use crate::resample::resize_area_with_plan_cancellable;
 use crate::{
     CancellationToken, DitherMode, ExportImage, GamutMappingDiagnostics, OutputBitDepth,
-    OutputGeometry, OutputSharpening, OutputSize, PipelineError, apply_adjustments,
+    OutputGeometry, OutputSharpening, OutputSize, PipelineError,
 };
+use local_work::LocalWork;
 
 /// Default longest edge of an interactively developed preview.
 pub const DEFAULT_PREVIEW_LONG_EDGE: usize = 2_560;
@@ -124,20 +125,27 @@ pub struct StageTimings {
 pub enum SpatialOptics {
     Off,
     Enabled(Box<OpticsExecution>),
+    /// Already applied to the pixels of the source this describes (an
+    /// executor baked optics in before defringe): nothing left to execute.
+    Applied(Box<OpticsProvenance>),
 }
 
 impl SpatialOptics {
     #[must_use]
     pub fn execution(&self) -> Option<&OpticsExecution> {
         match self {
-            Self::Off => None,
+            Self::Off | Self::Applied(_) => None,
             Self::Enabled(execution) => Some(execution.as_ref()),
         }
     }
 
     #[must_use]
     pub fn provenance(&self) -> Option<&OpticsProvenance> {
-        self.execution().map(OpticsExecution::provenance)
+        match self {
+            Self::Off => None,
+            Self::Enabled(execution) => Some(execution.provenance()),
+            Self::Applied(provenance) => Some(provenance),
+        }
     }
 }
 
@@ -170,6 +178,8 @@ pub struct SpatialCompletionDescription {
     highlight_diagnostics: HighlightDiagnostics,
     detail: Option<crate::DetailProvenance>,
     defringe: Option<crate::DefringeProvenance>,
+    /// Optics and defringe are already part of the pixels this describes.
+    defringe_baked: bool,
     preparation_timings: StageTimings,
     decoded_raw_bytes: usize,
     normalized_mosaic_bytes: usize,
@@ -244,6 +254,25 @@ impl SpatialCompletionDescription {
         self.detail
     }
 
+    /// This description for pixels that went through optics and defringe
+    /// already (see [`SpatialOptics::Applied`]), as an executor that bakes
+    /// both into its source produces them.
+    #[must_use]
+    pub fn with_defringe_baked(mut self) -> Self {
+        if let SpatialOptics::Enabled(execution) = &self.optics {
+            self.optics = SpatialOptics::Applied(Box::new(execution.provenance().clone()));
+        }
+        self.defringe_baked = true;
+        self
+    }
+
+    /// Whether the source still has to be defringed (after optics) before
+    /// reduction or development.
+    #[must_use]
+    pub const fn defringe_pending(&self) -> bool {
+        self.defringe.is_some() && !self.defringe_baked
+    }
+
     /// The defringe step the spatial stage will run, if any.
     #[must_use]
     pub const fn defringe(&self) -> Option<crate::DefringeProvenance> {
@@ -285,6 +314,8 @@ pub struct MemoryEstimate {
     /// Cropped, horizontal-pass and resized linear buffers of an export resize.
     pub export_resize_bytes: usize,
     pub display_rgb_bytes: usize,
+    /// Prepared mask layers, their tone tables and per-thread alpha rows.
+    pub local_adjustment_bytes: usize,
     pub estimated_peak_bytes: usize,
 }
 
@@ -733,7 +764,7 @@ pub(super) mod render {
         ) -> Result<RenderResult, PipelineError> {
             let total_started = Instant::now();
             let base = prepare_base(self.optics.as_deref(), frame, recipe, options)?;
-            let mut result = render_base(base, recipe, options.output_policy)?;
+            let mut result = render_base(base, recipe, options)?;
             result.timings.total = total_started.elapsed();
             Ok(result)
         }
@@ -907,18 +938,21 @@ pub(super) mod render {
                 .checked_mul(size_of::<f32>())
                 .ok_or_else(|| dimension_overflow(base.image.width(), base.image.height()))?;
             let geometry = output_geometry(base.image(), base.source_orientation, recipe)?;
+            let local = LocalWork::prepare(base.image(), recipe)?;
             let mut memory = memory_estimate(
                 base,
                 size_of::<u8>(),
                 geometry,
                 geometry.output_dimensions(),
                 false,
+                local.bytes(),
             )?;
             let retained_peak = base
                 .decoded_raw_bytes
                 .checked_add(retained_base_bytes)
                 .and_then(|bytes| bytes.checked_add(retained_base_bytes))
                 .and_then(|bytes| bytes.checked_add(memory.display_rgb_bytes))
+                .and_then(|bytes| bytes.checked_add(memory.local_adjustment_bytes))
                 .ok_or_else(|| dimension_overflow(base.image.width(), base.image.height()))?;
             memory.estimated_peak_bytes = memory.estimated_peak_bytes.max(retained_peak);
             validate_working_set(memory.estimated_peak_bytes)?;
@@ -927,7 +961,7 @@ pub(super) mod render {
             cancellation.checkpoint()?;
             let mut timings = StageTimings::default();
             let adjustments_started = Instant::now();
-            apply_adjustments_cancellable(working, recipe, cancellation)?;
+            apply_adjustments_with_local(working, recipe, local.stage.as_ref(), cancellation)?;
             timings.adjustments = adjustments_started.elapsed();
 
             let output_started = Instant::now();
@@ -964,7 +998,7 @@ pub(super) mod render {
         ) -> Result<RenderResult, PipelineError> {
             let total_started = Instant::now();
             let base = self.prepare_preview_base(frame, recipe, options)?;
-            let mut result = render_base(base, recipe, options.render.output_policy)?;
+            let mut result = render_base(base, recipe, options.render)?;
             result.timings.total = total_started.elapsed();
             Ok(result)
         }
@@ -992,15 +1026,22 @@ pub(super) mod render {
                 cancellation,
             )?;
             let geometry = output_geometry(&base.image, base.source_orientation, recipe)?;
+            let local = LocalWork::prepare(&base.image, recipe)?;
             let memory = memory_estimate(
                 &base,
                 size_of::<u8>(),
                 geometry,
                 geometry.output_dimensions(),
                 false,
+                local.bytes(),
             )?;
             let adjustments_started = Instant::now();
-            apply_adjustments_cancellable(&mut base.image, recipe, cancellation)?;
+            apply_adjustments_with_local(
+                &mut base.image,
+                recipe,
+                local.stage.as_ref(),
+                cancellation,
+            )?;
             base.timings.adjustments = adjustments_started.elapsed();
             let output_started = Instant::now();
             let (image, output_gamut_diagnostics) = render_display_srgb8_cancellable_with_geometry(
@@ -1063,15 +1104,22 @@ pub(super) mod render {
             let mut geometry = output_geometry(&base.image, base.source_orientation, recipe)?;
             let (output_width, output_height) = geometry.output_dimensions();
             let target = size.resolve(output_width, output_height);
+            let local = LocalWork::prepare(&base.image, recipe)?;
             let memory = memory_estimate(
                 &base,
                 bit_depth.bytes_per_sample(),
                 geometry,
                 target,
                 sharpening.is_some(),
+                local.bytes(),
             )?;
             let adjustments_started = Instant::now();
-            apply_adjustments(&mut base.image, recipe)?;
+            apply_adjustments_with_local(
+                &mut base.image,
+                recipe,
+                local.stage.as_ref(),
+                &CancellationToken::new(),
+            )?;
             base.timings.adjustments = adjustments_started.elapsed();
             let output_started = Instant::now();
             // Resize in linear light on the cropped, oriented image; the
@@ -1140,6 +1188,8 @@ pub(super) mod render {
 
 #[path = "camera_source.rs"]
 mod camera_source;
+#[path = "local_work.rs"]
+mod local_work;
 use camera_source::prepare_reconstructed_preview;
 pub use camera_source::{CapturedCameraSource, DemosaicedCameraSource};
 #[path = "sensor_source.rs"]
@@ -1504,20 +1554,28 @@ fn estimated_highlight_scratch_bytes(
 fn render_base(
     mut base: DemosaicedBase,
     recipe: &EditRecipe,
-    output_policy: OutputPolicy,
+    options: RenderOptions,
 ) -> Result<RenderResult, PipelineError> {
     validate_base_recipe(&base, recipe)?;
+    let output_policy = options.output_policy;
     let geometry = output_geometry(&base.image, base.source_orientation, recipe)?;
+    let local = LocalWork::prepare(&base.image, recipe)?;
     let memory = memory_estimate(
         &base,
         size_of::<u8>(),
         geometry,
         geometry.output_dimensions(),
         false,
+        local.bytes(),
     )?;
 
     let adjustments_started = Instant::now();
-    apply_adjustments(&mut base.image, recipe)?;
+    apply_adjustments_with_local(
+        &mut base.image,
+        recipe,
+        local.stage.as_ref(),
+        &CancellationToken::new(),
+    )?;
     base.timings.adjustments = adjustments_started.elapsed();
 
     let output_started = Instant::now();
@@ -1563,6 +1621,7 @@ fn memory_estimate(
     output_geometry: OutputGeometry,
     final_dimensions: (usize, usize),
     output_sharpening: bool,
+    local_adjustment_bytes: usize,
 ) -> Result<MemoryEstimate, PipelineError> {
     let width = base.image.width();
     let height = base.image.height();
@@ -1602,6 +1661,7 @@ fn memory_estimate(
         .and_then(|bytes| bytes.checked_add(output_sharpening_bytes))
         .and_then(|bytes| bytes.checked_add(export_resize_bytes))
         .and_then(|bytes| bytes.checked_add(display_rgb_bytes))
+        .and_then(|bytes| bytes.checked_add(local_adjustment_bytes))
         .ok_or_else(|| dimension_overflow(width, height))?;
 
     let estimate = MemoryEstimate {
@@ -1615,6 +1675,7 @@ fn memory_estimate(
         linear_rgb_bytes,
         export_resize_bytes,
         display_rgb_bytes,
+        local_adjustment_bytes,
         estimated_peak_bytes: base.preparation_peak_bytes.max(output_peak),
     };
     validate_working_set(estimate.estimated_peak_bytes)?;

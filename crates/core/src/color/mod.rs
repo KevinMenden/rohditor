@@ -14,7 +14,7 @@ pub use calibration::{
     resolve_camera_colour,
 };
 pub use output::{clip_linear_srgb_for_output, convert_rec2020_to_display_srgb};
-pub use rohditor_color::{linear_srgb_to_srgb, srgb_to_linear_srgb};
+pub use rohditor_color::{linear_srgb_to_srgb, oklab_to_linear_srgb, srgb_to_linear_srgb};
 pub use transforms::{
     LINEAR_REC2020_TO_XYZ_D65, Matrix3, XYZ_D65_TO_LINEAR_REC2020, XYZ_D65_TO_LINEAR_SRGB,
     adapt_xyz_to_d65,

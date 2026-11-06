@@ -15,8 +15,8 @@ use clap::ValueEnum;
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_detail::{
     ChromaDenoise, FalseColor, FringeColour, FringeRemoval, LumaDenoise, NeverCancelled,
-    denoise_chroma, denoise_luma, estimate_luma_noise, estimate_noise, remove_fringes,
-    split_opponent, suppress_false_color,
+    denoise_chroma, denoise_luma, estimate_luma_noise, estimate_noise, estimate_noise_profiles,
+    remove_fringes, split_opponent, suppress_false_color,
 };
 use rohditor_edit::{DEFAULT_GREEN_HUE, DEFAULT_PURPLE_HUE};
 use rohditor_image::LinearRgbImage;
@@ -103,7 +103,9 @@ impl DetailStage {
             }
             Self::ChromaNr | Self::LumaNr => {
                 // Too small to profile: the stage leaves the image alone.
-                let Some(noise) = estimate_luma_noise(input, BALANCE, &NeverCancelled)? else {
+                let Some(noise_profiles) =
+                    estimate_noise_profiles(input, BALANCE, &NeverCancelled)?
+                else {
                     return Ok(output);
                 };
                 if matches!(self, Self::ChromaNr) {
@@ -113,7 +115,7 @@ impl DetailStage {
                             strength: settings.strength,
                             balance: BALANCE,
                             ceilings: CEILINGS,
-                            luma_noise: noise,
+                            noise: noise_profiles,
                         },
                         &NeverCancelled,
                     )?;
@@ -125,7 +127,7 @@ impl DetailStage {
                             detail: settings.detail,
                             balance: BALANCE,
                             ceilings: CEILINGS,
-                            noise,
+                            noise: noise_profiles.luma,
                         },
                         &NeverCancelled,
                     )?;
