@@ -15,14 +15,20 @@
 //!    `p' = saturation(light_tone_i(p))`, then `p = p + a_i * (p' - p)`. Layer order matters
 //!    here: a later layer sees the result of the earlier ones.
 //!
+//! Layers with luminance or colour range components also need a per-pixel *reference* (see
+//! `range_reference`): the stage measures it once per row, before evaluating any alpha, using a
+//! function the adjustment stage passes in. That function is what keeps the reference free of
+//! local terms, so one mask never changes what another one selects.
+//!
 //! A recipe without active layers never creates a [`LocalStage`], so the pipeline output is
 //! bit-identical to a build without masks.
 
 use std::mem::size_of;
 
 use rohditor_edit::{EditRecipe, LightAdjustments, LightToneLut, MaskLayer};
-use rohditor_mask::{MaskError, MaskFrame, PreparedMask};
+use rohditor_mask::{MaskError, MaskFrame, PreparedMask, ReferenceNeeds};
 
+use super::range_reference::{ReferenceRows, row_bytes};
 use super::stages::adjustments::{apply_light_tone, luminance};
 use crate::PipelineError;
 
@@ -36,6 +42,8 @@ pub(crate) struct LocalStage {
     scene: Vec<usize>,
     /// Indices into `layers` that have a display-referred term (Light tone, saturation).
     display: Vec<usize>,
+    /// What any layer's range components read; measured once per row.
+    reference: ReferenceNeeds,
 }
 
 #[derive(Debug)]
@@ -56,6 +64,7 @@ struct StageLayer {
 #[derive(Debug, Default)]
 pub(crate) struct RowAlphas {
     values: Vec<f32>,
+    reference: ReferenceRows,
 }
 
 /// Alpha-weighted sums of the scene-referred sliders at one pixel.
@@ -85,10 +94,12 @@ impl LocalStage {
             layers: Vec::new(),
             scene: Vec::new(),
             display: Vec::new(),
+            reference: ReferenceNeeds::default(),
         };
         for layer in recipe.local.layers.iter().filter(|layer| layer.is_active()) {
             let index = stage.layers.len();
             let layer = StageLayer::prepare(layer, frame)?;
+            stage.reference = stage.reference.union(layer.mask.reference_needs());
             if layer.has_scene_term() {
                 stage.scene.push(index);
             }
@@ -106,7 +117,7 @@ impl LocalStage {
     }
 
     /// Bytes this stage keeps alive while rendering: prepared masks, tone tables, and one row
-    /// of alpha per layer for every worker thread.
+    /// of alpha per layer (plus the reference row) for every worker thread.
     pub(crate) fn bytes(&self) -> usize {
         let masks: usize = self
             .layers
@@ -122,19 +133,36 @@ impl LocalStage {
             .len()
             .saturating_mul(self.width)
             .saturating_mul(size_of::<f32>())
+            .saturating_add(row_bytes(self.reference, self.width))
             .saturating_mul(rayon::current_num_threads());
         masks.saturating_add(row_scratch)
     }
 
     /// Fills `alphas` with every layer's alpha for row `y`.
-    pub(crate) fn evaluate_row(&self, y: usize, alphas: &mut RowAlphas) {
+    ///
+    /// `pixels` is the row as it enters the adjustment stage (interleaved linear Rec.2020) and
+    /// `to_reference` turns one such pixel into the reference pixel range components read. It is
+    /// only called when some layer has a range component.
+    pub(crate) fn evaluate_row(
+        &self,
+        y: usize,
+        pixels: &[f32],
+        to_reference: impl Fn(&mut [f32; 3]),
+        alphas: &mut RowAlphas,
+    ) {
+        if self.reference.any() {
+            alphas
+                .reference
+                .measure(self.reference, pixels, to_reference);
+        }
         alphas.values.resize(self.layers.len() * self.width, 0.0);
+        let reference = alphas.reference.row();
         for (layer, out) in self
             .layers
             .iter()
             .zip(alphas.values.chunks_exact_mut(self.width))
         {
-            layer.mask.evaluate_row(y, 0..self.width, out);
+            layer.mask.evaluate_row(y, 0..self.width, reference, out);
         }
     }
 

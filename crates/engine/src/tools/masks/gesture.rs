@@ -128,6 +128,8 @@ impl MaskToolSession {
             MaskEditMode::CreateLinear => self.press_create(GradientKind::Linear, at),
             MaskEditMode::CreateRadial => self.press_create(GradientKind::Radial, at),
             MaskEditMode::Paint { erase } => self.press_paint(recipe, view.space(), at, erase),
+            // The frontend samples the colour and calls `pick_color`; there is no gesture.
+            MaskEditMode::PickColor => None,
         }
     }
 
@@ -188,7 +190,7 @@ impl MaskToolSession {
         ))
     }
 
-    fn select(&mut self, target: Placement) {
+    pub(super) fn select(&mut self, target: Placement) {
         self.selected_layer = Some(target.layer);
         self.selected_component = Some(target.component);
     }

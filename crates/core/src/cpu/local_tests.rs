@@ -6,24 +6,24 @@ use rohditor_edit::{
     MaskShape, RenderingProfileSelection,
 };
 use rohditor_image::{LinearRgbImage, LinearRgbSpace, Orientation};
-use rohditor_mask::{MaskFrame, PreparedMask};
+use rohditor_mask::{MaskFrame, PreparedMask, ReferenceRow};
 
 use super::adjustments::apply_adjustments;
 use super::local_stage::LocalStage;
 use super::mask_overlay::{MaskOverlayPlan, render_mask_overlay_preview};
 use crate::{CancellationToken, OutputGeometry};
 
-const WIDTH: usize = 23;
-const HEIGHT: usize = 11;
+pub(super) const WIDTH: usize = 23;
+pub(super) const HEIGHT: usize = 11;
 
 /// Neutral rendering keeps the global chain an identity, so a local edit is the only change.
-fn neutral_recipe() -> EditRecipe {
+pub(super) fn neutral_recipe() -> EditRecipe {
     let mut recipe = EditRecipe::default();
     recipe.rendering.profile = RenderingProfileSelection::NEUTRAL;
     recipe
 }
 
-fn image_of(pixel: impl Fn(usize, usize) -> [f32; 3]) -> LinearRgbImage<f32> {
+pub(super) fn image_of(pixel: impl Fn(usize, usize) -> [f32; 3]) -> LinearRgbImage<f32> {
     let mut data = Vec::with_capacity(WIDTH * HEIGHT * 3);
     for y in 0..HEIGHT {
         for x in 0..WIDTH {
@@ -35,7 +35,7 @@ fn image_of(pixel: impl Fn(usize, usize) -> [f32; 3]) -> LinearRgbImage<f32> {
 }
 
 /// Different at every pixel and channel, so a mix-up of pixels or rows shows.
-fn varied_image() -> LinearRgbImage<f32> {
+pub(super) fn varied_image() -> LinearRgbImage<f32> {
     image_of(|x, y| {
         let seed = (x * 7 + y * 13) % 17;
         let base = 0.05 + 0.6 * seed as f32 / 17.0;
@@ -43,18 +43,18 @@ fn varied_image() -> LinearRgbImage<f32> {
     })
 }
 
-fn flat_image(value: f32) -> LinearRgbImage<f32> {
+pub(super) fn flat_image(value: f32) -> LinearRgbImage<f32> {
     image_of(|_, _| [value; 3])
 }
 
-fn linear(start_x: f32, end_x: f32) -> MaskShape {
+pub(super) fn linear(start_x: f32, end_x: f32) -> MaskShape {
     MaskShape::Linear(LinearGradient {
         start: MaskPoint { x: start_x, y: 0.5 },
         end: MaskPoint { x: end_x, y: 0.5 },
     })
 }
 
-fn layer(id: u32, shape: MaskShape, settings: LocalSettings) -> MaskLayer {
+pub(super) fn layer(id: u32, shape: MaskShape, settings: LocalSettings) -> MaskLayer {
     MaskLayer {
         id,
         name: format!("layer {id}"),
@@ -69,7 +69,7 @@ fn layer(id: u32, shape: MaskShape, settings: LocalSettings) -> MaskLayer {
     }
 }
 
-fn adjusted(image: &LinearRgbImage<f32>, recipe: &EditRecipe) -> Vec<f32> {
+pub(super) fn adjusted(image: &LinearRgbImage<f32>, recipe: &EditRecipe) -> Vec<f32> {
     let mut image = image.clone();
     apply_adjustments(&mut image, recipe).expect("valid adjustments");
     image.data().to_vec()
@@ -86,11 +86,11 @@ fn alpha_row(layer: &MaskLayer) -> Vec<f32> {
     )
     .expect("valid mask");
     let mut row = vec![0.0; WIDTH];
-    mask.evaluate_row(HEIGHT / 2, 0..WIDTH, &mut row);
+    mask.evaluate_row(HEIGHT / 2, 0..WIDTH, ReferenceRow::NONE, &mut row);
     row
 }
 
-fn pixel(data: &[f32], x: usize, y: usize) -> [f32; 3] {
+pub(super) fn pixel(data: &[f32], x: usize, y: usize) -> [f32; 3] {
     let start = (y * WIDTH + x) * 3;
     [data[start], data[start + 1], data[start + 2]]
 }
@@ -438,7 +438,7 @@ fn overlay_has_display_geometry_and_follows_orientation_and_crop() {
             .expect("valid test fixture")
             .expect("layer exists");
         let overlay = plan
-            .render(&CancellationToken::new())
+            .render(None, &CancellationToken::new())
             .expect("valid test fixture");
         let (width, height) = geometry.output_dimensions();
         assert_eq!((overlay.width(), overlay.height()), (width, height));
@@ -448,7 +448,7 @@ fn overlay_has_display_geometry_and_follows_orientation_and_crop() {
         for y in 0..height {
             for x in 0..width {
                 let (sx, sy) = geometry.source_coordinate_in_bounds(x, y);
-                mask.evaluate_row(sy, 0..WIDTH, &mut row);
+                mask.evaluate_row(sy, 0..WIDTH, ReferenceRow::NONE, &mut row);
                 let expected = (row[sx].clamp(0.0, 1.0) * 255.0).round() as u8;
                 assert_eq!(
                     overlay.data()[y * width + x],
@@ -495,7 +495,7 @@ fn the_small_overlay_matches_the_full_size_one_under_orientation_and_crop() {
         let full = MaskOverlayPlan::prepare(&recipe, 3, FULL, geometry)
             .expect("valid test fixture")
             .expect("layer exists")
-            .render(&CancellationToken::new())
+            .render(None, &CancellationToken::new())
             .expect("valid test fixture");
         let small = render_mask_overlay_preview(&recipe, 3, FULL, Orientation::Normal, 100)
             .expect("valid test fixture")

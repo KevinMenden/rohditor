@@ -26,6 +26,7 @@ mod edit;
 mod gesture;
 mod handles;
 mod layers;
+mod range;
 mod view;
 
 #[cfg(test)]
@@ -34,10 +35,12 @@ mod tests;
 pub use brush::{BRUSH_RADIUS_RANGE, BrushSettings};
 pub use handles::MaskHandle;
 pub use layers::{LayerEdit, LocalSlider};
+pub use range::{ColorPick, RangeSlider};
 pub use view::MaskView;
 
 use rohditor_edit::{
-    MAX_BRUSH_POINTS, MAX_BRUSH_STROKES, MAX_MASK_COMPONENTS, MAX_MASK_LAYERS, MaskMode,
+    MAX_BRUSH_POINTS, MAX_BRUSH_STROKES, MAX_COLOR_SAMPLES, MAX_MASK_COMPONENTS, MAX_MASK_LAYERS,
+    MaskMode,
 };
 use thiserror::Error;
 
@@ -57,6 +60,10 @@ pub enum MaskEditMode {
     CreateRadial,
     /// Paint a brush stroke, or erase from the selected brush component.
     Paint { erase: bool },
+    /// A click samples the colour under the pointer for a colour range; see
+    /// [`MaskToolSession::pick_color`]. The frontend does the sampling, so the session ignores
+    /// presses in this mode.
+    PickColor,
 }
 
 /// A limit of the recipe model that stopped an edit.
@@ -70,6 +77,8 @@ pub enum MaskLimit {
     Strokes,
     #[error("A photo can have at most {MAX_BRUSH_POINTS} brush points")]
     BrushPoints,
+    #[error("A color range can have at most {MAX_COLOR_SAMPLES} samples")]
+    ColorSamples,
 }
 
 /// A point handle to draw, at a display position (`0..1` over the image on screen).

@@ -3,7 +3,9 @@
 mod gamut;
 mod local_white_balance;
 mod matrix;
+mod oklab;
 mod profile_table;
+mod range_reference;
 mod transfer;
 
 pub use gamut::{
@@ -17,5 +19,7 @@ pub use matrix::{
     XYZ_D65_TO_LINEAR_REC2020, XYZ_D65_TO_LINEAR_SRGB, adapt_xyz_to_d65,
     chromatic_adaptation_to_d65,
 };
+pub use oklab::{linear_srgb_to_oklab, oklab_to_linear_srgb};
 pub use profile_table::{DeltaTable, apply_delta_table, rec2020_prophoto_matrices};
+pub use range_reference::{rec2020_encoded_luminance, rec2020_to_oklab};
 pub use transfer::{linear_srgb_to_srgb, srgb_to_linear_srgb};

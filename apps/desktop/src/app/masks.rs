@@ -5,17 +5,20 @@
 //! goes into the recipe as it happens, so leaving the tool has nothing to commit.
 
 use eframe::egui;
-use rohditor_core::{OutputGeometry, RawCropPolicy};
-use rohditor_edit::{EditRecipe, GeometryAdjustments, MaskComponent, MaskLayer};
-use rohditor_engine::document::EditSession;
-use rohditor_engine::tools::{LayerEdit, MaskEditMode, MaskToolSession, MaskView, ToolKind};
+use rohditor_core::{MaskAlphaImage, OutputGeometry, PreviewOptions, RawCropPolicy};
+use rohditor_edit::{ColorSample, EditRecipe, GeometryAdjustments, MaskComponent, MaskLayer};
+use rohditor_engine::coordinator::RenderCoordinator;
+use rohditor_engine::document::{EditSession, PreviewTicket};
+use rohditor_engine::tools::{
+    ColorPick, LayerEdit, MaskEditMode, MaskToolSession, MaskView, ToolKind,
+};
 use rohditor_image::Orientation;
 use rohditor_raw::{RawFileInfo, RawFrame};
 
 use super::tools::tool_panel_model;
 use super::{Document, RohditorApp};
 use crate::ui::mask_overlay::{MaskOverlayModel, MaskOverlayOutput};
-use crate::ui::masks::{self, MasksAction, MasksPanelModel, SliderPhase};
+use crate::ui::masks::{self, MasksAction, MasksPanelModel, RangeKind, SliderPhase};
 use crate::ui::tool_panel;
 
 /// Peak opacity of the red mask tint, at alpha 1.
@@ -85,21 +88,37 @@ struct TintSource {
     geometry: GeometryAdjustments,
     /// Sets the developed frame, and with it the aspect the mask lives in.
     policy: RawCropPolicy,
+    /// For a layer with range components, whose shape depends on the image: the recipe revision
+    /// it was measured at. `None` for a layer that the recipe alone determines.
+    revision: Option<u64>,
 }
 
 impl TintSource {
-    fn new(recipe: &EditRecipe, layer: &MaskLayer, policy: RawCropPolicy) -> Self {
+    fn new(
+        recipe: &EditRecipe,
+        layer: &MaskLayer,
+        policy: RawCropPolicy,
+        revision: Option<u64>,
+    ) -> Self {
         Self {
             layer: layer.id,
             components: layer.components.clone(),
             geometry: recipe.geometry.clone(),
             policy,
+            revision,
         }
     }
 
     /// Whether the tint of this source is still right, without copying the layer.
-    fn matches(&self, recipe: &EditRecipe, layer: &MaskLayer, policy: RawCropPolicy) -> bool {
+    fn matches(
+        &self,
+        recipe: &EditRecipe,
+        layer: &MaskLayer,
+        policy: RawCropPolicy,
+        revision: Option<u64>,
+    ) -> bool {
         self.layer == layer.id
+            && self.revision == revision
             && self.policy == policy
             && self.geometry == recipe.geometry
             && self.components == layer.components
@@ -112,14 +131,18 @@ pub(super) struct MaskTint {
     texture: egui::TextureHandle,
 }
 
-/// Brings the tint up to date with the recipe and the selected layer. It is computed here, from
-/// the recipe, at a small size: a render would show the mask only after the whole preview was
-/// done, so the tint would trail the handles while they are dragged.
+/// Brings the tint up to date with the recipe and the selected layer. A gradient or brush is
+/// computed here, from the recipe, at a small size: a render would show the mask only after the
+/// whole preview was done, so the tint would trail the handles while they are dragged. A layer
+/// with a luminance or color range depends on the image, so the worker measures it (see
+/// [`request_range_overlay`]) and the tint follows the edits a little later.
 pub(super) fn refresh_tint(
     context: &egui::Context,
     document: &mut Document,
     session: &MaskToolSession,
     policy: RawCropPolicy,
+    coordinator: &RenderCoordinator,
+    options: PreviewOptions,
 ) {
     let Some(layer) = session.overlay_layer() else {
         return;
@@ -130,14 +153,23 @@ pub(super) fn refresh_tint(
         document.mask_overlay = None;
         return;
     };
+    let ranged = shown
+        .components
+        .iter()
+        .any(|component| component.shape.is_range());
+    let revision = ranged.then(|| document.edits.revision());
     if document
         .mask_overlay
         .as_ref()
-        .is_some_and(|tint| tint.source.matches(recipe, shown, policy))
+        .is_some_and(|tint| tint.source.matches(recipe, shown, policy, revision))
     {
         return;
     }
-    let source = TintSource::new(recipe, shown, policy);
+    if ranged {
+        request_range_overlay(document, layer, coordinator, options);
+        return;
+    }
+    let source = TintSource::new(recipe, shown, policy, None);
     let Some(info) = document.frame.as_ref().map(|frame| &frame.info) else {
         return;
     };
@@ -157,6 +189,44 @@ pub(super) fn refresh_tint(
         document.mask_overlay = None;
         return;
     };
+    install_tint(context, document, source, &alpha);
+}
+
+/// Asks the worker for the overlay of a layer that selects by image content. The old tint stays
+/// until the new one arrives, so dragging a range does not make it flicker.
+fn request_range_overlay(
+    document: &mut Document,
+    layer: u32,
+    coordinator: &RenderCoordinator,
+    options: PreviewOptions,
+) {
+    let revision = document.edits.revision();
+    if document.range_overlay_requested == Some((revision, layer)) || document.open_status.is_some()
+    {
+        return;
+    }
+    let Some(frame) = document.frame.clone() else {
+        return;
+    };
+    let ticket = document.ticket();
+    let recipe = document.edits.recipe().clone();
+    // A failed request is remembered too, so it is not repeated every frame.
+    document.range_overlay_requested = Some((revision, layer));
+    if coordinator
+        .render_mask_overlay(ticket, frame, recipe, layer, options)
+        .is_err()
+    {
+        document.mask_overlay = None;
+    }
+}
+
+/// Puts `alpha` on screen as the red tint of the layer `source` describes.
+fn install_tint(
+    context: &egui::Context,
+    document: &mut Document,
+    source: TintSource,
+    alpha: &MaskAlphaImage,
+) {
     let pixels = alpha
         .data()
         .iter()
@@ -334,6 +404,118 @@ impl RohditorApp {
         };
         let changed = self.forward_mask_pointer(output, &view);
         self.finish_mask_interaction(context, changed);
+        if let Some((position, pick)) = output.pick_color {
+            self.request_color_sample(position, pick);
+        }
+    }
+
+    /// Asks the worker for the colour under a click of the color-range picker. The sample is
+    /// measured on the developed image (after the global exposure and base rendering), the same
+    /// reference the mask selects on, so it comes back as an event.
+    fn request_color_sample(&mut self, position: (f64, f64), pick: ColorPick) {
+        if self.pending_color_pick.is_some() {
+            return;
+        }
+        let options = self.preview_options();
+        let Some(document) = self.document.as_mut() else {
+            return;
+        };
+        let Some(frame) = document.frame.clone() else {
+            document.error = Some("Open a developed RAW preview before picking colors".to_owned());
+            return;
+        };
+        let ticket = document.ticket();
+        let recipe = document.edits.recipe().clone();
+        match self
+            .coordinator
+            .sample_color_range(ticket, frame, recipe, position, pick, options)
+        {
+            Ok(()) => self.pending_color_pick = Some(ticket),
+            Err(error) => document.error = Some(error),
+        }
+    }
+
+    /// A picked colour arrived: it edits the color range, unless the recipe moved on meanwhile.
+    pub(super) fn apply_color_sample(
+        &mut self,
+        context: &egui::Context,
+        ticket: PreviewTicket,
+        pick: ColorPick,
+        sample: ColorSample,
+    ) {
+        if self.pending_color_pick != Some(ticket) {
+            return;
+        }
+        self.pending_color_pick = None;
+        let (Some(document), Some(session)) = (self.document.as_mut(), self.tool.masks_mut())
+        else {
+            return;
+        };
+        if document.id != ticket.document_id || document.edits.revision() != ticket.revision {
+            return;
+        }
+        let recipe = document.edits.recipe().clone();
+        let changed = install_discrete(
+            &mut document.edits,
+            session.pick_color(&recipe, sample, pick),
+        );
+        self.finish_mask_interaction(context, changed);
+    }
+
+    pub(super) fn fail_color_sample(&mut self, ticket: PreviewTicket, message: String) {
+        if self.pending_color_pick != Some(ticket) {
+            return;
+        }
+        self.pending_color_pick = None;
+        if let Some(document) = self
+            .document
+            .as_mut()
+            .filter(|document| document.id == ticket.document_id)
+        {
+            document.error = Some(message);
+        }
+    }
+
+    /// The worker measured the overlay of a range layer. It is shown if the recipe is still the
+    /// one it was measured for; otherwise `refresh_tint` has already asked for a newer one.
+    pub(super) fn install_range_overlay(
+        &mut self,
+        context: &egui::Context,
+        ticket: PreviewTicket,
+        layer: u32,
+        overlay: &MaskAlphaImage,
+    ) {
+        let policy = self.settings.render_options().raw_crop_policy;
+        let Some(document) = self
+            .document
+            .as_mut()
+            .filter(|document| document.id == ticket.document_id)
+        else {
+            return;
+        };
+        if document.range_overlay_requested == Some((ticket.revision, layer)) {
+            document.range_overlay_requested = None;
+        }
+        if document.edits.revision() != ticket.revision {
+            return;
+        }
+        let recipe = document.edits.recipe();
+        let Some(shown) = recipe.local.layer(layer) else {
+            return;
+        };
+        let source = TintSource::new(recipe, shown, policy, Some(ticket.revision));
+        install_tint(context, document, source, overlay);
+        context.request_repaint();
+    }
+
+    /// The overlay could not be measured: show no tint rather than one that no longer matches.
+    /// A failure for a recipe the user has since edited says nothing about the current one.
+    pub(super) fn fail_range_overlay(&mut self, ticket: PreviewTicket) {
+        if let Some(document) = self.document.as_mut().filter(|document| {
+            document.id == ticket.document_id && document.edits.revision() == ticket.revision
+        }) {
+            document.mask_overlay = None;
+        }
     }
 
     fn forward_mask_pointer(&mut self, output: &MaskOverlayOutput, view: &MaskView) -> bool {
@@ -373,6 +555,38 @@ impl RohditorApp {
             MasksAction::NewComponent(shape, mode) => session.create_component(shape, mode),
             MasksAction::PaintSelected => {
                 session.paint_selected(&recipe);
+            }
+            MasksAction::NewRange { kind, new_layer } => {
+                if new_layer {
+                    // Clears the selection, so the range becomes a layer of its own. A color
+                    // range then waits for its first click on the image.
+                    session.create_layer(match kind {
+                        RangeKind::Luminance => MaskEditMode::Select,
+                        RangeKind::Color => MaskEditMode::PickColor,
+                    });
+                }
+                match kind {
+                    RangeKind::Luminance => {
+                        return install_discrete(edits, session.add_luminance_range(&recipe));
+                    }
+                    RangeKind::Color => session.start_color_pick(),
+                }
+            }
+            MasksAction::PickColor => session.start_color_pick(),
+            MasksAction::RangeSlider {
+                layer,
+                component,
+                slider,
+                value,
+                phase,
+            } => {
+                let next = LayerEdit::RangeSlider {
+                    component,
+                    slider,
+                    value,
+                }
+                .apply(&recipe, layer);
+                return apply_slider(edits, next, phase);
             }
             MasksAction::CancelCreate => {
                 session.cancel_create();
@@ -488,7 +702,7 @@ impl RohditorApp {
 mod tests {
     use super::*;
     use rohditor_edit::{LinearGradient, MaskPoint, MaskShape};
-    use rohditor_engine::tools::LocalSlider;
+    use rohditor_engine::tools::{LocalSlider, RangeSlider};
 
     fn recipe_with_layer() -> EditRecipe {
         let mut recipe = EditRecipe::default();
@@ -518,6 +732,46 @@ mod tests {
             drag_stopped: stopped,
             reset: false,
         }
+    }
+
+    #[test]
+    fn dragging_a_luminance_handle_is_one_undo_step() {
+        let mut recipe = recipe_with_layer();
+        recipe.local.layers[0]
+            .components
+            .push(rohditor_edit::MaskComponent {
+                mode: rohditor_edit::MaskMode::Intersect,
+                invert: false,
+                shape: MaskShape::Luminance(rohditor_edit::LuminanceRange::default()),
+            });
+        let mut edits = EditSession::from_saved(recipe);
+        let step = |edits: &mut EditSession, value, phase| {
+            let next = LayerEdit::RangeSlider {
+                component: 1,
+                slider: RangeSlider::LuminanceLow,
+                value,
+            }
+            .apply(&edits.recipe().clone(), 0);
+            apply_slider(edits, next, phase)
+        };
+        let low = |edits: &EditSession| match &edits.recipe().local.layers[0].components[1].shape {
+            MaskShape::Luminance(range) => range.low,
+            other => panic!("not a luminance range: {other:?}"),
+        };
+        assert!(step(&mut edits, 0.2, drag(true, false)));
+        assert!(step(&mut edits, 0.4, drag(false, false)));
+        assert!(!step(
+            &mut edits,
+            0.4,
+            SliderPhase {
+                drag_stopped: true,
+                ..SliderPhase::default()
+            }
+        ));
+        assert_eq!(low(&edits), 0.4);
+        assert!(edits.undo());
+        assert_eq!(low(&edits), 0.0);
+        assert!(!edits.can_undo());
     }
 
     #[test]
@@ -796,9 +1050,10 @@ mod tests {
     fn the_tint_depends_on_the_shape_and_frame_but_not_on_sliders() {
         let policy = RawCropPolicy::default();
         let recipe = recipe_with_layer();
-        let source = TintSource::new(&recipe, &recipe.local.layers[0], policy);
-        let still_matches =
-            |recipe: &EditRecipe, policy| source.matches(recipe, &recipe.local.layers[0], policy);
+        let source = TintSource::new(&recipe, &recipe.local.layers[0], policy, None);
+        let still_matches = |recipe: &EditRecipe, policy| {
+            source.matches(recipe, &recipe.local.layers[0], policy, None)
+        };
         assert!(still_matches(&recipe, policy));
 
         let slider = LayerEdit::Slider(LocalSlider::Exposure, 1.0)
@@ -817,5 +1072,20 @@ mod tests {
         turned.geometry.orientation_override = Some(Orientation::Rotate90);
         assert!(!still_matches(&turned, policy));
         assert!(!still_matches(&recipe, RawCropPolicy::ActiveArea));
+    }
+
+    #[test]
+    fn the_tint_of_a_range_layer_is_tied_to_the_recipe_revision_it_was_measured_at() {
+        let policy = RawCropPolicy::default();
+        let recipe = recipe_with_layer();
+        let layer = &recipe.local.layers[0];
+        let measured = TintSource::new(&recipe, layer, policy, Some(4));
+        // The same recipe at another revision may look different (exposure, white balance), and a
+        // tint of a layer the recipe alone determines is never the tint of a measured one.
+        assert!(measured.matches(&recipe, layer, policy, Some(4)));
+        assert!(!measured.matches(&recipe, layer, policy, Some(5)));
+        assert!(!measured.matches(&recipe, layer, policy, None));
+        let plain = TintSource::new(&recipe, layer, policy, None);
+        assert!(!plain.matches(&recipe, layer, policy, Some(4)));
     }
 }
