@@ -9,8 +9,8 @@ mod masks;
 
 pub use crop::{CropAspect, CropHandle, CropToolSession};
 pub use masks::{
-    BRUSH_RADIUS_RANGE, BrushSettings, HandleMarker, LayerEdit, LocalSlider, MaskEditMode,
-    MaskHandle, MaskLimit, MaskToolSession, MaskView,
+    BRUSH_RADIUS_RANGE, BrushSettings, ColorPick, HandleMarker, LayerEdit, LocalSlider,
+    MaskEditMode, MaskHandle, MaskLimit, MaskToolSession, MaskView, RangeSlider,
 };
 
 use rohditor_edit::EditRecipe;

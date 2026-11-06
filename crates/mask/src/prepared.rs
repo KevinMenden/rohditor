@@ -5,8 +5,11 @@ use std::ops::Range;
 use rohditor_edit::{MaskComponent, MaskLayer, MaskMode, MaskShape};
 
 use crate::brush::PreparedBrush;
+use crate::color_range::PreparedColor;
 use crate::linear::PreparedLinear;
+use crate::luminance::PreparedLuminance;
 use crate::radial::PreparedRadial;
+use crate::reference::{ReferenceNeeds, ReferenceRow};
 use crate::{MaskError, MaskFrame};
 
 /// A [`MaskLayer`] resolved to pixel space for one frame size. Build it once per render and
@@ -27,11 +30,19 @@ use crate::{MaskError, MaskFrame};
 /// | `Intersect` | `acc * c`           |
 ///
 /// The layer's `opacity` multiplies the final result.
+///
+/// # Range components
+///
+/// Luminance and colour ranges select on what the pixels look like, not where they are. Their
+/// values come from the [`ReferenceRow`] passed to [`evaluate_row`](Self::evaluate_row); ask
+/// [`reference_needs`](Self::reference_needs) which parts to measure. They combine like any
+/// other component and are typically `Intersect`.
 #[derive(Debug, Clone)]
 pub struct PreparedMask {
     frame: MaskFrame,
     opacity: f32,
     components: Vec<PreparedComponent>,
+    needs: ReferenceNeeds,
 }
 
 #[derive(Debug, Clone)]
@@ -46,6 +57,17 @@ enum PreparedShape {
     Linear(PreparedLinear),
     Radial(PreparedRadial),
     Brush(PreparedBrush),
+    Luminance(PreparedLuminance),
+    Color(PreparedColor),
+}
+
+impl PreparedShape {
+    fn reference_needs(&self) -> ReferenceNeeds {
+        ReferenceNeeds {
+            luminance: matches!(self, Self::Luminance(_)),
+            oklab: matches!(self, Self::Color(_)),
+        }
+    }
 }
 
 impl PreparedMask {
@@ -67,24 +89,47 @@ impl PreparedMask {
                 reason: "opacity must be finite",
             });
         }
-        let components = layer
+        let components: Vec<PreparedComponent> = layer
             .components
             .iter()
             .map(|component| PreparedComponent::prepare(component, frame))
             .collect::<Result<_, _>>()?;
+        let needs = components
+            .iter()
+            .fold(ReferenceNeeds::default(), |needs, component| {
+                needs.union(component.shape.reference_needs())
+            });
         Ok(Self {
             frame,
             opacity: layer.opacity.clamp(0.0, 1.0),
             components,
+            needs,
         })
+    }
+
+    /// The reference values this mask reads. When [`ReferenceNeeds::any`] is false, pass
+    /// [`ReferenceRow::NONE`] to `evaluate_row`.
+    #[must_use]
+    pub const fn reference_needs(&self) -> ReferenceNeeds {
+        self.needs
     }
 
     /// Writes the layer's alpha (opacity applied) for pixels `x_range` of row `y` into `out`.
     ///
+    /// `reference` holds the reference values of those same pixels, but only the parts named by
+    /// [`reference_needs`](Self::reference_needs).
+    ///
     /// # Panics
     ///
-    /// If `y` or `x_range` lies outside the frame, or `out.len() != x_range.len()`.
-    pub fn evaluate_row(&self, y: usize, x_range: Range<usize>, out: &mut [f32]) {
+    /// If `y` or `x_range` lies outside the frame, `out.len() != x_range.len()`, or a part of
+    /// `reference` the mask reads does not have one value per pixel.
+    pub fn evaluate_row(
+        &self,
+        y: usize,
+        x_range: Range<usize>,
+        reference: ReferenceRow<'_>,
+        out: &mut [f32],
+    ) {
         assert!(y < self.frame.height, "row {y} outside the mask frame");
         assert!(
             x_range.start <= x_range.end && x_range.end <= self.frame.width,
@@ -94,6 +139,14 @@ impl PreparedMask {
             out.len(),
             x_range.len(),
             "output must match the column range"
+        );
+        assert!(
+            !self.needs.luminance || reference.luminance.len() == out.len(),
+            "luminance reference must match the column range"
+        );
+        assert!(
+            !self.needs.oklab || reference.oklab.len() == out.len(),
+            "OkLab reference must match the column range"
         );
 
         let mut scratch = RowScratch::default();
@@ -108,11 +161,17 @@ impl PreparedMask {
         }
         for (index, component) in self.components.iter().enumerate() {
             if index == 0 && writes_directly {
-                component.evaluate_row(y, x_range.start, out, &mut scratch.keep);
+                component.evaluate_row(y, x_range.start, reference, out, &mut scratch.keep);
                 continue;
             }
             scratch.component.resize(out.len(), 0.0);
-            component.evaluate_row(y, x_range.start, &mut scratch.component, &mut scratch.keep);
+            component.evaluate_row(
+                y,
+                x_range.start,
+                reference,
+                &mut scratch.component,
+                &mut scratch.keep,
+            );
             combine(component.mode, out, &scratch.component);
         }
         if self.opacity != 1.0 {
@@ -132,6 +191,7 @@ impl PreparedMask {
                 .iter()
                 .map(|component| match &component.shape {
                     PreparedShape::Brush(brush) => brush.bytes(),
+                    PreparedShape::Color(color) => color.bytes(),
                     _ => 0,
                 })
                 .sum::<usize>()
@@ -157,6 +217,10 @@ impl PreparedComponent {
                 PreparedShape::Radial(PreparedRadial::prepare(radial, frame)?)
             }
             MaskShape::Brush(brush) => PreparedShape::Brush(PreparedBrush::prepare(brush, frame)?),
+            MaskShape::Luminance(range) => {
+                PreparedShape::Luminance(PreparedLuminance::prepare(range)?)
+            }
+            MaskShape::Color(range) => PreparedShape::Color(PreparedColor::prepare(range)?),
         };
         Ok(Self {
             mode: component.mode,
@@ -166,11 +230,20 @@ impl PreparedComponent {
     }
 
     /// The component's own alpha (inversion applied, combine mode not).
-    fn evaluate_row(&self, y: usize, x_start: usize, out: &mut [f32], keep: &mut Vec<f32>) {
+    fn evaluate_row(
+        &self,
+        y: usize,
+        x_start: usize,
+        reference: ReferenceRow<'_>,
+        out: &mut [f32],
+        keep: &mut Vec<f32>,
+    ) {
         match &self.shape {
             PreparedShape::Linear(linear) => linear.evaluate_row(y, x_start, out),
             PreparedShape::Radial(radial) => radial.evaluate_row(y, x_start, out),
             PreparedShape::Brush(brush) => brush.evaluate_row(y, x_start, out, keep),
+            PreparedShape::Luminance(range) => range.evaluate_row(reference.luminance, out),
+            PreparedShape::Color(range) => range.evaluate_row(reference.oklab, out),
         }
         if self.invert {
             for alpha in out.iter_mut() {
@@ -192,7 +265,10 @@ fn combine(mode: MaskMode, acc: &mut [f32], component: &[f32]) {
 
 #[cfg(test)]
 mod tests {
-    use rohditor_edit::{LinearGradient, LocalSettings, MaskPoint, RadialGradient};
+    use rohditor_edit::{
+        ColorRange, ColorSample, LinearGradient, LocalSettings, LuminanceRange, MaskPoint,
+        RadialGradient,
+    };
 
     use super::*;
     use crate::test_support::{FRAME, plane_of};
@@ -239,7 +315,7 @@ mod tests {
     fn evaluate(layer: &MaskLayer) -> Vec<f32> {
         let mask = PreparedMask::prepare(layer, FRAME).unwrap();
         plane_of(FRAME, |y, x, out| {
-            mask.evaluate_row(y, x..x + out.len(), out)
+            mask.evaluate_row(y, x..x + out.len(), ReferenceRow::NONE, out)
         })
     }
 
@@ -340,8 +416,254 @@ mod tests {
         let whole = evaluate(&two);
         let mask = PreparedMask::prepare(&two, FRAME).unwrap();
         let mut piece = vec![0.0; 11];
-        mask.evaluate_row(9, 7..18, &mut piece);
+        mask.evaluate_row(9, 7..18, ReferenceRow::NONE, &mut piece);
         assert_eq!(piece, whole[9 * FRAME.width + 7..9 * FRAME.width + 18]);
+    }
+
+    /// A luminance reference that grows with x: 0 at the left edge, 1 at the right.
+    fn luminance_ramp() -> Vec<f32> {
+        (0..FRAME.width)
+            .map(|x| x as f32 / (FRAME.width - 1) as f32)
+            .collect()
+    }
+
+    fn evaluate_with_luminance(layer: &MaskLayer, luminance: &[f32]) -> Vec<f32> {
+        let mask = PreparedMask::prepare(layer, FRAME).unwrap();
+        plane_of(FRAME, |y, x, out| {
+            let reference = ReferenceRow {
+                luminance: &luminance[x..x + out.len()],
+                oklab: &[],
+            };
+            mask.evaluate_row(y, x..x + out.len(), reference, out)
+        })
+    }
+
+    #[test]
+    fn a_gradient_intersected_with_a_luminance_range_is_their_product() {
+        let range = MaskShape::Luminance(LuminanceRange {
+            low: 0.4,
+            high: 0.9,
+            feather_low: 0.2,
+            feather_high: 0.0,
+        });
+        let both = layer(
+            1.0,
+            vec![
+                component(MaskMode::Add, false, top()),
+                component(MaskMode::Intersect, false, range.clone()),
+            ],
+        );
+        let ramp = luminance_ramp();
+        let gradient = single(top());
+        let range_only = evaluate_with_luminance(
+            &layer(1.0, vec![component(MaskMode::Add, false, range)]),
+            &ramp,
+        );
+        let combined = evaluate_with_luminance(&both, &ramp);
+        for ((got, g), r) in combined.iter().zip(&gradient).zip(&range_only) {
+            assert!((got - g * r).abs() < 1e-6);
+        }
+        // The range really restricts: some pixels the gradient fully covers are cut away, and
+        // some stay.
+        assert!(
+            combined
+                .iter()
+                .zip(&gradient)
+                .any(|(c, g)| *g == 1.0 && *c == 0.0)
+        );
+        assert!(
+            combined
+                .iter()
+                .zip(&gradient)
+                .any(|(c, g)| *g == 1.0 && *c == 1.0)
+        );
+    }
+
+    /// Reference values of pixels `xs` of row `y`, computed from the absolute position so that
+    /// every pixel has its own value and a row offset shows as a different result.
+    fn reference_of(y: usize, xs: Range<usize>) -> (Vec<f32>, Vec<[f32; 3]>) {
+        let luminance: Vec<f32> = xs
+            .clone()
+            .map(|x| ((x * 7 + y * 13) % 17) as f32 / 16.0)
+            .collect();
+        let oklab = xs
+            .zip(&luminance)
+            .map(|(x, lum)| [*lum, 0.1 - 0.2 * lum, 0.05 * (x % 5) as f32])
+            .collect();
+        (luminance, oklab)
+    }
+
+    fn evaluate_span(mask: &PreparedMask, y: usize, xs: Range<usize>) -> Vec<f32> {
+        let (luminance, oklab) = reference_of(y, xs.clone());
+        let mut out = vec![0.0; xs.len()];
+        mask.evaluate_row(
+            y,
+            xs,
+            ReferenceRow {
+                luminance: &luminance,
+                oklab: &oklab,
+            },
+            &mut out,
+        );
+        out
+    }
+
+    #[test]
+    fn a_sub_range_uses_the_reference_of_its_own_pixels() {
+        // A position-dependent component and both kinds of range, on the asymmetric frame, so
+        // an offset mixed up between the geometry and the reference changes the result.
+        let range_layer = layer(
+            0.9,
+            vec![
+                component(MaskMode::Add, false, left()),
+                component(
+                    MaskMode::Intersect,
+                    false,
+                    MaskShape::Luminance(LuminanceRange {
+                        low: 0.2,
+                        high: 0.8,
+                        feather_low: 0.1,
+                        feather_high: 0.1,
+                    }),
+                ),
+                component(
+                    MaskMode::Intersect,
+                    true,
+                    MaskShape::Color(ColorRange {
+                        samples: vec![
+                            ColorSample {
+                                lightness: 0.2,
+                                a: 0.0,
+                                b: 0.05,
+                            },
+                            ColorSample {
+                                lightness: 0.9,
+                                a: -0.1,
+                                b: 0.1,
+                            },
+                        ],
+                        tolerance: 0.2,
+                    }),
+                ),
+            ],
+        );
+        let mask = PreparedMask::prepare(&range_layer, FRAME).expect("valid layer");
+        for y in [0, 9, FRAME.height - 1] {
+            let whole = evaluate_span(&mask, y, 0..FRAME.width);
+            // The row is neither empty nor flat, so the comparison means something.
+            assert!(whole.iter().any(|alpha| *alpha > 0.0));
+            assert!(whole.windows(2).any(|pair| pair[0] != pair[1]));
+            for xs in [7..18, 30..FRAME.width, 0..1, FRAME.width - 1..FRAME.width] {
+                assert_eq!(
+                    evaluate_span(&mask, y, xs.clone()),
+                    whole[xs.clone()],
+                    "row {y}, columns {xs:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "luminance reference must match")]
+    fn a_full_width_luminance_reference_for_a_sub_range_is_rejected() {
+        let mask = PreparedMask::prepare(
+            &layer(
+                1.0,
+                vec![component(
+                    MaskMode::Add,
+                    false,
+                    MaskShape::Luminance(LuminanceRange::default()),
+                )],
+            ),
+            FRAME,
+        )
+        .expect("valid layer");
+        // The reference of the whole row, not of the columns asked for: it must not be read
+        // from column 0 as if it were aligned.
+        let (luminance, oklab) = reference_of(3, 0..FRAME.width);
+        let reference = ReferenceRow {
+            luminance: &luminance,
+            oklab: &oklab,
+        };
+        mask.evaluate_row(3, 7..18, reference, &mut [0.0; 11]);
+    }
+
+    #[test]
+    #[should_panic(expected = "OkLab reference must match")]
+    fn a_full_width_color_reference_for_a_sub_range_is_rejected() {
+        let mask = PreparedMask::prepare(
+            &layer(
+                1.0,
+                vec![component(
+                    MaskMode::Add,
+                    false,
+                    MaskShape::Color(ColorRange::default()),
+                )],
+            ),
+            FRAME,
+        )
+        .expect("valid layer");
+        let (luminance, oklab) = reference_of(3, 0..FRAME.width);
+        let reference = ReferenceRow {
+            luminance: &luminance,
+            oklab: &oklab,
+        };
+        mask.evaluate_row(3, 7..18, reference, &mut [0.0; 11]);
+    }
+
+    #[test]
+    fn masks_report_which_reference_they_read() {
+        let needs = |shapes: Vec<MaskShape>| {
+            let components = shapes
+                .into_iter()
+                .map(|shape| component(MaskMode::Add, false, shape))
+                .collect();
+            PreparedMask::prepare(&layer(1.0, components), FRAME)
+                .unwrap()
+                .reference_needs()
+        };
+        let luminance = || MaskShape::Luminance(LuminanceRange::default());
+        let color = || MaskShape::Color(ColorRange::default());
+        assert!(!needs(vec![left(), top()]).any());
+        assert_eq!(
+            needs(vec![left(), luminance()]),
+            ReferenceNeeds {
+                luminance: true,
+                oklab: false
+            }
+        );
+        assert_eq!(
+            needs(vec![color()]),
+            ReferenceNeeds {
+                luminance: false,
+                oklab: true
+            }
+        );
+        assert_eq!(
+            needs(vec![luminance(), color()]),
+            ReferenceNeeds {
+                luminance: true,
+                oklab: true
+            }
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "luminance reference must match")]
+    fn a_missing_reference_is_a_programming_error() {
+        let mask = PreparedMask::prepare(
+            &layer(
+                1.0,
+                vec![component(
+                    MaskMode::Add,
+                    false,
+                    MaskShape::Luminance(LuminanceRange::default()),
+                )],
+            ),
+            FRAME,
+        )
+        .unwrap();
+        mask.evaluate_row(0, 0..4, ReferenceRow::NONE, &mut [0.0; 4]);
     }
 
     #[test]

@@ -8,7 +8,9 @@
 use eframe::egui;
 use rohditor_core::OutputGeometry;
 use rohditor_edit::{EditRecipe, MaskLayer, MaskShape};
-use rohditor_engine::tools::{HandleMarker, MaskEditMode, MaskHandle, MaskToolSession, MaskView};
+use rohditor_engine::tools::{
+    ColorPick, HandleMarker, MaskEditMode, MaskHandle, MaskToolSession, MaskView,
+};
 
 use super::theme::colors;
 
@@ -40,6 +42,9 @@ pub(crate) struct MaskOverlayOutput {
     pub erase_held: bool,
     /// A click on another mask's pin.
     pub select_layer: Option<u32>,
+    /// A click of the colour picker: where, and what it does to the samples (a plain click
+    /// replaces them, Shift adds, Alt removes the nearest).
+    pub pick_color: Option<((f64, f64), ColorPick)>,
     /// A mask gesture owns the primary drag, so the viewport must not pan with it.
     pub captures_drag: bool,
     /// How the image was shown this frame; the positions above are only meaningful for it.
@@ -84,6 +89,8 @@ fn press_grabs(model: &MaskOverlayModel<'_>, image_rect: egui::Rect, pointer: eg
         MaskEditMode::CreateLinear | MaskEditMode::CreateRadial | MaskEditMode::Paint { .. } => {
             true
         }
+        // A click, not a drag: the image still pans.
+        MaskEditMode::PickColor => false,
     }
 }
 
@@ -205,6 +212,8 @@ fn layer_anchor(layer: &MaskLayer) -> Option<(f32, f32)> {
             .iter()
             .find_map(|stroke| stroke.points.first())
             .map(|point| (point.x, point.y)),
+        // A range has no position to pin.
+        MaskShape::Luminance(_) | MaskShape::Color(_) => None,
     }
 }
 
@@ -271,8 +280,27 @@ pub(crate) fn interact_and_paint(
     }
 
     let hover = response.hover_pos();
-    // Painting takes every press, so the pins of other masks cannot be clicked then.
-    let hovered_pin = hover.filter(|_| !painting).and_then(|hover| {
+    let picking = model.session.is_picking_color();
+    if picking
+        && response.clicked_by(primary)
+        && let Some(position) = response
+            .interact_pointer_pos()
+            .filter(|position| image_rect.contains(*position))
+    {
+        let pick = ui.input(|input| {
+            if input.modifiers.alt {
+                ColorPick::RemoveNearest
+            } else if input.modifiers.shift {
+                ColorPick::Add
+            } else {
+                ColorPick::Replace
+            }
+        });
+        output.pick_color = Some((to_display(image_rect, position), pick));
+    }
+    // Painting takes every press, and so does the picker, so the pins of other masks cannot be
+    // clicked then.
+    let hovered_pin = hover.filter(|_| !painting && !picking).and_then(|hover| {
         other_pins(model, image_rect)
             .find(|(_, pin)| pin.distance(hover) <= PIN_HIT_RADIUS)
             .map(|(layer, _)| layer)

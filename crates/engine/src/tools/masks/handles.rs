@@ -138,7 +138,8 @@ pub(super) fn markers(shape: &MaskShape, space: Space) -> Vec<(MaskHandle, Vec2)
                 (MaskHandle::RadialCenter, ellipse.center),
             ]
         }
-        MaskShape::Brush(_) => Vec::new(),
+        // Brushes are painted and ranges are set with sliders and the picker: no handles.
+        MaskShape::Brush(_) | MaskShape::Luminance(_) | MaskShape::Color(_) => Vec::new(),
     }
 }
 
@@ -180,7 +181,7 @@ pub(super) fn hit_test(
                 None
             }
         }
-        MaskShape::Brush(_) => None,
+        MaskShape::Brush(_) | MaskShape::Luminance(_) | MaskShape::Color(_) => None,
     }
 }
 
@@ -204,7 +205,7 @@ pub(super) fn drag(
         MaskShape::Radial(radial) => {
             drag_radial(radial, space, handle, grab, pointer).map(MaskShape::Radial)
         }
-        MaskShape::Brush(_) => None,
+        MaskShape::Brush(_) | MaskShape::Luminance(_) | MaskShape::Color(_) => None,
     }
 }
 

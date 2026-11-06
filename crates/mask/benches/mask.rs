@@ -6,14 +6,17 @@
 //! The `brush-N` cases are what painting produces: N strokes of a 5 % radius, each simplified
 //! to about a dozen points. A brush layer is prepared again on every render, so `mask_prepare`
 //! at fit size is the cost every preview of a painted photo pays.
+//!
+//! The `luminance` and `color-3` cases evaluate a range component on a synthetic reference
+//! (the cost of measuring the reference from pixels is the pipeline's, not this crate's).
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use rayon::prelude::*;
 use rohditor_edit::{
-    BrushMask, BrushStroke, LinearGradient, LocalSettings, MaskComponent, MaskLayer, MaskMode,
-    MaskPoint, MaskShape, RadialGradient,
+    BrushMask, BrushStroke, ColorRange, ColorSample, LinearGradient, LocalSettings, LuminanceRange,
+    MaskComponent, MaskLayer, MaskMode, MaskPoint, MaskShape, RadialGradient,
 };
-use rohditor_mask::{MaskFrame, PreparedMask};
+use rohditor_mask::{MaskFrame, PreparedMask, ReferenceRow};
 
 const FRAMES: [(&str, usize, usize); 3] = [
     ("fit-2560x1707", 2_560, 1_707),
@@ -118,6 +121,28 @@ fn cases() -> Vec<(&'static str, MaskLayer)> {
                 feather: 0.5,
             })),
         ),
+        (
+            "luminance",
+            layer(MaskShape::Luminance(LuminanceRange {
+                low: 0.3,
+                high: 0.8,
+                feather_low: 0.1,
+                feather_high: 0.1,
+            })),
+        ),
+        (
+            "color-3",
+            layer(MaskShape::Color(ColorRange {
+                samples: (0..3)
+                    .map(|i| ColorSample {
+                        lightness: 0.4 + 0.15 * i as f32,
+                        a: 0.1 - 0.1 * i as f32,
+                        b: 0.05 * i as f32,
+                    })
+                    .collect(),
+                tolerance: 0.4,
+            })),
+        ),
         ("brush-50x200", layer(brush())),
         ("brush-10", layer(painted(10))),
         ("brush-100", layer(painted(100))),
@@ -125,15 +150,40 @@ fn cases() -> Vec<(&'static str, MaskLayer)> {
     ]
 }
 
+/// A per-thread row of output alpha plus a synthetic reference (a luminance ramp and a matching
+/// OkLab sweep) for masks with range components.
+struct RowBuffers {
+    alpha: Vec<f32>,
+    luminance: Vec<f32>,
+    oklab: Vec<[f32; 3]>,
+}
+
+impl RowBuffers {
+    fn new(width: usize) -> Self {
+        let ramp = |x: usize| x as f32 / width as f32;
+        Self {
+            alpha: vec![0.0; width],
+            luminance: (0..width).map(ramp).collect(),
+            oklab: (0..width)
+                .map(|x| [ramp(x), 0.1 - 0.2 * ramp(x), 0.1 * ramp(x)])
+                .collect(),
+        }
+    }
+}
+
 /// Evaluates every row of the frame, as a pipeline stage would, and returns a checksum.
 fn evaluate_all(mask: &PreparedMask, frame: MaskFrame) -> f32 {
     (0..frame.height)
         .into_par_iter()
         .map_init(
-            || vec![0.0f32; frame.width],
-            |row, y| {
-                mask.evaluate_row(y, 0..frame.width, row);
-                row[frame.width / 2]
+            || RowBuffers::new(frame.width),
+            |buffers, y| {
+                let reference = ReferenceRow {
+                    luminance: &buffers.luminance,
+                    oklab: &buffers.oklab,
+                };
+                mask.evaluate_row(y, 0..frame.width, reference, &mut buffers.alpha);
+                buffers.alpha[frame.width / 2]
             },
         )
         .sum()
