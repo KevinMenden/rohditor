@@ -715,3 +715,23 @@ fn a_copy_of_another_size_is_refused() {
         .push(layer(0, linear(0.2, 0.8), detail_settings()));
     assert!(LocalStage::prepare(&recipe, WIDTH, HEIGHT, &|_| Some(Arc::clone(&wrong))).is_err());
 }
+
+#[test]
+fn the_standalone_stage_refuses_local_detail_rather_than_dropping_it() {
+    let original = varied_image();
+    let mut recipe = neutral_recipe();
+    recipe
+        .local
+        .layers
+        .push(layer(0, linear(0.2, 0.8), detail_settings()));
+    let mut image = original.clone();
+    assert!(matches!(
+        apply_adjustments(&mut image, &recipe),
+        Err(crate::PipelineError::InvalidRecipe { .. })
+    ));
+    assert_eq!(image.data(), original.data());
+
+    // Taking away noise reduction the global settings don't have needs no copy, so nothing is lost.
+    recipe.local.layers[0].settings.detail.luminance_noise = -0.5;
+    assert_eq!(adjusted(&original, &recipe), original.data());
+}

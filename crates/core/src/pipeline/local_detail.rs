@@ -152,7 +152,8 @@ pub(super) fn prepare_base(
 ///
 /// At the peak, the last copy is being developed: the other copies at output size, the camera
 /// source, its working copy, and either the detail scratch or the optics output. Developing the
-/// base afterwards needs no more, because it consumes the source in place.
+/// base afterwards needs no more: it consumes the source in place, so it trades the source for
+/// one more finished image, which `preview_dimensions` never makes larger than the source.
 fn validate_peak(
     frame: &RawFrame,
     recipe: &EditRecipe,
@@ -166,6 +167,7 @@ fn validate_peak(
     let (target_width, target_height) = preview_dimensions(width, height, options.max_long_edge)?;
     let source = image_bytes(width, height).ok_or_else(overflow)?;
     let finished = image_bytes(target_width, target_height).ok_or_else(overflow)?;
+    debug_assert!(finished <= source, "the peak below relies on this");
 
     let mut scratch = source; // The optics output, at least as large as the source.
     for recipe in std::iter::once(recipe.clone())

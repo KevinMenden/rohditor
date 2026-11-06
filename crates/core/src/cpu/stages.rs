@@ -317,12 +317,19 @@ pub(super) mod adjustments {
     /// Exposure is scene-referred and precedes the selected base rendering. The
     /// remaining Light and Color controls operate on that rendered linear result.
     ///
-    /// Local detail settings are left out: their copies of the image belong to a
-    /// `DemosaicedBase`, so only the render paths of `CpuPipeline` apply them.
+    /// A recipe with effective local detail settings is refused rather than rendered without
+    /// them: their copies of the image belong to a `DemosaicedBase`, so only the render paths of
+    /// `CpuPipeline` can apply them.
     pub fn apply_adjustments(
         image: &mut LinearRgbImage<f32>,
         recipe: &EditRecipe,
     ) -> Result<(), PipelineError> {
+        if !crate::local_detail_variants(recipe).is_empty() {
+            return Err(PipelineError::InvalidRecipe {
+                field: "local.layers.settings.detail",
+                reason: "local detail settings need the render paths of CpuPipeline".to_owned(),
+            });
+        }
         apply_adjustments_cancellable(image, recipe, &CancellationToken::new())
     }
 
