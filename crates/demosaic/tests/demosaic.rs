@@ -357,6 +357,25 @@ fn amaze_reconstructs_across_tile_boundaries() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn rcd_covers_every_pixel_across_tiles_and_dropped_partial_tiles() -> Result<(), Box<dyn Error>> {
+    // 370 and 380 leave a final 22-pixel tile with no complete neighbourhood
+    // (dropped), 400 and 230 leave partial tiles that are processed. Every
+    // pixel must come from either a tile core or the bilinear base.
+    for (width, height) in [(370, 380), (400, 230), (230, 370)] {
+        let mosaic = mosaic_from_rgb(width, height, BayerPattern::Grbg, |_, _| [0.18, 0.36, 0.72])?;
+        let image = demosaic(
+            &mosaic,
+            WhiteBalanceGains::identity(),
+            DemosaicAlgorithm::Rcd,
+        )?;
+        for pixel in image.data().as_chunks::<3>().0 {
+            assert_close(pixel, &[0.18, 0.36, 0.72], 2.0e-5);
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn amaze_keeps_signed_and_over_range_samples_finite() -> Result<(), Box<dyn Error>> {
     let mosaic = mosaic_from_rgb(40, 40, BayerPattern::Bggr, |_, _| [-0.25, 1.25, 2.0])?;
     let image = demosaic(
