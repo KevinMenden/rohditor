@@ -22,11 +22,15 @@ pub use opposed::{opposed_scratch_bytes, reconstruct_opposed, reconstruct_oppose
 
 /// Version of the deterministic Local ratios estimator used in recipe/cache
 /// identities. Numerical contract changes must increment this value.
-pub const LOCAL_RATIOS_ALGORITHM_VERSION: u8 = 1;
+/// v2: suspected sites that reconstruction did not raise are lowered to the
+/// optional WB-aware `neutral_ceiling` (issue #65).
+pub const LOCAL_RATIOS_ALGORITHM_VERSION: u8 = 2;
 
 /// Version of the deterministic Opposed estimator used in recipe/cache
 /// identities. Numerical contract changes must increment this value.
-pub const OPPOSED_ALGORITHM_VERSION: u8 = 1;
+/// v2: suspected sites that reconstruction did not raise are lowered to the
+/// optional WB-aware `neutral_ceiling` (issue #65).
+pub const OPPOSED_ALGORITHM_VERSION: u8 = 2;
 
 /// Version of the deterministic Clip operation used in backend/cache identities.
 /// Numerical contract changes must increment this value.
@@ -65,6 +69,15 @@ impl ChannelClipLevels {
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn for_channel(self, channel: usize) -> f32 {
+        match channel {
+            0 => self.red,
+            1 => self.green,
+            2 => self.blue,
+            _ => unreachable!("Bayer channel index is always in range"),
+        }
     }
 }
 
@@ -111,10 +124,21 @@ impl ChannelDetectionLevels {
     }
 }
 
-/// Configuration for version-one local-ratio reconstruction.
+/// Configuration for local-ratio reconstruction.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LocalRatioOptions {
     pub detection_levels: ChannelDetectionLevels,
+    /// WB-aware neutral ceiling per channel, computed from the as-shot white
+    /// balance by the caller; `None` disables neutralisation. Values are
+    /// camera-native (pre-WB) — suspected sites that reconstruction did not
+    /// raise are lowered to this ceiling so they land neutral after the
+    /// as-shot balance, mirroring Clip's common-ceiling rule (issue #65).
+    ///
+    /// Because the ceiling derives from as-shot metadata (constant per file)
+    /// and never from the recipe, a big user white-balance change can leave a
+    /// slight tint in fully blown areas — the same trade-off the demosaic
+    /// stage documents for `demosaic_balance` in `rohditor-core`.
+    pub neutral_ceiling: Option<ChannelClipLevels>,
 }
 
 /// Counts produced by Local ratios reconstruction.
@@ -122,9 +146,14 @@ pub struct LocalRatioOptions {
 pub struct ReconstructionStats {
     pub suspected_clipped_sites: usize,
     pub reconstructed_sites: usize,
+    /// Sites strictly *raised* by an applied estimate. Neutralisation is
+    /// counted separately in [`Self::neutralised_sites`] (issue #65).
     pub changed_sites: usize,
     pub fallback_sites: usize,
     pub fully_unsupported_sites: usize,
+    /// Sites the neutraliser lowered strictly below their input to the
+    /// `neutral_ceiling`; zero when the option is `None`.
+    pub neutralised_sites: usize,
     pub suspected_by_channel: [usize; 3],
 }
 
@@ -135,6 +164,7 @@ impl ReconstructionStats {
         self.changed_sites += other.changed_sites;
         self.fallback_sites += other.fallback_sites;
         self.fully_unsupported_sites += other.fully_unsupported_sites;
+        self.neutralised_sites += other.neutralised_sites;
         for (target, source) in self
             .suspected_by_channel
             .iter_mut()
@@ -222,10 +252,21 @@ impl HighlightExecution {
     }
 }
 
-/// Configuration for version-one Opposed / local-inpainting reconstruction.
+/// Configuration for Opposed / local-inpainting reconstruction.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OpposedOptions {
     pub detection_levels: ChannelDetectionLevels,
+    /// WB-aware neutral ceiling per channel, computed from the as-shot white
+    /// balance by the caller; `None` disables neutralisation. Values are
+    /// camera-native (pre-WB) — suspected sites that reconstruction did not
+    /// raise are lowered to this ceiling so they land neutral after the
+    /// as-shot balance, mirroring Clip's common-ceiling rule (issue #65).
+    ///
+    /// Because the ceiling derives from as-shot metadata (constant per file)
+    /// and never from the recipe, a big user white-balance change can leave a
+    /// slight tint in fully blown areas — the same trade-off the demosaic
+    /// stage documents for `demosaic_balance` in `rohditor-core`.
+    pub neutral_ceiling: Option<ChannelClipLevels>,
 }
 
 /// Counts produced by Opposed / local-inpainting reconstruction.
@@ -233,9 +274,14 @@ pub struct OpposedOptions {
 pub struct OpposedStats {
     pub suspected_clipped_sites: usize,
     pub reconstructed_sites: usize,
+    /// Sites strictly *raised* by an applied estimate. Neutralisation is
+    /// counted separately in [`Self::neutralised_sites`] (issue #65).
     pub changed_sites: usize,
     pub fallback_sites: usize,
     pub fully_unsupported_sites: usize,
+    /// Sites the neutraliser lowered strictly below their input to the
+    /// `neutral_ceiling`; zero when the option is `None`.
+    pub neutralised_sites: usize,
     pub suspected_by_channel: [usize; 3],
 }
 
@@ -246,6 +292,7 @@ impl OpposedStats {
         self.changed_sites += other.changed_sites;
         self.fallback_sites += other.fallback_sites;
         self.fully_unsupported_sites += other.fully_unsupported_sites;
+        self.neutralised_sites += other.neutralised_sites;
         for (target, source) in self
             .suspected_by_channel
             .iter_mut()

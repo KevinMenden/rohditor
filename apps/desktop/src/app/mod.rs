@@ -2613,6 +2613,7 @@ impl RohditorApp {
                                 changed_sites: stats.changed_sites,
                                 fallback_sites: stats.fallback_sites,
                                 fully_unsupported_sites: stats.fully_unsupported_sites,
+                                neutralised_sites: stats.neutralised_sites,
                                 suspected_by_channel: stats.suspected_by_channel,
                             }
                         }
@@ -2622,6 +2623,7 @@ impl RohditorApp {
                             changed_sites: stats.changed_sites,
                             fallback_sites: stats.fallback_sites,
                             fully_unsupported_sites: stats.fully_unsupported_sites,
+                            neutralised_sites: stats.neutralised_sites,
                             suspected_by_channel: stats.suspected_by_channel,
                         },
                     },

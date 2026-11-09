@@ -4,7 +4,7 @@ use rohditor_image::MosaicImage;
 use crate::cells::CellSummaries;
 use crate::detect::is_suspected_clipped;
 use crate::{
-    ChannelDetectionLevels, HighlightError, LocalRatioOptions, LocalRatioOutput,
+    ChannelClipLevels, ChannelDetectionLevels, HighlightError, LocalRatioOptions, LocalRatioOutput,
     ReconstructionStats, checkpoint,
 };
 
@@ -40,6 +40,11 @@ pub fn reconstruct_local_ratios_cancellable(
     cancellation: &dyn crate::CancellationCheck,
 ) -> Result<LocalRatioOutput, HighlightError> {
     options.detection_levels.validate()?;
+    if let Some(ceiling) = options.neutral_ceiling {
+        // Validate before any pixel write: a NaN/zero ceiling would sail past
+        // the input-only non-finite sample scans below.
+        ceiling.validate()?;
+    }
     checkpoint(cancellation)?;
     let validation = validate_visible_samples(&mosaic, options.detection_levels, cancellation)?;
     if validation.suspected_clipped_sites == 0 {
@@ -75,6 +80,12 @@ pub fn reconstruct_local_ratios_cancellable(
                     if support_count == 0 {
                         row_stats.fallback_sites += 1;
                         row_stats.fully_unsupported_sites += 1;
+                        neutralise_to_ceiling(
+                            sample,
+                            options.neutral_ceiling,
+                            channel,
+                            &mut row_stats.neutralised_sites,
+                        );
                         continue;
                     }
 
@@ -89,6 +100,12 @@ pub fn reconstruct_local_ratios_cancellable(
                     );
                     let Some(estimate) = estimate else {
                         row_stats.fallback_sites += 1;
+                        neutralise_to_ceiling(
+                            sample,
+                            options.neutral_ceiling,
+                            channel,
+                            &mut row_stats.neutralised_sites,
+                        );
                         continue;
                     };
 
@@ -97,6 +114,16 @@ pub fn reconstruct_local_ratios_cancellable(
                     if bounded > *sample {
                         *sample = bounded;
                         row_stats.changed_sites += 1;
+                    } else {
+                        // Estimate produced but not applied: the site keeps
+                        // its raw value, so for the neutraliser it is a
+                        // fallback like a `None` estimate (issue #65).
+                        neutralise_to_ceiling(
+                            sample,
+                            options.neutral_ceiling,
+                            channel,
+                            &mut row_stats.neutralised_sites,
+                        );
                     }
                 }
                 Ok(row_stats)
@@ -117,6 +144,10 @@ pub fn reconstruct_local_ratios_cancellable(
     );
     debug_assert!(reconstruction.changed_sites <= reconstruction.reconstructed_sites);
     debug_assert!(reconstruction.fully_unsupported_sites <= reconstruction.fallback_sites);
+    debug_assert!(
+        reconstruction.neutralised_sites
+            <= reconstruction.suspected_clipped_sites - reconstruction.changed_sites
+    );
     checkpoint(cancellation)?;
     Ok(LocalRatioOutput {
         mosaic,
@@ -315,5 +346,26 @@ fn median(values: &[f32]) -> f32 {
         (values[middle - 1] + values[middle]) * 0.5
     } else {
         values[middle]
+    }
+}
+
+/// Lower a suspected, not-raised site to its neutral ceiling with a strict
+/// `>` (mirroring Clip's `is_changed`), so the site lands neutral after the
+/// as-shot white balance instead of keeping its clipped chroma (issue #65).
+/// Raised sites are deliberately excluded in v1: the estimator output above
+/// the ceiling is still information, not raw clipping.
+fn neutralise_to_ceiling(
+    sample: &mut f32,
+    ceiling: Option<ChannelClipLevels>,
+    channel: usize,
+    neutralised_sites: &mut usize,
+) {
+    let Some(ceiling) = ceiling else {
+        return;
+    };
+    let limit = ceiling.for_channel(channel);
+    if *sample > limit {
+        *sample = limit;
+        *neutralised_sites += 1;
     }
 }

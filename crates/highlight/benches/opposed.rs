@@ -43,6 +43,7 @@ fn bench_opposed(c: &mut Criterion) {
             green: 0.9,
             blue: 0.9,
         },
+        neutral_ceiling: None,
     };
     let fixtures = [
         Fixture {
