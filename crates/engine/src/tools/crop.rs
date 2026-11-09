@@ -86,6 +86,12 @@ pub struct CropToolSession {
     draft: NormalizedCropRect,
     aspect: CropAspect,
     locked: bool,
+    /// Ratio captured when the lock is ticked while the preset is `Free`,
+    /// stored in pixel units in landscape base form (the effective ratio is
+    /// `1.0 / locked_ratio` while portrait), mirroring how `CropAspect::ratio`
+    /// keeps preset ratios in pixel space before the normalized conversion.
+    /// Preset-locked drags never consult this.
+    locked_ratio: Option<f64>,
     portrait: bool,
     full_width: usize,
     full_height: usize,
@@ -104,6 +110,7 @@ impl CropToolSession {
             draft: committed.unwrap_or(NormalizedCropRect::FULL_FRAME),
             aspect: CropAspect::Free,
             locked: false,
+            locked_ratio: None,
             portrait: false,
             full_width,
             full_height,
@@ -142,11 +149,30 @@ impl CropToolSession {
     pub fn set_aspect(&mut self, aspect: CropAspect) {
         self.aspect = aspect;
         self.locked = aspect != CropAspect::Free;
+        // The ratio derives from the preset from here on; a Free switch also
+        // unlocks, so the preset row and the checkbox can never disagree.
+        self.locked_ratio = None;
         self.constrain_draft();
     }
 
+    /// Ticking the lock on the `Free` preset captures the draft's current
+    /// ratio (portrait-aware, so the effective ratio equals the draft ratio
+    /// at tick time and the capture causes no snap); unticking clears it.
     pub fn set_locked(&mut self, locked: bool) {
         self.locked = locked;
+        self.locked_ratio = if locked && self.aspect == CropAspect::Free {
+            // Dragged rects keep both edges >= MINIMUM_NORMALIZED_EDGE and presets
+            // are fit-to-frame, so this division can't produce inf/NaN.
+            let pixel_ratio = ((self.draft.right - self.draft.left) * self.full_width as f64)
+                / ((self.draft.bottom - self.draft.top) * self.full_height as f64);
+            Some(if self.portrait {
+                1.0 / pixel_ratio
+            } else {
+                pixel_ratio
+            })
+        } else {
+            None
+        };
         self.constrain_draft();
     }
 
@@ -209,11 +235,20 @@ impl CropToolSession {
     }
 
     fn normalized_ratio(&self) -> Option<f64> {
-        self.aspect
-            .ratio(
+        // Pixel-space ratio first, exactly like the preset path: presets are
+        // flipped in pixel space inside `CropAspect::ratio`, a Free-locked
+        // session flips its captured base form here, and both then share the
+        // single normalized conversion.
+        let pixel_ratio = match self.aspect {
+            CropAspect::Free => self
+                .locked_ratio
+                .map(|ratio| if self.portrait { 1.0 / ratio } else { ratio }),
+            _ => self.aspect.ratio(
                 self.full_width as f64 / self.full_height as f64,
                 self.portrait,
-            )
+            ),
+        };
+        pixel_ratio
             .map(|pixel_ratio| pixel_ratio * self.full_height as f64 / self.full_width as f64)
     }
 
@@ -341,6 +376,23 @@ fn fit_rect(center_x: f64, center_y: f64, width: f64, height: f64) -> Normalized
 mod tests {
     use super::{CropAspect, CropHandle, CropToolSession};
 
+    /// The draft's ratio in pixel coordinates: `(Δx·W)/(Δy·H)`.
+    fn pixel_ratio(session: &CropToolSession, full_width: usize, full_height: usize) -> f64 {
+        let rect = session.draft();
+        ((rect.right - rect.left) * full_width as f64)
+            / ((rect.bottom - rect.top) * full_height as f64)
+    }
+
+    /// 6000×4000 session, free-resized on SouthEast to a 3000×1600 draft
+    /// (pixel ratio 1.875), the fixture shared by the capture tests.
+    fn session_resized_to_1875() -> CropToolSession {
+        let mut session = CropToolSession::new(None, 6000, 4000);
+        session.begin_drag(CropHandle::SouthEast, (1.0, 1.0));
+        session.drag_to((0.5, 0.4));
+        session.finish_drag();
+        session
+    }
+
     #[test]
     fn moving_and_free_resizing_stay_in_bounds_without_inversion() {
         let mut session = CropToolSession::new(None, 6000, 4000);
@@ -375,5 +427,179 @@ mod tests {
         assert!(session.committed_crop().is_some());
         session.reset();
         assert_eq!(session.committed_crop(), None);
+    }
+
+    #[test]
+    fn lock_on_free_preserves_draft_pixel_ratio_corner() {
+        let mut session = session_resized_to_1875();
+        let before = session.draft();
+        session.set_locked(true);
+        session.begin_drag(CropHandle::NorthWest, (before.left, before.top));
+        session.drag_to((0.1, 0.2));
+        session.finish_drag();
+        assert!((pixel_ratio(&session, 6000, 4000) - 1.875).abs() < 1.0e-9);
+        assert_ne!(session.draft(), before);
+    }
+
+    #[test]
+    fn lock_on_free_preserves_ratio_for_edge_handles() {
+        // Width-driven edge: East.
+        let mut session = session_resized_to_1875();
+        session.set_locked(true);
+        session.begin_drag(CropHandle::East, (0.5, 0.2));
+        session.drag_to((0.8, 0.5));
+        session.finish_drag();
+        assert!((pixel_ratio(&session, 6000, 4000) - 1.875).abs() < 1.0e-9);
+        // Height-driven edge: South, on a fresh session.
+        let mut session = session_resized_to_1875();
+        session.set_locked(true);
+        session.begin_drag(CropHandle::South, (0.25, 0.4));
+        session.drag_to((0.25, 0.7));
+        session.finish_drag();
+        assert!((pixel_ratio(&session, 6000, 4000) - 1.875).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn lock_on_free_works_on_portrait_image() {
+        // The capture is not landscape-biased: a physically portrait image.
+        let mut session = CropToolSession::new(None, 4000, 6000);
+        session.begin_drag(CropHandle::SouthEast, (1.0, 1.0));
+        session.drag_to((0.4, 0.5));
+        session.finish_drag();
+        session.set_locked(true);
+        session.begin_drag(CropHandle::NorthWest, (0.0, 0.0));
+        session.drag_to((0.1, 0.1));
+        session.finish_drag();
+        assert!((pixel_ratio(&session, 4000, 6000) - 8.0 / 15.0).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn captured_ratio_flips_with_orientation() {
+        // Orientation flips happen in pixel space, as with presets. Storing
+        // the capture in normalized units would yield 1.2 here, not 0.5333.
+        let mut session = session_resized_to_1875();
+        session.set_locked(true);
+        session.toggle_orientation();
+        let flipped = 1.0 / 1.875;
+        assert!((pixel_ratio(&session, 6000, 4000) - flipped).abs() < 1.0e-9);
+        session.begin_drag(CropHandle::NorthWest, (session.draft().left, 0.0));
+        session.drag_to((0.05, 0.05));
+        session.finish_drag();
+        assert!((pixel_ratio(&session, 6000, 4000) - flipped).abs() < 1.0e-9);
+        session.toggle_orientation();
+        assert!((pixel_ratio(&session, 6000, 4000) - 1.875).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn lock_captured_while_portrait_keeps_screen_ratio() {
+        let mut session = CropToolSession::new(None, 6000, 4000);
+        session.toggle_orientation();
+        session.begin_drag(CropHandle::SouthEast, (1.0, 1.0));
+        session.drag_to((0.5, 0.4));
+        session.finish_drag();
+        // The portrait capture arm stores 1/1.875 so the effective ratio
+        // stays the on-screen 1.875: locking causes no snap.
+        session.set_locked(true);
+        session.begin_drag(CropHandle::NorthWest, (0.0, 0.0));
+        session.drag_to((0.1, 0.2));
+        session.finish_drag();
+        assert!((pixel_ratio(&session, 6000, 4000) - 1.875).abs() < 1.0e-9);
+        session.toggle_orientation();
+        assert!((pixel_ratio(&session, 6000, 4000) - 1.0 / 1.875).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn selecting_free_unlocks_and_keeps_draft() {
+        let mut session = CropToolSession::new(None, 6000, 4000);
+        session.set_aspect(CropAspect::ThreeTwo);
+        session.begin_drag(CropHandle::NorthWest, (0.0, 0.0));
+        session.drag_to((0.2, 0.2));
+        session.finish_drag();
+        let before = session.draft();
+        session.set_aspect(CropAspect::Free);
+        assert!(!session.locked());
+        assert_eq!(session.draft(), before);
+        session.begin_drag(CropHandle::SouthEast, (1.0, 1.0));
+        session.drag_to((0.6, 0.4));
+        session.finish_drag();
+        let ratio = pixel_ratio(&session, 6000, 4000);
+        assert!((ratio - 1.5).abs() > 1.0e-9);
+    }
+
+    #[test]
+    fn preset_after_free_capture_wins() {
+        let mut session = session_resized_to_1875();
+        session.set_locked(true);
+        session.set_aspect(CropAspect::Square);
+        assert!(session.locked());
+        let draft = session.draft();
+        session.begin_drag(CropHandle::NorthWest, (draft.left, draft.top));
+        session.drag_to((0.05, 0.05));
+        session.finish_drag();
+        assert!((pixel_ratio(&session, 6000, 4000) - 1.0).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn reticking_lock_recaptures_current_draft() {
+        let mut session = session_resized_to_1875();
+        session.set_locked(true);
+        session.set_locked(false);
+        session.begin_drag(CropHandle::NorthWest, (0.0, 0.0));
+        session.drag_to((0.2, 0.05));
+        session.finish_drag();
+        // Untouched the ratio drifted off 1.875; reticking pins the new one.
+        session.set_locked(true);
+        let draft = session.draft();
+        session.begin_drag(CropHandle::NorthWest, (draft.left, draft.top));
+        session.drag_to((0.1, 0.02));
+        session.finish_drag();
+        let ratio = pixel_ratio(&session, 6000, 4000);
+        // 1800x1400 px = (0.5-0.2)*6000 x (0.4-0.05)*4000 captured at retick -> 1800/1400 = 9/7
+        assert!((ratio - 9.0 / 7.0).abs() < 1.0e-9);
+        assert!((ratio - 1.875).abs() > 1.0e-9);
+    }
+
+    #[test]
+    fn reselecting_free_unlocks_captured_lock() {
+        // `set_aspect` runs unconditionally: re-clicking the selected Free
+        // preset also unlocks a captured lock.
+        let mut session = session_resized_to_1875();
+        session.set_locked(true);
+        let before = session.draft();
+        session.set_aspect(CropAspect::Free);
+        assert!(!session.locked());
+        assert_eq!(session.draft(), before);
+    }
+
+    #[test]
+    fn lock_on_full_frame_locks_image_aspect() {
+        let mut session = CropToolSession::new(None, 6000, 4000);
+        session.set_locked(true);
+        session.begin_drag(CropHandle::NorthWest, (0.0, 0.0));
+        session.drag_to((0.25, 0.15));
+        session.finish_drag();
+        assert!((pixel_ratio(&session, 6000, 4000) - 1.5).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn locked_preset_edge_and_orientation_paths() {
+        let mut session = CropToolSession::new(None, 6000, 4000);
+        session.set_aspect(CropAspect::ThreeTwo);
+        session.begin_drag(CropHandle::East, (1.0, 0.5));
+        session.drag_to((0.7, 0.5));
+        session.finish_drag();
+        assert!((pixel_ratio(&session, 6000, 4000) - 1.5).abs() < 1.0e-9);
+
+        let mut session = CropToolSession::new(None, 6000, 4000);
+        session.set_aspect(CropAspect::Square);
+        session.begin_drag(CropHandle::South, (0.5, 1.0));
+        session.drag_to((0.5, 0.6));
+        session.finish_drag();
+        assert!((pixel_ratio(&session, 6000, 4000) - 1.0).abs() < 1.0e-9);
+
+        let mut session = CropToolSession::new(None, 6000, 4000);
+        session.set_aspect(CropAspect::Original);
+        session.toggle_orientation();
+        assert!((pixel_ratio(&session, 6000, 4000) - 2.0 / 3.0).abs() < 1.0e-9);
     }
 }
