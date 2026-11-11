@@ -37,8 +37,10 @@ impl Presence {
     }
 }
 
-/// Scratch bytes [`apply_presence`] needs beyond the image itself: at its peak the encoded luma
-/// plane plus the blur's working planes. `None` on overflow.
+/// Scratch bytes [`apply_presence`] needs beyond the image itself. The peak is in texture and
+/// clarity: the encoded luma plane plus the blur's four buffers (copy, scratch, transposed and
+/// restored) is five planes; one more is headroom. Dehaze works on a reduced image and needs
+/// less. `None` on overflow.
 #[must_use]
 pub fn presence_scratch_bytes(width: usize, height: usize) -> Option<usize> {
     width.checked_mul(height)?.checked_mul(6 * size_of::<f32>())

@@ -25,7 +25,6 @@ fn striped_frame() -> RawFrame {
         .map(|index| {
             let (x, y) = (index % WIDTH, index / WIDTH);
             let phase = (y & 1) * 2 + (x & 1);
-            let _ = y;
             // Soft vertical stripes (period 24 px) in every colour: mid-scale structure.
             let value = 0.25 + 0.08 * (x as f32 * std::f32::consts::TAU / 24.0).sin();
             (black[phase] + value * (white[phase] - black[phase])).round() as u16
