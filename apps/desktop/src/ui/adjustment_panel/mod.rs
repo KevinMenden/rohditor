@@ -177,6 +177,7 @@ pub(crate) struct PanelDefaults {
     pub rendering_profile: RenderingProfileSelection,
     pub highlights: HighlightAdjustments,
     pub noise_reduction: rohditor_edit::NoiseReduction,
+    pub capture_sharpening: rohditor_edit::CaptureSharpening,
 }
 
 /// The noise-reduction strength Auto would set, as far as it is known.
@@ -363,7 +364,8 @@ fn show_sections(
         ui,
         output,
         P::CaptureSharpening,
-        CollapsibleSection::new("Capture sharpening").changed(document.capture_sharpening.enabled),
+        CollapsibleSection::new("Capture sharpening")
+            .changed(document.capture_sharpening != document.defaults.capture_sharpening),
         |ui, output| detail::capture_sharpening(ui, document, output),
     );
     section(

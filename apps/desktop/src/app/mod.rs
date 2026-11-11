@@ -3166,6 +3166,7 @@ fn document_panel_model(
             rendering_profile: defaults.rendering.profile,
             highlights: defaults.raw.highlights,
             noise_reduction: defaults.noise_reduction,
+            capture_sharpening: defaults.capture_sharpening,
         },
         capture_sharpening: document.edits.recipe().capture_sharpening,
         defringe: document.edits.recipe().defringe,
