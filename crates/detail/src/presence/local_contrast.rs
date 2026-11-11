@@ -24,6 +24,9 @@ const GAIN_FLOOR: f32 = 1.0e-3;
 const MIN_SIGMA: f32 = 1.0;
 /// Lowest factor the amount is scaled down to, so tiny images still show the effect.
 const MIN_AMOUNT_SCALE: f32 = 0.5;
+/// Encoded luma below which strengthening fades out towards black, where most of the signal
+/// is noise (0.12 encoded is about 1.4% linear, six stops under white).
+const SHADOW_KNEE: f32 = 0.12;
 /// Weight clarity keeps at black and white, where the tone weighting is lowest.
 const CLARITY_TONE_FLOOR: f32 = 0.3;
 
@@ -96,6 +99,12 @@ pub(super) fn apply_band(
                     let tone = base.clamp(0.0, 1.0);
                     weight *=
                         CLARITY_TONE_FLOOR + (1.0 - CLARITY_TONE_FLOOR) * 4.0 * tone * (1.0 - tone);
+                }
+                if amount > 0.0 {
+                    // Strengthening is faded out in the deepest shadows so it does not
+                    // amplify noise there; softening is left alone, as it only helps.
+                    let t = (base / SHADOW_KNEE).clamp(0.0, 1.0);
+                    weight *= t * t * (3.0 - 2.0 * t);
                 }
                 let target = decode(encoded + amount * weight * detail);
                 let current = decode(encoded);
@@ -188,6 +197,43 @@ mod tests {
         let mut clearer = source.clone();
         apply_band(&mut clearer, WEIGHTS, CLARITY, 1.0, &NeverCancelled).unwrap();
         assert!(luma_std(&clearer) > luma_std(&source) * 1.2);
+    }
+
+    #[test]
+    fn strengthening_does_not_amplify_noise_in_deep_shadows() {
+        // Grain on a very dark patch (about 0.2% linear) next to the same grain on a mid-grey.
+        let grain = |x: usize, y: usize| ((x * 7 + y * 13) % 11) as f32 / 11.0 - 0.5;
+        let dark = |x, y| {
+            let v = 0.002 + 0.0015 * grain(x, y);
+            [v, v, v]
+        };
+        let mid = |x, y| {
+            let v = 0.2 + 0.03 * grain(x, y);
+            [v, v, v]
+        };
+        let spread = |image: &LinearRgbImage<f32>| {
+            let values: Vec<f32> = image
+                .data()
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .map(|p| encode(p[1]))
+                .collect();
+            let mean = values.iter().sum::<f32>() / values.len() as f32;
+            (values.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / values.len() as f32).sqrt()
+        };
+        let boosted = |f: &dyn Fn(usize, usize) -> [f32; 3]| {
+            let source = image(1_500, 8, f);
+            let mut boosted = source.clone();
+            apply_band(&mut boosted, WEIGHTS, TEXTURE, 1.0, &NeverCancelled).unwrap();
+            spread(&boosted) / spread(&source)
+        };
+        let (dark_growth, mid_growth) = (boosted(&dark), boosted(&mid));
+        assert!(mid_growth > 1.5, "mid-tone grain should grow: {mid_growth}");
+        assert!(
+            dark_growth - 1.0 < 0.3 * (mid_growth - 1.0),
+            "shadow grain grew {dark_growth}x against {mid_growth}x in the mid-tones"
+        );
     }
 
     #[test]
