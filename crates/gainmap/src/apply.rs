@@ -32,6 +32,13 @@ pub fn apply_gain_map(
     is_cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<Vec<f32>, GainMapError> {
     metadata.validate()?;
+    if !display_headroom_log2.is_finite() {
+        // `clamp` would pass a NaN through and turn the whole image into NaN.
+        return Err(GainMapError::InvalidParams {
+            name: "display_headroom_log2",
+            reason: "must be finite",
+        });
+    }
     if map.channels() != 1 {
         return Err(GainMapError::UnsupportedChannelCount(map.channels()));
     }
@@ -224,6 +231,19 @@ mod tests {
         // Spot check against the literal sample above: pixel (1, 1) samples 37.5 / 255.
         let want = o * (3.0 * 37.5_f32 / 255.0).exp2() - o;
         assert!((out[(4 + 1) * 3] - want).abs() < 1e-5);
+    }
+
+    #[test]
+    fn rejects_non_finite_display_headroom() {
+        let pixels = [0.1; 3];
+        let base = LinearRgbView::new(1, 1, &pixels).unwrap();
+        let map = GainMapImage::new(1, 1, 1, vec![255]).unwrap();
+        for headroom in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert!(matches!(
+                apply_gain_map(&base, &map, &metadata(), headroom, &|| false),
+                Err(GainMapError::InvalidParams { .. })
+            ));
+        }
     }
 
     #[test]
