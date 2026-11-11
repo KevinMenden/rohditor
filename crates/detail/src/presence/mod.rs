@@ -225,6 +225,77 @@ mod tests {
         }
     }
 
+    /// The same picture (defined on the unit square) at a given width, 1/100 as tall.
+    fn unit_scene(width: usize) -> LinearRgbImage<f32> {
+        let height = width / 100;
+        image(width, height, |x, _| {
+            let u = (x as f32 + 0.5) / width as f32;
+            let tau = std::f32::consts::TAU;
+            // Broad shapes, mid-scale ripples and fine grain, in unit-square coordinates.
+            let v = 0.2
+                + 0.12 * (3.0 * tau * u).sin()
+                + 0.04 * (12.0 * tau * u).sin()
+                + 0.02 * (40.0 * tau * u).sin();
+            [v, v * 0.8, v * 0.6]
+        })
+    }
+
+    /// Average each 2x2 block, so a double-size result can be compared with the smaller one.
+    fn halve(image: &LinearRgbImage<f32>) -> Vec<f32> {
+        let (w, h) = (image.width() / 2, image.height() / 2);
+        let mut out = Vec::with_capacity(w * h * 3);
+        for y in 0..h {
+            for x in 0..w {
+                for c in 0..3 {
+                    let sum: f32 = [(0, 0), (1, 0), (0, 1), (1, 1)]
+                        .iter()
+                        .map(|(dx, dy)| image.pixel(2 * x + dx, 2 * y + dy).unwrap()[c])
+                        .sum();
+                    out.push(sum / 4.0);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_picture_looks_the_same_at_half_and_full_size() {
+        // Radii are fractions of the long edge, so the effect (result minus source) of a
+        // preview must match that of an export of twice the size.
+        for presence in [
+            Presence {
+                texture: 0.8,
+                ..Presence::default()
+            },
+            Presence {
+                clarity: 0.8,
+                ..Presence::default()
+            },
+            Presence {
+                dehaze: 0.8,
+                ..Presence::default()
+            },
+        ] {
+            let source = unit_scene(3_200);
+            let mut small = source.clone();
+            apply_presence(&mut small, presence, WEIGHTS, &NeverCancelled).unwrap();
+            let mut large = unit_scene(6_400);
+            apply_presence(&mut large, presence, WEIGHTS, &NeverCancelled).unwrap();
+
+            let large = halve(&large);
+            let (mut difference, mut effect) = (0.0_f32, 0.0_f32);
+            for ((small, large), source) in small.data().iter().zip(&large).zip(source.data()) {
+                difference += (small - large).abs();
+                effect += (small - source).abs();
+            }
+            assert!(effect > 0.0, "{presence:?} did nothing");
+            assert!(
+                difference < 0.15 * effect,
+                "{presence:?}: sizes differ by {difference} against an effect of {effect}"
+            );
+        }
+    }
+
     #[test]
     fn all_three_together_stay_finite_and_honour_cancellation() {
         let mut picture = image(70, 45, scene);

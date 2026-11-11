@@ -48,6 +48,13 @@ fn bench_presence(c: &mut Criterion) {
                     ..Presence::default()
                 },
             ),
+            (
+                "add-haze",
+                Presence {
+                    dehaze: -0.5,
+                    ..Presence::default()
+                },
+            ),
         ] {
             group.bench_with_input(BenchmarkId::new(name, control), &input, |b, input| {
                 b.iter_batched(
