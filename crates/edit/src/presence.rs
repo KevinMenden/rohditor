@@ -2,7 +2,7 @@
 //!
 //! Three spatial controls that change how much the picture "pops" without moving the tonal
 //! sliders of Light. They act on the developed image after every other global and local
-//! adjustment; `rohditor_detail::presence` is the implementation.
+//! adjustment; `rohditor_detail::apply_presence` is the implementation.
 
 use serde::{Deserialize, Serialize};
 
