@@ -10,6 +10,7 @@ mod local_stage;
 mod local_tests;
 mod mask_overlay;
 mod normalize;
+mod presence;
 mod range_reference;
 #[cfg(test)]
 mod range_tests;
@@ -40,6 +41,7 @@ pub use mask_overlay::{
     MaskAlphaImage, render_mask_overlay_from_image, render_mask_overlay_preview,
 };
 pub(crate) use normalize::preview_dimensions;
+pub(crate) use presence::presence_stage_bytes;
 pub(crate) use sharpened_output::{render_sharpened_export, sharpened_output_bytes};
 pub use stages::raw_crop_dimensions;
 pub(crate) use white_balance::{

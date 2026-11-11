@@ -145,6 +145,11 @@ impl PreviewCacheKeys {
                 .flat_map(|channel| [channel.hue, channel.saturation, channel.luminance])
                 .map(f32::to_bits)
                 .collect(),
+            presence_bits: [
+                recipe.presence.texture.to_bits(),
+                recipe.presence.clarity.to_bits(),
+                recipe.presence.dehaze.to_bits(),
+            ],
             local: LocalKey::from_local(&recipe.local),
             grading_bits: recipe
                 .color
@@ -497,6 +502,8 @@ struct AdjustedPreviewKey {
     vibrance_bits: u32,
     hsl_bits: Vec<u32>,
     grading_bits: Vec<u32>,
+    /// Texture, clarity and dehaze.
+    presence_bits: [u32; 3],
     local: LocalKey,
     orientation: Orientation,
     crop_bits: Option<[u64; 4]>,
@@ -1009,6 +1016,27 @@ mod tests {
             cache.prepare_spatial(&pipeline, &frame, &recipe, options, &keys, false, &token),
             Err(rohditor_core::PipelineError::Cancelled)
         ));
+    }
+
+    #[test]
+    fn presence_invalidates_only_adjusted_output() {
+        let frame = frame();
+        let recipe = EditRecipe::default();
+        let options = PreviewOptions::default();
+        let original = PreviewCacheKeys::new(1, &frame, &recipe, options);
+        for index in 0..3 {
+            let mut changed = recipe.clone();
+            match index {
+                0 => changed.presence.texture = 0.5,
+                1 => changed.presence.clarity = 0.5,
+                _ => changed.presence.dehaze = 0.5,
+            }
+            let keys = PreviewCacheKeys::new(1, &frame, &changed, options);
+            assert_eq!(keys.decoded, original.decoded);
+            assert_eq!(keys.reconstructed, original.reconstructed);
+            assert_eq!(keys.demosaiced, original.demosaiced);
+            assert_ne!(keys.adjusted, original.adjusted);
+        }
     }
 
     #[test]

@@ -10,6 +10,7 @@ mod local;
 mod local_detail;
 mod local_range;
 mod noise_reduction;
+mod presence;
 mod profile;
 mod raw;
 mod recipe;
@@ -26,6 +27,7 @@ pub use local::*;
 pub use local_detail::*;
 pub use local_range::*;
 pub use noise_reduction::*;
+pub use presence::*;
 pub use profile::*;
 pub use raw::*;
 pub use recipe::{

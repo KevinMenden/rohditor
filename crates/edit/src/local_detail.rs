@@ -164,6 +164,7 @@ impl EditRecipe {
             defringe: self.defringe,
             light: self.light.clone(),
             color: self.color.clone(),
+            presence: self.presence,
             geometry: self.geometry.clone(),
             local: LocalAdjustments::default(),
         }

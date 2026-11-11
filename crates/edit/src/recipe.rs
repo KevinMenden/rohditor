@@ -23,7 +23,10 @@ pub use rendering::{
     RenderingAdjustments, RenderingProfileSelection,
 };
 
-use crate::{CaptureSharpening, Defringe, FalseColorSuppression, LocalAdjustments, NoiseReduction};
+use crate::{
+    CaptureSharpening, Defringe, FalseColorSuppression, LocalAdjustments, NoiseReduction,
+    PresenceAdjustments,
+};
 use color_adjustments::*;
 use color_settings::WhiteBalance;
 use light_settings::*;
@@ -531,6 +534,9 @@ pub struct EditRecipe {
     pub defringe: Defringe,
     pub light: LightAdjustments,
     pub color: ColorAdjustments,
+    /// Texture, clarity and dehaze: spatial, applied after every other adjustment.
+    #[serde(default)]
+    pub presence: PresenceAdjustments,
     pub geometry: GeometryAdjustments,
     /// Mask layers applied on top of the global adjustments.
     #[serde(default)]
@@ -550,6 +556,7 @@ impl Default for EditRecipe {
             defringe: Defringe::default(),
             light: LightAdjustments::default(),
             color: ColorAdjustments::default(),
+            presence: PresenceAdjustments::default(),
             geometry: GeometryAdjustments::default(),
             local: LocalAdjustments::default(),
         }
@@ -572,6 +579,7 @@ impl EditRecipe {
         self.noise_reduction.validate()?;
         self.capture_sharpening.validate()?;
         self.defringe.validate()?;
+        self.presence.validate()?;
         if let LensProfileSelection::Lensfun { profile_id } = &self.optics.profile {
             if profile_id.trim().is_empty() {
                 return Err(EditError {
@@ -714,6 +722,8 @@ struct RecipeFields {
     #[serde(default)]
     color: ColorAdjustments,
     #[serde(default)]
+    presence: PresenceAdjustments,
+    #[serde(default)]
     geometry: GeometryAdjustments,
     #[serde(default)]
     local: LocalAdjustments,
@@ -754,6 +764,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
                 defringe: Defringe::default(),
                 light,
                 color,
+                presence: PresenceAdjustments::default(),
                 geometry: GeometryAdjustments {
                     orientation_override: fields.legacy_orientation_override,
                     crop: None,
@@ -775,6 +786,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
                 defringe: Defringe::default(),
                 light: fields.light,
                 color: fields.color,
+                presence: PresenceAdjustments::default(),
                 geometry: fields.geometry,
                 local: LocalAdjustments::default(),
             }
@@ -795,6 +807,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
                 defringe: Defringe::default(),
                 light: fields.light,
                 color: fields.color,
+                presence: PresenceAdjustments::default(),
                 geometry: fields.geometry,
                 local: LocalAdjustments::default(),
             }
@@ -814,6 +827,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
                 defringe: Defringe::default(),
                 light: fields.light,
                 color: fields.color,
+                presence: PresenceAdjustments::default(),
                 geometry: fields.geometry,
                 local: LocalAdjustments::default(),
             }
@@ -837,6 +851,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
                 defringe: Defringe::default(),
                 light: fields.light,
                 color: fields.color,
+                presence: PresenceAdjustments::default(),
                 geometry: fields.geometry,
                 local: LocalAdjustments::default(),
             }
@@ -856,6 +871,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
                 defringe: fields.defringe,
                 light: fields.light,
                 color: fields.color,
+                presence: fields.presence,
                 geometry: fields.geometry,
                 local: fields.local,
             }
