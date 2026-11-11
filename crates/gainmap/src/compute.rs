@@ -330,6 +330,39 @@ mod tests {
     }
 
     #[test]
+    fn downsample_larger_than_the_image_gives_one_pixel() {
+        // 3x2 image, factor 8: a single partial block covering every pixel.
+        let params = GainMapParams {
+            offset_sdr: 0.0,
+            offset_hdr: 0.0,
+            downsample: 8,
+            ..GainMapParams::default()
+        };
+        let sdr = grey(3, 2, 0.25);
+        let mut hdr = grey(3, 2, 0.25);
+        hdr[..3].fill(2.0); // one of six pixels at the full 3 stops: mean 0.5 stops
+        let map = compute(&sdr, &hdr, 3, 2, &params);
+        assert_eq!((map.width(), map.height()), (1, 1));
+        assert_eq!(map.data(), [43]); // round(255 * 0.5 / 3)
+    }
+
+    #[test]
+    fn downsample_one_keeps_full_resolution() {
+        let params = GainMapParams {
+            offset_sdr: 0.0,
+            offset_hdr: 0.0,
+            downsample: 1,
+            ..GainMapParams::default()
+        };
+        let sdr = grey(3, 2, 0.25);
+        let mut hdr = grey(3, 2, 0.25);
+        hdr[3 * 4..3 * 4 + 3].fill(2.0); // pixel (1, 1)
+        let map = compute(&sdr, &hdr, 3, 2, &params);
+        assert_eq!((map.width(), map.height()), (3, 2));
+        assert_eq!(map.data(), [0, 0, 0, 0, 255, 0]);
+    }
+
+    #[test]
     fn gamma_is_applied_to_the_normalised_value() {
         let params = GainMapParams {
             offset_sdr: 0.0,

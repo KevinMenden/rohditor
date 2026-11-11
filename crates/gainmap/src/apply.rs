@@ -22,6 +22,9 @@ pub fn boost_weight(metadata: &GainMapMetadata, display_headroom_log2: f32) -> f
 ///
 /// The map is upsampled bilinearly in its encoded domain, as decoders do. Any map size is
 /// accepted, since both images are aligned by their edges and no size check is needed.
+/// Only single-channel maps are supported (see the crate docs), although [`crate::iso21496`]
+/// can already read three-channel metadata; others return
+/// [`GainMapError::UnsupportedChannelCount`].
 /// Returns interleaved linear RGB with the same size as `base`. `is_cancelled` is polled once
 /// per row, as in [`crate::compute_gain_map`].
 pub fn apply_gain_map(
@@ -50,6 +53,7 @@ pub fn apply_gain_map(
     let channel = metadata.channels[0];
     let weight = boost_weight(metadata, display_headroom_log2);
     let width = base.width();
+    // Cannot overflow: `LinearRgbView::new` checked `width * height * 3` already.
     let stride = width * 3;
     // The interpolation taps depend only on the column or row, so build them once.
     let x_taps = axis_taps(width, map.width());
