@@ -305,6 +305,42 @@ mod tests {
     }
 
     #[test]
+    fn dehaze_looks_the_same_at_double_size_on_a_2d_scene() {
+        // Blocks of colour in unit-square coordinates under a uniform veil, so the airlight and
+        // transmission are estimated from real 2-D structure at both sizes.
+        let veiled = |width: usize| {
+            let height = width * 5 / 8;
+            let clear = image(width, height, |x, y| {
+                let (u, v) = (x as f32 / width as f32, y as f32 / height as f32);
+                let cell = ((u * 8.0) as usize * 3 + (v * 6.0) as usize * 5) % 7;
+                let base = 0.03 + 0.5 * cell as f32 / 6.0;
+                [base, base * 0.8, base * 0.6]
+            });
+            hazy(&clear, 0.6, 0.8)
+        };
+        let presence = Presence {
+            dehaze: 0.8,
+            ..Presence::default()
+        };
+        let source = veiled(640);
+        let mut small = source.clone();
+        apply_presence(&mut small, presence, WEIGHTS, &NeverCancelled).unwrap();
+        let mut large = veiled(1_280);
+        apply_presence(&mut large, presence, WEIGHTS, &NeverCancelled).unwrap();
+
+        let large = halve(&large);
+        let (mut difference, mut effect) = (0.0_f32, 0.0_f32);
+        for ((small, large), source) in small.data().iter().zip(&large).zip(source.data()) {
+            difference += (small - large).abs();
+            effect += (small - source).abs();
+        }
+        assert!(
+            difference < 0.15 * effect,
+            "sizes differ by {difference} against an effect of {effect}"
+        );
+    }
+
+    #[test]
     fn small_previews_keep_the_look_despite_the_minimum_blur() {
         // At 1000 px the texture blur would be 0.7 px; the 1 px floor is compensated by amount. The
         // box blur is coarse at this sigma, so the match is looser than at export sizes.
