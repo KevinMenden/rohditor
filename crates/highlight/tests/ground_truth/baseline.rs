@@ -132,9 +132,9 @@ pub fn bound_holds(bound: Bound, measured: usize) -> bool {
 // Per-scene rationale for a ceiling (rather than floor) raised bound, kept
 // as data so `render_baseline_row` stays one function that only formats.
 const DISC_KNOWN_62_COMMENT: &[&str] = &[
-    "Known failure #62: estimates produced (recon >> raised) are never applied",
-    "on large single-channel regions. When #62 lands this row flips to AtLeast",
-    "— that flip IS the progress signal.",
+    "Not recoverable from chroma: truth G is ~6.0 against R/B of ~0.5 behind a",
+    "~2 px edge, so estimates stay below the clip level and are never applied",
+    "(see disk_soft for the region-aware Opposed regime, #66).",
 ];
 const SPECULARS_KNOWN_62_COMMENT: &[&str] = &[
     "Known #62 shape: estimates produced, none applied on isolated tiny",
@@ -280,11 +280,12 @@ pub fn check_baseline(row: &BaselineRow, measured: &MeasuredRow) -> Vec<String> 
     violations
 }
 
-// Measured 2026-11-09 on this branch (base f0a2895 + issue #65), debug,
-// x86-64, default rayon threads. Full re-baseline: Clip rows now run with
-// WB-aware ceilings (sat * min(METRIC_WB) / gain) and the reconstruction
-// rows share that vector as `neutral_ceiling`, so all 14 Clip rows and the
-// R/B-fallback LR/Opposed rows moved (issue #65).
+// Measured 2026-11-11 on this branch (base b744145 + issue #66), release,
+// x86-64, default rayon threads. Opposed rows re-baselined for region-aware
+// Opposed (v3) and the new `disk_soft` scene; the Off, Clip and LocalRatios
+// rows are unchanged except for the new scene. Earlier note (2026-11-09,
+// issue #65): Clip rows run with WB-aware ceilings (sat * min(METRIC_WB) /
+// gain) and the reconstruction rows share that vector as `neutral_ceiling`.
 // Suspected counts are bit-derived (see generator margin guard); the med,
 // p95 and hue-max ceilings are all 1.5x measured per issue #63 "assert
 // today's numbers loosely", `raised` ceilings carry RAISED_SLACK units of
@@ -298,83 +299,82 @@ use Bound::{AtLeast, AtMost, Exact};
 pub const BASELINES: &[BaselineRow] = &[
     BaselineRow { scene: "disk_small", sat: 1.00, method: "off", suspected: 9, raised: Exact(0), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 0.754080, p95_abs_logerr_max: 1.028429, hue_max_at_most: 1.526664 },
     BaselineRow { scene: "disk_small", sat: 1.00, method: "clip", suspected: 9, raised: Exact(0), lowered: AtLeast(1), neutralised: Exact(0), med_abs_logerr_max: 0.754080, p95_abs_logerr_max: 1.028429, hue_max_at_most: 1.526664 },
-    // Known failure #62: estimates produced (recon >> raised) are never applied
-    // on large single-channel regions. When #62 lands this row flips to AtLeast
-    // — that flip IS the progress signal.
+    // Not recoverable from chroma: truth G is ~6.0 against R/B of ~0.5 behind a
+    // ~2 px edge, so estimates stay below the clip level and are never applied
+    // (see disk_soft for the region-aware Opposed regime, #66).
     // #65: this raised ceiling is unaffected by neutralisation; see the
     // neutralised floor on the same row for the lowering-side signal.
     BaselineRow { scene: "disk_small", sat: 1.00, method: "local_ratios", suspected: 9, raised: AtMost(2), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 0.754080, p95_abs_logerr_max: 1.028429, hue_max_at_most: 1.526664 },
-    // Known failure #62: estimates produced (recon >> raised) are never applied
-    // on large single-channel regions. When #62 lands this row flips to AtLeast
-    // — that flip IS the progress signal.
+    // Not recoverable from chroma: truth G is ~6.0 against R/B of ~0.5 behind a
+    // ~2 px edge, so estimates stay below the clip level and are never applied
+    // (see disk_soft for the region-aware Opposed regime, #66).
     // #65: this raised ceiling is unaffected by neutralisation; see the
     // neutralised floor on the same row for the lowering-side signal.
     BaselineRow { scene: "disk_small", sat: 1.00, method: "opposed", suspected: 9, raised: AtMost(2), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 0.754080, p95_abs_logerr_max: 1.028429, hue_max_at_most: 1.526664 },
     BaselineRow { scene: "disk_small", sat: 0.98, method: "off", suspected: 9, raised: Exact(0), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 0.784384, p95_abs_logerr_max: 1.058733, hue_max_at_most: 1.589631 },
     BaselineRow { scene: "disk_small", sat: 0.98, method: "clip", suspected: 9, raised: Exact(0), lowered: AtLeast(1), neutralised: Exact(0), med_abs_logerr_max: 0.784384, p95_abs_logerr_max: 1.058733, hue_max_at_most: 1.589631 },
-    // Known failure #62: estimates produced (recon >> raised) are never applied
-    // on large single-channel regions. When #62 lands this row flips to AtLeast
-    // — that flip IS the progress signal.
+    // Not recoverable from chroma: truth G is ~6.0 against R/B of ~0.5 behind a
+    // ~2 px edge, so estimates stay below the clip level and are never applied
+    // (see disk_soft for the region-aware Opposed regime, #66).
     // #65: this raised ceiling is unaffected by neutralisation; see the
     // neutralised floor on the same row for the lowering-side signal.
     BaselineRow { scene: "disk_small", sat: 0.98, method: "local_ratios", suspected: 9, raised: AtMost(2), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 0.784384, p95_abs_logerr_max: 1.058733, hue_max_at_most: 1.589631 },
-    // Known failure #62: estimates produced (recon >> raised) are never applied
-    // on large single-channel regions. When #62 lands this row flips to AtLeast
-    // — that flip IS the progress signal.
+    // Not recoverable from chroma: truth G is ~6.0 against R/B of ~0.5 behind a
+    // ~2 px edge, so estimates stay below the clip level and are never applied
+    // (see disk_soft for the region-aware Opposed regime, #66).
     // #65: this raised ceiling is unaffected by neutralisation; see the
     // neutralised floor on the same row for the lowering-side signal.
     BaselineRow { scene: "disk_small", sat: 0.98, method: "opposed", suspected: 9, raised: AtMost(2), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 0.784384, p95_abs_logerr_max: 1.058733, hue_max_at_most: 1.589631 },
     BaselineRow { scene: "disk_large", sat: 1.00, method: "off", suspected: 8073, raised: Exact(0), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 2.403506, p95_abs_logerr_max: 2.753494, hue_max_at_most: 2.086022 },
     BaselineRow { scene: "disk_large", sat: 1.00, method: "clip", suspected: 8073, raised: Exact(0), lowered: AtLeast(1247), neutralised: Exact(0), med_abs_logerr_max: 2.403506, p95_abs_logerr_max: 2.753494, hue_max_at_most: 2.086022 },
-    // Known failure #62: estimates produced (recon >> raised) are never applied
-    // on large single-channel regions. When #62 lands this row flips to AtLeast
-    // — that flip IS the progress signal.
+    // Not recoverable from chroma: truth G is ~6.0 against R/B of ~0.5 behind a
+    // ~2 px edge, so estimates stay below the clip level and are never applied
+    // (see disk_soft for the region-aware Opposed regime, #66).
     // 2026-11-04: measured 4 + slack 2 for estimator-bit drift across codegen
     // #65: this raised ceiling is unaffected by neutralisation; see the
     // neutralised floor on the same row for the lowering-side signal.
     BaselineRow { scene: "disk_large", sat: 1.00, method: "local_ratios", suspected: 8073, raised: AtMost(6), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 2.403506, p95_abs_logerr_max: 2.753494, hue_max_at_most: 2.086022 },
-    // Known failure #62: estimates produced (recon >> raised) are never applied
-    // on large single-channel regions. When #62 lands this row flips to AtLeast
-    // — that flip IS the progress signal.
+    // Not recoverable from chroma: truth G is ~6.0 against R/B of ~0.5 behind a
+    // ~2 px edge, so estimates stay below the clip level and are never applied
+    // (see disk_soft for the region-aware Opposed regime, #66).
     // #65: this raised ceiling is unaffected by neutralisation; see the
     // neutralised floor on the same row for the lowering-side signal.
     BaselineRow { scene: "disk_large", sat: 1.00, method: "opposed", suspected: 8073, raised: AtMost(2), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 2.403506, p95_abs_logerr_max: 2.753494, hue_max_at_most: 2.086022 },
     BaselineRow { scene: "disk_large", sat: 0.98, method: "off", suspected: 8086, raised: Exact(0), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 2.433040, p95_abs_logerr_max: 2.783764, hue_max_at_most: 2.150477 },
     BaselineRow { scene: "disk_large", sat: 0.98, method: "clip", suspected: 8086, raised: Exact(0), lowered: AtLeast(1306), neutralised: Exact(0), med_abs_logerr_max: 2.433040, p95_abs_logerr_max: 2.783764, hue_max_at_most: 2.150477 },
-    // Known failure #62: estimates produced (recon >> raised) are never applied
-    // on large single-channel regions. When #62 lands this row flips to AtLeast
-    // — that flip IS the progress signal.
+    // Not recoverable from chroma: truth G is ~6.0 against R/B of ~0.5 behind a
+    // ~2 px edge, so estimates stay below the clip level and are never applied
+    // (see disk_soft for the region-aware Opposed regime, #66).
     // 2026-11-04: measured 2 + slack 2 for estimator-bit drift across codegen
     // #65: this raised ceiling is unaffected by neutralisation; see the
     // neutralised floor on the same row for the lowering-side signal.
     BaselineRow { scene: "disk_large", sat: 0.98, method: "local_ratios", suspected: 8086, raised: AtMost(4), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 2.433040, p95_abs_logerr_max: 2.783764, hue_max_at_most: 2.150477 },
-    // Known failure #62: estimates produced (recon >> raised) are never applied
-    // on large single-channel regions. When #62 lands this row flips to AtLeast
-    // — that flip IS the progress signal.
+    // Not recoverable from chroma: truth G is ~6.0 against R/B of ~0.5 behind a
+    // ~2 px edge, so estimates stay below the clip level and are never applied
+    // (see disk_soft for the region-aware Opposed regime, #66).
     // #65: this raised ceiling is unaffected by neutralisation; see the
     // neutralised floor on the same row for the lowering-side signal.
     BaselineRow { scene: "disk_large", sat: 0.98, method: "opposed", suspected: 8086, raised: AtMost(2), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 2.433040, p95_abs_logerr_max: 2.783764, hue_max_at_most: 2.150477 },
+    BaselineRow { scene: "disk_soft", sat: 1.00, method: "off", suspected: 1026, raised: Exact(0), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 0.162798, p95_abs_logerr_max: 0.302952, hue_max_at_most: 0.450014 },
+    BaselineRow { scene: "disk_soft", sat: 1.00, method: "clip", suspected: 1026, raised: Exact(0), lowered: AtLeast(1136), neutralised: Exact(0), med_abs_logerr_max: 0.162798, p95_abs_logerr_max: 0.302952, hue_max_at_most: 0.450014 },
+    BaselineRow { scene: "disk_soft", sat: 1.00, method: "local_ratios", suspected: 1026, raised: AtLeast(112), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 0.162798, p95_abs_logerr_max: 0.302952, hue_max_at_most: 0.450014 },
+    BaselineRow { scene: "disk_soft", sat: 1.00, method: "opposed", suspected: 1026, raised: AtLeast(467), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 0.077667, p95_abs_logerr_max: 0.132857, hue_max_at_most: 0.249586 },
+    BaselineRow { scene: "disk_soft", sat: 0.98, method: "off", suspected: 1126, raised: Exact(0), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 0.176199, p95_abs_logerr_max: 0.331650, hue_max_at_most: 0.477948 },
+    BaselineRow { scene: "disk_soft", sat: 0.98, method: "clip", suspected: 1126, raised: Exact(0), lowered: AtLeast(1194), neutralised: Exact(0), med_abs_logerr_max: 0.176199, p95_abs_logerr_max: 0.331650, hue_max_at_most: 0.477948 },
+    BaselineRow { scene: "disk_soft", sat: 0.98, method: "local_ratios", suspected: 1126, raised: AtLeast(115), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 0.176199, p95_abs_logerr_max: 0.331650, hue_max_at_most: 0.477948 },
+    BaselineRow { scene: "disk_soft", sat: 0.98, method: "opposed", suspected: 1126, raised: AtLeast(516), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 0.084315, p95_abs_logerr_max: 0.142942, hue_max_at_most: 0.265251 },
     BaselineRow { scene: "two_channel", sat: 1.00, method: "off", suspected: 42, raised: Exact(0), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 0.450329, p95_abs_logerr_max: 0.828959, hue_max_at_most: 0.612795 },
     BaselineRow { scene: "two_channel", sat: 1.00, method: "clip", suspected: 42, raised: Exact(0), lowered: AtLeast(21), neutralised: Exact(0), med_abs_logerr_max: 0.719794, p95_abs_logerr_max: 1.800280, hue_max_at_most: 3.657449 },
     BaselineRow { scene: "two_channel", sat: 1.00, method: "local_ratios", suspected: 42, raised: AtLeast(11), lowered: AtLeast(3), neutralised: AtLeast(3), med_abs_logerr_max: 0.419187, p95_abs_logerr_max: 1.371914, hue_max_at_most: 2.984909 },
-    // raised below the acting threshold (5) at baseline; flip to AtLeast when
-    // methods act here.
-    // #65: this raised ceiling is unaffected by neutralisation; see the
-    // neutralised floor on the same row for the lowering-side signal.
-    BaselineRow { scene: "two_channel", sat: 1.00, method: "opposed", suspected: 42, raised: AtMost(2), lowered: AtLeast(8), neutralised: AtLeast(8), med_abs_logerr_max: 0.719794, p95_abs_logerr_max: 1.800280, hue_max_at_most: 3.657449 },
+    BaselineRow { scene: "two_channel", sat: 1.00, method: "opposed", suspected: 42, raised: AtLeast(4), lowered: AtLeast(6), neutralised: AtLeast(6), med_abs_logerr_max: 0.663621, p95_abs_logerr_max: 1.789400, hue_max_at_most: 3.625005 },
     BaselineRow { scene: "two_channel", sat: 0.98, method: "off", suspected: 43, raised: Exact(0), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 0.477053, p95_abs_logerr_max: 0.859263, hue_max_at_most: 0.668729 },
     BaselineRow { scene: "two_channel", sat: 0.98, method: "clip", suspected: 43, raised: Exact(0), lowered: AtLeast(21), neutralised: Exact(0), med_abs_logerr_max: 0.737333, p95_abs_logerr_max: 1.830584, hue_max_at_most: 3.684205 },
     BaselineRow { scene: "two_channel", sat: 0.98, method: "local_ratios", suspected: 43, raised: AtLeast(11), lowered: AtLeast(3), neutralised: AtLeast(3), med_abs_logerr_max: 0.405345, p95_abs_logerr_max: 1.402218, hue_max_at_most: 3.124926 },
-    // raised below the acting threshold (5) at baseline; flip to AtLeast when
-    // methods act here.
-    // 2026-11-04: measured 2 + slack 2 for estimator-bit drift across codegen
-    // #65: this raised ceiling is unaffected by neutralisation; see the
-    // neutralised floor on the same row for the lowering-side signal.
-    BaselineRow { scene: "two_channel", sat: 0.98, method: "opposed", suspected: 43, raised: AtMost(4), lowered: AtLeast(8), neutralised: AtLeast(8), med_abs_logerr_max: 0.729825, p95_abs_logerr_max: 1.830584, hue_max_at_most: 3.684205 },
+    BaselineRow { scene: "two_channel", sat: 0.98, method: "opposed", suspected: 43, raised: AtLeast(4), lowered: AtLeast(6), neutralised: AtLeast(6), med_abs_logerr_max: 0.672514, p95_abs_logerr_max: 1.819704, hue_max_at_most: 3.660458 },
     BaselineRow { scene: "sun_core_halo", sat: 1.00, method: "off", suspected: 268, raised: Exact(0), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 0.704530, p95_abs_logerr_max: 1.989775, hue_max_at_most: 2.697371 },
     BaselineRow { scene: "sun_core_halo", sat: 1.00, method: "clip", suspected: 268, raised: Exact(0), lowered: AtLeast(399), neutralised: Exact(0), med_abs_logerr_max: 1.245692, p95_abs_logerr_max: 3.029496, hue_max_at_most: 3.087307 },
     BaselineRow { scene: "sun_core_halo", sat: 1.00, method: "local_ratios", suspected: 268, raised: AtLeast(38), lowered: AtLeast(53), neutralised: AtLeast(53), med_abs_logerr_max: 1.105516, p95_abs_logerr_max: 3.029496, hue_max_at_most: 3.087307 },
-    BaselineRow { scene: "sun_core_halo", sat: 1.00, method: "opposed", suspected: 268, raised: AtLeast(35), lowered: AtLeast(56), neutralised: AtLeast(56), med_abs_logerr_max: 1.067033, p95_abs_logerr_max: 3.029496, hue_max_at_most: 3.087307 },
+    BaselineRow { scene: "sun_core_halo", sat: 1.00, method: "opposed", suspected: 268, raised: AtLeast(35), lowered: AtLeast(57), neutralised: AtLeast(57), med_abs_logerr_max: 1.078413, p95_abs_logerr_max: 3.029496, hue_max_at_most: 3.087307 },
     BaselineRow { scene: "sun_core_halo", sat: 0.98, method: "off", suspected: 276, raised: Exact(0), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 0.693285, p95_abs_logerr_max: 2.020079, hue_max_at_most: 2.716664 },
     BaselineRow { scene: "sun_core_halo", sat: 0.98, method: "clip", suspected: 276, raised: Exact(0), lowered: AtLeast(410), neutralised: Exact(0), med_abs_logerr_max: 1.263992, p95_abs_logerr_max: 3.059800, hue_max_at_most: 3.093362 },
     BaselineRow { scene: "sun_core_halo", sat: 0.98, method: "local_ratios", suspected: 276, raised: AtLeast(40), lowered: AtLeast(54), neutralised: AtLeast(54), med_abs_logerr_max: 1.031028, p95_abs_logerr_max: 3.059800, hue_max_at_most: 3.093362 },

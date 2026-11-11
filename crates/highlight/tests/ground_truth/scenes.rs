@@ -73,6 +73,32 @@ pub const DISK_LARGE: SceneSpec = SceneSpec {
     clips: [false, true, false],
 };
 
+/// The regime region-aware Opposed (#66) targets: a large G highlight with a
+/// wide soft shoulder on a nearly neutral object (R and B rise at about 60% of
+/// the rate of G), so the chromatic offset at the clip boundary describes the
+/// whole blown interior. The clipped region is ~50 px across, far beyond the
+/// ~12 px that local candidate search can reach, while the shoulder keeps
+/// plenty of near-clip border cells around it. `DISK_LARGE` cannot serve
+/// this purpose: its truth G is 6.0 against R/B of ~0.5 with a ~2 px edge,
+/// so no chroma model can recover it.
+pub const DISK_SOFT: SceneSpec = SceneSpec {
+    name: "disk_soft",
+    width: 151,
+    height: 141,
+    bg: BG,
+    wb_scale: NO_WB,
+    objects: &[Object {
+        shape: Shape::Disc {
+            cx: 70.0,
+            cy: 66.0,
+            r: 70.0,
+            profile: Profile::Smooth,
+        },
+        peak: [0.58, 0.9519, 0.58],
+    }],
+    clips: [false, true, false],
+};
+
 /// Opposed-channel case: R and G clip, B stays clean to oppose with.
 /// rx != ry and a lower-right-of-center placement break symmetry.
 pub const TWO_CHANNEL: SceneSpec = SceneSpec {
@@ -333,9 +359,10 @@ pub const SPECULARS: SceneSpec = SceneSpec {
 };
 
 /// Iteration order for the matrix and guard tests.
-pub const ALL: [SceneSpec; 7] = [
+pub const ALL: [SceneSpec; 8] = [
     DISK_SMALL,
     DISK_LARGE,
+    DISK_SOFT,
     TWO_CHANNEL,
     SUN_CORE_HALO,
     WARM_COOL_ADJACENT,
