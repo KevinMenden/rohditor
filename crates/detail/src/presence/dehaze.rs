@@ -26,8 +26,9 @@ const AIRLIGHT_FLOOR: f32 = 0.05;
 const KEPT_HAZE: f32 = 0.05;
 /// Lowest transmission the inversion divides by: caps the contrast stretch at 4x.
 const MIN_TRANSMISSION: f32 = 0.25;
-/// Radius of the dark-channel patch on the reduced image, in pixels.
-const PATCH_RADIUS: usize = 1;
+/// Radius of the dark-channel patch on the reduced image, in cells: about 1.5% of the long
+/// edge each way.
+const PATCH_RADIUS: usize = 2;
 /// Guided-filter window radius on the reduced image, in pixels.
 const GUIDE_RADIUS: usize = 4;
 /// Guided-filter regularisation in encoded-luma units squared: lower follows edges more.
@@ -35,13 +36,12 @@ const GUIDE_EPSILON: f32 = 1.0e-3;
 /// Transmission of the veil added by a dehaze of -1.
 const FULL_VEIL_TRANSMISSION: f32 = 0.4;
 
-/// A reduced copy of the image: per-channel block means and block minima.
+/// A reduced copy of the image: per-channel block means.
 struct Reduced {
     width: usize,
     height: usize,
     factor: usize,
     mean: [Vec<f32>; 3],
-    minimum: [Vec<f32>; 3],
 }
 
 /// Remove (`amount > 0`) or add (`amount < 0`) haze, in `-1..=1`.
@@ -87,59 +87,52 @@ fn reduce(
     let factor = width.max(height).div_ceil(ESTIMATE_LONG_EDGE).max(1);
     let (reduced_width, reduced_height) = (width.div_ceil(factor), height.div_ceil(factor));
     let cells = reduced_width * reduced_height;
-    // One reduced row per task, writing [mean r, g, b, min r, g, b] per cell.
-    let mut packed = vec![0.0_f32; cells * 6];
+    // One reduced row per task, writing the mean r, g, b of each cell. Means rather than
+    // minima: a minimum over more pixels is always lower on noisy content, which would make
+    // the same picture dehaze harder at a larger size.
+    let mut packed = vec![0.0_f32; cells * 3];
     packed
-        .par_chunks_mut(reduced_width * 6)
+        .par_chunks_mut(reduced_width * 3)
         .enumerate()
         .for_each(|(cell_y, out)| {
             if cancellation.is_cancelled() {
                 return;
             }
             let rows = cell_y * factor..((cell_y + 1) * factor).min(height);
-            for (cell_x, out) in out.as_chunks_mut::<6>().0.iter_mut().enumerate() {
+            for (cell_x, out) in out.as_chunks_mut::<3>().0.iter_mut().enumerate() {
                 let columns = cell_x * factor..((cell_x + 1) * factor).min(width);
                 let mut sum = [0.0_f32; 3];
-                let mut minimum = [f32::MAX; 3];
                 let count = (rows.len() * columns.len()) as f32;
                 for y in rows.clone() {
                     let row = &image.data()[y * stride..y * stride + width * 3];
                     for pixel in row[columns.start * 3..columns.end * 3].as_chunks::<3>().0 {
-                        for c in 0..3 {
+                        for (sum, &value) in sum.iter_mut().zip(pixel) {
                             // Negative or non-finite samples count as black.
-                            let value = if pixel[c].is_finite() {
-                                pixel[c].max(0.0)
+                            *sum += if value.is_finite() {
+                                value.max(0.0)
                             } else {
                                 0.0
                             };
-                            sum[c] += value;
-                            minimum[c] = minimum[c].min(value);
                         }
                     }
                 }
-                for c in 0..3 {
-                    out[c] = sum[c] / count;
-                    out[3 + c] = minimum[c];
-                }
+                *out = sum.map(|sum| sum / count);
             }
         });
     check(cancellation)?;
-    let unpack = |offset: usize| -> [Vec<f32>; 3] {
-        std::array::from_fn(|c| {
-            packed
-                .as_chunks::<6>()
-                .0
-                .iter()
-                .map(|cell| cell[offset + c])
-                .collect()
-        })
-    };
+    let mean = std::array::from_fn(|c| {
+        packed
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|cell| cell[c])
+            .collect()
+    });
     Ok(Reduced {
         width: reduced_width,
         height: reduced_height,
         factor,
-        mean: unpack(0),
-        minimum: unpack(3),
+        mean,
     })
 }
 
@@ -147,13 +140,7 @@ fn reduce(
 /// the regions that look most like pure haze.
 fn estimate_airlight(reduced: &Reduced) -> [f32; 3] {
     let darkest: Vec<f32> = (0..reduced.mean[0].len())
-        .map(|i| {
-            reduced
-                .minimum
-                .iter()
-                .map(|c| c[i])
-                .fold(f32::MAX, f32::min)
-        })
+        .map(|i| reduced.mean.iter().map(|c| c[i]).fold(f32::MAX, f32::min))
         .collect();
     let count = ((darkest.len() as f32 * AIRLIGHT_FRACTION) as usize).max(1);
     let mut sorted = darkest.clone();
@@ -191,7 +178,7 @@ fn guided_transmission(
     let relative: Vec<f32> = (0..cells)
         .map(|i| {
             (0..3)
-                .map(|c| reduced.minimum[c][i] / airlight[c])
+                .map(|c| reduced.mean[c][i] / airlight[c])
                 .fold(f32::MAX, f32::min)
         })
         .collect();

@@ -341,6 +341,62 @@ mod tests {
     }
 
     #[test]
+    fn dehaze_does_not_depend_on_how_much_grain_a_block_holds() {
+        // The same veiled block scene with per-pixel grain, at two sizes. A dark-channel
+        // minimum taken over more pixels is lower, so a block-size-dependent estimate would
+        // dehaze the larger one harder. Compare block averages, which the grain does not move. (With block minima this differs by
+        // about 14%, against about 8% with block means.)
+        let grainy = |width: usize| {
+            let height = width * 5 / 8;
+            let clear = image(width, height, |x, y| {
+                let (u, v) = (x as f32 / width as f32, y as f32 / height as f32);
+                let cell = ((u * 8.0) as usize * 3 + (v * 6.0) as usize * 5) % 7;
+                let hash = (x * 7_919 + y * 104_729) % 1_021;
+                let grain = 0.3 * (hash as f32 / 1_021.0 - 0.5);
+                let base = (0.2 + 0.5 * cell as f32 / 6.0 + grain).max(0.0);
+                [base, base * 0.8, base * 0.6]
+            });
+            hazy(&clear, 0.6, 0.8)
+        };
+        let presence = Presence {
+            dehaze: 0.8,
+            ..Presence::default()
+        };
+        // Mean green over a 16 x 10 grid of blocks.
+        let block_means = |image: &LinearRgbImage<f32>| {
+            let (w, h) = (image.width(), image.height());
+            let mut sums = vec![0.0_f32; 16 * 10];
+            for y in 0..h {
+                for x in 0..w {
+                    sums[(y * 10 / h) * 16 + x * 16 / w] += image.pixel(x, y).unwrap()[1];
+                }
+            }
+            let per_block = (w * h) as f32 / 160.0;
+            sums.iter().map(|sum| sum / per_block).collect::<Vec<_>>()
+        };
+        let mut small = grainy(640);
+        let mut large = grainy(2_560);
+        let (small_before, large_before) = (block_means(&small), block_means(&large));
+        apply_presence(&mut small, presence, WEIGHTS, &NeverCancelled).unwrap();
+        apply_presence(&mut large, presence, WEIGHTS, &NeverCancelled).unwrap();
+        let (small_after, large_after) = (block_means(&small), block_means(&large));
+
+        let (mut difference, mut effect) = (0.0_f32, 0.0_f32);
+        for i in 0..160 {
+            let (small_effect, large_effect) = (
+                small_after[i] - small_before[i],
+                large_after[i] - large_before[i],
+            );
+            difference += (small_effect - large_effect).abs();
+            effect += small_effect.abs();
+        }
+        assert!(
+            difference < 0.11 * effect,
+            "sizes differ by {difference} against an effect of {effect}"
+        );
+    }
+
+    #[test]
     fn small_previews_keep_the_look_despite_the_minimum_blur() {
         // At 1000 px the texture blur would be 0.7 px; the 1 px floor is compensated by amount. The
         // box blur is coarse at this sigma, so the match is looser than at export sizes.
