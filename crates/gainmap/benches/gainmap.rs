@@ -36,7 +36,9 @@ fn bench(c: &mut Criterion) {
         });
         let (map, metadata) = compute_gain_map(&sdr_view, &hdr_view, &params, &|| false).unwrap();
         group.bench_function(BenchmarkId::new("apply", name), |b| {
-            b.iter(|| black_box(apply_gain_map(&sdr_view, &map, &metadata, 3.0).unwrap()));
+            b.iter(|| {
+                black_box(apply_gain_map(&sdr_view, &map, &metadata, 3.0, &|| false).unwrap())
+            });
         });
     }
     group.finish();

@@ -95,7 +95,7 @@ fn round_trip(
         (map.width(), map.height()),
         (width.div_ceil(2), height.div_ceil(2))
     );
-    apply_gain_map(&sdr_view, &map, &metadata, headroom).unwrap()
+    apply_gain_map(&sdr_view, &map, &metadata, headroom, &|| false).unwrap()
 }
 
 #[test]
@@ -167,7 +167,7 @@ fn serialised_metadata_decodes_the_same_map() {
         compute_gain_map(&sdr_view, &hdr_view, &GainMapParams::default(), &|| false).unwrap();
     let reread = iso21496::from_bytes(&iso21496::to_bytes(&metadata).unwrap()).unwrap();
     assert_eq!(
-        apply_gain_map(&sdr_view, &map, &metadata, 3.0).unwrap(),
-        apply_gain_map(&sdr_view, &map, &reread, 3.0).unwrap()
+        apply_gain_map(&sdr_view, &map, &metadata, 3.0, &|| false).unwrap(),
+        apply_gain_map(&sdr_view, &map, &reread, 3.0, &|| false).unwrap()
     );
 }

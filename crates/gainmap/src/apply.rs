@@ -22,12 +22,14 @@ pub fn boost_weight(metadata: &GainMapMetadata, display_headroom_log2: f32) -> f
 ///
 /// The map is upsampled bilinearly in its encoded domain, as decoders do. Any map size is
 /// accepted, since both images are aligned by their edges and no size check is needed.
-/// Returns interleaved linear RGB with the same size as `base`.
+/// Returns interleaved linear RGB with the same size as `base`. `is_cancelled` is polled once
+/// per row, as in [`crate::compute_gain_map`].
 pub fn apply_gain_map(
     base: &LinearRgbView<'_>,
     map: &GainMapImage,
     metadata: &GainMapMetadata,
     display_headroom_log2: f32,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<Vec<f32>, GainMapError> {
     metadata.validate()?;
     if map.channels() != 1 {
@@ -49,7 +51,10 @@ pub fn apply_gain_map(
 
     out.par_chunks_mut(stride)
         .enumerate()
-        .for_each(|(y, out_row)| {
+        .try_for_each(|(y, out_row)| {
+            if is_cancelled() {
+                return Err(GainMapError::Cancelled);
+            }
             let base_row = base.row(y);
             for (x, x_tap) in x_taps.iter().enumerate() {
                 let encoded = sample_bilinear(map, x_tap, &y_taps[y]) / 255.0;
@@ -62,7 +67,8 @@ pub fn apply_gain_map(
                         ((rgb + channel.offset_sdr) * gain - channel.offset_hdr).max(0.0);
                 }
             }
-        });
+            Ok(())
+        })?;
     Ok(out)
 }
 
@@ -127,7 +133,7 @@ mod tests {
         let pixels = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6];
         let base = LinearRgbView::new(2, 1, &pixels).unwrap();
         let map = GainMapImage::new(1, 1, 1, vec![255]).unwrap();
-        let out = apply_gain_map(&base, &map, &metadata(), 0.0).unwrap();
+        let out = apply_gain_map(&base, &map, &metadata(), 0.0, &|| false).unwrap();
         for (a, b) in out.iter().zip(&pixels) {
             assert!((a - b).abs() < 1e-6);
         }
@@ -139,9 +145,41 @@ mod tests {
         let pixels = [0.25, 0.25, 0.25];
         let base = LinearRgbView::new(1, 1, &pixels).unwrap();
         let map = GainMapImage::new(1, 1, 1, vec![255]).unwrap();
-        let out = apply_gain_map(&base, &map, &metadata(), 3.0).unwrap();
+        let out = apply_gain_map(&base, &map, &metadata(), 3.0, &|| false).unwrap();
         let expected = (0.25 + 1.0 / 64.0) * 8.0 - 1.0 / 64.0;
         assert!(out.iter().all(|v| (v - expected).abs() < 1e-5));
+    }
+
+    #[test]
+    fn decodes_with_gamma_and_negative_minimum() {
+        // Encoded 128 with gamma 2 over [-1, 2] stops: recovery = (128/255)^(1/2).
+        let mut meta = metadata();
+        meta.channels[0].gamma = 2.0;
+        meta.channels[0].min_log2 = -1.0;
+        meta.channels[0].max_log2 = 2.0;
+        meta.alternate_hdr_headroom_log2 = 2.0;
+        let pixels = [0.25, 0.5, 0.75];
+        let base = LinearRgbView::new(1, 1, &pixels).unwrap();
+        let map = GainMapImage::new(1, 1, 1, vec![128]).unwrap();
+        let out = apply_gain_map(&base, &map, &meta, 2.0, &|| false).unwrap();
+        let recovery = (128.0_f32 / 255.0).sqrt();
+        let gain = (-1.0 + 3.0 * recovery).exp2();
+        let o = 1.0 / 64.0;
+        for (got, rgb) in out.iter().zip(pixels) {
+            let want = (rgb + o) * gain - o;
+            assert!((got - want).abs() < 1e-5, "{got} vs {want}");
+        }
+    }
+
+    #[test]
+    fn stops_when_cancelled() {
+        let pixels = [0.0; 6];
+        let base = LinearRgbView::new(2, 1, &pixels).unwrap();
+        let map = GainMapImage::new(1, 1, 1, vec![0]).unwrap();
+        assert_eq!(
+            apply_gain_map(&base, &map, &metadata(), 3.0, &|| true),
+            Err(GainMapError::Cancelled)
+        );
     }
 
     #[test]
@@ -157,7 +195,7 @@ mod tests {
             .map(|x| sample_bilinear(&map, x, y_tap))
             .collect();
         assert_eq!(samples, [0.0, 63.75, 191.25, 255.0]);
-        assert!(apply_gain_map(&base, &map, &metadata(), 3.0).is_ok());
+        assert!(apply_gain_map(&base, &map, &metadata(), 3.0, &|| false).is_ok());
     }
 
     #[test]
@@ -166,7 +204,7 @@ mod tests {
         let base = LinearRgbView::new(1, 1, &pixels).unwrap();
         let map = GainMapImage::new(1, 1, 3, vec![0; 3]).unwrap();
         assert_eq!(
-            apply_gain_map(&base, &map, &metadata(), 3.0),
+            apply_gain_map(&base, &map, &metadata(), 3.0, &|| false),
             Err(GainMapError::UnsupportedChannelCount(3))
         );
     }

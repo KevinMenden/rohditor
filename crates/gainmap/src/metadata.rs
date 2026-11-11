@@ -45,7 +45,7 @@ impl ChannelMetadata {
             return bad("min_log2", "must not exceed max_log2");
         }
         if !(self.gamma.is_finite() && self.gamma > 0.0 && self.gamma <= MAX_LOG2_MAGNITUDE) {
-            return bad("gamma", "must be positive and finite");
+            return bad("gamma", "must be positive and at most 64");
         }
         for (name, value) in [
             ("offset_sdr", self.offset_sdr),
