@@ -2994,6 +2994,8 @@ fn document_panel_model(
             tint,
         ),
     };
+    // Built once per frame and shared by everything that compares to defaults.
+    let defaults = default_recipe_for_document(document);
     DocumentPanelModel {
         file_name: document.file_name(),
         camera: document
@@ -3003,11 +3005,9 @@ fn document_panel_model(
         sensor_dimensions: document.info.as_ref().map(|info| (info.width, info.height)),
         revision: document.edits.revision(),
         dirty: document.is_dirty(),
-        has_adjustments: has_user_adjustments(document),
+        has_adjustments: differs_from_defaults(document, &defaults),
         white_balance_changed: document.edits.recipe().color.white_balance
-            != default_recipe(document_as_shot_coordinates(document))
-                .color
-                .white_balance,
+            != defaults.color.white_balance,
         camera_profile,
         camera_profile_choices,
         rendering_profile: document.edits.recipe().rendering.profile,
@@ -3161,7 +3161,7 @@ fn document_panel_model(
         optics: optics_panel_model(document),
         false_color: document.edits.recipe().false_color,
         noise_reduction: document.edits.recipe().noise_reduction,
-        default_noise_reduction: default_recipe_for_document(document).noise_reduction,
+        default_noise_reduction: defaults.noise_reduction,
         capture_sharpening: document.edits.recipe().capture_sharpening,
         defringe: document.edits.recipe().defringe,
         noise_suggestion: document.noise.suggestion(),
@@ -3275,13 +3275,18 @@ fn camera_profile_choice(
     }
 }
 
+#[cfg(test)]
+fn has_user_adjustments(document: &Document) -> bool {
+    differs_from_defaults(document, &default_recipe_for_document(document))
+}
+
 /// Whether the recipe differs from the document's defaults. The fitted camera
 /// look is derived from the photo rather than chosen, so it does not count.
-fn has_user_adjustments(document: &Document) -> bool {
+fn differs_from_defaults(document: &Document, defaults: &EditRecipe) -> bool {
     let mut current = document.edits.recipe().clone();
     current.rendering.camera_tone = None;
     current.rendering.camera_chroma = None;
-    current != default_recipe_for_document(document)
+    current != *defaults
 }
 
 /// The recipe a document is reset to: camera-specific white balance, plus the
