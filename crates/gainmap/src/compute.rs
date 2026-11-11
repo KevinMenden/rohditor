@@ -270,8 +270,8 @@ mod tests {
 
     #[test]
     fn odd_sizes_average_partial_blocks() {
-        // 3x3 source, factor 2 -> 2x2 map. Left column of the SDR is dark, so only the
-        // partial right-hand blocks see no boost.
+        // 3x3 source, factor 2 -> 2x2 map: the right column and bottom row of blocks are
+        // partial (1 pixel wide or tall), and must be averaged over their real size.
         let (w, h) = (3, 3);
         let params = GainMapParams {
             offset_sdr: 0.0,
