@@ -123,7 +123,8 @@ pub fn compute_gain_map(
                     return Err(GainMapError::Cancelled);
                 }
                 let first = map_y * factor;
-                let last = (first + factor).min(sdr.height());
+                // Saturating: a huge `downsample` must not overflow (the only map row is then row 0).
+                let last = first.saturating_add(factor).min(sdr.height());
                 sums.fill(0.0);
                 for y in first..last {
                     accumulate_row(sdr.row(y), hdr.row(y), params, sums);
@@ -344,6 +345,17 @@ mod tests {
         let map = compute(&sdr, &hdr, 3, 2, &params);
         assert_eq!((map.width(), map.height()), (1, 1));
         assert_eq!(map.data(), [43]); // round(255 * 0.5 / 3)
+    }
+
+    #[test]
+    fn huge_downsample_does_not_overflow() {
+        let params = GainMapParams {
+            downsample: usize::MAX,
+            ..GainMapParams::default()
+        };
+        let img = grey(3, 2, 0.25);
+        let map = compute(&img, &img, 3, 2, &params);
+        assert_eq!((map.width(), map.height()), (1, 1));
     }
 
     #[test]
