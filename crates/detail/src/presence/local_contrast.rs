@@ -217,19 +217,22 @@ mod tests {
             let v = 0.05 + 0.4 * (((x * 7 + y * 13) % 11) as f32 / 11.0);
             [v, v * 0.8, v * 0.6]
         };
+        // A non-square 2D image, so a swapped axis anywhere in the blur shows up.
         let (w, h) = (47, 29);
-        let mut original = image(w, h, pattern);
-        let mut transposed = image(h, w, |x, y| pattern(y, x));
-        apply_band(&mut original, WEIGHTS, CLARITY, 0.8, &NeverCancelled).unwrap();
-        apply_band(&mut transposed, WEIGHTS, CLARITY, 0.8, &NeverCancelled).unwrap();
-        for y in 0..h {
-            for x in 0..w {
-                let (a, b) = (
-                    original.pixel(x, y).unwrap(),
-                    transposed.pixel(y, x).unwrap(),
-                );
-                for c in 0..3 {
-                    assert!((a[c] - b[c]).abs() < 1e-5);
+        for band in [TEXTURE, CLARITY] {
+            let mut original = image(w, h, pattern);
+            let mut transposed = image(h, w, |x, y| pattern(y, x));
+            apply_band(&mut original, WEIGHTS, band, 0.8, &NeverCancelled).unwrap();
+            apply_band(&mut transposed, WEIGHTS, band, 0.8, &NeverCancelled).unwrap();
+            for y in 0..h {
+                for x in 0..w {
+                    let (a, b) = (
+                        original.pixel(x, y).unwrap(),
+                        transposed.pixel(y, x).unwrap(),
+                    );
+                    for c in 0..3 {
+                        assert!((a[c] - b[c]).abs() < 1e-5);
+                    }
                 }
             }
         }
