@@ -2,6 +2,9 @@
 
 use crate::{DEFAULT_OFFSET, GainMapError};
 
+/// Largest gamma accepted; far beyond any useful encoding curve.
+const MAX_GAMMA: f32 = 64.0;
+
 /// Largest magnitude any log2 value may have. Far beyond real content (HDR headroom is a few
 /// stops) and small enough that every field fits the ISO rational encoding.
 pub(crate) const MAX_LOG2_MAGNITUDE: f32 = 64.0;
@@ -44,7 +47,7 @@ impl ChannelMetadata {
         if self.min_log2 > self.max_log2 {
             return bad("min_log2", "must not exceed max_log2");
         }
-        if !(self.gamma.is_finite() && self.gamma > 0.0 && self.gamma <= MAX_LOG2_MAGNITUDE) {
+        if !(self.gamma.is_finite() && self.gamma > 0.0 && self.gamma <= MAX_GAMMA) {
             return bad("gamma", "must be positive and at most 64");
         }
         for (name, value) in [

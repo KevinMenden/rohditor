@@ -241,8 +241,9 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_flag_bits() {
-        // Bit 5 is the backward-direction flag in the spec as I know it; every bit below the
-        // two supported ones must be refused instead of silently misread.
+        // The spec has a backward-direction flag (base image is the HDR side) that this crate
+        // does not model, and Skia's parser does not pin its position down. Refuse every bit
+        // below the two supported ones instead of silently misreading the direction.
         for bit in 0..6 {
             let mut bytes = to_bytes(&sample()).unwrap();
             bytes[4] |= 1 << bit;
