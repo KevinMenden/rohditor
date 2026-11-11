@@ -9,7 +9,7 @@ use rohditor_core::{
     DitherMode, ExportFormat, ExportImage, ExportMetadataPolicy, ExportSettings, OutputSize,
     PngBitDepth, export_image, paths_refer_to_same_file, write_output_bytes,
 };
-use rohditor_image::{DisplayRgbImage, DisplayTransfer, Orientation};
+use rohditor_image::{DisplayColorSpace, DisplayRgbImage, Orientation};
 use rohditor_raw::{
     CameraColorMatrix, CameraMatrixOrigin, CaptureMetadata, CfaPattern, LevelPattern,
     PhotometricInterpretation, RationalValue, RawFileInfo,
@@ -64,6 +64,54 @@ fn png8_and_jpeg_embed_srgb_and_orientation_safe_exif() -> Result<(), Box<dyn Er
 }
 
 #[test]
+fn display_p3_image_embeds_the_p3_profile_not_srgb() -> Result<(), Box<dyn Error>> {
+    let outputs = TempDirectory::new("p3")?;
+    let (width, height) = (96, 64);
+    let srgb = rgb8_pattern(width, height)?;
+    let image = ExportImage::Rgb8(DisplayRgbImage::new(
+        width,
+        height,
+        srgb.row_stride(),
+        DisplayColorSpace::DISPLAY_P3,
+        srgb.into_data(),
+    )?);
+    assert_eq!(image.color_space(), DisplayColorSpace::DISPLAY_P3);
+
+    for (name, format) in [
+        (
+            "p3.png",
+            ExportFormat::Png {
+                bit_depth: PngBitDepth::Eight,
+            },
+        ),
+        ("p3.jpg", ExportFormat::Jpeg { quality: 90 }),
+    ] {
+        let path = outputs.path().join(name);
+        export_image(
+            &path,
+            &image,
+            &source_info(),
+            ExportSettings {
+                format,
+                metadata: ExportMetadataPolicy::None,
+                ..ExportSettings::default()
+            },
+        )?;
+        let mut decoder = ImageReader::open(&path)?
+            .with_guessed_format()?
+            .into_decoder()?;
+        let profile = decoder
+            .icc_profile()?
+            .ok_or("missing embedded ICC profile")?;
+        assert_eq!(read_be_u32(&profile, 0), Some(profile.len() as u32));
+        assert_eq!(profile.get(36..40), Some(&b"acsp"[..]));
+        assert!(contains_bytes(&profile, b"Rohditor Display P3"));
+        assert!(!contains_bytes(&profile, b"Rohditor sRGB"));
+    }
+    Ok(())
+}
+
+#[test]
 fn png16_contains_native_sixteen_bit_samples() -> Result<(), Box<dyn Error>> {
     let outputs = TempDirectory::new("png16")?;
     let path = outputs.path().join("native-16.png");
@@ -76,7 +124,7 @@ fn png16_contains_native_sixteen_bit_samples() -> Result<(), Box<dyn Error>> {
         width,
         height,
         width * 3,
-        DisplayTransfer::Srgb,
+        DisplayColorSpace::SRGB,
         samples.clone(),
     )?);
     export_image(
@@ -140,7 +188,7 @@ fn failed_encoding_preserves_destination_and_removes_temporary_file() -> Result<
         width,
         1,
         width * 3,
-        DisplayTransfer::Srgb,
+        DisplayColorSpace::SRGB,
         vec![128; width * 3],
     )?);
 
@@ -184,7 +232,7 @@ fn padded_rows_are_rejected_without_creating_a_destination() -> Result<(), Box<d
         2,
         1,
         8,
-        DisplayTransfer::Srgb,
+        DisplayColorSpace::SRGB,
         vec![0; 8],
     )?);
     let result = export_image(
@@ -257,7 +305,7 @@ fn rgb8_pattern(width: usize, height: usize) -> Result<DisplayRgbImage<u8>, Box<
         width,
         height,
         width * 3,
-        DisplayTransfer::Srgb,
+        DisplayColorSpace::SRGB,
         samples,
     )?)
 }

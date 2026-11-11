@@ -4,7 +4,7 @@ use image::ImageFormat;
 use rohditor_edit::{
     CameraProfileSelection, EditRecipe, RenderingAdjustments, RenderingProfileSelection,
 };
-use rohditor_image::{DisplayRgbImage, DisplayTransfer, ImageError, Orientation, OrientationMap};
+use rohditor_image::{DisplayColorSpace, DisplayRgbImage, ImageError, Orientation, OrientationMap};
 use rohditor_look::{
     ChromaFit, ChromaFitError, Proxy, ToneFit, ToneFitError, check_chroma_improvement,
     common_aspect_crops, compare_proxies, fit_camera_chroma, fit_camera_tone, luminance_histogram,
@@ -90,7 +90,7 @@ fn orient_rgb8(
         output_width,
         output_height,
         output_width * 3,
-        DisplayTransfer::Srgb,
+        DisplayColorSpace::SRGB,
         data,
     )
 }

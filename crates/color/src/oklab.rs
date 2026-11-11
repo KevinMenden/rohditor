@@ -1,5 +1,20 @@
 //! OkLab conversions, shared by gamut mapping and colour-range masks.
 
+use crate::matrix::Matrix3;
+
+// Both are exact conversions between the sRGB and Display P3 primaries (D65),
+// so OkLab, which is defined from linear sRGB, can also describe P3 colours.
+const LINEAR_DISPLAY_P3_TO_LINEAR_SRGB: Matrix3 = Matrix3::new([
+    [1.224_940_2, -0.224_940_2, 0.0],
+    [-0.042_057, 1.042_057, 0.0],
+    [-0.019_637_6, -0.078_636, 1.098_273_6],
+]);
+const LINEAR_SRGB_TO_LINEAR_DISPLAY_P3: Matrix3 = Matrix3::new([
+    [0.822_462, 0.177_538, 0.0],
+    [0.033_194_2, 0.966_805_8, 0.0],
+    [0.017_082_6, 0.072_397_4, 0.910_519_9],
+]);
+
 /// Linear sRGB to OkLab `[L, a, b]`. Out-of-gamut and negative inputs are accepted.
 #[must_use]
 pub fn linear_srgb_to_oklab([red, green, blue]: [f32; 3]) -> [f32; 3] {
@@ -30,4 +45,56 @@ pub fn oklab_to_linear_srgb([lightness, a, b]: [f32; 3]) -> [f32; 3] {
         -1.268_438 * l + 2.609_757_4 * m - 0.341_319_38 * s,
         -0.004_196_086_3 * l - 0.703_418_6 * m + 1.707_614_7 * s,
     ]
+}
+
+/// Linear Display P3 to OkLab `[L, a, b]`. Out-of-gamut inputs are accepted.
+#[must_use]
+pub fn linear_display_p3_to_oklab(rgb: [f32; 3]) -> [f32; 3] {
+    linear_srgb_to_oklab(LINEAR_DISPLAY_P3_TO_LINEAR_SRGB.transform(rgb))
+}
+
+/// OkLab `[L, a, b]` to linear Display P3; the inverse of [`linear_display_p3_to_oklab`].
+#[must_use]
+pub fn oklab_to_linear_display_p3(lab: [f32; 3]) -> [f32; 3] {
+    LINEAR_SRGB_TO_LINEAR_DISPLAY_P3.transform(oklab_to_linear_srgb(lab))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::matrix::{LINEAR_DISPLAY_P3_TO_XYZ_D65, XYZ_D65_TO_LINEAR_SRGB};
+
+    #[test]
+    fn p3_srgb_matrices_match_the_xyz_chain() {
+        let chain = LINEAR_DISPLAY_P3_TO_XYZ_D65.then(XYZ_D65_TO_LINEAR_SRGB);
+        let probe = [0.9, 0.2, 0.05];
+        for (actual, expected) in LINEAR_DISPLAY_P3_TO_LINEAR_SRGB
+            .transform(probe)
+            .into_iter()
+            .zip(chain.transform(probe))
+        {
+            assert!((actual - expected).abs() < 1.0e-4, "{actual} != {expected}");
+        }
+        let round_trip = LINEAR_SRGB_TO_LINEAR_DISPLAY_P3
+            .transform(LINEAR_DISPLAY_P3_TO_LINEAR_SRGB.transform(probe));
+        for (actual, expected) in round_trip.into_iter().zip(probe) {
+            assert!((actual - expected).abs() < 1.0e-6, "{actual} != {expected}");
+        }
+    }
+
+    #[test]
+    fn display_p3_oklab_round_trips_asymmetric_values() {
+        for rgb in [[0.17, 0.43, 0.81], [-0.05, 0.61, 1.3], [1.5, -0.1, 0.3]] {
+            let restored = oklab_to_linear_display_p3(linear_display_p3_to_oklab(rgb));
+            for (actual, expected) in restored.into_iter().zip(rgb) {
+                assert!((actual - expected).abs() < 3.0e-6, "{actual} != {expected}");
+            }
+        }
+    }
+
+    #[test]
+    fn p3_neutral_axis_stays_neutral_in_oklab() {
+        let lab = linear_display_p3_to_oklab([0.4, 0.4, 0.4]);
+        assert!(lab[1].abs() < 1.0e-4 && lab[2].abs() < 1.0e-4, "{lab:?}");
+    }
 }

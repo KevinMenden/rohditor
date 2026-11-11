@@ -8,15 +8,15 @@ use rohditor_edit::{
     WhiteBalance,
 };
 use rohditor_image::{
-    DisplayRgbImage, DisplayTransfer, LinearRgbImage, LinearRgbSpace, MosaicImage, Orientation,
+    DisplayColorSpace, DisplayRgbImage, LinearRgbImage, LinearRgbSpace, MosaicImage, Orientation,
     allocate_zeroed_u8, allocate_zeroed_u16,
 };
 use rohditor_raw::{RawFileInfo, RawFrame};
 
 use super::local_stage::{LocalStage, RowAlphas};
 use crate::color::{
-    CameraColorTransform, LINEAR_REC2020_TO_XYZ_D65, XYZ_D65_TO_LINEAR_SRGB,
-    camera_color_transform, encode_rec2020_for_srgb_output,
+    CameraColorTransform, DisplayOutputTransform, LINEAR_REC2020_TO_XYZ_D65,
+    XYZ_D65_TO_LINEAR_SRGB, camera_color_transform, encode_rec2020_for_srgb_output,
 };
 use crate::white_balance::camera_gains_from_as_shot_coordinates;
 use crate::{
@@ -956,9 +956,48 @@ pub(super) mod display {
         )
     }
 
+    /// Convert linear Rec.2020 to Display P3 with the sRGB transfer, 8 bits per
+    /// sample. Out-of-gamut colours are mapped into the P3 gamut according to
+    /// `output_policy`.
+    pub fn render_display_p3_8_with_geometry(
+        image: &LinearRgbImage<f32>,
+        geometry: OutputGeometry,
+        output_policy: OutputPolicy,
+        dithering: DitherMode,
+    ) -> Result<DisplayRgbImage<u8>, PipelineError> {
+        render_display8_cancellable(
+            image,
+            geometry,
+            DisplayColorSpace::DISPLAY_P3,
+            output_policy,
+            dithering,
+            &CancellationToken::new(),
+        )
+        .map(|(image, _)| image)
+    }
+
     fn render_display_srgb8_dithered_cancellable_with_geometry(
         image: &LinearRgbImage<f32>,
         geometry: OutputGeometry,
+        output_policy: OutputPolicy,
+        dithering: DitherMode,
+        cancellation: &CancellationToken,
+    ) -> Result<(DisplayRgbImage<u8>, GamutMappingDiagnostics), PipelineError> {
+        render_display8_cancellable(
+            image,
+            geometry,
+            DisplayColorSpace::SRGB,
+            output_policy,
+            dithering,
+            cancellation,
+        )
+    }
+
+    /// Shared 8-bit body for every supported display color space.
+    fn render_display8_cancellable(
+        image: &LinearRgbImage<f32>,
+        geometry: OutputGeometry,
+        color_space: DisplayColorSpace,
         output_policy: OutputPolicy,
         dithering: DitherMode,
         cancellation: &CancellationToken,
@@ -987,7 +1026,7 @@ pub(super) mod display {
             )
         })?;
         let mut output = allocate_zeroed_u8(elements)?;
-        let rec2020_to_srgb = LINEAR_REC2020_TO_XYZ_D65.then(XYZ_D65_TO_LINEAR_SRGB);
+        let transform = DisplayOutputTransform::new(color_space.primaries);
         let diagnostics = output
             .par_chunks_mut(row_stride)
             .enumerate()
@@ -1002,11 +1041,8 @@ pub(super) mod display {
                             geometry.source_coordinate_in_bounds(output_x, output_y);
                         let start = source_y * image.row_stride() + source_x * 3;
                         let source = &image.data()[start..start + 3];
-                        let (encoded, status) = encode_rec2020_for_srgb_output(
-                            rec2020_to_srgb,
-                            [source[0], source[1], source[2]],
-                            output_policy,
-                        );
+                        let (encoded, status) =
+                            transform.encode([source[0], source[1], source[2]], output_policy);
                         diagnostics.record(status);
                         for (encoded, output) in encoded.into_iter().zip(destination) {
                             let dither = quantization_dither(dithering, output_x, output_y);
@@ -1020,14 +1056,9 @@ pub(super) mod display {
                 Ok(left.merge(right))
             })?;
         cancellation.checkpoint()?;
-        let image = DisplayRgbImage::new(
-            output_width,
-            output_height,
-            row_stride,
-            DisplayTransfer::Srgb,
-            output,
-        )
-        .map_err(PipelineError::from)?;
+        let image =
+            DisplayRgbImage::new(output_width, output_height, row_stride, color_space, output)
+                .map_err(PipelineError::from)?;
         Ok((image, diagnostics))
     }
 
@@ -1125,7 +1156,7 @@ pub(super) mod display {
             output_width,
             output_height,
             row_stride,
-            DisplayTransfer::Srgb,
+            DisplayColorSpace::SRGB,
             output,
         )
         .map_err(PipelineError::from)?;

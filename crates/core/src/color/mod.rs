@@ -4,6 +4,7 @@
 //! This module adapts RAW metadata and recipe selections to that contract.
 
 mod calibration;
+mod display_output;
 mod metadata;
 mod output;
 mod transforms;
@@ -20,4 +21,5 @@ pub use transforms::{
     adapt_xyz_to_d65,
 };
 
+pub(crate) use display_output::DisplayOutputTransform;
 pub(crate) use metadata::encode_rec2020_for_srgb_output;

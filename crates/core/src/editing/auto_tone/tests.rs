@@ -1,5 +1,5 @@
 use rohditor_edit::{BLACKS_RANGE, HIGHLIGHTS_RANGE, RenderingProfileSelection, SHADOWS_RANGE};
-use rohditor_image::{DisplayRgbImage, DisplayTransfer};
+use rohditor_image::{DisplayColorSpace, DisplayRgbImage};
 
 use super::*;
 
@@ -22,8 +22,14 @@ fn rendered_histogram(recipe: &EditRecipe, scene: &[f32]) -> Histogram {
         let code = stages.display_code(value * gain).round() as u8;
         data.extend([code; 3]);
     }
-    let image = DisplayRgbImage::new(scene.len(), 1, scene.len() * 3, DisplayTransfer::Srgb, data)
-        .expect("valid histogram fixture");
+    let image = DisplayRgbImage::new(
+        scene.len(),
+        1,
+        scene.len() * 3,
+        DisplayColorSpace::SRGB,
+        data,
+    )
+    .expect("valid histogram fixture");
     Histogram::from_display_rgb8(&image)
 }
 
@@ -169,7 +175,7 @@ fn a_single_clipped_channel_blocks_exposure() {
     for _ in 0..20 {
         data.extend([255, 30, 30]);
     }
-    let image = DisplayRgbImage::new(500, 1, 1500, DisplayTransfer::Srgb, data)
+    let image = DisplayRgbImage::new(500, 1, 1500, DisplayColorSpace::SRGB, data)
         .expect("valid histogram fixture");
     let histogram = Histogram::from_display_rgb8(&image);
     assert!(histogram.luminance_percentile(0.99) < 200);
@@ -207,7 +213,7 @@ fn exposure_that_reached_clipping_is_kept_on_the_next_press() {
         for _ in 0..20 {
             data.extend([bright_red, 30, 30]);
         }
-        let image = DisplayRgbImage::new(500, 1, 1500, DisplayTransfer::Srgb, data)
+        let image = DisplayRgbImage::new(500, 1, 1500, DisplayColorSpace::SRGB, data)
             .expect("valid histogram fixture");
         Histogram::from_display_rgb8(&image)
     };
@@ -255,7 +261,7 @@ fn keeps_other_controls_and_accounts_for_them() {
 fn stays_finite_and_in_range_for_extreme_histograms() {
     for code in [1_u8, 8, 32, 240, 254, 255] {
         for recipe in [neutral_recipe(), standard_recipe()] {
-            let image = DisplayRgbImage::new(8, 1, 24, DisplayTransfer::Srgb, vec![code; 24])
+            let image = DisplayRgbImage::new(8, 1, 24, DisplayColorSpace::SRGB, vec![code; 24])
                 .expect("valid histogram fixture");
             let next = auto_tone(&recipe, &Histogram::from_display_rgb8(&image)).expect("midtone");
             assert!(EXPOSURE_EV_RANGE.contains(next.light.exposure_ev));

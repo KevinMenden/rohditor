@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use rohditor_image::{DisplayRgbImage, DisplayTransfer};
+use rohditor_image::{DisplayColorSpace, DisplayRgbImage};
 use serde::{Deserialize, Serialize};
 
 use super::{ExportError, OutputSharpening};
@@ -228,7 +228,8 @@ impl ExportSettings {
     }
 }
 
-/// Quantized, transfer-encoded pixels ready for a file encoder.
+/// Quantized, transfer-encoded pixels ready for a file encoder. The color
+/// space travels with the pixels and selects the embedded ICC profile.
 #[derive(Debug)]
 pub enum ExportImage {
     Rgb8(DisplayRgbImage<u8>),
@@ -269,10 +270,10 @@ impl ExportImage {
     }
 
     #[must_use]
-    pub const fn transfer(&self) -> DisplayTransfer {
+    pub const fn color_space(&self) -> DisplayColorSpace {
         match self {
-            Self::Rgb8(image) => image.transfer(),
-            Self::Rgb16(image) => image.transfer(),
+            Self::Rgb8(image) => image.color_space(),
+            Self::Rgb16(image) => image.color_space(),
         }
     }
 }

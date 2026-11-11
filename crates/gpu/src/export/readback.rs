@@ -174,12 +174,12 @@ impl GpuExportProcessor {
         check_cancel(cancellation)?;
         match depth {
             OutputBitDepth::Eight => {
-                DisplayRgbImage::new(width, height, width * 3, DisplayTransfer::Srgb, eight)
+                DisplayRgbImage::new(width, height, width * 3, DisplayColorSpace::SRGB, eight)
                     .map(ExportImage::Rgb8)
                     .map_err(input_error)
             }
             OutputBitDepth::Sixteen => {
-                DisplayRgbImage::new(width, height, width * 3, DisplayTransfer::Srgb, sixteen)
+                DisplayRgbImage::new(width, height, width * 3, DisplayColorSpace::SRGB, sixteen)
                     .map(ExportImage::Rgb16)
                     .map_err(input_error)
             }
