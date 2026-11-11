@@ -161,6 +161,9 @@ pub(crate) struct DocumentPanelModel {
     pub optics: OpticsPanelModel,
     pub false_color: rohditor_edit::FalseColorSuppression,
     pub noise_reduction: rohditor_edit::NoiseReduction,
+    /// What a reset restores. Not zero when the photo's own noise estimate
+    /// sets the default, so "changed" is judged against this.
+    pub default_noise_reduction: rohditor_edit::NoiseReduction,
     pub capture_sharpening: rohditor_edit::CaptureSharpening,
     pub defringe: rohditor_edit::Defringe,
     pub noise_suggestion: NoiseSuggestion,
@@ -342,7 +345,7 @@ fn show_sections(
         output,
         P::NoiseReduction,
         CollapsibleSection::new("Noise reduction")
-            .changed(document.noise_reduction.is_active())
+            .changed(document.noise_reduction != document.default_noise_reduction)
             .tooltip(detail::NOISE_REDUCTION_HINT),
         |ui, output| detail::noise_reduction(ui, document, output),
     );

@@ -3161,6 +3161,7 @@ fn document_panel_model(
         optics: optics_panel_model(document),
         false_color: document.edits.recipe().false_color,
         noise_reduction: document.edits.recipe().noise_reduction,
+        default_noise_reduction: default_recipe_for_document(document).noise_reduction,
         capture_sharpening: document.edits.recipe().capture_sharpening,
         defringe: document.edits.recipe().defringe,
         noise_suggestion: document.noise.suggestion(),
