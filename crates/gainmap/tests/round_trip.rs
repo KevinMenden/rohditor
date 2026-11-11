@@ -90,7 +90,7 @@ fn round_trip(
 ) -> Vec<f32> {
     let sdr_view = LinearRgbView::new(width, height, sdr).unwrap();
     let hdr_view = LinearRgbView::new(width, height, hdr).unwrap();
-    let (map, metadata) = compute_gain_map(&sdr_view, &hdr_view, params).unwrap();
+    let (map, metadata) = compute_gain_map(&sdr_view, &hdr_view, params, &|| false).unwrap();
     assert_eq!(
         (map.width(), map.height()),
         (width.div_ceil(2), height.div_ceil(2))
@@ -164,7 +164,7 @@ fn serialised_metadata_decodes_the_same_map() {
     let sdr_view = LinearRgbView::new(7, 5, &sdr).unwrap();
     let hdr_view = LinearRgbView::new(7, 5, &hdr).unwrap();
     let (map, metadata) =
-        compute_gain_map(&sdr_view, &hdr_view, &GainMapParams::default()).unwrap();
+        compute_gain_map(&sdr_view, &hdr_view, &GainMapParams::default(), &|| false).unwrap();
     let reread = iso21496::from_bytes(&iso21496::to_bytes(&metadata).unwrap()).unwrap();
     assert_eq!(
         apply_gain_map(&sdr_view, &map, &metadata, 3.0).unwrap(),

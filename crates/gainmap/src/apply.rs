@@ -21,8 +21,8 @@ pub fn boost_weight(metadata: &GainMapMetadata, display_headroom_log2: f32) -> f
 /// Applies the gain map to the linear SDR `base` for a display with the given headroom.
 ///
 /// The map is upsampled bilinearly in its encoded domain, as decoders do. Any map size is
-/// accepted (both images are aligned by their edges), so no size check is needed. Returns interleaved
-/// linear RGB with the same size as `base`.
+/// accepted, since both images are aligned by their edges and no size check is needed.
+/// Returns interleaved linear RGB with the same size as `base`.
 pub fn apply_gain_map(
     base: &LinearRgbView<'_>,
     map: &GainMapImage,
@@ -42,14 +42,17 @@ pub fn apply_gain_map(
     let weight = boost_weight(metadata, display_headroom_log2);
     let width = base.width();
     let stride = width * 3;
+    // The interpolation taps depend only on the column or row, so build them once.
+    let x_taps = axis_taps(width, map.width());
+    let y_taps = axis_taps(base.height(), map.height());
     let mut out = vec![0.0_f32; base.pixels().len()];
 
     out.par_chunks_mut(stride)
         .enumerate()
         .for_each(|(y, out_row)| {
             let base_row = base.row(y);
-            for x in 0..width {
-                let encoded = sample_bilinear(map, x, y, width, base.height()) / 255.0;
+            for (x, x_tap) in x_taps.iter().enumerate() {
+                let encoded = sample_bilinear(map, x_tap, &y_taps[y]) / 255.0;
                 let recovery = encoded.powf(1.0 / channel.gamma);
                 let boost = channel.min_log2 + (channel.max_log2 - channel.min_log2) * recovery;
                 let gain = (boost * weight).exp2();
@@ -63,28 +66,42 @@ pub fn apply_gain_map(
     Ok(out)
 }
 
-/// Bilinear sample of the encoded map at the centre of base pixel `(x, y)`.
+/// Bilinear sample of the encoded map for one column tap and one row tap.
+fn sample_bilinear(map: &GainMapImage, x: &Tap, y: &Tap) -> f32 {
+    let at = |mx: usize, my: usize| f32::from(map.data()[my * map.width() + mx]);
+    let top = at(x.lower, y.lower) * (1.0 - x.fraction) + at(x.upper, y.lower) * x.fraction;
+    let bottom = at(x.lower, y.upper) * (1.0 - x.fraction) + at(x.upper, y.upper) * x.fraction;
+    top * (1.0 - y.fraction) + bottom * y.fraction
+}
+
+/// Where one base column (or row) samples the map along one axis.
+struct Tap {
+    lower: usize,
+    upper: usize,
+    /// Weight of `upper`; `lower` gets the rest.
+    fraction: f32,
+}
+
+/// Taps for every position of an axis.
 ///
 /// Map pixel `i` is centred at `(i + 0.5) * base_size / map_size` in base pixels, so both
 /// images are aligned by their edges whatever the (possibly odd) sizes.
-fn sample_bilinear(map: &GainMapImage, x: usize, y: usize, width: usize, height: usize) -> f32 {
-    let (u, x0, x1) = axis(x, width, map.width());
-    let (v, y0, y1) = axis(y, height, map.height());
-    let at = |mx: usize, my: usize| f32::from(map.data()[my * map.width() + mx]);
-    let top = at(x0, y0) * (1.0 - u) + at(x1, y0) * u;
-    let bottom = at(x0, y1) * (1.0 - u) + at(x1, y1) * u;
-    top * (1.0 - v) + bottom * v
-}
-
-/// Lower/upper map index and the interpolation fraction along one axis.
-fn axis(pos: usize, base_size: usize, map_size: usize) -> (f32, usize, usize) {
-    let coord = (pos as f32 + 0.5) * map_size as f32 / base_size as f32 - 0.5;
-    let coord = coord.clamp(0.0, (map_size - 1) as f32);
-    let lower = coord.floor();
-    let upper = (lower + 1.0).min((map_size - 1) as f32);
-    // Index conversions are exact: both values are small non-negative integers.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    (coord - lower, lower as usize, upper as usize)
+fn axis_taps(base_size: usize, map_size: usize) -> Vec<Tap> {
+    let last = (map_size - 1) as f32;
+    (0..base_size)
+        .map(|pos| {
+            let coord = (pos as f32 + 0.5) * map_size as f32 / base_size as f32 - 0.5;
+            let coord = coord.clamp(0.0, last);
+            let lower = coord.floor();
+            // Index conversions are exact: both are small non-negative integers.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            Tap {
+                lower: lower as usize,
+                upper: (lower + 1.0).min(last) as usize,
+                fraction: coord - lower,
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -133,7 +150,12 @@ mod tests {
         let pixels = [0.0; 12];
         let base = LinearRgbView::new(4, 1, &pixels).unwrap();
         let map = GainMapImage::new(2, 1, 1, vec![0, 255]).unwrap();
-        let samples: Vec<f32> = (0..4).map(|x| sample_bilinear(&map, x, 0, 4, 1)).collect();
+        let x_taps = axis_taps(4, 2);
+        let y_tap = &axis_taps(1, 1)[0];
+        let samples: Vec<f32> = x_taps
+            .iter()
+            .map(|x| sample_bilinear(&map, x, y_tap))
+            .collect();
         assert_eq!(samples, [0.0, 63.75, 191.25, 255.0]);
         assert!(apply_gain_map(&base, &map, &metadata(), 3.0).is_ok());
     }

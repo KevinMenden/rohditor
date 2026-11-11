@@ -87,10 +87,14 @@ impl GainMapParams {
 ///
 /// Both images must share size and primaries (see the crate docs). Non-finite samples do not
 /// fail the export: NaN counts as black and infinity as the brightest representable value.
+///
+/// `is_cancelled` is polled once per map row; when it returns true the work stops and
+/// [`GainMapError::Cancelled`] is returned. Pass `&|| false` to never cancel.
 pub fn compute_gain_map(
     sdr: &LinearRgbView<'_>,
     hdr: &LinearRgbView<'_>,
     params: &GainMapParams,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<(GainMapImage, GainMapMetadata), GainMapError> {
     if (sdr.width(), sdr.height()) != (hdr.width(), hdr.height()) {
         return Err(GainMapError::SizeMismatch {
@@ -111,7 +115,10 @@ pub fn compute_gain_map(
     // full-resolution gain plane is ever allocated.
     data.par_chunks_mut(map_width)
         .enumerate()
-        .for_each(|(map_y, out_row)| {
+        .try_for_each(|(map_y, out_row)| {
+            if is_cancelled() {
+                return Err(GainMapError::Cancelled);
+            }
             let first = map_y * factor;
             let last = (first + factor).min(sdr.height());
             let mut sums = vec![0.0_f32; map_width];
@@ -123,7 +130,8 @@ pub fn compute_gain_map(
                 let columns = block_columns(map_x, factor, sdr.width()) as f32;
                 *out = encode(sum / (rows * columns), params);
             }
-        });
+            Ok(())
+        })?;
 
     let image = GainMapImage::new(map_width, map_height, 1, data)?;
     Ok((image, params.metadata()))
@@ -187,7 +195,7 @@ mod tests {
     fn compute(sdr: &[f32], hdr: &[f32], w: usize, h: usize, p: &GainMapParams) -> GainMapImage {
         let sdr = LinearRgbView::new(w, h, sdr).unwrap();
         let hdr = LinearRgbView::new(w, h, hdr).unwrap();
-        compute_gain_map(&sdr, &hdr, p).unwrap().0
+        compute_gain_map(&sdr, &hdr, p, &|| false).unwrap().0
     }
 
     #[test]
@@ -327,19 +335,29 @@ mod tests {
         let view_a = LinearRgbView::new(2, 2, &a).unwrap();
         let view_b = LinearRgbView::new(4, 2, &b).unwrap();
         assert!(matches!(
-            compute_gain_map(&view_a, &view_b, &GainMapParams::default()),
+            compute_gain_map(&view_a, &view_b, &GainMapParams::default(), &|| false),
             Err(GainMapError::SizeMismatch { .. })
         ));
         let params = GainMapParams {
             downsample: 0,
             ..GainMapParams::default()
         };
-        assert!(compute_gain_map(&view_a, &view_a, &params).is_err());
+        assert!(compute_gain_map(&view_a, &view_a, &params, &|| false).is_err());
         let params = GainMapParams {
             luma_weights: [0.0; 3],
             ..GainMapParams::default()
         };
-        assert!(compute_gain_map(&view_a, &view_a, &params).is_err());
+        assert!(compute_gain_map(&view_a, &view_a, &params, &|| false).is_err());
+    }
+
+    #[test]
+    fn stops_when_cancelled() {
+        let img = grey(8, 8, 0.5);
+        let view = LinearRgbView::new(8, 8, &img).unwrap();
+        assert_eq!(
+            compute_gain_map(&view, &view, &GainMapParams::default(), &|| true),
+            Err(GainMapError::Cancelled)
+        );
     }
 
     #[test]

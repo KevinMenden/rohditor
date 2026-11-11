@@ -90,6 +90,9 @@ pub enum GainMapError {
         reason: &'static str,
     },
 
+    #[error("gain-map computation was cancelled")]
+    Cancelled,
+
     #[error("{0}-channel gain maps are not supported here")]
     UnsupportedChannelCount(usize),
 
