@@ -1,16 +1,30 @@
-//! Camera-native Opposed / local-inpainting reconstruction.
+//! Camera-native, region-aware Opposed reconstruction.
 //!
 //! This is an original Bayer-domain implementation informed by the opposed
 //! recovery family, rather than a port of a demosaiced RGB implementation.
-//! It keeps the algorithm deliberately local and conservative: valid nearby
-//! photosites provide a chrominance offset, while the target cell's surviving
-//! channels provide the opposing reference for the missing channel.
+//! Every clipped site is estimated as
+//! `opposing_reference(target) + correction`: the target cell's surviving
+//! channels provide the reference, and a chrominance offset measured on clean
+//! cells provides the correction. The correction comes from two sources:
+//!
+//! - **local**: clean candidate cells within [`LAST_RADIUS`] cells of the
+//!   site, accurate near the edge of a clipped region;
+//! - **region**: a robust statistic over the clean border ring of the
+//!   site's clipped region (see [`crate::regions`] and
+//!   [`crate::region_correction`]), falling back to an image-wide pool.
+//!
+//! Near the border the local value dominates; deeper inside, where the local
+//! search runs out of candidates, the region value takes over, with a
+//! distance-weighted blend in between.
 
 use rayon::prelude::*;
 use rohditor_image::MosaicImage;
 
-use crate::cells::CellSummaries;
+use crate::cells::{CellSummaries, ceil_halved};
 use crate::detect::is_suspected_clipped;
+use crate::region_correction::RegionCorrections;
+use crate::regions::Regions;
+use crate::support::{self, ChannelMask};
 use crate::{
     ChannelClipLevels, ChannelDetectionLevels, HighlightError, OpposedOptions, OpposedOutput,
     OpposedStats, checkpoint,
@@ -20,14 +34,20 @@ const FIRST_RADIUS: usize = 1;
 const LAST_RADIUS: usize = 3;
 const MAX_CANDIDATES: usize = 48;
 const MIN_CANDIDATES: usize = 3;
-const DARK_SUPPORT_FRACTION: f32 = 0.2;
-const CROSS_CHANNEL_TOLERANCE_EV: f32 = 0.75;
 const MAXIMUM_ESTIMATE_MULTIPLIER: f32 = 4.0;
 
-/// Logical bytes occupied by the immutable cell summaries used by Opposed.
+/// Logical bytes occupied by the working memory of Opposed: the immutable
+/// cell summaries, the per-cell region labels (plus segmentation scratch) and
+/// the per-region correction accumulators, all for their worst case.
 #[must_use]
 pub fn opposed_scratch_bytes(width: usize, height: usize) -> Option<usize> {
-    crate::cells::scratch_bytes(width, height)
+    let (cell_width, cell_height) = (ceil_halved(width), ceil_halved(height));
+    crate::cells::scratch_bytes(width, height)?
+        .checked_add(crate::regions::scratch_bytes(cell_width, cell_height)?)?
+        .checked_add(crate::region_correction::scratch_bytes(
+            cell_width,
+            cell_height,
+        )?)
 }
 
 /// Reconstruct suspected-clipped Bayer sites using local opposing-channel
@@ -62,6 +82,15 @@ pub fn reconstruct_opposed_cancellable(
     }
 
     let summaries = CellSummaries::build(&mosaic, options.detection_levels, cancellation)?;
+    let regions = Regions::build(&summaries, cancellation)?;
+    let corrections =
+        RegionCorrections::build(&summaries, &regions, options.detection_levels, cancellation)?;
+    let context = EstimateContext {
+        levels: options.detection_levels,
+        summaries: &summaries,
+        regions: &regions,
+        corrections: &corrections,
+    };
     let width = mosaic.width();
     let row_stride = mosaic.row_stride();
     let pattern = mosaic.pattern();
@@ -85,15 +114,11 @@ pub fn reconstruct_opposed_cancellable(
                     let target_y = y / 2;
                     let target = summaries.get(target_x, target_y);
                     let support_count = opposing_support_count(target, channel);
-                    let estimate = estimate_site(
-                        target,
-                        channel,
-                        options.detection_levels,
-                        &summaries,
-                        target_x,
-                        target_y,
-                        support_count,
-                    );
+                    let estimate = if support_count == 0 {
+                        None
+                    } else {
+                        context.estimate_site(target, channel, target_x, target_y)
+                    };
                     let Some(estimate) = estimate else {
                         row_stats.fallback_sites += 1;
                         if support_count == 0 {
@@ -197,139 +222,115 @@ fn opposing_support_count(target: crate::cells::CellSummary, target_channel: usi
         .count()
 }
 
-fn estimate_site(
-    target: crate::cells::CellSummary,
-    target_channel: usize,
+/// Everything the per-site estimator reads; all of it is immutable, so rows
+/// can be reconstructed in parallel.
+struct EstimateContext<'a> {
     levels: ChannelDetectionLevels,
-    summaries: &CellSummaries,
-    target_x: usize,
-    target_y: usize,
-    support_count: usize,
-) -> Option<f32> {
-    if support_count == 0 {
-        return None;
-    }
-    let target_reference = opposing_reference(target, target_channel)?;
-    let mut corrections = [0.0_f32; MAX_CANDIDATES];
-    let mut count = 0;
+    summaries: &'a CellSummaries,
+    regions: &'a Regions,
+    corrections: &'a RegionCorrections,
+}
 
-    for radius in FIRST_RADIUS..=LAST_RADIUS {
-        for cell_y in target_y.saturating_sub(radius)
-            ..=target_y.saturating_add(radius).min(summaries.height - 1)
-        {
-            for cell_x in target_x.saturating_sub(radius)
-                ..=target_x.saturating_add(radius).min(summaries.width - 1)
+impl EstimateContext<'_> {
+    /// Estimate a suspected-clipped `target_channel` site in cell
+    /// `(target_x, target_y)`, or `None` when neither the local neighbourhood
+    /// nor any region border provides evidence.
+    fn estimate_site(
+        &self,
+        target: crate::cells::CellSummary,
+        target_channel: usize,
+        target_x: usize,
+        target_y: usize,
+    ) -> Option<f32> {
+        let support = support::support_mask(target, target_channel, self.levels);
+        let target_reference = support::reference(target, support)?;
+        let target_ratio = support::support_log_ratio(target, support);
+        let local =
+            self.local_correction(target_channel, support, target_ratio, target_x, target_y);
+        let label = self.regions.label(target_x, target_y);
+        debug_assert_ne!(label, 0, "a suspected site always lies inside a region");
+        // A border whose colour differs from the target's belongs to a
+        // neighbouring object: treat it as no evidence rather than bleed it.
+        let region = self
+            .corrections
+            .lookup(label, target_channel, support)
+            .filter(|border| {
+                support::chromaticity_agrees(support, target_ratio, border.support_log_ratio)
+            })
+            .map(|border| border.offset);
+
+        let correction = match (local, region) {
+            (Some((local, radius)), Some(region)) => {
+                let weight = local_weight(radius);
+                weight * local + (1.0 - weight) * region
+            }
+            (Some((local, _)), None) => local,
+            (None, Some(region)) => region,
+            (None, None) => return None,
+        };
+        let estimate = target_reference + correction;
+        (estimate.is_finite() && estimate > 0.0).then_some(estimate)
+    }
+
+    /// Median correction of the clean candidates nearest to the target, and
+    /// the search radius (in cells) that supplied them.
+    fn local_correction(
+        &self,
+        target_channel: usize,
+        support: ChannelMask,
+        target_ratio: Option<f32>,
+        target_x: usize,
+        target_y: usize,
+    ) -> Option<(f32, usize)> {
+        let summaries = self.summaries;
+        let mut corrections = [0.0_f32; MAX_CANDIDATES];
+        let mut count = 0;
+
+        for radius in FIRST_RADIUS..=LAST_RADIUS {
+            for cell_y in target_y.saturating_sub(radius)
+                ..=target_y.saturating_add(radius).min(summaries.height - 1)
             {
-                if target_x.abs_diff(cell_x).max(target_y.abs_diff(cell_y)) != radius {
-                    continue;
-                }
-                let candidate = summaries.get(cell_x, cell_y);
-                if !candidate.is_usable(target_channel)
-                    || !candidate.is_clean(target_channel)
-                    || candidate.means[target_channel]
-                        <= DARK_SUPPORT_FRACTION * levels.for_channel(target_channel)
+                for cell_x in target_x.saturating_sub(radius)
+                    ..=target_x.saturating_add(radius).min(summaries.width - 1)
                 {
-                    continue;
-                }
-                if !candidate_matches_support(
-                    target,
-                    candidate,
-                    target_channel,
-                    levels,
-                    support_count,
-                ) {
-                    continue;
-                }
-                let Some(candidate_reference) = opposing_reference(candidate, target_channel)
-                else {
-                    continue;
-                };
-                let correction = candidate.means[target_channel] - candidate_reference;
-                if correction.is_finite() && count < corrections.len() {
-                    corrections[count] = correction;
-                    count += 1;
+                    if target_x.abs_diff(cell_x).max(target_y.abs_diff(cell_y)) != radius {
+                        continue;
+                    }
+                    // Most cells next to a large region are clipped too:
+                    // reject them from the flag byte before loading means.
+                    if !summaries.is_usable_and_clean(cell_x, cell_y, target_channel) {
+                        continue;
+                    }
+                    let candidate = summaries.get(cell_x, cell_y);
+                    let Some(correction) =
+                        support::correction(candidate, target_channel, support, self.levels)
+                    else {
+                        continue;
+                    };
+                    let candidate_ratio = support::support_log_ratio(candidate, support);
+                    if !support::chromaticity_agrees(support, target_ratio, candidate_ratio) {
+                        continue;
+                    }
+                    if count < corrections.len() {
+                        corrections[count] = correction;
+                        count += 1;
+                    }
                 }
             }
+            if count >= MIN_CANDIDATES {
+                corrections[..count].sort_by(|left, right| left.total_cmp(right));
+                return Some((median(&corrections[..count]), radius));
+            }
         }
-        if count >= MIN_CANDIDATES {
-            break;
-        }
-    }
-
-    if count < MIN_CANDIDATES {
-        return None;
-    }
-    corrections[..count].sort_by(|left, right| left.total_cmp(right));
-    let correction = median(&corrections[..count]);
-    let estimate = target_reference + correction;
-    (estimate.is_finite() && estimate > 0.0).then_some(estimate)
-}
-
-fn candidate_matches_support(
-    target: crate::cells::CellSummary,
-    candidate: crate::cells::CellSummary,
-    target_channel: usize,
-    levels: ChannelDetectionLevels,
-    support_count: usize,
-) -> bool {
-    let mut checked = 0;
-    for channel in 0..3 {
-        if channel == target_channel || !target.is_usable(channel) {
-            continue;
-        }
-        if !target.is_clean(channel)
-            || !candidate.is_usable(channel)
-            || !candidate.is_clean(channel)
-        {
-            return false;
-        }
-        let target_value = target.means[channel];
-        let candidate_value = candidate.means[channel];
-        if target_value <= DARK_SUPPORT_FRACTION * levels.for_channel(channel)
-            || candidate_value <= DARK_SUPPORT_FRACTION * levels.for_channel(channel)
-        {
-            return false;
-        }
-        checked += 1;
-    }
-
-    // With two surviving support channels, their ratio is a useful edge guard.
-    // With one support channel there is no chromaticity ratio to compare, so
-    // the median and the minimum candidate count provide the conservative guard.
-    if support_count >= 2 {
-        let target_ratio =
-            target.means[(target_channel + 1) % 3] / target.means[(target_channel + 2) % 3];
-        let candidate_ratio =
-            candidate.means[(target_channel + 1) % 3] / candidate.means[(target_channel + 2) % 3];
-        target_ratio.is_finite()
-            && candidate_ratio.is_finite()
-            && target_ratio > 0.0
-            && candidate_ratio > 0.0
-            && (target_ratio.log2() - candidate_ratio.log2()).abs() <= CROSS_CHANNEL_TOLERANCE_EV
-            && checked >= 2
-    } else {
-        checked >= 1
+        None
     }
 }
 
-fn opposing_reference(summary: crate::cells::CellSummary, target_channel: usize) -> Option<f32> {
-    let mut sum = 0.0;
-    let mut count = 0;
-    for channel in 0..3 {
-        if channel == target_channel || !summary.is_usable(channel) || !summary.is_clean(channel) {
-            continue;
-        }
-        let value = summary.means[channel];
-        if !value.is_finite() || value <= 0.0 {
-            continue;
-        }
-        sum += value.cbrt();
-        count += 1;
-    }
-    (count != 0).then(|| {
-        let root = sum / count as f32;
-        root * root * root
-    })
+/// Weight of the local correction when it was found at `radius` cells:
+/// 1 right at the border, falling linearly towards the region estimate as
+/// the nearest evidence gets further away.
+fn local_weight(radius: usize) -> f32 {
+    (LAST_RADIUS + 1 - radius) as f32 / LAST_RADIUS as f32
 }
 
 fn median(values: &[f32]) -> f32 {

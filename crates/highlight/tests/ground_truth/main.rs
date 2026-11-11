@@ -6,7 +6,7 @@
 //! - `scene_guards`: exact-sat margin + mask-from-bits guards, no method
 //!   runs — fast.
 //! - `margin_negative_control`: the #62 margin trap as a one-liner.
-//! - `ground_truth_matrix`: 7 scenes x 2 sat levels x 4 methods = 56 runs,
+//! - `ground_truth_matrix`: 8 scenes x 2 sat levels x 4 methods = 64 runs,
 //!   prints the human table, the pasteable baseline literal block, and the
 //!   elapsed time (timing is printed, never asserted), then checks every run
 //!   against the pinned `baseline::BASELINES` rows and fails once with the
@@ -24,6 +24,7 @@ mod baseline;
 mod generator;
 mod metrics;
 mod neutral_fallback;
+mod region_opposed;
 mod scenes;
 
 use std::time::Instant;
@@ -279,7 +280,7 @@ fn margin_negative_control() {
     );
 }
 
-/// The 56-run matrix: prints the human table (14 sections of 4 rows), the
+/// The 64-run matrix: prints the human table (16 sections of 4 rows), the
 /// pasteable baseline block, and elapsed time, then asserts invariants and
 /// pinned baselines for every run.
 #[test]

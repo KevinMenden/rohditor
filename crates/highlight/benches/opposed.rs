@@ -2,7 +2,24 @@ use criterion::{
     BatchSize, BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main,
 };
 use rohditor_highlight::{ChannelDetectionLevels, OpposedOptions, reconstruct_opposed};
-use rohditor_image::{BayerPattern, MosaicImage};
+use rohditor_image::{BayerPattern, CfaColor, MosaicImage};
+
+/// Where the clipped samples of a fixture are.
+#[derive(Clone, Copy)]
+enum Layout {
+    /// Nothing clipped: only the detection scan runs.
+    Clean,
+    /// One isolated clipped sample every ~1000 samples.
+    Sparse,
+    /// Every sample clipped: one region spanning the frame, no border.
+    AllClipped,
+    /// A clipped green cell on a 5-cell lattice: the densest layout of
+    /// separate regions (worst case for per-region bookkeeping).
+    TinyRegions,
+    /// One huge blown-green disc with a shoulder (worst case for a single
+    /// region's border statistics).
+    Disc,
+}
 
 #[derive(Clone, Copy)]
 struct Fixture {
@@ -10,20 +27,53 @@ struct Fixture {
     width: usize,
     height: usize,
     row_stride: usize,
-    sparse: bool,
-    clipped: bool,
+    layout: Layout,
+}
+
+/// Background of the layouts that need near-clip border cells to exist.
+const SHOULDER_BASE: f32 = 0.6;
+
+fn sample_value(fixture: Fixture, x: usize, y: usize) -> f32 {
+    let is_green = BayerPattern::Rggb.color_at(x, y) == CfaColor::Green;
+    match fixture.layout {
+        Layout::Clean => 0.35,
+        Layout::Sparse => {
+            if (x + y * fixture.width).is_multiple_of(997) {
+                1.0
+            } else {
+                0.35
+            }
+        }
+        Layout::AllClipped => 1.0,
+        Layout::TinyRegions => {
+            if is_green && (x / 2) % 5 == 2 && (y / 2) % 5 == 2 {
+                1.0
+            } else {
+                SHOULDER_BASE
+            }
+        }
+        Layout::Disc => {
+            let dx = x as f32 - fixture.width as f32 / 2.0;
+            let dy = y as f32 - fixture.height as f32 / 2.0;
+            let distance = (dx * dx + dy * dy).sqrt();
+            let edge = fixture.height as f32 / 3.0;
+            if !is_green {
+                SHOULDER_BASE
+            } else if distance <= edge {
+                1.0
+            } else {
+                // Linear shoulder back to the background over 200 samples.
+                (1.0 - (distance - edge) / 200.0 * (1.0 - SHOULDER_BASE)).max(SHOULDER_BASE)
+            }
+        }
+    }
 }
 
 fn make_mosaic(fixture: Fixture) -> MosaicImage<f32> {
-    let mut data = vec![0.35_f32; fixture.row_stride * fixture.height];
+    let mut data = vec![0.0_f32; fixture.row_stride * fixture.height];
     for y in 0..fixture.height {
         for x in 0..fixture.width {
-            let index = y * fixture.row_stride + x;
-            let should_clip =
-                fixture.clipped || (fixture.sparse && (x + y * fixture.width).is_multiple_of(997));
-            if should_clip {
-                data[index] = 1.0;
-            }
+            data[y * fixture.row_stride + x] = sample_value(fixture, x, y);
         }
     }
     MosaicImage::new(
@@ -51,40 +101,49 @@ fn bench_opposed(c: &mut Criterion) {
             width: 6_000,
             height: 4_000,
             row_stride: 6_000,
-            sparse: false,
-            clipped: false,
+            layout: Layout::Clean,
         },
         Fixture {
             name: "6000x4000_tight_sparse",
             width: 6_000,
             height: 4_000,
             row_stride: 6_000,
-            sparse: true,
-            clipped: false,
+            layout: Layout::Sparse,
         },
         Fixture {
             name: "6000x4000_tight_large",
             width: 6_000,
             height: 4_000,
             row_stride: 6_000,
-            sparse: false,
-            clipped: true,
+            layout: Layout::AllClipped,
+        },
+        Fixture {
+            name: "6000x4000_many_tiny_regions",
+            width: 6_000,
+            height: 4_000,
+            row_stride: 6_000,
+            layout: Layout::TinyRegions,
+        },
+        Fixture {
+            name: "6000x4000_one_huge_region",
+            width: 6_000,
+            height: 4_000,
+            row_stride: 6_000,
+            layout: Layout::Disc,
         },
         Fixture {
             name: "37x23_padded_sparse",
             width: 37,
             height: 23,
             row_stride: 41,
-            sparse: true,
-            clipped: false,
+            layout: Layout::Sparse,
         },
         Fixture {
             name: "37x23_padded_large",
             width: 37,
             height: 23,
             row_stride: 41,
-            sparse: false,
-            clipped: true,
+            layout: Layout::AllClipped,
         },
     ];
 
