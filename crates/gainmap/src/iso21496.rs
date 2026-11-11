@@ -5,7 +5,7 @@
 //! | field | type |
 //! |---|---|
 //! | `minimum_version`, `writer_version` | `u16`, `u16` |
-//! | flags: bit 7 multichannel, bit 6 use-base-colour-space, rest reserved | `u8` |
+//! | flags: bit 7 multichannel, bit 6 use-base-colour-space, rest unsupported | `u8` |
 //! | base headroom (log2) | `u32` numerator, `u32` denominator |
 //! | alternate headroom (log2) | `u32` numerator, `u32` denominator |
 //! | per channel: min, max | `i32`/`u32` fraction each |
@@ -54,8 +54,10 @@ pub fn to_bytes(metadata: &GainMapMetadata) -> Result<Vec<u8>, GainMapError> {
 
 /// Parses a payload written by this module or by another ISO 21496-1 writer.
 ///
-/// Reserved flag bits are ignored. Trailing bytes are an error so a truncated or concatenated
-/// payload is not silently accepted.
+/// Flag bits other than multichannel and use-base-colour-space are rejected rather than
+/// ignored: one of them is the backward-direction flag (the base image is the HDR side),
+/// which would make a reader apply the gain the wrong way round. Trailing bytes are an error
+/// so a truncated or concatenated payload is not silently accepted.
 pub fn from_bytes(bytes: &[u8]) -> Result<GainMapMetadata, GainMapError> {
     let mut reader = Reader { bytes };
     let minimum_version = reader.u16()?;
@@ -64,6 +66,9 @@ pub fn from_bytes(bytes: &[u8]) -> Result<GainMapMetadata, GainMapError> {
     }
     let _writer_version = reader.u16()?;
     let flags = reader.u8()?;
+    if flags & !(FLAG_MULTICHANNEL | FLAG_USE_BASE_COLOUR_SPACE) != 0 {
+        return Err(GainMapError::UnsupportedIsoFlags(flags));
+    }
     let channel_count = if flags & FLAG_MULTICHANNEL != 0 { 3 } else { 1 };
     let base_hdr_headroom_log2 = reader.unsigned()?;
     let alternate_hdr_headroom_log2 = reader.unsigned()?;
@@ -230,6 +235,21 @@ mod tests {
             Err(GainMapError::UnsupportedIsoVersion(1))
         );
         assert!(from_bytes(&[]).is_err());
+    }
+
+    #[test]
+    fn rejects_unsupported_flag_bits() {
+        // Bit 5 is the backward-direction flag in the spec as I know it; every bit below the
+        // two supported ones must be refused instead of silently misread.
+        for bit in 0..6 {
+            let mut bytes = to_bytes(&sample()).unwrap();
+            bytes[4] |= 1 << bit;
+            assert_eq!(
+                from_bytes(&bytes),
+                Err(GainMapError::UnsupportedIsoFlags(bytes[4])),
+                "bit {bit}"
+            );
+        }
     }
 
     #[test]

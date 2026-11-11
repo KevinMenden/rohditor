@@ -99,6 +99,9 @@ pub enum GainMapError {
     #[error("malformed ISO 21496-1 payload: {0}")]
     MalformedIsoPayload(&'static str),
 
+    #[error("unsupported ISO 21496-1 flag bits {0:#010b}")]
+    UnsupportedIsoFlags(u8),
+
     #[error("unsupported ISO 21496-1 minimum version {0}")]
     UnsupportedIsoVersion(u16),
 }
