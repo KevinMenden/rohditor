@@ -54,7 +54,7 @@ pub(super) fn apply_dehaze(
     let reduced = reduce(image, cancellation)?;
     let airlight = estimate_airlight(&reduced);
     if amount < 0.0 {
-        add_veil(image, airlight, -amount);
+        add_veil(image, airlight, -amount, cancellation);
         return check(cancellation);
     }
     let transmission = guided_transmission(&reduced, airlight, luma_weights, cancellation)?;
@@ -65,6 +65,7 @@ pub(super) fn apply_dehaze(
         airlight,
         luma_weights,
         amount,
+        cancellation,
     );
     check(cancellation)
 }
@@ -265,6 +266,7 @@ fn remove_veil(
     airlight: [f32; 3],
     luma_weights: [f32; 3],
     amount: f32,
+    cancellation: &dyn CancellationCheck,
 ) {
     let (width, stride) = (image.width(), image.row_stride());
     image
@@ -272,6 +274,10 @@ fn remove_veil(
         .par_chunks_mut(stride)
         .enumerate()
         .for_each(|(y, row)| {
+            // A cancelled render discards the image, so skipped rows are harmless.
+            if cancellation.is_cancelled() {
+                return;
+            }
             for (x, pixel) in row[..width * 3]
                 .as_chunks_mut::<3>()
                 .0
@@ -293,10 +299,18 @@ fn remove_veil(
 }
 
 /// Mix a uniform veil of the atmospheric light into every pixel.
-fn add_veil(image: &mut LinearRgbImage<f32>, airlight: [f32; 3], amount: f32) {
+fn add_veil(
+    image: &mut LinearRgbImage<f32>,
+    airlight: [f32; 3],
+    amount: f32,
+    cancellation: &dyn CancellationCheck,
+) {
     let t = 1.0 - amount * (1.0 - FULL_VEIL_TRANSMISSION);
     let (width, stride) = (image.width(), image.row_stride());
     image.data_mut().par_chunks_mut(stride).for_each(|row| {
+        if cancellation.is_cancelled() {
+            return;
+        }
         for pixel in row[..width * 3].as_chunks_mut::<3>().0 {
             for (value, light) in pixel.iter_mut().zip(airlight) {
                 *value = *value * t + light * (1.0 - t);
