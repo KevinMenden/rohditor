@@ -113,25 +113,29 @@ pub fn compute_gain_map(
 
     // Each map row only reads its own `factor` source rows, so rows are independent and no
     // full-resolution gain plane is ever allocated.
+    // One scratch row of block sums per worker thread, cleared for every map row.
     data.par_chunks_mut(map_width)
         .enumerate()
-        .try_for_each(|(map_y, out_row)| {
-            if is_cancelled() {
-                return Err(GainMapError::Cancelled);
-            }
-            let first = map_y * factor;
-            let last = (first + factor).min(sdr.height());
-            let mut sums = vec![0.0_f32; map_width];
-            for y in first..last {
-                accumulate_row(sdr.row(y), hdr.row(y), params, &mut sums);
-            }
-            let rows = (last - first) as f32;
-            for (map_x, (out, sum)) in out_row.iter_mut().zip(&sums).enumerate() {
-                let columns = block_columns(map_x, factor, sdr.width()) as f32;
-                *out = encode(sum / (rows * columns), params);
-            }
-            Ok(())
-        })?;
+        .try_for_each_init(
+            || vec![0.0_f32; map_width],
+            |sums, (map_y, out_row)| {
+                if is_cancelled() {
+                    return Err(GainMapError::Cancelled);
+                }
+                let first = map_y * factor;
+                let last = (first + factor).min(sdr.height());
+                sums.fill(0.0);
+                for y in first..last {
+                    accumulate_row(sdr.row(y), hdr.row(y), params, sums);
+                }
+                let rows = (last - first) as f32;
+                for (map_x, (out, sum)) in out_row.iter_mut().zip(sums.iter()).enumerate() {
+                    let columns = block_columns(map_x, factor, sdr.width()) as f32;
+                    *out = encode(sum / (rows * columns), params);
+                }
+                Ok(())
+            },
+        )?;
 
     let image = GainMapImage::new(map_width, map_height, 1, data)?;
     Ok((image, params.metadata()))

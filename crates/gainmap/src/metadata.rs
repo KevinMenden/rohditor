@@ -52,7 +52,7 @@ impl ChannelMetadata {
             ("offset_hdr", self.offset_hdr),
         ] {
             if !(value.is_finite() && (0.0..=MAX_LOG2_MAGNITUDE).contains(&value)) {
-                return bad(name, "must be finite and non-negative");
+                return bad(name, "must be finite and within 0..=64");
             }
         }
         Ok(())
@@ -101,7 +101,7 @@ impl GainMapMetadata {
             ),
         ] {
             if !(value.is_finite() && (0.0..=MAX_LOG2_MAGNITUDE).contains(&value)) {
-                return bad(name, "must be finite and non-negative");
+                return bad(name, "must be finite and within 0..=64");
             }
         }
         if self.alternate_hdr_headroom_log2 < self.base_hdr_headroom_log2 {
