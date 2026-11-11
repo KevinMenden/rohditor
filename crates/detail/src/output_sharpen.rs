@@ -129,7 +129,7 @@ fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use rohditor_image::DisplayTransfer;
+    use rohditor_image::DisplayColorSpace;
 
     use super::*;
     use crate::NeverCancelled;
@@ -147,7 +147,7 @@ mod tests {
         let data = (0..width * height)
             .flat_map(|i| [value(i % width); 3])
             .collect();
-        DisplayRgbImage::new(width, height, width * 3, DisplayTransfer::Srgb, data).unwrap()
+        DisplayRgbImage::new(width, height, width * 3, DisplayColorSpace::SRGB, data).unwrap()
     }
 
     #[test]
@@ -180,7 +180,7 @@ mod tests {
             0.9, 0.1, 0.1, 0.1, 0.9, 0.1, 0.1, 0.1, 0.9, //
             0.5, 0.5, 0.5, 1.0, 1.0, 1.0, 0.2, 0.6, 0.4,
         ];
-        let mut colour = DisplayRgbImage::new(3, 2, 9, DisplayTransfer::Srgb, data).unwrap();
+        let mut colour = DisplayRgbImage::new(3, 2, 9, DisplayColorSpace::SRGB, data).unwrap();
         let before = colour.clone();
         sharpen_output(&mut colour, PARAMS, &NeverCancelled).unwrap();
         for (a, b) in colour.data().chunks(3).zip(before.data().chunks(3)) {

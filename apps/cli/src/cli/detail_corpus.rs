@@ -522,7 +522,7 @@ fn build_sheet(
         width,
         height,
         stride,
-        baseline.transfer(),
+        baseline.color_space(),
         pixels,
     )?)
 }
@@ -530,7 +530,7 @@ fn build_sheet(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rohditor_image::DisplayTransfer;
+    use rohditor_image::DisplayColorSpace;
 
     #[test]
     fn presets_start_with_an_inert_baseline_and_all_validate() {
@@ -551,7 +551,7 @@ mod tests {
     #[test]
     fn sheet_puts_the_baseline_left_of_every_row() {
         let image = |value: u8| {
-            DisplayRgbImage::new(2, 1, 6, DisplayTransfer::Srgb, vec![value; 6]).expect("image")
+            DisplayRgbImage::new(2, 1, 6, DisplayColorSpace::SRGB, vec![value; 6]).expect("image")
         };
         let (base, a, b) = (image(10), image(20), image(30));
         let sheet = build_sheet(&base, &[&a, &b]).expect("sheet");

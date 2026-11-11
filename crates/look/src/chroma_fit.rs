@@ -169,7 +169,7 @@ impl ChromaStatistics {
 mod tests {
     use super::*;
     use rohditor_color::linear_srgb_to_srgb;
-    use rohditor_image::DisplayTransfer;
+    use rohditor_image::DisplayColorSpace;
 
     /// Gradient over brightness with a fixed, asymmetric colour direction.
     /// `gain` scales the colour at a given linear luminance, as the camera would.
@@ -188,7 +188,7 @@ mod tests {
                 }
             }
         }
-        DisplayRgbImage::new(width, height, width * 3, DisplayTransfer::Srgb, data)
+        DisplayRgbImage::new(width, height, width * 3, DisplayColorSpace::SRGB, data)
             .expect("gradient image")
     }
 

@@ -25,7 +25,7 @@ use rohditor_edit::{
     TEMPERATURE_RANGE, TINT_RANGE, TONE_CURVE_RANGE, VIBRANCE_RANGE, WHITES_RANGE, WhiteBalance,
 };
 use rohditor_gpu::{ExportBackend, ExportRender, FallbackExporter};
-use rohditor_image::{DisplayRgbImage, DisplayTransfer, Orientation};
+use rohditor_image::{DisplayColorSpace, DisplayRgbImage, Orientation};
 use rohditor_raw::{
     EncodedPreviewFormat, ImageRect, PhotometricInterpretation, RawDecoder, RawFileInfo,
     RawlerDecoder,
@@ -1980,7 +1980,7 @@ pub(super) fn crop_display_image(
         crop.width,
         crop.height,
         row_stride,
-        image.transfer(),
+        image.color_space(),
         pixels,
     )?)
 }
@@ -2014,7 +2014,7 @@ fn nearest_neighbor_2x(image: &DisplayRgbImage<u8>) -> Result<DisplayRgbImage<u8
         width,
         height,
         row_stride,
-        DisplayTransfer::Srgb,
+        DisplayColorSpace::SRGB,
         pixels,
     )?)
 }
@@ -2326,7 +2326,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use clap::Parser;
-    use rohditor_image::{DisplayRgbImage, DisplayTransfer};
+    use rohditor_image::{DisplayColorSpace, DisplayRgbImage};
     use rohditor_raw::{CfaPattern, EncodedPreviewFormat, PhotometricInterpretation};
 
     use super::{
@@ -2801,7 +2801,7 @@ mod tests {
             3,
             2,
             9,
-            DisplayTransfer::Srgb,
+            DisplayColorSpace::SRGB,
             vec![
                 1, 2, 3, 4, 5, 6, 7, 8, 9, // row 0
                 10, 11, 12, 13, 14, 15, 16, 17, 18, // row 1

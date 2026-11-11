@@ -10,7 +10,7 @@ use rohditor_color::{
 use rohditor_demosaic::WhiteBalanceGains;
 use rohditor_edit::{CameraProfileSelection, WhiteBalance};
 use rohditor_image::{
-    DisplayRgbImage, DisplayTransfer, LinearRgbImage, LinearRgbSpace, allocate_zeroed_f32,
+    DisplayColorSpace, DisplayRgbImage, LinearRgbImage, LinearRgbSpace, allocate_zeroed_f32,
 };
 use rohditor_raw::{CameraColorMatrix, CameraMatrixOrigin, RawFileInfo};
 
@@ -512,7 +512,7 @@ pub fn convert_rec2020_to_display_srgb(
         input.width(),
         input.height(),
         row_stride,
-        DisplayTransfer::Srgb,
+        DisplayColorSpace::SRGB,
         output,
     )
     .map_err(Into::into)
@@ -526,7 +526,7 @@ pub(crate) fn encode_rec2020_for_srgb_output(
     output_policy: OutputPolicy,
 ) -> ([f32; 3], rohditor_color::GamutMapStatus) {
     let mapped = map_rec2020_for_srgb_output(rec2020_to_srgb, source, output_policy);
-    (mapped.linear_srgb.map(linear_srgb_to_srgb), mapped.status)
+    (mapped.linear_rgb.map(linear_srgb_to_srgb), mapped.status)
 }
 
 pub(crate) fn map_rec2020_for_srgb_output(
@@ -544,7 +544,7 @@ pub(crate) fn map_rec2020_for_srgb_output(
 /// Compatibility helper for hard-clipping linear sRGB to [0, 1].
 #[must_use]
 pub fn clip_linear_srgb_for_output(rgb: [f32; 3]) -> [f32; 3] {
-    clip_linear_srgb(rgb).linear_srgb
+    clip_linear_srgb(rgb).linear_rgb
 }
 
 fn parse_camera_matrix(
@@ -716,7 +716,7 @@ mod tests {
         CameraCalibration, D50_WHITE, adapt_xyz_to_d65, camera_profile_key,
         clip_linear_srgb_for_output, convert_rec2020_to_display_srgb, resolve_camera_colour,
     };
-    use rohditor_image::{DisplayTransfer, LinearRgbImage, LinearRgbSpace};
+    use rohditor_image::{DisplayColorSpace, LinearRgbImage, LinearRgbSpace};
 
     fn assert_close(actual: f32, expected: f32, tolerance: f32) {
         assert!(
@@ -738,7 +738,7 @@ mod tests {
         let input = LinearRgbImage::new(1, 1, 3, LinearRgbSpace::Rec2020D65, vec![1.0, 1.0, 1.0])
             .expect("valid linear image");
         let output = convert_rec2020_to_display_srgb(&input).expect("valid display conversion");
-        assert_eq!(output.transfer(), DisplayTransfer::Srgb);
+        assert_eq!(output.color_space(), DisplayColorSpace::SRGB);
         for channel in output.data() {
             assert_close(*channel, 1.0, 2.0e-5);
         }
