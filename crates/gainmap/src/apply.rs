@@ -20,7 +20,8 @@ pub fn boost_weight(metadata: &GainMapMetadata, display_headroom_log2: f32) -> f
 
 /// Applies the gain map to the linear SDR `base` for a display with the given headroom.
 ///
-/// The map is upsampled bilinearly in its encoded domain, as decoders do. Returns interleaved
+/// The map is upsampled bilinearly in its encoded domain, as decoders do. Any map size is
+/// accepted (both images are aligned by their edges), so no size check is needed. Returns interleaved
 /// linear RGB with the same size as `base`.
 pub fn apply_gain_map(
     base: &LinearRgbView<'_>,

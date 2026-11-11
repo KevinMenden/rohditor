@@ -257,15 +257,16 @@ mod tests {
         hdr[4] = f32::INFINITY;
         hdr[7] = f32::NEG_INFINITY;
         let map = compute(&sdr, &hdr, 2, 2, &params);
-        // A NaN/-inf pixel counts as black (cannot raise the boost above 0 here) and +inf
-        // counts as the maximum, so the block is the mean of 0, 0, 1 and 0 of the range.
-        assert_eq!(map.data().len(), 1);
-        assert!(map.data()[0] > 0 && map.data()[0] < 255);
-        // Non-finite SDR input must not panic or poison the output either.
+        // NaN and -inf count as black (gain below 0, clamped to no boost) and +inf as the
+        // brightest value (maximum boost), so the block is the mean of 0, 3, 0 and 0 stops:
+        // 0.75 of 3 stops = a quarter of the range = 63.75.
+        assert_eq!(map.data(), [64]);
+        // Non-finite SDR input: NaN darkens the SDR luminance (boost 1.48 stops), infinity
+        // makes the SDR infinitely bright (clamped to no boost). Mean 1.48 / 4 stops of 3.
         let mut bad_sdr = grey(2, 2, 0.2);
         bad_sdr[1] = f32::NAN;
         bad_sdr[5] = f32::INFINITY;
-        let _ = compute(&bad_sdr, &sdr, 2, 2, &params);
+        assert_eq!(compute(&bad_sdr, &sdr, 2, 2, &params).data(), [31]);
     }
 
     #[test]
