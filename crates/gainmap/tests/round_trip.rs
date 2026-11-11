@@ -5,14 +5,16 @@
 use rohditor_gainmap::{GainMapParams, LinearRgbView, apply_gain_map, compute_gain_map, iso21496};
 
 /// Quantisation alone costs at most half an 8-bit step of a 3-stop map: 3/255/2 = 0.59 % of
-/// the value. The half-resolution map cannot follow a gradient exactly (bilinear upsampling
-/// of block means, clamped at the borders), which is why smooth scenes get a wider band than
-/// uniform ones. A small absolute floor covers near-black, where the offsets dominate.
+/// the value, so uniform scenes get 1 %.
 const UNIFORM_TOLERANCE: f32 = 0.01;
-///
-/// For the test ramp (3 stops over 76 px = 0.039 stops/px) the block mean at a border lags the
-/// corner pixel by about one pixel of gradient, 2.7 %; quantisation (and gamma) add the rest.
+
+/// The half-resolution map cannot follow a gradient exactly (bilinear upsampling of block
+/// means, clamped at the borders), so smooth scenes get a wider band. For the test ramp
+/// (3 stops over 76 px = 0.039 stops/px) the block mean at a border lags the corner pixel by
+/// about one pixel of gradient, 2.7 %; quantisation (and gamma) add the rest.
 const RAMP_TOLERANCE: f32 = 0.04;
+
+/// Absolute floor for near-black samples, where the offsets dominate.
 const ABSOLUTE_TOLERANCE: f32 = 0.002;
 
 /// Test scene whose SDR colour varies by position (asymmetric in x and y). The HDR rendition is
