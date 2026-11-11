@@ -1,11 +1,13 @@
-//! Gain-map computation and CPU inverse at 24 MP and 48 MP (the export sizes).
+//! Gain-map computation and CPU inverse at 24 MP (a common export size).
+//!
+//! 48 MP is left out on purpose: the two f32 RGB inputs alone would take about 1.2 GB.
 
 #![allow(clippy::unwrap_used)]
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use rohditor_gainmap::{GainMapParams, LinearRgbView, apply_gain_map, compute_gain_map};
 
-const FRAMES: [(&str, usize, usize); 2] = [("24MP", 6_000, 4_000), ("48MP", 8_000, 6_000)];
+const FRAMES: [(&str, usize, usize); 1] = [("24MP", 6_000, 4_000)];
 
 /// A diagonal ramp: cheap to build, exercises the whole boost range.
 fn frame(width: usize, height: usize, scale: f32) -> Vec<f32> {

@@ -1,6 +1,8 @@
 //! ISO 21496-1 gain-map metadata payload (the bytes of the metadata box/segment body).
 //!
-//! Layout, all integers big-endian:
+//! Layout, all integers big-endian. Field order, widths and signedness match the parser in
+//! Skia's `SkGainmapInfo.cpp` (what Chrome and Android read): headroom and gamma are unsigned
+//! fractions, gain-map min/max and both offsets are signed.
 //!
 //! | field | type |
 //! |---|---|
