@@ -25,6 +25,7 @@ pub fn boost_weight(metadata: &GainMapMetadata, display_headroom_log2: f32) -> f
 /// Only single-channel maps are supported (see the crate docs), although [`crate::iso21496`]
 /// can already read three-channel metadata; others return
 /// [`GainMapError::UnsupportedChannelCount`].
+///
 /// Returns interleaved linear RGB with the same size as `base`. `is_cancelled` is polled once
 /// per row, as in [`crate::compute_gain_map`].
 pub fn apply_gain_map(
