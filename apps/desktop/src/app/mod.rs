@@ -36,7 +36,7 @@ use crate::ui::ViewMode;
 use crate::ui::adjustment_panel::{
     self, AdjustmentInteraction, AdjustmentRange, AdjustmentRanges, AdjustmentTarget,
     AdjustmentValues, CameraProfileChoice, DocumentPanelModel, ExportKind, ExportUiSettings,
-    PngDepth, SizeMode,
+    PanelSection, PngDepth, SizeMode,
 };
 use crate::ui::catalog::{
     self, FilmstripModel, LibraryEntryModel, LibraryEntryState, LibraryModel, LibrarySort,
@@ -86,6 +86,7 @@ mod gpu;
 mod lifecycle;
 mod masks;
 mod noise_reduction;
+mod section_reset;
 mod tools;
 
 use camera_look::CameraLookState;
@@ -1815,6 +1816,16 @@ impl RohditorApp {
                 // too; otherwise switching away from As-shot after a reset
                 // would unexpectedly resurrect an older manual WB choice.
                 white_balance_memory = WhiteBalanceModeMemory::default();
+            }
+            if let Some(section) = output.reset_section {
+                let defaults = default_recipe_for_document(document);
+                let next =
+                    section_reset::reset_section(document.edits.recipe(), &defaults, section);
+                changed |= document.edits.set_discrete(next);
+                if section == PanelSection::WhiteBalance {
+                    // Same reason as reset-all: forget the hidden manual choice.
+                    white_balance_memory = WhiteBalanceModeMemory::default();
+                }
             }
             if changed {
                 document.notice = None;

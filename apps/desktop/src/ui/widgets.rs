@@ -369,7 +369,16 @@ pub(crate) struct CollapsibleSection<'a> {
     title: &'a str,
     default_open: bool,
     changed: bool,
+    resettable: bool,
     tooltip: Option<&'a str>,
+}
+
+/// What a section reported for one frame.
+pub(crate) struct SectionOutput<R> {
+    /// `None` when the section is fully closed.
+    pub body: Option<R>,
+    /// The header's reset button was clicked.
+    pub reset_clicked: bool,
 }
 
 impl<'a> CollapsibleSection<'a> {
@@ -378,6 +387,7 @@ impl<'a> CollapsibleSection<'a> {
             title,
             default_open: false,
             changed: false,
+            resettable: false,
             tooltip: None,
         }
     }
@@ -387,10 +397,17 @@ impl<'a> CollapsibleSection<'a> {
         self
     }
 
-    /// Marks the closed header, so an edit cannot go unnoticed while its
-    /// controls are hidden.
+    /// Marks the header with a dot while the section holds an edit, so an edit
+    /// cannot go unnoticed while its controls are hidden or scrolled away.
     pub(crate) const fn changed(mut self, changed: bool) -> Self {
         self.changed = changed;
+        self
+    }
+
+    /// Adds a reset button to the header of a changed section. Read the click
+    /// from [`SectionOutput`] via [`Self::show_resettable`].
+    pub(crate) const fn resettable(mut self) -> Self {
+        self.resettable = true;
         self
     }
 
@@ -406,24 +423,38 @@ impl<'a> CollapsibleSection<'a> {
         ui: &mut egui::Ui,
         add_contents: impl FnOnce(&mut egui::Ui) -> R,
     ) -> Option<R> {
+        self.show_resettable(ui, add_contents).body
+    }
+
+    /// Like [`Self::show`], and also reports the header's reset button.
+    pub(crate) fn show_resettable<R>(
+        self,
+        ui: &mut egui::Ui,
+        add_contents: impl FnOnce(&mut egui::Ui) -> R,
+    ) -> SectionOutput<R> {
         // Keyed by the title alone, so the state survives `changed` flipping.
         let id = ui.make_persistent_id(("collapsible_section", self.title));
         let mut state = CollapsingState::load_with_default_open(ui.ctx(), id, self.default_open);
         let result = theme::adjustment_section_frame().show(ui, |ui| {
-            self.show_header(ui, &mut state);
-            state
+            let reset_clicked = self.show_header(ui, &mut state);
+            let body = state
                 .show_body_unindented(ui, |ui| {
                     ui.add_space(7.0);
                     add_contents(ui)
                 })
-                .map(|body| body.inner)
+                .map(|body| body.inner);
+            SectionOutput {
+                body,
+                reset_clicked,
+            }
         });
         ui.add_space(metrics::ADJUSTMENT_SECTION_GAP);
         result.inner
     }
 
-    /// The whole row toggles the section, not only the arrow.
-    fn show_header(&self, ui: &mut egui::Ui, state: &mut CollapsingState) {
+    /// The whole row toggles the section, not only the arrow. Returns whether
+    /// the reset button was clicked.
+    fn show_header(&self, ui: &mut egui::Ui, state: &mut CollapsingState) -> bool {
         let size = egui::vec2(ui.available_width(), metrics::SECTION_HEADER_HEIGHT);
         let (rect, mut response) = ui.allocate_exact_size(size, egui::Sense::click());
         response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -451,13 +482,39 @@ impl<'a> CollapsibleSection<'a> {
             egui::FontId::proportional(13.0),
             colors::TEXT,
         );
-        if self.changed && !state.is_open() {
-            ui.painter().circle_filled(
-                rect.right_center() - egui::vec2(5.0, 0.0),
-                3.0,
-                colors::ACCENT_HOVER,
-            );
+        if !self.changed {
+            return false;
         }
+        ui.painter().circle_filled(
+            rect.right_center() - egui::vec2(5.0, 0.0),
+            3.0,
+            colors::ACCENT_HOVER,
+        );
+        self.resettable && self.show_reset_button(ui, rect)
+    }
+
+    /// A small reset icon left of the changed-dot. It is added after the
+    /// header row, so it takes the click instead of toggling the section.
+    fn show_reset_button(&self, ui: &mut egui::Ui, header: egui::Rect) -> bool {
+        let rect = egui::Rect::from_center_size(
+            header.right_center() - egui::vec2(24.0, 0.0),
+            egui::Vec2::splat(22.0),
+        );
+        let response = ui
+            .interact(
+                rect,
+                ui.make_persistent_id(("section_reset", self.title)),
+                egui::Sense::click(),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text("Reset this section");
+        let color = if response.hovered() {
+            colors::TEXT
+        } else {
+            colors::TEXT_MUTED
+        };
+        icons::paint(ui.painter(), rect, Icon::Reset, color);
+        response.clicked()
     }
 }
 
@@ -709,6 +766,53 @@ mod tests {
         assert!(section_frame(&context, 1.0, Vec::new(), || {
             CollapsibleSection::new(TITLE).changed(true)
         }));
+    }
+
+    #[test]
+    fn collapsible_section_reset_button_reports_a_click_without_toggling() {
+        let context = egui::Context::default();
+        let reset_button = egui::pos2(300.0 - 24.0 - 12.0, 20.0);
+        let button = |pressed| egui::Event::PointerButton {
+            pos: reset_button,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let frames = [
+            vec![egui::Event::PointerMoved(reset_button)],
+            vec![button(true)],
+            vec![button(false)],
+        ];
+        let mut resets = Vec::new();
+        let mut bodies = Vec::new();
+        for (index, events) in frames.into_iter().enumerate() {
+            let _ = context.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(300.0, 400.0),
+                    )),
+                    time: Some(index as f64 / 60.0),
+                    events,
+                    ..Default::default()
+                },
+                |context| {
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::NONE)
+                        .show(context, |ui| {
+                            let shown = CollapsibleSection::new("Resettable")
+                                .changed(true)
+                                .resettable()
+                                .show_resettable(ui, |_| ());
+                            resets.push(shown.reset_clicked);
+                            bodies.push(shown.body.is_some());
+                        });
+                },
+            );
+        }
+        assert_eq!(resets.iter().filter(|clicked| **clicked).count(), 1);
+        // The click hit the button, so the closed section stayed closed.
+        assert!(bodies.iter().all(|open| !open));
     }
 
     fn saturation_spec() -> AdjustmentSpec<'static> {
