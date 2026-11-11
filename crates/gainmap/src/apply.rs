@@ -182,20 +182,48 @@ mod tests {
         );
     }
 
+    /// A non-square 2x3 map with a distinct value in every cell, so a swapped x/y tap changes
+    /// the result.
+    fn asymmetric_map() -> GainMapImage {
+        GainMapImage::new(2, 3, 1, vec![0, 100, 50, 150, 200, 250]).unwrap()
+    }
+
     #[test]
-    fn upsampling_interpolates_between_map_pixels() {
-        // 4 base pixels over a 2-pixel map: interior samples blend, outer ones are clamped.
-        let pixels = [0.0; 12];
-        let base = LinearRgbView::new(4, 1, &pixels).unwrap();
-        let map = GainMapImage::new(2, 1, 1, vec![0, 255]).unwrap();
+    fn upsampling_matches_known_bilinear_samples() {
+        let map = asymmetric_map();
         let x_taps = axis_taps(4, 2);
-        let y_tap = &axis_taps(1, 1)[0];
-        let samples: Vec<f32> = x_taps
-            .iter()
-            .map(|x| sample_bilinear(&map, x, y_tap))
-            .collect();
-        assert_eq!(samples, [0.0, 63.75, 191.25, 255.0]);
-        assert!(apply_gain_map(&base, &map, &metadata(), 3.0, &|| false).is_ok());
+        let y_taps = axis_taps(6, 3);
+        let at = |x: usize, y: usize| sample_bilinear(&map, &x_taps[x], &y_taps[y]);
+        // Base column 1 is 0.25 map pixels right of map column 0; row 1 is 0.25 below row 0.
+        assert_eq!(at(0, 0), 0.0); // clamped to the corner
+        assert_eq!(at(1, 0), 25.0); // horizontal only: 0 -> 100
+        assert_eq!(at(0, 1), 12.5); // vertical only: 0 -> 50
+        assert_eq!(at(1, 1), 37.5); // both: 25 -> 75
+        assert_eq!(at(3, 5), 250.0); // opposite corner
+        assert_eq!(at(3, 3), 175.0); // row 3 = 1.25 -> 0.25 between map rows 1 and 2
+    }
+
+    #[test]
+    fn apply_uses_the_upsampled_map_for_every_pixel() {
+        // Black base: output = offset * (2^(3 * encoded) - 1), so it exposes the sampled
+        // value of each pixel directly.
+        let pixels = [0.0; 4 * 6 * 3];
+        let base = LinearRgbView::new(4, 6, &pixels).unwrap();
+        let map = asymmetric_map();
+        let out = apply_gain_map(&base, &map, &metadata(), 3.0, &|| false).unwrap();
+        let (x_taps, y_taps) = (axis_taps(4, 2), axis_taps(6, 3));
+        let o = 1.0 / 64.0;
+        for y in 0..6 {
+            for x in 0..4 {
+                let encoded = sample_bilinear(&map, &x_taps[x], &y_taps[y]) / 255.0;
+                let want = o * (3.0 * encoded).exp2() - o;
+                let got = out[(y * 4 + x) * 3];
+                assert!((got - want).abs() < 1e-5, "({x}, {y}): {got} vs {want}");
+            }
+        }
+        // Spot check against the literal sample above: pixel (1, 1) samples 37.5 / 255.
+        let want = o * (3.0 * 37.5_f32 / 255.0).exp2() - o;
+        assert!((out[(4 + 1) * 3] - want).abs() < 1e-5);
     }
 
     #[test]
