@@ -18,8 +18,12 @@ use crate::{CancellationCheck, DetailError};
 const ENCODING_FLOOR: f32 = 1.0e-4;
 /// Added to both sides of the gain ratio so a black pixel gets a finite, harmless gain.
 const GAIN_FLOOR: f32 = 1.0e-3;
-/// Never blur with less than this sigma: smaller kernels collapse to the identity.
+/// Never blur with less than this sigma: smaller kernels collapse to the identity. Where the
+/// band's own sigma is smaller (previews below ~1400 px for texture), the amount is scaled
+/// down instead; see [`apply_band`].
 const MIN_SIGMA: f32 = 1.0;
+/// Lowest factor the amount is scaled down to, so tiny images still show the effect.
+const MIN_AMOUNT_SCALE: f32 = 0.5;
 /// Weight clarity keeps at black and white, where the tone weighting is lowest.
 const CLARITY_TONE_FLOOR: f32 = 0.3;
 
@@ -66,7 +70,12 @@ pub(super) fn apply_band(
     cancellation: &dyn CancellationCheck,
 ) -> Result<(), DetailError> {
     let (width, height, stride) = (image.width(), image.height(), image.row_stride());
-    let sigma = (band.sigma_fraction * width.max(height) as f32).max(MIN_SIGMA);
+    let ideal_sigma = band.sigma_fraction * width.max(height) as f32;
+    let sigma = ideal_sigma.max(MIN_SIGMA);
+    // The detail a blur removes from smooth structure grows with sigma squared, so when the
+    // floor makes the blur wider than intended the amount shrinks by the same ratio. A small
+    // preview then still looks like the export.
+    let amount = amount * (ideal_sigma / sigma).powi(2).clamp(MIN_AMOUNT_SCALE, 1.0);
     let encoded = luma_of(image, luma_weights, encode)?;
     let base = fast_gaussian(&encoded, sigma, cancellation)?;
 

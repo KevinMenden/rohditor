@@ -258,10 +258,32 @@ mod tests {
         out
     }
 
+    /// Render the unit scene `width` wide and at twice that, and require the effects (result
+    /// minus source) to agree within `tolerance` of the effect's size.
+    fn assert_same_look_at_double_size(presence: Presence, width: usize, tolerance: f32) {
+        let source = unit_scene(width);
+        let mut small = source.clone();
+        apply_presence(&mut small, presence, WEIGHTS, &NeverCancelled).unwrap();
+        let mut large = unit_scene(width * 2);
+        apply_presence(&mut large, presence, WEIGHTS, &NeverCancelled).unwrap();
+
+        let large = halve(&large);
+        let (mut difference, mut effect) = (0.0_f32, 0.0_f32);
+        for ((small, large), source) in small.data().iter().zip(&large).zip(source.data()) {
+            difference += (small - large).abs();
+            effect += (small - source).abs();
+        }
+        assert!(effect > 0.0, "{presence:?} did nothing");
+        assert!(
+            difference < tolerance * effect,
+            "{presence:?} at {width} px: sizes differ by {difference} against an effect of {effect}"
+        );
+    }
+
     #[test]
     fn a_picture_looks_the_same_at_half_and_full_size() {
-        // Radii are fractions of the long edge, so the effect (result minus source) of a
-        // preview must match that of an export of twice the size.
+        // Radii are fractions of the long edge, so the effect of a preview must match that of
+        // an export of twice the size.
         for presence in [
             Presence {
                 texture: 0.8,
@@ -276,24 +298,19 @@ mod tests {
                 ..Presence::default()
             },
         ] {
-            let source = unit_scene(3_200);
-            let mut small = source.clone();
-            apply_presence(&mut small, presence, WEIGHTS, &NeverCancelled).unwrap();
-            let mut large = unit_scene(6_400);
-            apply_presence(&mut large, presence, WEIGHTS, &NeverCancelled).unwrap();
-
-            let large = halve(&large);
-            let (mut difference, mut effect) = (0.0_f32, 0.0_f32);
-            for ((small, large), source) in small.data().iter().zip(&large).zip(source.data()) {
-                difference += (small - large).abs();
-                effect += (small - source).abs();
-            }
-            assert!(effect > 0.0, "{presence:?} did nothing");
-            assert!(
-                difference < 0.15 * effect,
-                "{presence:?}: sizes differ by {difference} against an effect of {effect}"
-            );
+            assert_same_look_at_double_size(presence, 3_200, 0.15);
         }
+    }
+
+    #[test]
+    fn small_previews_keep_the_look_despite_the_minimum_blur() {
+        // At 1000 px the texture blur would be 0.7 px; the 1 px floor is compensated by amount. The
+        // box blur is coarse at this sigma, so the match is looser than at export sizes.
+        let texture = Presence {
+            texture: 0.8,
+            ..Presence::default()
+        };
+        assert_same_look_at_double_size(texture, 1_000, 0.3);
     }
 
     #[test]

@@ -68,7 +68,8 @@ mod tests {
 
     /// Fine two-tone checkerboard: texture has plenty to work on.
     fn checkerboard() -> LinearRgbImage<f32> {
-        let (width, height) = (48_usize, 30_usize);
+        // Wide enough that the texture blur is not below its minimum sigma.
+        let (width, height) = (1_500_usize, 8_usize);
         let data = (0..width * height)
             .flat_map(|i| {
                 let v = if (i % width + i / width).is_multiple_of(2) {
