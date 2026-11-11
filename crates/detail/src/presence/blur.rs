@@ -101,11 +101,13 @@ fn blur_rows(
 fn box_blur_line(line: &[f32], out: &mut [f32], radius: usize) {
     let length = line.len();
     let radius = radius as isize;
-    let window = (2 * radius + 1) as f32;
-    let at = |index: isize| line[mirror(index, length)];
-    let mut sum: f32 = (-radius..=radius).map(at).sum();
+    let window = (2 * radius + 1) as f64;
+    let at = |index: isize| f64::from(line[mirror(index, length)]);
+    // An f64 running sum: adding and subtracting thousands of f32 samples would otherwise
+    // let rounding error build up along a long row.
+    let mut sum: f64 = (-radius..=radius).map(at).sum();
     for (x, out) in out.iter_mut().enumerate() {
-        *out = sum / window;
+        *out = (sum / window) as f32;
         let x = x as isize;
         sum += at(x + radius + 1) - at(x - radius);
     }
