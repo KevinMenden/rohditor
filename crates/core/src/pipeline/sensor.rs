@@ -329,6 +329,7 @@ impl SensorDevelopmentDescription {
             highlight_execution: highlight_execution(
                 highlight_adjustments,
                 resolved.white_balance_gains,
+                demosaic_balance,
             ),
             highlight_adjustments,
             demosaic: options.demosaic.contract(),
@@ -406,6 +407,7 @@ impl SensorDevelopmentDescription {
 fn highlight_execution(
     adjustments: HighlightAdjustments,
     gains: WhiteBalanceGains,
+    demosaic_balance: WhiteBalanceGains,
 ) -> HighlightExecution {
     match adjustments.method {
         HighlightMethod::Off => HighlightExecution::Off,
@@ -426,6 +428,11 @@ fn highlight_execution(
                     green: level,
                     blue: level,
                 },
+                // Derived from the as-shot balance, never from the recipe or
+                // the user WB: white-balance edits keep this execution (and
+                // its cache identity) bit-equal, exactly like the
+                // `demosaic_balance` trade-off documented on the field above.
+                neutral_ceiling: Some(neutral_ceiling(level, demosaic_balance)),
             })
         }
         HighlightMethod::Opposed => {
@@ -436,8 +443,23 @@ fn highlight_execution(
                     green: level,
                     blue: level,
                 },
+                neutral_ceiling: Some(neutral_ceiling(level, demosaic_balance)),
             })
         }
+    }
+}
+
+/// WB-aware neutral ceiling for highlight sites a reconstruction method did
+/// not raise (issue #65): mirrors Clip's common-ceiling formula but with the
+/// method's own detection threshold and the file's as-shot gains, so a
+/// neutralised site lands at `threshold * min(gains)` after white balance —
+/// neutral white, like Clip.
+fn neutral_ceiling(threshold: f32, balance: WhiteBalanceGains) -> ChannelClipLevels {
+    let common_ceiling = threshold * balance.red.min(balance.green).min(balance.blue);
+    ChannelClipLevels {
+        red: common_ceiling / balance.red,
+        green: common_ceiling / balance.green,
+        blue: common_ceiling / balance.blue,
     }
 }
 
@@ -823,5 +845,114 @@ mod tests {
             HighlightExecution::Clip(_)
         ));
         assert_eq!(description.highlight_algorithm_version(), Some(1));
+    }
+
+    /// Issue #65: the LR/Opposed neutral ceiling is derived from the
+    /// file's as-shot balance, never from the recipe-resolved user gains.
+    /// The fixture's as-shot `[2.0, 1.0, 1.55]` normalises to gains
+    /// `{2.0, 1.0, 1.55}`; the manual multipliers below push the user gains
+    /// to `{2.6, 1.0, 1.395}`, which must NOT show up in the ceilings.
+    #[test]
+    fn reconstruction_neutral_ceiling_uses_as_shot_not_user_white_balance() {
+        let mut frame = frame("RGGB");
+        frame.info.as_shot_white_balance = [Some(2.0), Some(1.0), Some(1.55), None];
+        let options = RenderOptions {
+            raw_crop_policy: RawCropPolicy::Recommended,
+            demosaic: DemosaicAlgorithm::MalvarHeCutler,
+            ..RenderOptions::default()
+        };
+        let threshold = 1.2;
+        for (method, level) in [
+            (HighlightMethod::LocalRatios, threshold),
+            (HighlightMethod::Opposed, threshold),
+        ] {
+            let mut recipe = EditRecipe::default();
+            recipe.raw.highlights.method = method;
+            recipe.raw.highlights.local_ratios.detection_threshold = level;
+            recipe.raw.highlights.opposed.detection_threshold = level;
+            recipe.color.white_balance = WhiteBalance::ManualMultipliers {
+                red: 1.3,
+                green: 1.0,
+                blue: 0.9,
+            };
+            let description = SensorDevelopmentDescription::from_frame(&frame, &recipe, options)
+                .expect("valid description");
+            assert_ne!(
+                description.white_balance_gains(),
+                description.demosaic_balance(),
+                "fixture must actually differ user WB from as-shot"
+            );
+            let ceiling = match description.highlight_execution() {
+                HighlightExecution::LocalRatios(options) => options.neutral_ceiling,
+                HighlightExecution::Opposed(options) => options.neutral_ceiling,
+                other => panic!("expected a reconstruction execution, got {other:?}"),
+            }
+            .expect("core always fills the neutral ceiling");
+            // threshold * min(as-shot gains) / gain per channel, the same
+            // arithmetic shape as the Clip branch. Exact equality holds:
+            // identical single mul/div in the same order.
+            let common = level * 1.0_f32.min(2.0).min(1.55);
+            assert_eq!(ceiling.red, common / 2.0);
+            assert_eq!(ceiling.green, common / 1.0);
+            assert_eq!(ceiling.blue, common / 1.55);
+        }
+    }
+
+    /// Issue #65 cache identity: two recipes differing only in the user
+    /// white balance produce bit-equal `HighlightExecution::LocalRatios` /
+    /// `Opposed` (the sensor-source invalidation compare stays quiet), while
+    /// `Clip(_)` — which uses the user gains — differs.
+    #[test]
+    fn user_white_balance_edit_leaves_reconstruction_execution_bit_equal() {
+        let mut frame = frame("RGGB");
+        frame.info.as_shot_white_balance = [Some(1.8), Some(1.0), Some(1.4), None];
+        let options = RenderOptions {
+            raw_crop_policy: RawCropPolicy::Recommended,
+            demosaic: DemosaicAlgorithm::MalvarHeCutler,
+            ..RenderOptions::default()
+        };
+        for method in [HighlightMethod::LocalRatios, HighlightMethod::Opposed] {
+            let mut as_shot_recipe = EditRecipe::default();
+            as_shot_recipe.raw.highlights.method = method;
+            as_shot_recipe.color.white_balance = WhiteBalance::AsShot;
+            let mut manual_recipe = EditRecipe::default();
+            manual_recipe.raw.highlights.method = method;
+            manual_recipe.color.white_balance = WhiteBalance::ManualMultipliers {
+                red: 1.4,
+                green: 1.0,
+                blue: 0.8,
+            };
+            let as_shot =
+                SensorDevelopmentDescription::from_frame(&frame, &as_shot_recipe, options)
+                    .expect("valid description");
+            let manual = SensorDevelopmentDescription::from_frame(&frame, &manual_recipe, options)
+                .expect("valid description");
+            assert_ne!(
+                as_shot.white_balance_gains(),
+                manual.white_balance_gains(),
+                "the two recipes must resolve different user gains"
+            );
+            assert_eq!(
+                as_shot.highlight_execution(),
+                manual.highlight_execution(),
+                "a user WB edit must not change the reconstruction execution"
+            );
+
+            let mut clip_as_shot = as_shot_recipe;
+            clip_as_shot.raw.highlights.method = HighlightMethod::Clip;
+            let mut clip_manual = manual_recipe;
+            clip_manual.raw.highlights.method = HighlightMethod::Clip;
+            let clip_as_shot =
+                SensorDevelopmentDescription::from_frame(&frame, &clip_as_shot, options)
+                    .expect("valid description");
+            let clip_manual =
+                SensorDevelopmentDescription::from_frame(&frame, &clip_manual, options)
+                    .expect("valid description");
+            assert_ne!(
+                clip_as_shot.highlight_execution(),
+                clip_manual.highlight_execution(),
+                "Clip resolves user gains, so it must differ here"
+            );
+        }
     }
 }

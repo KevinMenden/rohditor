@@ -12,13 +12,18 @@
 //!   against the pinned `baseline::BASELINES` rows and fails once with the
 //!   full violation list.
 //!
-//! Levels are pinned at the crate boundary (`{sat} x 3` for both detection
-//! and Clip ceilings) instead of going through `rohditor_core` resolution,
-//! which decouples this harness from pending #64.
+//! Levels are pinned at the crate boundary (`{sat} x 3` for detection)
+//! instead of going through `rohditor_core` resolution, which decouples
+//! this harness from pending #64. Since issue #65 the Clip rows run with
+//! production-shaped WB-aware ceilings (`sat * min(METRIC_WB) / gain`,
+//! the METRIC_WB vector standing in for as-shot balance) and the
+//! LocalRatios/Opposed rows receive the same vector as `neutral_ceiling`,
+//! so clause A/B of #65 compare like-for-like. Off rows are unchanged.
 
 mod baseline;
 mod generator;
 mod metrics;
+mod neutral_fallback;
 mod scenes;
 
 use std::time::Instant;
@@ -29,7 +34,7 @@ use rohditor_highlight::{
 };
 use rohditor_image::BayerPattern;
 
-use metrics::{MeasuredRow, SiteSet, abs_log_errors};
+use metrics::{METRIC_WB, MeasuredRow, SiteSet, abs_log_errors};
 
 /// The four methods named by the issue, driven at the crate boundary.
 #[derive(Clone, Copy)]
@@ -55,25 +60,51 @@ fn detection_levels(sat: f32) -> ChannelDetectionLevels {
     }
 }
 
-fn execution(method: Method, sat: f32) -> HighlightExecution {
-    let detection = detection_levels(sat);
+/// WB-aware per-channel ceilings used by BOTH the Clip rows (as Clip
+/// limits) and the reconstruction rows (as `neutral_ceiling`):
+/// `sat * min(METRIC_WB) / METRIC_WB_c`, mirroring production
+/// `sensor.rs` Clip resolution with the metric vector standing in for
+/// the as-shot balance (issue #65: the harness as-shot *is*
+/// `METRIC_WB`, so "neutral under the ceilings" and the hue metric
+/// agree). Computed ONCE per (scene, sat) section and shared, so the
+/// Clip↔neutraliser bit-parity claim never depends on recomputation.
+fn shared_ceilings(sat: f32) -> [f32; 3] {
+    let min = METRIC_WB[0].min(METRIC_WB[1]).min(METRIC_WB[2]);
+    METRIC_WB.map(|gain| sat * min / gain)
+}
+
+fn execution(
+    method: Method,
+    ceilings: [f32; 3],
+    detection: ChannelDetectionLevels,
+) -> HighlightExecution {
     match method {
         Method::Off => HighlightExecution::Off,
-        // Clip ceilings == sat: on an already-clamped mosaic Clip is a
-        // bit-exact no-op (only strictly-above is lowered; pinned by
-        // crates/highlight/tests/clip.rs).
+        // WB-aware Clip (issue #65): limits below sat on R and B, a
+        // real Clip like production sensor.rs — no longer a bit-exact
+        // no-op on the pre-clamped mosaic.
         Method::Clip => HighlightExecution::Clip(ChannelClipLevels {
-            red: sat,
-            green: sat,
-            blue: sat,
+            red: ceilings[0],
+            green: ceilings[1],
+            blue: ceilings[2],
         }),
         Method::LocalRatios => {
             HighlightExecution::LocalRatios(rohditor_highlight::LocalRatioOptions {
                 detection_levels: detection,
+                neutral_ceiling: Some(ChannelClipLevels {
+                    red: ceilings[0],
+                    green: ceilings[1],
+                    blue: ceilings[2],
+                }),
             })
         }
         Method::Opposed => HighlightExecution::Opposed(rohditor_highlight::OpposedOptions {
             detection_levels: detection,
+            neutral_ceiling: Some(ChannelClipLevels {
+                red: ceilings[0],
+                green: ceilings[1],
+                blue: ceilings[2],
+            }),
         }),
     }
 }
@@ -90,10 +121,19 @@ struct RunResult {
     stats_suspected: Option<usize>,
     /// `suspected_by_channel`, LocalRatios/Opposed only.
     by_channel: Option<[usize; 3]>,
+    /// `stats.neutralised_sites` (issue #65); zero for Off/Clip, which
+    /// have no neutraliser.
+    neutralised_sites: usize,
 }
 
-fn run(method: Method, sat: f32, input: &rohditor_image::MosaicImage<f32>) -> RunResult {
-    let output = execution(method, sat)
+fn run(
+    method: Method,
+    sat: f32,
+    ceilings: [f32; 3],
+    input: &rohditor_image::MosaicImage<f32>,
+) -> RunResult {
+    let detection = detection_levels(sat);
+    let output = execution(method, ceilings, detection)
         .apply_cancellable(input.clone(), &|| false)
         .expect("harness mosaic and levels are valid");
     match output {
@@ -103,6 +143,7 @@ fn run(method: Method, sat: f32, input: &rohditor_image::MosaicImage<f32>) -> Ru
             recon: None,
             stats_suspected: None,
             by_channel: None,
+            neutralised_sites: 0,
         },
         HighlightExecutionOutput::Clip(output) => RunResult {
             mosaic: output.mosaic,
@@ -110,6 +151,7 @@ fn run(method: Method, sat: f32, input: &rohditor_image::MosaicImage<f32>) -> Ru
             recon: None,
             stats_suspected: Some(output.stats.affected_sites),
             by_channel: None,
+            neutralised_sites: 0,
         },
         HighlightExecutionOutput::LocalRatios(output) => RunResult {
             mosaic: output.mosaic,
@@ -117,6 +159,7 @@ fn run(method: Method, sat: f32, input: &rohditor_image::MosaicImage<f32>) -> Ru
             recon: Some(output.stats.reconstructed_sites),
             stats_suspected: Some(output.stats.suspected_clipped_sites),
             by_channel: Some(output.stats.suspected_by_channel),
+            neutralised_sites: output.stats.neutralised_sites,
         },
         HighlightExecutionOutput::Opposed(output) => RunResult {
             mosaic: output.mosaic,
@@ -124,6 +167,7 @@ fn run(method: Method, sat: f32, input: &rohditor_image::MosaicImage<f32>) -> Ru
             recon: Some(output.stats.reconstructed_sites),
             stats_suspected: Some(output.stats.suspected_clipped_sites),
             by_channel: Some(output.stats.suspected_by_channel),
+            neutralised_sites: output.stats.neutralised_sites,
         },
     }
 }
@@ -250,6 +294,7 @@ fn ground_truth_matrix() {
     for spec in scenes::ALL {
         for sat in scenes::SAT_LEVELS {
             let scene = generator::generate(&spec, sat);
+            let ceilings = shared_ceilings(sat);
             let mask = detect_local_ratios(&scene.mosaic, detection_levels(sat))
                 .expect("harness mosaic and levels are valid");
             let suspected = mask.data();
@@ -263,21 +308,37 @@ fn ground_truth_matrix() {
                 println!("no suspected sites at this level; matrix skips the section");
                 continue;
             }
+            // Clip's own affected set derived from the input bits: with
+            // WB-aware limits it catches below-sat falloff content too, so
+            // the mask-from-bits expectation is replaced for Clip rows.
+            let clip_allowed: Vec<bool> = scene
+                .mosaic
+                .data()
+                .iter()
+                .enumerate()
+                .map(|(index, sample)| {
+                    let (x, y) = (index % spec.width, index / spec.width);
+                    let channel = BayerPattern::Rggb.color_at(x, y).channel_index();
+                    *sample >= ceilings[channel]
+                })
+                .collect();
             println!(
-                "  {:<12} {:>6} {:>6} {:>7} {:>7} {:>9} {:>9} {:>9} {:>9}",
+                "  {:<12} {:>6} {:>6} {:>7} {:>8} {:>11} {:>7} {:>9} {:>9} {:>9} {:>9}",
                 "method",
                 "sus",
                 "recon",
                 "raised",
+                "lowered",
+                "neutralised",
                 "frac",
                 "med|ln|",
                 "p95|ln|",
                 "hue_max",
-                "hue_med"
+                "hue_med",
             );
             for method in METHODS {
-                let method_name = execution(method, sat).stable_name();
-                let out = run(method, sat, &scene.mosaic);
+                let method_name = execution(method, ceilings, detection_levels(sat)).stable_name();
+                let out = run(method, sat, ceilings, &scene.mosaic);
                 let sites = SiteSet {
                     width: spec.width,
                     truth: &scene.truth,
@@ -285,44 +346,105 @@ fn ground_truth_matrix() {
                     output: out.mosaic.data(),
                     suspected,
                 };
-                // Invariants, asserted for every run.
-                if let Some((index, before, after)) = metrics::site_below_input(&sites) {
+                // Invariants, asserted for every run — per-method matrix
+                // from the #65 contract (the pre-#65 "no method ever
+                // lowers" asserts encoded exactly what #65 overturns).
+                let floors = if matches!(method, Method::Off) {
+                    [sat; 3]
+                } else {
+                    ceilings
+                };
+                if let Some((index, before, after)) = metrics::below_floor(&sites, floors) {
                     panic!(
-                        "{}@{} {}: site {index} dropped below its clipped input ({before} -> {after})",
+                        "{}@{} {}: site {index} dropped below min(input, ceiling) ({before} -> {after})",
                         spec.name, sat, method_name
                     );
                 }
                 let raised = metrics::raised_count(&sites);
-                assert_eq!(
-                    raised, out.changed_sites,
-                    "{}@{} {}: raised != stats.changed_sites",
-                    spec.name, sat, method_name
-                );
-                if let Some(stats_suspected) = out.stats_suspected {
-                    assert_eq!(
-                        stats_suspected, suspected_total,
-                        "{}@{} {}: stats suspected != mask-from-bits",
-                        spec.name, sat, method_name
-                    );
-                }
-                if let Some(by_channel) = out.by_channel {
-                    assert_eq!(
-                        by_channel[0] + by_channel[1] + by_channel[2],
-                        suspected_total,
-                        "{}@{} {}: suspected_by_channel sums != mask count",
-                        spec.name,
-                        sat,
-                        method_name
-                    );
-                }
-                if matches!(method, Method::Off) {
-                    assert_eq!(
-                        out.mosaic.data(),
-                        scene.mosaic.data(),
-                        "{}@{} off: output must be bit-identical to input",
-                        spec.name,
-                        sat
-                    );
+                let lowered = metrics::lowered_count(&sites);
+                match method {
+                    Method::Off => {
+                        assert_eq!(lowered, 0, "{}@{} off: nothing may lower", spec.name, sat);
+                        assert_eq!(
+                            out.mosaic.data(),
+                            scene.mosaic.data(),
+                            "{}@{} off: output must be bit-identical to input",
+                            spec.name,
+                            sat
+                        );
+                    }
+                    Method::Clip => {
+                        // Clip's changed_sites counts LOWERED samples.
+                        assert_eq!(
+                            lowered, out.changed_sites,
+                            "{}@{} clip: lowered != stats.changed_sites",
+                            spec.name, sat
+                        );
+                        assert_eq!(
+                            out.stats_suspected.expect("clip reports affected_sites"),
+                            metrics::affected_by_limits(&sites, ceilings),
+                            "{}@{} clip: affected_sites != input>=limit count",
+                            spec.name,
+                            sat
+                        );
+                        if let Some(index) = metrics::moves_outside(&sites, &clip_allowed) {
+                            panic!("{}@{} clip: unsuspected site {index} moved", spec.name, sat);
+                        }
+                        if let Some((index, before, after)) =
+                            metrics::clip_landing_violations(&sites, ceilings)
+                        {
+                            panic!(
+                                "{}@{} clip: site {index} above its limit did not land exactly on it ({before} -> {after})",
+                                spec.name, sat
+                            );
+                        }
+                    }
+                    Method::LocalRatios | Method::Opposed => {
+                        assert_eq!(
+                            raised, out.changed_sites,
+                            "{}@{} {}: raised != stats.changed_sites",
+                            spec.name, sat, method_name
+                        );
+                        // Neutralisation is the only lowering pass here
+                        // Backstop: the neutralisation pass must be asserted, never print-only.
+                        assert_eq!(
+                            lowered, out.neutralised_sites,
+                            "{}@{} {}: neutralised != stats.neutralised_sites",
+                            spec.name, sat, method_name
+                        );
+                        assert_eq!(
+                            out.stats_suspected.expect("recon reports suspected"),
+                            suspected_total,
+                            "{}@{} {}: stats suspected != mask-from-bits",
+                            spec.name,
+                            sat,
+                            method_name
+                        );
+                        if let Some(by_channel) = out.by_channel {
+                            assert_eq!(
+                                by_channel[0] + by_channel[1] + by_channel[2],
+                                suspected_total,
+                                "{}@{} {}: suspected_by_channel sums != mask count",
+                                spec.name,
+                                sat,
+                                method_name
+                            );
+                        }
+                        if let Some(index) = metrics::moves_outside(&sites, suspected) {
+                            panic!(
+                                "{}@{} {}: unsuspected site {index} moved",
+                                spec.name, sat, method_name
+                            );
+                        }
+                        if let Some((index, before, after)) =
+                            metrics::neutral_landing_violations(&sites, ceilings)
+                        {
+                            panic!(
+                                "{}@{} {}: fallback site {index} above the ceiling did not land exactly on it ({before} -> {after})",
+                                spec.name, sat, method_name
+                            );
+                        }
+                    }
                 }
                 // Log-ratio error over ALL suspected sites.
                 let (med, p95) = metrics::summarize(abs_log_errors(&sites))
@@ -342,16 +464,18 @@ fn ground_truth_matrix() {
                     || "—".to_owned(),
                     |(rmed, rp95)| format!("{rmed:.4}/{rp95:.4}"),
                 );
-                let (hue_max_text, hue_med_text, hue_max) = hue_text.map_or(
-                    ("—".to_owned(), "—".to_owned(), None),
-                    |(hmax, hmed)| (format!("{hmax:.4}"), format!("{hmed:.4}"), Some(hmax)),
-                );
+                let (hue_max_text, hue_med_text) = hue_text
+                    .map_or(("—".to_owned(), "—".to_owned()), |(hmax, hmed)| {
+                        (format!("{hmax:.4}"), format!("{hmed:.4}"))
+                    });
                 println!(
-                    "  {:<12} {:>6} {:>6} {:>7} {:>7.3} {:>9.4} {:>9.4} {:>9} {:>9}  raised med/p95: {}",
+                    "  {:<12} {:>6} {:>6} {:>7} {:>8} {:>11} {:>7.3} {:>9.4} {:>9.4} {:>9} {:>9}  raised med/p95: {}",
                     method_name,
                     suspected_total,
                     out.recon.map_or("—".to_owned(), |v| v.to_string()),
                     raised,
+                    lowered,
+                    out.neutralised_sites,
                     raised as f64 / suspected_total as f64,
                     med,
                     p95,
@@ -365,9 +489,11 @@ fn ground_truth_matrix() {
                     method: method_name,
                     suspected: suspected_total,
                     raised,
+                    lowered,
+                    neutralised: out.neutralised_sites,
                     med,
                     p95,
-                    hue_max,
+                    hue_max: hue_text.map(|(hmax, _)| hmax),
                 });
             }
         }
@@ -411,5 +537,11 @@ fn ground_truth_matrix() {
     println!(
         "note: AtMost ceilings on the disk and speculars rows track known #62 (estimates \
          produced, none applied) — see the BASELINES comment blocks in baseline.rs"
+    );
+    println!(
+        "note: 2026-11-09 — WB-aware Clip + neutral fallback (#65) landed. The raised \
+         ceilings stay valid for RAISED only; the lowering-side signal is asserted \
+         per run (lowered==clip changed, neutralised==stats) and floored in the \
+         lowered/neutralised baseline columns."
     );
 }

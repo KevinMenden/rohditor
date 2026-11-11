@@ -39,17 +39,108 @@ impl SiteSet<'_> {
     }
 }
 
-/// First `(index, input, output)` where an output bit dropped below its
-/// input bit — the "no site goes below its clipped input" invariant.
+/// First `(index, input, output)` where an output bit dropped below
+/// `min(input, ceiling_c)` — the #65 replacement for the old
+/// `site_below_input` invariant. WB-aware Clip lowering and LR/Opposed
+/// neutralisation lower strictly-above samples ONTO the ceiling, never
+/// under it; anything else dropping is a bug. `ceilings` is the method's
+/// own per-channel vector (sat x 3 for Off, Clip levels for Clip, the
+/// `neutral_ceiling` for the reconstruction methods).
 /// `None` means the invariant holds.
 #[must_use]
-pub fn site_below_input(sites: &SiteSet<'_>) -> Option<(usize, f32, f32)> {
+pub fn below_floor(sites: &SiteSet<'_>, ceilings: [f32; 3]) -> Option<(usize, f32, f32)> {
     sites
         .input
         .iter()
         .zip(sites.output)
         .enumerate()
-        .find_map(|(index, (&before, &after))| (after < before).then_some((index, before, after)))
+        .find_map(|(index, (&before, &after))| {
+            let floor = before.min(ceilings[sites.channel_at(index)]);
+            (after < floor).then_some((index, before, after))
+        })
+}
+
+/// Sites whose output bit dropped strictly below the input bit
+/// (`out < in`). For Clip this is the pass that lowers strictly-above
+/// samples; for LocalRatios/Opposed it is exactly the neutralisation pass
+/// (the asserted data equalities of the #65 invariant matrix).
+#[must_use]
+pub fn lowered_count(sites: &SiteSet<'_>) -> usize {
+    sites
+        .input
+        .iter()
+        .zip(sites.output)
+        .filter(|(before, after)| after < before)
+        .count()
+}
+
+/// Count of input sites Clip considers affected: `input >= limit_c` per
+/// channel (detect.rs semantics). Replaces the mask-from-bits expectation
+/// for Clip rows: a WB-aware limit also catches unblown falloff content.
+/// Requires `sites.input` to be the dense row-major mosaic (stride ==
+/// width, true for every generated scene).
+#[must_use]
+pub fn affected_by_limits(sites: &SiteSet<'_>, limits: [f32; 3]) -> usize {
+    sites
+        .input
+        .iter()
+        .enumerate()
+        .filter(|(index, sample)| **sample >= limits[sites.channel_at(*index)])
+        .count()
+}
+
+/// First index where a site moved (`out != in`) although the method is
+/// only allowed to touch sites marked in `allowed`.
+#[must_use]
+pub fn moves_outside(sites: &SiteSet<'_>, allowed: &[bool]) -> Option<usize> {
+    sites
+        .input
+        .iter()
+        .zip(sites.output)
+        .enumerate()
+        .find_map(|(index, (&before, &after))| {
+            (before != after && !allowed[index]).then_some(index)
+        })
+}
+
+/// Clip exact-landing violation: first site with `input > limit_c` whose
+/// output is not bit-exactly `limit_c` (and first move outside the
+/// affected set). `None` means every strictly-above sample landed exactly
+/// on its ceiling.
+#[must_use]
+pub fn clip_landing_violations(sites: &SiteSet<'_>, limits: [f32; 3]) -> Option<(usize, f32, f32)> {
+    sites
+        .input
+        .iter()
+        .zip(sites.output)
+        .enumerate()
+        .find_map(|(index, (&before, &after))| {
+            let limit = limits[sites.channel_at(index)];
+            (before > limit && after != limit).then_some((index, before, after))
+        })
+}
+
+/// Neutraliser exact-landing violation: first suspected, NOT-raised site
+/// with `input > ceiling_c` whose output is not bit-exactly the ceiling
+/// (no partial neutralisation; raised sites belong to the estimator and
+/// are deliberately left alone in v1).
+#[must_use]
+pub fn neutral_landing_violations(
+    sites: &SiteSet<'_>,
+    ceilings: [f32; 3],
+) -> Option<(usize, f32, f32)> {
+    sites
+        .input
+        .iter()
+        .zip(sites.output)
+        .enumerate()
+        .find_map(|(index, (&before, &after))| {
+            if !sites.suspected[index] || after > before {
+                return None;
+            }
+            let ceiling = ceilings[sites.channel_at(index)];
+            (before > ceiling && after != ceiling).then_some((index, before, after))
+        })
 }
 
 /// Data-driven "raised": sites where the output bit actually got lifted
@@ -152,6 +243,29 @@ pub fn hue_errors(sites: &SiteSet<'_>) -> Vec<f64> {
     errors
 }
 
+/// Direct chroma of one site's METRIC_WB-scaled metric triple (sampled
+/// channel from a method's output, the other two from truth):
+/// `(max - min) / sum`, gated on `sum > 1e-3` like the hue metric. Unlike
+/// hue, chroma is defined on grey truth, so the clause-B falsifier needs
+/// no truth chroma floor (issue #65). `None` for a zero-sum triple.
+#[must_use]
+pub fn site_chroma(truth: &[f32; 3], channel: usize, out: f32) -> Option<f64> {
+    let mut triple = *truth;
+    triple[channel] = out;
+    let scaled = [
+        f64::from(triple[0]) * f64::from(METRIC_WB[0]),
+        f64::from(triple[1]) * f64::from(METRIC_WB[1]),
+        f64::from(triple[2]) * f64::from(METRIC_WB[2]),
+    ];
+    let sum = scaled[0] + scaled[1] + scaled[2];
+    if sum <= 1e-3 {
+        return None;
+    }
+    let max = scaled[0].max(scaled[1]).max(scaled[2]);
+    let min = scaled[0].min(scaled[1]).min(scaled[2]);
+    Some((max - min) / sum)
+}
+
 /// Median of an already `total_cmp`-sorted list.
 #[must_use]
 pub fn median_sorted(values: &[f64]) -> f64 {
@@ -187,6 +301,12 @@ pub struct MeasuredRow {
     pub method: &'static str,
     pub suspected: usize,
     pub raised: usize,
+    /// Data-driven lowering (`out < in`): Clip's ceiling pass on its rows,
+    /// the neutraliser's on LocalRatios/Opposed rows (issue #65).
+    pub lowered: usize,
+    /// `stats.neutralised_sites`; zero for Off and Clip, which have no
+    /// neutraliser.
+    pub neutralised: usize,
     pub med: f64,
     pub p95: f64,
     /// `None` when no suspected pixel passes the chroma floor; the hue
