@@ -1,5 +1,3 @@
-use rohditor_edit::{CameraProfileSelection, HighlightAdjustments, RenderingProfileSelection};
-
 use super::{AdjustmentRange, DocumentPanelModel};
 use crate::ui::widgets;
 
@@ -25,7 +23,7 @@ impl SectionChanges {
                 .iter()
                 .any(|(value, range)| !widgets::approximately_equal(*value, range.neutral))
         };
-        let highlight_defaults = HighlightAdjustments::default();
+        let defaults = &document.defaults;
         Self {
             tone: any_moved(&[
                 (values.exposure, ranges.exposure),
@@ -46,13 +44,13 @@ impl SectionChanges {
                 (values.tone_curve_lights, ranges.tone_curve),
                 (values.tone_curve_highlights, ranges.tone_curve),
             ]),
-            highlights: values.highlight_method != highlight_defaults.method
+            highlights: values.highlight_method != defaults.highlights.method
                 || !widgets::approximately_equal(
                     values.highlight_threshold,
-                    highlight_defaults.clip.threshold,
+                    defaults.highlights.clip.threshold,
                 ),
-            profile: document.camera_profile != CameraProfileSelection::Automatic
-                || document.rendering_profile != RenderingProfileSelection::MATCHED,
+            profile: document.camera_profile != defaults.camera_profile
+                || document.rendering_profile != defaults.rendering_profile,
             color_mixer: values.hsl.iter().any(|channel| {
                 channel
                     .iter()

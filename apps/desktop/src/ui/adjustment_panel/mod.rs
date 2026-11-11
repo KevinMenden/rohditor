@@ -13,8 +13,8 @@ pub(crate) use histogram::{histogram_canvas, histogram_panel};
 use eframe::egui;
 use rohditor_core::{HSL_CHANNEL_CENTERS, WhiteBalanceMode};
 use rohditor_edit::{
-    CameraProfileSelection, HighlightMethod, LensProfileSelection, OpticsAction,
-    RenderingProfileSelection,
+    CameraProfileSelection, HighlightAdjustments, HighlightMethod, LensProfileSelection,
+    OpticsAction, RenderingProfileSelection,
 };
 use rohditor_engine::tools::Picker;
 
@@ -161,12 +161,22 @@ pub(crate) struct DocumentPanelModel {
     pub optics: OpticsPanelModel,
     pub false_color: rohditor_edit::FalseColorSuppression,
     pub noise_reduction: rohditor_edit::NoiseReduction,
-    /// What a reset restores. Not zero when the photo's own noise estimate
-    /// sets the default, so "changed" is judged against this.
-    pub default_noise_reduction: rohditor_edit::NoiseReduction,
+    /// What a reset restores; "changed" is judged against it.
+    pub defaults: PanelDefaults,
     pub capture_sharpening: rohditor_edit::CaptureSharpening,
     pub defringe: rohditor_edit::Defringe,
     pub noise_suggestion: NoiseSuggestion,
+}
+
+/// The document's default values for the settings that are not simply the
+/// neutral slider position. The photo's own noise estimate, for one, sets its
+/// default noise reduction.
+#[derive(Debug, Clone)]
+pub(crate) struct PanelDefaults {
+    pub camera_profile: CameraProfileSelection,
+    pub rendering_profile: RenderingProfileSelection,
+    pub highlights: HighlightAdjustments,
+    pub noise_reduction: rohditor_edit::NoiseReduction,
 }
 
 /// The noise-reduction strength Auto would set, as far as it is known.
@@ -345,7 +355,7 @@ fn show_sections(
         output,
         P::NoiseReduction,
         CollapsibleSection::new("Noise reduction")
-            .changed(document.noise_reduction != document.default_noise_reduction)
+            .changed(document.noise_reduction != document.defaults.noise_reduction)
             .tooltip(detail::NOISE_REDUCTION_HINT),
         |ui, output| detail::noise_reduction(ui, document, output),
     );

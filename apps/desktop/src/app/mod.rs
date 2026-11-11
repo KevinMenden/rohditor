@@ -36,7 +36,7 @@ use crate::ui::ViewMode;
 use crate::ui::adjustment_panel::{
     self, AdjustmentInteraction, AdjustmentRange, AdjustmentRanges, AdjustmentTarget,
     AdjustmentValues, CameraProfileChoice, DocumentPanelModel, ExportKind, ExportUiSettings,
-    PanelSection, PngDepth, SizeMode,
+    PanelDefaults, PanelSection, PngDepth, SizeMode,
 };
 use crate::ui::catalog::{
     self, FilmstripModel, LibraryEntryModel, LibraryEntryState, LibraryModel, LibrarySort,
@@ -3161,7 +3161,12 @@ fn document_panel_model(
         optics: optics_panel_model(document),
         false_color: document.edits.recipe().false_color,
         noise_reduction: document.edits.recipe().noise_reduction,
-        default_noise_reduction: defaults.noise_reduction,
+        defaults: PanelDefaults {
+            camera_profile: defaults.color.camera_profile.clone(),
+            rendering_profile: defaults.rendering.profile,
+            highlights: defaults.raw.highlights,
+            noise_reduction: defaults.noise_reduction,
+        },
         capture_sharpening: document.edits.recipe().capture_sharpening,
         defringe: document.edits.recipe().defringe,
         noise_suggestion: document.noise.suggestion(),
