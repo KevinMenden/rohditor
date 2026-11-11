@@ -2135,6 +2135,15 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn gpu_capability_predicate_refuses_presence() {
+        let mut recipe = EditRecipe::default();
+        recipe.presence.texture = 0.1;
+        assert!(!GpuPreviewProcessor::supports_recipe(&recipe));
+        recipe.presence.texture = 0.0;
+        assert!(GpuPreviewProcessor::supports_recipe(&recipe));
+    }
+
+    #[test]
     fn clipped_reconstruction_upload_rejects_dynamic_white_balance() {
         let mut recipe = EditRecipe::default();
         recipe.raw.highlights.method = HighlightMethod::Clip;

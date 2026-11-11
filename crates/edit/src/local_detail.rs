@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     CAPTURE_AMOUNT_RANGE, CHROMA_NOISE_REDUCTION_RANGE, CaptureSharpening, EditError, EditRecipe,
     FALSE_COLOR_MAX_STEPS, FalseColorSuppression, LUMINANCE_NOISE_REDUCTION_RANGE,
-    LocalAdjustments, MaskLayer, NoiseReduction, ParameterRange,
+    LocalAdjustments, MaskLayer, NoiseReduction, ParameterRange, PresenceAdjustments,
 };
 
 /// Most different [`LocalDetail`] values in one recipe. Every distinct value is a full copy of
@@ -164,7 +164,8 @@ impl EditRecipe {
             defringe: self.defringe,
             light: self.light.clone(),
             color: self.color.clone(),
-            presence: self.presence,
+            // Developed before the adjustment stage, which is where presence acts.
+            presence: PresenceAdjustments::default(),
             geometry: self.geometry.clone(),
             local: LocalAdjustments::default(),
         }

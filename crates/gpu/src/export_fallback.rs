@@ -158,3 +158,49 @@ impl FallbackExporter {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use rohditor_image::Orientation;
+
+    use super::*;
+    use crate::preview::processor::tests::synthetic_frame;
+
+    /// A CPU-only stage (here presence) must route to the CPU without touching a GPU device,
+    /// and must fail a GPU-required export instead of silently rendering it on the CPU.
+    #[test]
+    fn a_cpu_only_stage_never_reaches_the_gpu() {
+        let frame = synthetic_frame(Orientation::Normal);
+        let mut recipe = EditRecipe::default();
+        recipe.presence.clarity = 0.5;
+        let render = |backend| {
+            let mut fallback = None;
+            let result = FallbackExporter::default().render(
+                backend,
+                &CpuPipeline::default(),
+                &frame,
+                &recipe,
+                RenderOptions::default(),
+                OutputBitDepth::Eight,
+                DitherMode::None,
+                OutputSize::Original,
+                None,
+                |reason| fallback = Some(reason.to_owned()),
+            );
+            (result, fallback)
+        };
+
+        let (result, reported) = render(ExportBackend::PreferGpu);
+        assert!(matches!(
+            result,
+            Ok(ExportRender::Cpu {
+                gpu_error: Some(_),
+                ..
+            })
+        ));
+        assert!(reported.is_some_and(|reason| reason.contains("clarity")));
+
+        let (result, _) = render(ExportBackend::RequireGpu);
+        assert!(matches!(result, Err(ExportRenderError::GpuRequired(_))));
+    }
+}
