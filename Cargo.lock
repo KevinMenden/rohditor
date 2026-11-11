@@ -2976,6 +2976,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rohditor-gainmap"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "rayon",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "rohditor-gpu"
 version = "0.1.0"
 dependencies = [
