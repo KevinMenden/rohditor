@@ -56,6 +56,12 @@ pub fn apply_presence(
     cancellation: &dyn CancellationCheck,
 ) -> Result<(), DetailError> {
     presence.validate()?;
+    // The image type guarantees non-zero dimensions. Checking the byte count once here lets the
+    // stages size their planes (at most six per pixel) with plain arithmetic.
+    let (width, height) = (image.width(), image.height());
+    if presence_scratch_bytes(width, height).is_none() {
+        return Err(DetailError::InvalidDimensions { width, height });
+    }
     if presence.dehaze != 0.0 {
         dehaze::apply_dehaze(image, luma_weights, presence.dehaze, cancellation)?;
     }
