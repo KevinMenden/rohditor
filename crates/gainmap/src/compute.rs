@@ -145,15 +145,26 @@ fn block_columns(map_x: usize, factor: usize, width: usize) -> usize {
 /// Adds the clamped log2 gain of every pixel in a source row to its block's running sum.
 fn accumulate_row(sdr: &[f32], hdr: &[f32], params: &GainMapParams, sums: &mut [f32]) {
     let (sdr, hdr) = (sdr.as_chunks::<3>().0, hdr.as_chunks::<3>().0);
-    for (x, (s, h)) in sdr.iter().zip(hdr).enumerate() {
-        let sdr_luma = luminance(s, &params.luma_weights);
-        let hdr_luma = luminance(h, &params.luma_weights);
-        let gain = ((hdr_luma + params.offset_hdr) / (sdr_luma + params.offset_sdr)).log2();
-        // Zero offsets make black over black 0/0; call that "no boost" rather than NaN.
-        let gain = if gain.is_nan() { 0.0 } else { gain };
-        // Clamping before averaging keeps an extreme pixel from dragging its whole block.
-        sums[x / params.downsample] += gain.clamp(params.min_boost_log2, params.max_boost_log2);
+    // One `chunks` item per map column: the last block of a row can be partial.
+    let blocks = sdr
+        .chunks(params.downsample)
+        .zip(hdr.chunks(params.downsample));
+    for ((sdr_block, hdr_block), sum) in blocks.zip(sums) {
+        for (s, h) in sdr_block.iter().zip(hdr_block) {
+            *sum += pixel_gain(s, h, params);
+        }
     }
+}
+
+/// Clamped log2 gain of one pixel.
+fn pixel_gain(sdr: &[f32; 3], hdr: &[f32; 3], params: &GainMapParams) -> f32 {
+    let sdr_luma = luminance(sdr, &params.luma_weights);
+    let hdr_luma = luminance(hdr, &params.luma_weights);
+    let gain = ((hdr_luma + params.offset_hdr) / (sdr_luma + params.offset_sdr)).log2();
+    // Zero offsets make black over black 0/0; call that "no boost" rather than NaN.
+    let gain = if gain.is_nan() { 0.0 } else { gain };
+    // Clamping before averaging keeps an extreme pixel from dragging its whole block.
+    gain.clamp(params.min_boost_log2, params.max_boost_log2)
 }
 
 fn luminance(rgb: &[f32; 3], weights: &[f32; 3]) -> f32 {
