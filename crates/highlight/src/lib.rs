@@ -9,6 +9,9 @@ mod clip;
 mod detect;
 mod local_ratios;
 mod opposed;
+mod region_correction;
+mod regions;
+mod support;
 
 pub use clip::{ClipOutput, clip, clip_cancellable};
 pub use detect::{
@@ -30,7 +33,9 @@ pub const LOCAL_RATIOS_ALGORITHM_VERSION: u8 = 2;
 /// identities. Numerical contract changes must increment this value.
 /// v2: suspected sites that reconstruction did not raise are lowered to the
 /// optional WB-aware `neutral_ceiling` (issue #65).
-pub const OPPOSED_ALGORITHM_VERSION: u8 = 2;
+/// v3: region-aware correction from clipped-region border rings with an
+/// image-wide fallback, blended with the local search (issue #66).
+pub const OPPOSED_ALGORITHM_VERSION: u8 = 3;
 
 /// Version of the deterministic Clip operation used in backend/cache identities.
 /// Numerical contract changes must increment this value.
