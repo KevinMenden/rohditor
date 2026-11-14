@@ -9,7 +9,7 @@ use rohditor_core::{
     CpuPipeline, DitherMode, ExportImage, OutputBitDepth, OutputSharpening, OutputSize,
     RenderOptions,
 };
-use rohditor_image::{DisplayRgbImage, DisplayTransfer};
+use rohditor_image::{DisplayColorSpace, DisplayRgbImage};
 use rohditor_raw::RawFrame;
 
 #[cfg(test)]

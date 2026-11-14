@@ -16,6 +16,7 @@ mod median;
 mod noise;
 mod output_sharpen;
 mod planes;
+mod presence;
 #[cfg(test)]
 mod test_support;
 
@@ -38,6 +39,7 @@ pub use median::{median3, median5};
 pub use noise::{NoiseProfile, estimate_noise};
 pub use output_sharpen::{OutputSharpen, output_sharpen_scratch_bytes, sharpen_output};
 pub use planes::{OpponentPlanes, Plane, luma_plane, merge_opponent, split_opponent};
+pub use presence::{Presence, apply_presence, presence_scratch_bytes};
 
 use rohditor_image::ImageError;
 use thiserror::Error;

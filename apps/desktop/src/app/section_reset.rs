@@ -24,6 +24,7 @@ pub(super) fn reset_section(
             next.light.whites = defaults.light.whites;
             next.light.blacks = defaults.light.blacks;
         }
+        PanelSection::Presence => next.presence = defaults.presence,
         PanelSection::WhiteBalance => next.color.white_balance = defaults.color.white_balance,
         PanelSection::Saturation => {
             next.color.saturation = defaults.color.saturation;
@@ -92,8 +93,9 @@ mod tests {
         assert_eq!(reset.color.hsl, recipe.color.hsl);
     }
 
-    const ALL_SECTIONS: [PanelSection; 13] = [
+    const ALL_SECTIONS: [PanelSection; 14] = [
         PanelSection::Tone,
+        PanelSection::Presence,
         PanelSection::WhiteBalance,
         PanelSection::Saturation,
         PanelSection::ToneCurve,
@@ -126,6 +128,7 @@ mod tests {
         recipe.color.camera_profile = CameraProfileSelection::Automatic;
         recipe.rendering.profile = RenderingProfileSelection::MATCHED;
         recipe.raw.highlights.method = HighlightMethod::Off;
+        recipe.presence.clarity = 0.3;
         recipe.noise_reduction.chroma = 0.5;
         recipe.capture_sharpening.enabled = true;
         recipe.false_color.steps = 2;

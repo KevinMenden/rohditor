@@ -8,7 +8,7 @@
 use rayon::prelude::*;
 use rohditor_detail::{DetailError, OutputSharpen, sharpen_output};
 use rohditor_image::{
-    DisplayRgbImage, DisplayTransfer, LinearRgbImage, LinearRgbSpace, allocate_zeroed_f32,
+    DisplayColorSpace, DisplayRgbImage, LinearRgbImage, LinearRgbSpace, allocate_zeroed_f32,
     allocate_zeroed_u8, allocate_zeroed_u16,
 };
 
@@ -106,7 +106,7 @@ fn encode_srgb_f32(
         .try_reduce(GamutMappingDiagnostics::default, |left, right| {
             Ok(left.merge(right))
         })?;
-    let image = DisplayRgbImage::new(width, height, stride, DisplayTransfer::Srgb, data)?;
+    let image = DisplayRgbImage::new(width, height, stride, DisplayColorSpace::SRGB, data)?;
     Ok((image, diagnostics))
 }
 
@@ -137,7 +137,7 @@ fn quantize_u8(
         width,
         height,
         stride,
-        DisplayTransfer::Srgb,
+        DisplayColorSpace::SRGB,
         output,
     )?)
 }
@@ -169,7 +169,7 @@ fn quantize_u16(
         width,
         height,
         stride,
-        DisplayTransfer::Srgb,
+        DisplayColorSpace::SRGB,
         output,
     )?)
 }

@@ -117,7 +117,7 @@ impl Default for Histogram {
 #[cfg(test)]
 mod tests {
     use super::Histogram;
-    use rohditor_image::{DisplayRgbImage, DisplayTransfer};
+    use rohditor_image::{DisplayColorSpace, DisplayRgbImage};
 
     #[test]
     fn histogram_counts_channels_luminance_and_clipping() {
@@ -125,7 +125,7 @@ mod tests {
             2,
             1,
             6,
-            DisplayTransfer::Srgb,
+            DisplayColorSpace::SRGB,
             vec![0, 10, 255, 255, 20, 30],
         )
         .expect("valid image");
@@ -152,7 +152,7 @@ mod tests {
             4,
             1,
             12,
-            DisplayTransfer::Srgb,
+            DisplayColorSpace::SRGB,
             [0, 0, 0, 64, 64, 64, 128, 128, 128, 255, 255, 255].to_vec(),
         )
         .expect("valid image");
@@ -168,7 +168,7 @@ mod tests {
             2,
             1,
             6,
-            DisplayTransfer::Srgb,
+            DisplayColorSpace::SRGB,
             vec![10, 20, 250, 12, 22, 252],
         )
         .expect("valid image");

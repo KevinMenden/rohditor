@@ -324,19 +324,65 @@ impl<T> LinearRgbImage<T> {
     }
 }
 
-/// Transfer function/profile carried by output-ready RGB samples.
+/// RGB primaries of an output image. Both are D65-referred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RgbPrimaries {
+    /// Rec.709 / sRGB primaries.
+    Srgb,
+    /// DCI-P3 primaries with the D65 white point, as used by Apple displays.
+    DisplayP3,
+}
+
+impl RgbPrimaries {
+    #[must_use]
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Srgb => "sRGB",
+            Self::DisplayP3 => "Display P3",
+        }
+    }
+}
+
+/// Transfer function carried by output-ready RGB samples.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DisplayTransfer {
+    /// The IEC sRGB piecewise curve, also used by Display P3.
     Srgb,
 }
 
-/// A three-channel display/output image with an explicit transfer function.
+/// Primaries plus transfer function of a quantizable display image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DisplayColorSpace {
+    pub primaries: RgbPrimaries,
+    pub transfer: DisplayTransfer,
+}
+
+impl DisplayColorSpace {
+    /// sRGB primaries with the sRGB transfer.
+    pub const SRGB: Self = Self {
+        primaries: RgbPrimaries::Srgb,
+        transfer: DisplayTransfer::Srgb,
+    };
+
+    /// Display P3 primaries with the sRGB transfer.
+    pub const DISPLAY_P3: Self = Self {
+        primaries: RgbPrimaries::DisplayP3,
+        transfer: DisplayTransfer::Srgb,
+    };
+
+    #[must_use]
+    pub const fn description(self) -> &'static str {
+        self.primaries.description()
+    }
+}
+
+/// A three-channel display/output image with an explicit color space.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DisplayRgbImage<T> {
     width: usize,
     height: usize,
     row_stride: usize,
-    transfer: DisplayTransfer,
+    color_space: DisplayColorSpace,
     data: Vec<T>,
 }
 
@@ -345,7 +391,7 @@ impl<T> DisplayRgbImage<T> {
         width: usize,
         height: usize,
         row_stride: usize,
-        transfer: DisplayTransfer,
+        color_space: DisplayColorSpace,
         data: Vec<T>,
     ) -> Result<Self, ImageError> {
         let minimum_stride = width.checked_mul(3).ok_or_else(|| {
@@ -361,7 +407,7 @@ impl<T> DisplayRgbImage<T> {
             width,
             height,
             row_stride,
-            transfer,
+            color_space,
             data,
         })
     }
@@ -382,8 +428,8 @@ impl<T> DisplayRgbImage<T> {
     }
 
     #[must_use]
-    pub const fn transfer(&self) -> DisplayTransfer {
-        self.transfer
+    pub const fn color_space(&self) -> DisplayColorSpace {
+        self.color_space
     }
 
     #[must_use]
@@ -407,6 +453,106 @@ impl<T> DisplayRgbImage<T> {
 
     pub fn data_mut(&mut self) -> &mut [T] {
         &mut self.data
+    }
+}
+
+/// A linear, display-referred RGB image whose values may exceed 1.0.
+///
+/// Values are relative to diffuse white (1.0) and reach at most `headroom`,
+/// so a headroom of 4.0 means two stops above diffuse white. Nothing is
+/// quantized or clamped at 1.0. `T` is typically `f32` or `f16`. The image
+/// stays linear and in the primaries of its SDR base, which makes a
+/// gain-map ratio a per-pixel division.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExtendedLinearRgbImage<T> {
+    width: usize,
+    height: usize,
+    row_stride: usize,
+    primaries: RgbPrimaries,
+    headroom: f32,
+    data: Vec<T>,
+}
+
+impl<T> ExtendedLinearRgbImage<T> {
+    pub fn new(
+        width: usize,
+        height: usize,
+        row_stride: usize,
+        primaries: RgbPrimaries,
+        headroom: f32,
+        data: Vec<T>,
+    ) -> Result<Self, ImageError> {
+        let minimum_stride = width.checked_mul(3).ok_or_else(|| {
+            invalid_layout(
+                width,
+                height,
+                row_stride,
+                "RGB row-stride calculation overflowed",
+            )
+        })?;
+        validate_layout(width, height, row_stride, minimum_stride, data.len())?;
+        // Anything below 1.0 would not even hold diffuse white.
+        if !headroom.is_finite() || headroom < 1.0 {
+            return Err(invalid_layout(
+                width,
+                height,
+                row_stride,
+                &format!("headroom {headroom} must be finite and at least 1.0"),
+            ));
+        }
+        Ok(Self {
+            width,
+            height,
+            row_stride,
+            primaries,
+            headroom,
+            data,
+        })
+    }
+
+    #[must_use]
+    pub const fn width(&self) -> usize {
+        self.width
+    }
+
+    #[must_use]
+    pub const fn height(&self) -> usize {
+        self.height
+    }
+
+    #[must_use]
+    pub const fn row_stride(&self) -> usize {
+        self.row_stride
+    }
+
+    #[must_use]
+    pub const fn primaries(&self) -> RgbPrimaries {
+        self.primaries
+    }
+
+    /// Largest representable value, relative to diffuse white.
+    #[must_use]
+    pub const fn headroom(&self) -> f32 {
+        self.headroom
+    }
+
+    #[must_use]
+    pub fn data(&self) -> &[T] {
+        &self.data
+    }
+
+    #[must_use]
+    pub fn into_data(self) -> Vec<T> {
+        self.data
+    }
+
+    #[must_use]
+    pub fn pixel(&self, x: usize, y: usize) -> Option<&[T]> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        let start = y * self.row_stride + x * 3;
+        Some(&self.data[start..start + 3])
     }
 }
 
@@ -496,7 +642,10 @@ fn invalid_layout(width: usize, height: usize, row_stride: usize, reason: &str) 
 
 #[cfg(test)]
 mod tests {
-    use super::{BayerPattern, CfaColor, MosaicImage};
+    use super::{
+        BayerPattern, CfaColor, DisplayColorSpace, DisplayRgbImage, ExtendedLinearRgbImage,
+        MosaicImage, RgbPrimaries,
+    };
 
     #[test]
     fn every_supported_bayer_layout_indexes_all_sites() {
@@ -546,5 +695,39 @@ mod tests {
         assert_eq!(mosaic.sample(0, 0), &7);
         assert_eq!(mosaic.row_stride(), 3);
         assert_eq!(mosaic.data()[2], 9);
+    }
+
+    #[test]
+    fn display_image_carries_its_color_space() {
+        let image = DisplayRgbImage::new(1, 1, 3, DisplayColorSpace::DISPLAY_P3, vec![1_u8; 3])
+            .expect("valid image");
+        assert_eq!(image.color_space().primaries, RgbPrimaries::DisplayP3);
+        assert_ne!(image.color_space(), DisplayColorSpace::SRGB);
+    }
+
+    #[test]
+    fn extended_image_keeps_values_above_diffuse_white() {
+        // 2x1 with row padding; the second pixel is two stops above white.
+        let data = vec![0.5_f32, 1.0, 0.0, 4.0, 2.0, 0.25, 9.0, 9.0];
+        let image = ExtendedLinearRgbImage::new(2, 1, 8, RgbPrimaries::DisplayP3, 4.0, data)
+            .expect("valid extended image");
+        assert_eq!(image.pixel(1, 0), Some(&[4.0, 2.0, 0.25][..]));
+        assert_eq!(image.headroom(), 4.0);
+        assert_eq!(image.primaries(), RgbPrimaries::DisplayP3);
+    }
+
+    #[test]
+    fn extended_image_rejects_unusable_headroom() {
+        for headroom in [0.99, f32::NAN, f32::INFINITY, -2.0] {
+            let result = ExtendedLinearRgbImage::new(
+                1,
+                1,
+                3,
+                RgbPrimaries::DisplayP3,
+                headroom,
+                vec![0.0_f32; 3],
+            );
+            assert!(result.is_err(), "headroom {headroom} was accepted");
+        }
     }
 }

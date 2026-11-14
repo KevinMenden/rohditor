@@ -10,6 +10,7 @@ members = [
     "crates/demosaic",
     "crates/edit",
     "crates/engine",
+    "crates/gainmap",
     "crates/gpu",
     "crates/highlight",
     "crates/image",

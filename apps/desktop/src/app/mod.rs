@@ -3192,6 +3192,7 @@ fn document_panel_model(
         },
         capture_sharpening: document.edits.recipe().capture_sharpening,
         defringe: document.edits.recipe().defringe,
+        presence: document.edits.recipe().presence,
         noise_suggestion: document.noise.suggestion(),
     }
 }
@@ -3423,6 +3424,9 @@ fn apply_adjustment_interaction(
                 | AdjustmentTarget::GradingShadows(_)
                 | AdjustmentTarget::GradingMidtones(_)
                 | AdjustmentTarget::GradingHighlights(_)
+                | AdjustmentTarget::PresenceTexture
+                | AdjustmentTarget::PresenceClarity
+                | AdjustmentTarget::PresenceDehaze
                 | AdjustmentTarget::HighlightThreshold
                 | AdjustmentTarget::FalseColorSteps
                 | AdjustmentTarget::ChromaNoiseReduction
@@ -3498,6 +3502,9 @@ fn apply_adjustment_interaction(
         AdjustmentTarget::DefringeGreenHueEnd => {
             next.defringe.green_hue = with_hue_edge(next.defringe.green_hue, 1, interaction.value)
         }
+        AdjustmentTarget::PresenceTexture => next.presence.texture = interaction.value,
+        AdjustmentTarget::PresenceClarity => next.presence.clarity = interaction.value,
+        AdjustmentTarget::PresenceDehaze => next.presence.dehaze = interaction.value,
         AdjustmentTarget::Exposure => next.light.exposure_ev = interaction.value,
         AdjustmentTarget::Contrast => next.light.contrast = interaction.value,
         AdjustmentTarget::Highlights => next.light.highlights = interaction.value,

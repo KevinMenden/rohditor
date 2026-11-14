@@ -24,6 +24,7 @@ use self::color::{
 use self::tone::{show_highlight_controls, show_tone_controls, show_tone_curve_controls};
 use super::detail;
 use super::optics::{self, OpticsPanelModel};
+use super::presence;
 use super::theme::{self, colors};
 use super::widgets::{self, AdjustmentSpec, CollapsibleSection};
 
@@ -44,6 +45,9 @@ pub(crate) enum AdjustmentTarget {
     Shadows,
     Whites,
     Blacks,
+    PresenceTexture,
+    PresenceClarity,
+    PresenceDehaze,
     HighlightThreshold,
     FalseColorSteps,
     ChromaNoiseReduction,
@@ -160,6 +164,7 @@ pub(crate) struct DocumentPanelModel {
     pub defaults: PanelDefaults,
     pub capture_sharpening: rohditor_edit::CaptureSharpening,
     pub defringe: rohditor_edit::Defringe,
+    pub presence: rohditor_edit::PresenceAdjustments,
     pub noise_suggestion: NoiseSuggestion,
 }
 
@@ -224,6 +229,7 @@ pub(crate) struct AdjustmentPanelOutput {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PanelSection {
     Tone,
+    Presence,
     WhiteBalance,
     Saturation,
     ToneCurve,
@@ -289,6 +295,15 @@ fn show_sections(
             .default_open()
             .changed(changed.tone),
         |ui, output| show_tone_controls(ui, document, output),
+    );
+    section(
+        ui,
+        output,
+        P::Presence,
+        CollapsibleSection::new("Presence")
+            .changed(document.presence.is_active())
+            .tooltip(presence::PRESENCE_HINT),
+        |ui, output| presence::presence(ui, document, output),
     );
     section(
         ui,

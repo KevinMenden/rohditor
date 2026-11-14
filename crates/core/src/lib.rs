@@ -40,11 +40,12 @@ pub use color::{
 pub use cpu::{
     HSL_CHANNEL_CENTERS, HSL_HUE_SHIFT_PER_FULL_VALUE, MaskAlphaImage, apply_adjustments,
     evaluate_tone_curve, hsl_channel_weights, hsl_channel_weights_from_display_rgb, normalize_raw,
-    normalize_raw_preview, raw_crop_dimensions, render_display_srgb8,
-    render_display_srgb8_dithered, render_display_srgb8_dithered_with_geometry,
-    render_display_srgb8_with_geometry, render_display_srgb16, render_display_srgb16_with_geometry,
-    render_mask_overlay_from_image, render_mask_overlay_preview, white_balance_gains,
-    white_balance_gains_from_calibration,
+    normalize_raw_preview, raw_crop_dimensions, render_display_p3_8_with_geometry,
+    render_display_srgb8, render_display_srgb8_dithered,
+    render_display_srgb8_dithered_with_geometry, render_display_srgb8_with_geometry,
+    render_display_srgb16, render_display_srgb16_with_geometry,
+    render_extended_linear_with_geometry, render_mask_overlay_from_image,
+    render_mask_overlay_preview, white_balance_gains, white_balance_gains_from_calibration,
 };
 pub use cpu_only::cpu_only_stage_reason;
 pub use editing::{
