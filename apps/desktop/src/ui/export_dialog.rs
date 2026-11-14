@@ -1,9 +1,10 @@
+//! The export dialog and the settings it edits.
+
 use eframe::egui;
 use rohditor_core::{OutputMedium, OutputSharpening, OutputSharpeningStrength};
 
-use super::{AdjustmentPanelOutput, DocumentPanelModel};
-use crate::ui::theme::colors;
-use crate::ui::widgets;
+use super::theme::colors;
+use super::widgets;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum ExportKind {
@@ -62,32 +63,51 @@ impl ExportUiSettings {
     }
 }
 
-pub(super) fn show_export_controls(
-    ui: &mut egui::Ui,
-    document: &DocumentPanelModel,
-    export_settings: &mut ExportUiSettings,
-    output: &mut AdjustmentPanelOutput,
-) {
-    show_export_settings(ui, export_settings);
-    let export_label = if document.export_in_progress {
-        "Exporting…"
-    } else {
-        "Export image…"
-    };
-    output.export = widgets::primary_button(
-        ui,
-        export_label,
-        document.export_ready && !document.export_in_progress,
-    )
-    .on_hover_text("Export the full-resolution CPU-developed image")
-    .clicked();
-    if !document.export_ready && !document.export_in_progress {
-        ui.label(
-            egui::RichText::new("Available after RAW decoding completes")
-                .small()
-                .color(colors::TEXT_MUTED),
-        );
-    }
+/// What the dialog needs to know about the open photo.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ExportDialogModel {
+    /// The full-resolution frame has arrived.
+    pub ready: bool,
+    pub in_progress: bool,
+}
+
+/// The export dialog: format, size and sharpening, then the export button.
+/// Opened from the toolbar's Export button. Returns whether the user asked to
+/// export; the caller closes the dialog and picks the destination.
+pub(crate) fn show(
+    context: &egui::Context,
+    open: &mut bool,
+    model: &ExportDialogModel,
+    settings: &mut ExportUiSettings,
+) -> bool {
+    let mut export_requested = false;
+    egui::Window::new("Export")
+        .open(open)
+        .default_width(320.0)
+        .resizable(false)
+        .collapsible(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(context, |ui| {
+            show_export_settings(ui, settings);
+            ui.add_space(8.0);
+            let label = if model.in_progress {
+                "Exporting…"
+            } else {
+                "Export image…"
+            };
+            export_requested =
+                widgets::primary_button(ui, label, model.ready && !model.in_progress)
+                    .on_hover_text("Export the full-resolution CPU-developed image")
+                    .clicked();
+            if !model.ready && !model.in_progress {
+                ui.label(
+                    egui::RichText::new("Available after RAW decoding completes")
+                        .small()
+                        .color(colors::TEXT_MUTED),
+                );
+            }
+        });
+    export_requested
 }
 
 fn show_export_settings(ui: &mut egui::Ui, settings: &mut ExportUiSettings) {
@@ -255,5 +275,34 @@ mod tests {
         assert_eq!(settings.png_depth, PngDepth::Eight);
         assert!(settings.safe_metadata);
         assert!(!settings.overwrite);
+    }
+
+    /// Runs one frame of the dialog and reports `(still open, export asked)`.
+    fn frame(model: ExportDialogModel, settings: &mut ExportUiSettings) -> (bool, bool) {
+        let context = egui::Context::default();
+        let mut open = true;
+        let mut requested = false;
+        let _ = context.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                ..Default::default()
+            },
+            |context| requested = show(context, &mut open, &model, settings),
+        );
+        (open, requested)
+    }
+
+    #[test]
+    fn dialog_stays_open_and_does_not_export_until_asked() {
+        let mut settings = ExportUiSettings::with_jpeg_quality(90);
+        for (ready, in_progress) in [(true, false), (false, false), (true, true)] {
+            let model = ExportDialogModel { ready, in_progress };
+            assert_eq!(frame(model, &mut settings), (true, false));
+        }
+        // Showing the dialog never edits the settings by itself.
+        assert_eq!(settings.jpeg_quality, 90);
     }
 }

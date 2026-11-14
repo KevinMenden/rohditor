@@ -405,7 +405,7 @@ impl<'a> CollapsibleSection<'a> {
     }
 
     /// Adds a reset button to the header of a changed section. Read the click
-    /// from [`SectionOutput`] via [`Self::show_resettable`].
+    /// from [`SectionOutput`].
     pub(crate) const fn resettable(mut self) -> Self {
         self.resettable = true;
         self
@@ -416,17 +416,9 @@ impl<'a> CollapsibleSection<'a> {
         self
     }
 
-    /// Shows the section. `add_contents` only runs while the body is visible;
-    /// `None` means the section is fully closed.
-    pub(crate) fn show<R>(
-        self,
-        ui: &mut egui::Ui,
-        add_contents: impl FnOnce(&mut egui::Ui) -> R,
-    ) -> Option<R> {
-        self.show_resettable(ui, add_contents).body
-    }
-
-    /// Like [`Self::show`], and also reports the header's reset button.
+    /// Shows the section. `add_contents` only runs while the body is visible
+    /// (`body` is `None` when the section is fully closed). Also reports the
+    /// header's reset button.
     pub(crate) fn show_resettable<R>(
         self,
         ui: &mut egui::Ui,
@@ -721,7 +713,7 @@ mod tests {
                 egui::CentralPanel::default()
                     .frame(egui::Frame::NONE)
                     .show(context, |ui| {
-                        body_ran = section().show(ui, |_| ()).is_some();
+                        body_ran = section().show_resettable(ui, |_| ()).body.is_some();
                     });
             },
         );

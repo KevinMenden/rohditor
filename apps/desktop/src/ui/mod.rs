@@ -18,6 +18,7 @@ pub(crate) mod catalog;
 pub(crate) mod crop;
 mod detail;
 pub(crate) mod diagnostics;
+pub(crate) mod export_dialog;
 pub(crate) mod icons;
 pub(crate) mod mask_overlay;
 pub(crate) mod masks;

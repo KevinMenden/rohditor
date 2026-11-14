@@ -3,11 +3,9 @@
 
 mod changes;
 mod color;
-mod export;
 mod histogram;
 mod tone;
 
-pub(crate) use export::{ExportKind, ExportUiSettings, PngDepth, SizeMode};
 pub(crate) use histogram::{histogram_canvas, histogram_panel};
 
 use eframe::egui;
@@ -23,7 +21,6 @@ use self::color::{
     show_color_grading_controls, show_color_mixer_controls, show_profile_controls,
     show_saturation_controls, show_white_balance_controls,
 };
-use self::export::show_export_controls;
 use self::tone::{show_highlight_controls, show_tone_controls, show_tone_curve_controls};
 use super::detail;
 use super::optics::{self, OpticsPanelModel};
@@ -153,8 +150,6 @@ pub(crate) struct DocumentPanelModel {
     pub camera_profile_choices: Vec<CameraProfileChoice>,
     pub rendering_profile: RenderingProfileSelection,
     pub ranges: AdjustmentRanges,
-    pub export_ready: bool,
-    pub export_in_progress: bool,
     pub auto_tone_available: bool,
     pub picker_mode: Option<Picker>,
     pub color_mixer_channel: usize,
@@ -223,7 +218,6 @@ pub(crate) struct AdjustmentPanelOutput {
     pub reset_all: bool,
     /// The reset button of one section's header.
     pub reset_section: Option<PanelSection>,
-    pub export: bool,
 }
 
 /// The collapsible sections of the Edit panel that can be reset on their own.
@@ -258,7 +252,6 @@ impl AdjustmentPanelOutput {
 pub(crate) fn show_body(
     ui: &mut egui::Ui,
     document: Option<DocumentPanelModel>,
-    export_settings: &mut ExportUiSettings,
 ) -> AdjustmentPanelOutput {
     let mut output = AdjustmentPanelOutput::default();
     let Some(mut document) = document else {
@@ -275,7 +268,7 @@ pub(crate) fn show_body(
         .on_hover_text("Restore Rohditor Standard defaults")
         .clicked();
     ui.add_space(4.0);
-    show_sections(ui, &mut document, export_settings, &mut output);
+    show_sections(ui, &mut document, &mut output);
     output
 }
 
@@ -284,7 +277,6 @@ pub(crate) fn show_body(
 fn show_sections(
     ui: &mut egui::Ui,
     document: &mut DocumentPanelModel,
-    export_settings: &mut ExportUiSettings,
     output: &mut AdjustmentPanelOutput,
 ) {
     let changed = SectionChanges::of(document);
@@ -393,9 +385,6 @@ fn show_sections(
         |ui, output| optics::show(ui, &mut document.optics, &mut output.optics_action),
     )
     .flatten();
-    CollapsibleSection::new("Export").show(ui, |ui| {
-        show_export_controls(ui, document, export_settings, output);
-    });
 }
 
 /// Shows one section with a reset button, and records a click on it.

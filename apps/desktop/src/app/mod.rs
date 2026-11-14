@@ -35,8 +35,7 @@ use crate::config;
 use crate::ui::ViewMode;
 use crate::ui::adjustment_panel::{
     self, AdjustmentInteraction, AdjustmentRange, AdjustmentRanges, AdjustmentTarget,
-    AdjustmentValues, CameraProfileChoice, DocumentPanelModel, ExportKind, ExportUiSettings,
-    PanelDefaults, PanelSection, PngDepth, SizeMode,
+    AdjustmentValues, CameraProfileChoice, DocumentPanelModel, PanelDefaults, PanelSection,
 };
 use crate::ui::catalog::{
     self, FilmstripModel, LibraryEntryModel, LibraryEntryState, LibraryModel, LibrarySort,
@@ -45,6 +44,9 @@ use crate::ui::crop::CropOverlayModel;
 use crate::ui::diagnostics::{
     self, CacheModel, CatalogModel, DiagnosticsMessages, DiagnosticsModel, GpuModel,
     HighlightStatsModel, PreviewModel, QueueModel, TimingModel,
+};
+use crate::ui::export_dialog::{
+    self, ExportDialogModel, ExportKind, ExportUiSettings, PngDepth, SizeMode,
 };
 use crate::ui::optics::OpticsPanelModel;
 use crate::ui::settings as settings_ui;
@@ -335,6 +337,8 @@ pub(crate) struct RohditorApp {
     next_document_id: u64,
     next_export_id: u64,
     export_settings: ExportUiSettings,
+    /// The export dialog, opened from the toolbar.
+    export_dialog_open: bool,
     settings: AppSettings,
     settings_warning: Option<String>,
     recipe_save_status: Option<RecipeSaveStatus>,
@@ -468,6 +472,7 @@ impl RohditorApp {
             next_document_id: 1,
             next_export_id: 1,
             export_settings: ExportUiSettings::with_jpeg_quality(JPEG_QUALITY_DEFAULT),
+            export_dialog_open: false,
             settings,
             settings_warning,
             recipe_save_status: None,
@@ -1688,6 +1693,30 @@ impl RohditorApp {
             self.queue_preview(context, document_id);
         }
         if actions.export {
+            self.export_dialog_open = true;
+        }
+    }
+
+    /// The dialog edits the export settings; its button starts the export.
+    fn show_export_dialog(&mut self, context: &egui::Context) {
+        if !self.export_dialog_open {
+            return;
+        }
+        let model = ExportDialogModel {
+            ready: self
+                .document
+                .as_ref()
+                .is_some_and(|document| document.frame.is_some()),
+            in_progress: self
+                .document
+                .as_ref()
+                .is_some_and(|document| document.export_status.is_some()),
+        };
+        let mut open = true;
+        let export_requested =
+            export_dialog::show(context, &mut open, &model, &mut self.export_settings);
+        self.export_dialog_open = open && !export_requested;
+        if export_requested {
             self.request_export();
         }
     }
@@ -1728,9 +1757,7 @@ impl RohditorApp {
             )
         });
         let panel = tools::tool_panel_model(self.document.as_ref(), ToolKind::Edit);
-        let output = tool_panel::show(context, &panel, |ui| {
-            adjustment_panel::show_body(ui, model, &mut self.export_settings)
-        });
+        let output = tool_panel::show(context, &panel, |ui| adjustment_panel::show_body(ui, model));
         let picker_mode = output.picker_mode;
         let mut changed_document = None;
         let mut white_balance_draft = None;
@@ -1859,9 +1886,6 @@ impl RohditorApp {
         }
         if let Some(channel) = output.color_mixer_channel {
             self.color_mixer_channel = channel.min(HSL_CHANNEL_COUNT - 1);
-        }
-        if output.export {
-            self.request_export();
         }
     }
 
@@ -3153,8 +3177,6 @@ fn document_panel_model(
                 neutral: COLOR_GRADING_RANGE.neutral,
             },
         },
-        export_ready: document.frame.is_some(),
-        export_in_progress: document.export_status.is_some(),
         auto_tone_available: document.histogram_revision == Some(document.edits.revision()),
         picker_mode,
         color_mixer_channel,
@@ -3560,6 +3582,7 @@ impl eframe::App for RohditorApp {
         }
         self.show_developer_diagnostics(context);
         self.show_application_settings(context);
+        self.show_export_dialog(context);
         self.update_autosave(context);
         self.update_window_title(context);
         // eframe normally wakes the event loop from the worker's
