@@ -11,6 +11,7 @@ use rohditor_engine::tools::Picker;
 
 use super::detail;
 use super::optics::{self, OpticsPanelModel};
+use super::presence;
 use super::theme::{self, colors, metrics};
 use super::widgets::{self, AdjustmentSpec, CollapsibleSection, ValueScale};
 
@@ -31,6 +32,9 @@ pub(crate) enum AdjustmentTarget {
     Shadows,
     Whites,
     Blacks,
+    PresenceTexture,
+    PresenceClarity,
+    PresenceDehaze,
     HighlightThreshold,
     FalseColorSteps,
     ChromaNoiseReduction,
@@ -147,6 +151,7 @@ pub(crate) struct DocumentPanelModel {
     pub noise_reduction: rohditor_edit::NoiseReduction,
     pub capture_sharpening: rohditor_edit::CaptureSharpening,
     pub defringe: rohditor_edit::Defringe,
+    pub presence: rohditor_edit::PresenceAdjustments,
     pub noise_suggestion: NoiseSuggestion,
 }
 
@@ -290,6 +295,10 @@ fn show_sections(
         .default_open()
         .changed(changed.tone)
         .show(ui, |ui| show_tone_controls(ui, document, output));
+    CollapsibleSection::new("Presence")
+        .changed(document.presence.is_active())
+        .tooltip(presence::PRESENCE_HINT)
+        .show(ui, |ui| presence::presence(ui, document, output));
     CollapsibleSection::new("White balance")
         .default_open()
         .changed(changed.white_balance)

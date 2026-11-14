@@ -480,7 +480,9 @@ pub(super) mod adjustments {
                 },
             )?;
         cancellation.checkpoint()?;
-        Ok(())
+        // Texture, clarity and dehaze look at neighbourhoods, so they follow the per-pixel
+        // chain (local adjustments included) rather than being part of it.
+        crate::cpu::presence::apply_recipe_presence(image, recipe, cancellation)
     }
 
     /// The part of the adjustment chain that range masks measure: the global exposure and the

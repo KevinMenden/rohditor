@@ -21,6 +21,9 @@ pub fn cpu_only_stage_reason(recipe: &EditRecipe) -> Option<&'static str> {
     if !crate::local_detail_variants(recipe).is_empty() {
         return Some("local noise reduction, moiré and sharpening are not available on the GPU");
     }
+    if recipe.presence.is_active() {
+        return Some("texture, clarity and dehaze are not available on the GPU");
+    }
     let brushes = recipe
         .local
         .layers
@@ -56,6 +59,14 @@ mod tests {
         // Taking away noise reduction the global settings don't have is no work at all.
         recipe.local.layers[0].settings.detail.luminance_noise = -0.5;
         assert_eq!(cpu_only_stage_reason(&recipe), None);
+    }
+
+    #[test]
+    fn presence_runs_on_the_cpu_only_when_a_slider_is_set() {
+        let mut recipe = EditRecipe::default();
+        assert_eq!(cpu_only_stage_reason(&recipe), None);
+        recipe.presence.dehaze = -0.2;
+        assert!(cpu_only_stage_reason(&recipe).is_some());
     }
 
     fn recipe_with_brushes(count: usize) -> EditRecipe {
