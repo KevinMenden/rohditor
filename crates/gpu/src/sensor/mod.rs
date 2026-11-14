@@ -15,6 +15,8 @@ pub use develop::GpuDevelopedSource;
 mod demosaic_tests;
 mod highlight;
 mod normalize;
+#[cfg(test)]
+mod qualification;
 mod rcd;
 mod resources;
 #[cfg(test)]
