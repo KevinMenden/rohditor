@@ -1,0 +1,21 @@
+[package]
+name = "rohditor-gainmap"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Computes HDR gain maps from an SDR base and an HDR rendition, and serialises their ISO 21496-1 and Ultra HDR XMP metadata"
+
+[dependencies]
+rayon.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "gainmap"
+harness = false
+
+[lints]
+workspace = true
