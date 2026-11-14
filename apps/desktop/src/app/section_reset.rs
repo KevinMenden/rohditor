@@ -110,6 +110,34 @@ mod tests {
         PanelSection::Optics,
     ];
 
+    /// Position of a section in [`ALL_SECTIONS`]. The match has no wildcard, so
+    /// adding a `PanelSection` variant breaks the build here until it is added.
+    const fn position(section: PanelSection) -> usize {
+        match section {
+            PanelSection::Tone => 0,
+            PanelSection::Presence => 1,
+            PanelSection::WhiteBalance => 2,
+            PanelSection::Saturation => 3,
+            PanelSection::ToneCurve => 4,
+            PanelSection::HighlightReconstruction => 5,
+            PanelSection::ColorProfile => 6,
+            PanelSection::ColorMixer => 7,
+            PanelSection::ColorGrading => 8,
+            PanelSection::NoiseReduction => 9,
+            PanelSection::CaptureSharpening => 10,
+            PanelSection::FalseColor => 11,
+            PanelSection::Defringe => 12,
+            PanelSection::Optics => 13,
+        }
+    }
+
+    #[test]
+    fn all_sections_lists_every_section_once_in_order() {
+        for (index, section) in ALL_SECTIONS.into_iter().enumerate() {
+            assert_eq!(position(section), index, "{section:?} is out of place");
+        }
+    }
+
     /// A recipe where every field a section owns differs from the defaults.
     fn fully_edited() -> EditRecipe {
         let mut recipe = EditRecipe::default();
