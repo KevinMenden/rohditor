@@ -48,7 +48,7 @@ impl super::GpuSpatialProcessor {
                 .checked_add(estimated_bytes)
                 .is_none_or(|value| value > self.budget)
             {
-                return Err(GpuPreviewError::Unsupported {
+                return Err(GpuPreviewError::OverBudget {
                     reason: "resident source plus direct optics output exceeds the GPU budget"
                         .into(),
                 });
@@ -95,7 +95,7 @@ impl super::GpuSpatialProcessor {
             .checked_add(estimated_bytes)
             .is_none_or(|value| value > self.budget)
         {
-            return Err(GpuPreviewError::Unsupported {
+            return Err(GpuPreviewError::OverBudget {
                 reason: format!(
                     "resident source plus exact preview reduction needs more than the {}-byte GPU budget",
                     self.budget

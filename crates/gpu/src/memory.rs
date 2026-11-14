@@ -59,7 +59,7 @@ impl Reservation {
                         reason: "GPU memory reservation overflowed".to_owned(),
                     })?;
             if requested > budget {
-                return Err(GpuPreviewError::Unsupported {
+                return Err(GpuPreviewError::OverBudget {
                     reason: format!(
                         "GPU working-set budget exhausted: {current} resident bytes plus {bytes} requested bytes exceed the {budget}-byte limit"
                     ),

@@ -151,8 +151,11 @@ impl FallbackExporter {
                 capabilities,
             }),
             Err(error) => {
-                // A failed device must not poison later exports.
-                self.gpu = None;
+                // A failed device must not poison later exports. An image that merely does
+                // not fit is no device failure, so the device stays for the next export.
+                if !matches!(error, crate::GpuPreviewError::OverBudget { .. }) {
+                    self.gpu = None;
+                }
                 Err(error.to_string())
             }
         }

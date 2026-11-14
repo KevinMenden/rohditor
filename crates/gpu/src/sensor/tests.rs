@@ -279,7 +279,7 @@ fn clip_cancellation_and_budget_failure_preserve_cpu_recovery() {
     gpu.set_budget(64);
     assert!(matches!(
         gpu.apply_highlight(normalized, &description, &CancellationToken::new()),
-        Err(crate::GpuPreviewError::Unsupported { .. })
+        Err(crate::GpuPreviewError::OverBudget { .. })
     ));
     assert_eq!(frame.mosaic, original);
     normalize_raw(&frame, RawCropPolicy::Recommended).expect("CPU recovery reference");

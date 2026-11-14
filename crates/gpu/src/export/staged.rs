@@ -204,7 +204,7 @@ impl GpuExportProcessor {
             .max(spatial_metrics.estimated_gpu_bytes)
             .max(spatial_metrics.capture.estimated_gpu_bytes);
         if estimated_gpu_bytes > MEMORY_BUDGET {
-            return Err(GpuPreviewError::Unsupported {
+            return Err(GpuPreviewError::OverBudget {
                 reason: format!(
                     "resident export needs an estimated {estimated_gpu_bytes} GPU bytes; budget is {MEMORY_BUDGET}"
                 ),

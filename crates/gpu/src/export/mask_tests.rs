@@ -1,8 +1,6 @@
 //! CPU/GPU mask parity at full resolution, and what brush layers cost an export.
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-
 use super::super::tests::{gpu_test_guard, neutral_recipe};
+use super::memory_tests::measure;
 use super::tests::{difference, processor};
 use super::*;
 use crate::masks::test_recipes::{
@@ -231,30 +229,6 @@ fn prepared_export_masks_match_cpu_without_sensor_differences() {
     }
 }
 
-/// Used bytes of a memory pool as the kernel reports it, on the amdgpu driver.
-fn amdgpu_used(pool: &str) -> u64 {
-    std::fs::read_dir("/sys/class/drm")
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|entry| {
-            std::fs::read_to_string(entry.path().join(format!("device/mem_info_{pool}_used"))).ok()
-        })
-        .filter_map(|used| used.trim().parse::<u64>().ok())
-        .max()
-        .unwrap_or(0)
-}
-
-/// Highest values seen while an export runs, sampled every few milliseconds. The process-wide
-/// reservation peak never falls, so it cannot tell one run from the one before it.
-#[derive(Default)]
-struct Peaks {
-    reservation: AtomicU64,
-    vram: AtomicU64,
-    gtt: AtomicU64,
-    done: AtomicBool,
-}
-
 /// Reservations and measured memory with 8 brush layers. The kernel's numbers include everything
 /// else on the card, so they are printed as growth over the level just before the export.
 #[test]
@@ -286,49 +260,23 @@ fn eight_brush_layer_export_memory_at_24_and_48_mp() {
     for (name, width, height) in [("24 MP", 6000, 4000), ("48 MP", 8000, 6000)] {
         let frame = colored_frame(width, height, Orientation::Normal);
         for (recipe_name, recipe) in [("no masks", &plain), ("8 brush layers", &painted)] {
-            // Let the previous run's resources go before taking the starting level.
-            std::thread::sleep(Duration::from_millis(500));
-            let (vram_before, gtt_before) = (amdgpu_used("vram"), amdgpu_used("gtt"));
-            let peaks = Arc::new(Peaks::default());
-            let sampler = {
-                let peaks = Arc::clone(&peaks);
-                std::thread::spawn(move || {
-                    while !peaks.done.load(Ordering::Acquire) {
-                        peaks.reservation.fetch_max(
-                            crate::gpu_memory_reservations().current_bytes,
-                            Ordering::AcqRel,
-                        );
-                        peaks.vram.fetch_max(amdgpu_used("vram"), Ordering::AcqRel);
-                        peaks.gtt.fetch_max(amdgpu_used("gtt"), Ordering::AcqRel);
-                        std::thread::sleep(Duration::from_millis(2));
-                    }
-                })
-            };
-            let started = Instant::now();
-            let result = gpu.render(
-                &cpu,
-                &frame,
-                recipe,
-                RenderOptions::default(),
-                OutputBitDepth::Sixteen,
-                DitherMode::None,
-                OutputSize::Original,
-                None,
-                &token,
-            );
-            let elapsed = started.elapsed();
-            peaks.done.store(true, Ordering::Release);
-            sampler.join().expect("sampler");
+            let (result, elapsed, peaks) = measure(|| {
+                gpu.render(
+                    &cpu,
+                    &frame,
+                    recipe,
+                    RenderOptions::default(),
+                    OutputBitDepth::Sixteen,
+                    DitherMode::None,
+                    OutputSize::Original,
+                    None,
+                    &token,
+                )
+            });
             let result = result.expect("GPU export");
-            let growth = |peak: &AtomicU64, before: u64| {
-                peak.load(Ordering::Acquire).saturating_sub(before) >> 20
-            };
             eprintln!(
-                "{name} {recipe_name}: {elapsed:?}, reservation peak {} MiB, VRAM +{} MiB (of {} MiB in use), GTT +{} MiB, uploaded {} MiB, estimate {} MiB",
-                peaks.reservation.load(Ordering::Acquire) >> 20,
-                growth(&peaks.vram, vram_before),
-                vram_before >> 20,
-                growth(&peaks.gtt, gtt_before),
+                "{name} {recipe_name}: {elapsed:?}, {}, uploaded {} MiB, estimate {} MiB",
+                peaks.describe(),
                 result.uploaded_bytes >> 20,
                 result.estimated_gpu_bytes >> 20,
             );

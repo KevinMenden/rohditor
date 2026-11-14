@@ -14,6 +14,8 @@ use rohditor_raw::RawFrame;
 
 #[cfg(test)]
 mod mask_tests;
+#[cfg(test)]
+mod memory_tests;
 mod readback;
 mod staged;
 #[cfg(test)]
@@ -453,7 +455,7 @@ impl GpuExportProcessor {
             .max(spatial_metrics.estimated_gpu_bytes)
             .max(spatial_metrics.capture.estimated_gpu_bytes);
         if estimated_gpu_bytes > MEMORY_BUDGET {
-            return Err(GpuPreviewError::Unsupported {
+            return Err(GpuPreviewError::OverBudget {
                 reason: format!(
                     "resident export needs an estimated {estimated_gpu_bytes} GPU bytes; budget is {MEMORY_BUDGET}"
                 ),
@@ -672,7 +674,7 @@ impl GpuExportProcessor {
             || band > u64::from(limits.max_storage_buffer_binding_size)
             || w.max(h).div_ceil(WORKGROUP_EDGE) > limits.max_compute_workgroups_per_dimension
         {
-            return Err(GpuPreviewError::Unsupported {
+            return Err(GpuPreviewError::OverBudget {
                 reason: format!(
                     "export {w}x{h} needs an estimated {bytes} GPU bytes; budget is {MEMORY_BUDGET}, or a buffer/dispatch limit was exceeded"
                 ),

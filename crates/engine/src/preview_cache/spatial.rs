@@ -303,8 +303,10 @@ impl SpatialCache {
             Err(GpuPreviewError::Cancelled) => return Err(GpuPreviewError::Cancelled),
             Err(error) => {
                 self.sensor_source = None;
-                self.sensor = None;
-                if !matches!(error, GpuPreviewError::UnsupportedEdits { .. }) {
+                // Routing answers (an unsupported recipe, or one that does not fit the
+                // budget) leave the device healthy, so its processors stay.
+                if !error.is_routing() {
+                    self.sensor = None;
                     self.gpu = None;
                     self.gpu_display = None;
                 }
@@ -546,9 +548,11 @@ impl SpatialCache {
             self.recovery = Some(error.to_string());
             self.gpu_captured = None;
             self.sensor_source = None;
-            self.sensor = None;
-            self.gpu = None;
-            self.gpu_display = None;
+            if !error.is_routing() {
+                self.sensor = None;
+                self.gpu = None;
+                self.gpu_display = None;
+            }
         }
     }
 }
@@ -589,8 +593,28 @@ mod tests {
         assert!(cache.gpu_display.is_none());
         assert!(cache.gpu_captured.is_none());
     }
+
+    #[test]
+    fn a_recipe_over_budget_schedules_cpu_recovery_and_drops_resident_images() {
+        let mut cache = SpatialCache::default();
+        cache.record_gpu_result::<()>(&Err(GpuPreviewError::OverBudget {
+            reason: "48 MP with defringe".into(),
+        }));
+        assert!(
+            cache
+                .recovery
+                .as_deref()
+                .is_some_and(|reason| reason.contains("48 MP with defringe"))
+        );
+        assert!(cache.gpu_captured.is_none());
+        assert!(cache.sensor_source.is_none());
+    }
 }
 
 #[cfg(test)]
 #[path = "sensor_tests.rs"]
 mod sensor_tests;
+
+#[cfg(test)]
+#[path = "detail_latency_tests.rs"]
+mod detail_latency_tests;

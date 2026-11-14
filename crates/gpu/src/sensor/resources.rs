@@ -142,7 +142,7 @@ impl MosaicLayout {
                 }
             }
         }
-        best.ok_or_else(|| GpuPreviewError::Unsupported {
+        best.ok_or_else(|| GpuPreviewError::OverBudget {
             reason: format!(
                 "normalized RAW mosaic {width}x{height} cannot fit a bounded R32Float backing and u16 upload tile within the {budget}-byte GPU budget/device limits"
             ),
