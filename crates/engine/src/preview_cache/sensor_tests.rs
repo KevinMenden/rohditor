@@ -1,6 +1,6 @@
 use super::*;
 
-fn setup() -> (SpatialCache, RawFrame) {
+pub(super) fn setup() -> (SpatialCache, RawFrame) {
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
         ..Default::default()
@@ -29,7 +29,7 @@ fn setup() -> (SpatialCache, RawFrame) {
     (cache, frame)
 }
 
-fn prepare(
+pub(super) fn prepare(
     cache: &mut SpatialCache,
     frame: &RawFrame,
     recipe: &EditRecipe,
@@ -299,6 +299,10 @@ fn editor_sensor_budget_failure_recovers_on_cpu_and_reports_mixed_backend() {
     assert!(!metrics.sensor_gpu);
     assert!(cache.recovery.is_some());
     assert!(cache.sensor_source.is_none());
+    assert!(
+        cache.sensor.is_some() && cache.gpu.is_some(),
+        "a recipe that does not fit is no device failure: the processors stay"
+    );
     assert!(metrics.uploaded_bytes > 0);
     cache.release_gpu_images();
     assert!(

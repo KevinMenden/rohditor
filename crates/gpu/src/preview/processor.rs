@@ -1157,7 +1157,7 @@ impl GpuPreviewProcessor {
             .saturating_add(output_bytes)
             > crate::spatial::resources::DEFAULT_BUDGET.saturating_sub(64 * 1024)
         {
-            return Err(GpuPreviewError::Unsupported {
+            return Err(GpuPreviewError::OverBudget {
                 reason: "resident camera source and Source 1:1 display exceed the GPU budget"
                     .into(),
             });

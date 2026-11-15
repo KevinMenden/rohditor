@@ -153,7 +153,7 @@ impl GpuSensorProcessor {
         let remaining = self
             .budget
             .checked_sub(crate::gpu_memory_reservations().current_bytes)
-            .ok_or_else(|| GpuPreviewError::Unsupported {
+            .ok_or_else(|| GpuPreviewError::OverBudget {
                 reason: "sensor camera planes exceed the operation budget".into(),
             })?;
         let mut prepared_capture = if captured_planes.is_some() {

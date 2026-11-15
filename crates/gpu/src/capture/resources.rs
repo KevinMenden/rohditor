@@ -107,7 +107,7 @@ impl TilePlan {
             }
             edge /= 2;
         }
-        Err(GpuPreviewError::Unsupported { reason: "capture cannot fit a minimum tile and its iterative halo within the remaining budget/device limits".into() })
+        Err(GpuPreviewError::OverBudget { reason: "capture cannot fit a minimum tile and its iterative halo within the remaining budget/device limits".into() })
     }
 }
 
