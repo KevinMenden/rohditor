@@ -151,9 +151,10 @@ impl FallbackExporter {
                 capabilities,
             }),
             Err(error) => {
-                // A failed device must not poison later exports. An image that merely does
-                // not fit is no device failure, so the device stays for the next export.
-                if !matches!(error, crate::GpuPreviewError::OverBudget { .. }) {
+                // A failed device must not poison later exports. A routing answer (an image
+                // that does not fit, or edits the GPU lacks) is no device failure, so the
+                // device stays for the next export.
+                if !error.is_routing() {
                     self.gpu = None;
                 }
                 Err(error.to_string())
@@ -205,5 +206,44 @@ mod tests {
 
         let (result, _) = render(ExportBackend::RequireGpu);
         assert!(matches!(result, Err(ExportRenderError::GpuRequired(_))));
+    }
+
+    /// An export that does not fit the GPU budget (here 48 MP with the detail stage, see #30)
+    /// renders on the CPU and keeps the device, so the next export does not create a new one.
+    #[test]
+    #[ignore = "requires Vulkan; renders a 48 MP detail export on the CPU after the GPU refuses it"]
+    fn an_export_over_budget_falls_back_and_keeps_the_device() {
+        let _guard = crate::preview::processor::tests::gpu_test_guard();
+        let frame = crate::masks::test_recipes::colored_frame(8000, 6000, Orientation::Normal);
+        let mut recipe = EditRecipe::default();
+        recipe.noise_reduction.chroma = 0.5;
+        recipe.capture_sharpening.enabled = true;
+        let mut exporter = FallbackExporter::default();
+        let result = exporter
+            .render(
+                ExportBackend::PreferGpu,
+                &CpuPipeline::default(),
+                &frame,
+                &recipe,
+                RenderOptions::default(),
+                OutputBitDepth::Eight,
+                DitherMode::None,
+                OutputSize::LongEdge { pixels: 512 },
+                None,
+                |_| {},
+            )
+            .expect("CPU fallback export");
+        let ExportRender::Cpu {
+            gpu_error: Some(reason),
+            ..
+        } = result
+        else {
+            panic!("48 MP with the detail stage should not fit the GPU budget");
+        };
+        assert!(reason.contains("does not fit"), "{reason}");
+        assert!(
+            matches!(exporter.gpu, Some(Ok(_))),
+            "an over-budget export must keep the device"
+        );
     }
 }

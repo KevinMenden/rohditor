@@ -57,10 +57,10 @@ pub enum GpuPreviewError {
     #[error("the selected wgpu device cannot support GPU processing: {reason}")]
     Unsupported { reason: String },
 
-    /// The work does not fit the processing-memory budget. The device is healthy: this is a
-    /// routing answer for this image and recipe (run it on the CPU), not a reason to discard
-    /// GPU state the way a device failure is.
-    #[error("GPU working-set budget exceeded: {reason}")]
+    /// This image and recipe do not fit: the GPU or CPU working-set budget, or a buffer or
+    /// dispatch limit of the device. The device is healthy: this is a routing answer (run it
+    /// on the CPU), not a reason to discard GPU state the way a device failure is.
+    #[error("GPU work does not fit: {reason}")]
     OverBudget { reason: String },
 
     /// A preview dimension cannot be represented by the selected device.

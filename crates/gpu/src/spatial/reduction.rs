@@ -110,7 +110,7 @@ impl super::GpuSpatialProcessor {
             || (maximum_source_rows as u32).div_ceil(8)
                 > limits.max_compute_workgroups_per_dimension
         {
-            return Err(GpuPreviewError::Unsupported {
+            return Err(GpuPreviewError::OverBudget {
                 reason: "area reduction exceeds a storage-buffer or dispatch limit".into(),
             });
         }

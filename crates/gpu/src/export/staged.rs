@@ -193,7 +193,7 @@ impl GpuExportProcessor {
             || largest > u64::from(limits.max_storage_buffer_binding_size)
             || width.div_ceil(WORKGROUP_EDGE) > limits.max_compute_workgroups_per_dimension
         {
-            return Err(GpuPreviewError::Unsupported {
+            return Err(GpuPreviewError::OverBudget {
                 reason: "resized or sharpened export exceeds a buffer or dispatch limit".into(),
             });
         }
@@ -225,7 +225,7 @@ impl GpuExportProcessor {
             + band_bytes
             + coverage.cpu_bytes();
         if estimated_cpu_bytes > rohditor_core::CPU_WORKING_SET_LIMIT_BYTES as u64 {
-            return Err(GpuPreviewError::Unsupported {
+            return Err(GpuPreviewError::OverBudget {
                 reason: format!(
                     "export CPU buffers need {estimated_cpu_bytes} bytes, exceeding the CPU working-set budget"
                 ),

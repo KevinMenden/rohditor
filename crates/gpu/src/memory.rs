@@ -55,7 +55,7 @@ impl Reservation {
             let requested =
                 current
                     .checked_add(bytes)
-                    .ok_or_else(|| GpuPreviewError::Unsupported {
+                    .ok_or_else(|| GpuPreviewError::OverBudget {
                         reason: "GPU memory reservation overflowed".to_owned(),
                     })?;
             if requested > budget {

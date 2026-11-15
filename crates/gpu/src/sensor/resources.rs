@@ -159,7 +159,7 @@ impl MosaicLayout {
         self.resident_bytes
             .checked_add(transient_bytes)
             .and_then(|value| value.checked_add(RESOURCE_OVERHEAD))
-            .ok_or_else(|| GpuPreviewError::Unsupported {
+            .ok_or_else(|| GpuPreviewError::OverBudget {
                 reason: "GPU highlight allocation estimate overflowed".into(),
             })
     }
