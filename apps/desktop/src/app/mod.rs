@@ -1615,6 +1615,11 @@ impl RohditorApp {
         if let Some(mode) = actions.view_mode
             && mode != self.view_mode
         {
+            // The mode switch swaps the entire central UI, unmounting any
+            // dragged slider, so it commits an open gesture first.
+            if let Some(document) = self.document.as_mut() {
+                document.edits.finish_gesture();
+            }
             if mode == ViewMode::Library {
                 // The crop overlay and pickers belong to the develop viewport.
                 self.tool = ActiveTool::default();

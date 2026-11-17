@@ -62,6 +62,11 @@ impl RohditorApp {
         if target == self.tool.kind() {
             return;
         }
+        // The switch swaps the panel and unmounts any dragged slider, so the
+        // switch itself is the commit boundary for an open drag gesture.
+        if let Some(document) = self.document.as_mut() {
+            document.edits.finish_gesture();
+        }
         self.leave_tool(context, true);
         self.exit_masks_tool();
         match target {
