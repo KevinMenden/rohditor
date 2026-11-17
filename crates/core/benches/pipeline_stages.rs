@@ -2,14 +2,16 @@ use std::hint::black_box;
 
 use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
 use rohditor_core::{
-    OutputPolicy, RawCropPolicy, apply_adjustments, normalize_raw_preview, render_display_srgb8,
+    CancellationToken, OutputGeometry, OutputPolicy, RawCropPolicy, apply_adjustments,
+    apply_adjustments_extended, normalize_raw_preview, render_display_srgb8,
+    render_display_srgb8_with_geometry, render_extended_linear_with_geometry,
 };
 use rohditor_edit::{
     BrushMask, BrushStroke, ColorRange, ColorSample, EditRecipe, LinearGradient, LocalSettings,
     LuminanceRange, MaskComponent, MaskLayer, MaskMode, MaskPoint, MaskShape,
     RenderingProfileSelection,
 };
-use rohditor_image::{LinearRgbImage, LinearRgbSpace, Orientation};
+use rohditor_image::{LinearRgbImage, LinearRgbSpace, Orientation, RgbPrimaries};
 
 mod common;
 
@@ -267,6 +269,100 @@ fn benchmark_output_conversion(criterion: &mut Criterion) {
     group.finish();
 }
 
+/// The SDR and extended-range (HDR) renditions side by side at 24 MP: the adjustment stage with
+/// every per-pixel stage active, and the output conversion of each rendition.
+fn benchmark_hdr_rendition(criterion: &mut Criterion) {
+    const MEGAPIXEL_24: (usize, usize) = (6_000, 4_000);
+    const HEADROOM: f32 = 8.0;
+    let (width, height) = MEGAPIXEL_24;
+    let image = scene_ramp_image(width, height);
+    let mut recipe = EditRecipe::default();
+    recipe.light.exposure_ev = 0.5;
+    recipe.light.contrast = 0.2;
+    recipe.light.whites = -0.4;
+    recipe.light.tone_curve.lights = 0.05;
+    recipe.color.saturation = 1.15;
+    recipe.color.grading.highlights = [0.1, 0.0, -0.1];
+
+    let mut group = criterion.benchmark_group("hdr_rendition");
+    group.sample_size(10);
+    group.throughput(Throughput::Elements((width * height) as u64));
+    group.bench_function("adjustments_sdr_6000x4000", |bencher| {
+        bencher.iter_batched(
+            || image.clone(),
+            |mut working| {
+                must(apply_adjustments(&mut working, black_box(&recipe)));
+                black_box(working)
+            },
+            BatchSize::LargeInput,
+        );
+    });
+    group.bench_function("adjustments_extended_6000x4000", |bencher| {
+        bencher.iter_batched(
+            || image.clone(),
+            |mut working| {
+                must(apply_adjustments_extended(
+                    &mut working,
+                    black_box(&recipe),
+                    HEADROOM,
+                ));
+                black_box(working)
+            },
+            BatchSize::LargeInput,
+        );
+    });
+    let mut adjusted = image.clone();
+    must(apply_adjustments_extended(&mut adjusted, &recipe, HEADROOM));
+    let geometry = must(OutputGeometry::new(
+        width,
+        height,
+        Orientation::Normal,
+        None,
+    ));
+    group.bench_function("output_srgb8_6000x4000", |bencher| {
+        bencher.iter(|| {
+            must(render_display_srgb8_with_geometry(
+                black_box(&adjusted),
+                geometry,
+                OutputPolicy::ChromaCompressToSrgb,
+            ))
+        });
+    });
+    group.bench_function("output_extended_p3_6000x4000", |bencher| {
+        bencher.iter(|| {
+            must(render_extended_linear_with_geometry(
+                black_box(&adjusted),
+                geometry,
+                RgbPrimaries::DisplayP3,
+                HEADROOM,
+                OutputPolicy::ChromaCompressToSrgb,
+                &CancellationToken::new(),
+            ))
+        });
+    });
+    group.finish();
+}
+
+/// Slightly coloured horizontal ramp from 8 stops below to 6 stops above middle gray, so a
+/// large share of the pixels takes the HDR shoulder.
+fn scene_ramp_image(width: usize, height: usize) -> LinearRgbImage<f32> {
+    let row_stride = width * 3;
+    let mut data = vec![0.0; row_stride * height];
+    for row in data.chunks_exact_mut(row_stride) {
+        for (x, pixel) in row.as_chunks_mut::<3>().0.iter_mut().enumerate() {
+            let level = 0.18 * (14.0 * x as f32 / width as f32 - 8.0).exp2();
+            pixel.copy_from_slice(&[level * 1.1, level, level * 0.85]);
+        }
+    }
+    must(LinearRgbImage::new(
+        width,
+        height,
+        row_stride,
+        LinearRgbSpace::Rec2020D65,
+        data,
+    ))
+}
+
 fn representative_linear_image() -> LinearRgbImage<f32> {
     flat_linear_image(PREVIEW_WIDTH, PREVIEW_HEIGHT)
 }
@@ -288,6 +384,7 @@ criterion_group!(
     benchmark_normalization,
     benchmark_adjustments,
     benchmark_local_adjustments,
-    benchmark_output_conversion
+    benchmark_output_conversion,
+    benchmark_hdr_rendition
 );
 criterion_main!(benches);

@@ -4,6 +4,8 @@ use std::sync::OnceLock;
 use rohditor_color::{linear_srgb_to_srgb, srgb_to_linear_srgb};
 use rohditor_edit::{CameraTone, RenderingAdjustments, RenderingProfileSelection};
 
+use crate::PipelineError;
+
 /// Number of samples in the shared Rohditor Standard transfer function.
 pub const BASE_RENDERING_LUT_SIZE: usize = 4_096;
 
@@ -13,6 +15,17 @@ pub const ROHDITOR_STANDARD_MIDDLE_GRAY: f32 = 0.18;
 // The midpoint of the range proposed for v1. Changing this changes pixels and
 // therefore requires a new serialized Standard process version.
 const ROHDITOR_STANDARD_V1_EXPONENT: f32 = 1.45;
+
+/// Display-linear SDR output where the extended-range (HDR) base rendering
+/// leaves the SDR curve. Below it the two renditions are identical, so shadows
+/// and midtones agree and the gain map is exactly 1× there. Above it the HDR
+/// shoulder rises toward the headroom instead of toward 1.0.
+///
+/// 0.5 is about 1.5 stops above middle gray in Standard (sRGB code 188). It is
+/// low enough that highlights a RAW actually contains (rarely more than a few
+/// stops above diffuse white) spread over the headroom, instead of only
+/// reaching it far beyond anything the sensor recorded.
+pub const HDR_SHOULDER_KNEE: f32 = 0.5;
 
 /// Sampled, deterministic Rohditor Standard luminance transfer.
 #[derive(Debug, Clone, PartialEq)]
@@ -80,6 +93,103 @@ impl BaseRenderingLut {
     #[must_use]
     pub const fn values(&self) -> &[f32; BASE_RENDERING_LUT_SIZE] {
         &self.values
+    }
+
+    /// The extended-range (HDR) variant of this SDR rendering, whose shoulder
+    /// ends at `headroom` instead of at 1.0.
+    ///
+    /// Up to [`HDR_SHOULDER_KNEE`] the table is copied unchanged. Above it,
+    /// with `X = x^p` (`p` the Standard exponent), the shoulder is
+    ///
+    /// ```text
+    /// H(x) = h - (h - k) * Q / (Q + X - X_k),   Q = (h - k) / (dB/dX at the knee)
+    /// ```
+    ///
+    /// which is the Standard family `X / (X + a)` rescaled to end at `h`. Its
+    /// slope matches the SDR curve at the knee, so there is no kink. For
+    /// Standard and `h = 1` it reproduces Standard exactly, and it never lies
+    /// below Standard for `h > 1`.
+    ///
+    /// The shoulder is also the synthetic extension of camera-fitted tones,
+    /// which end at linear 1.0 because the camera JPEG clips there. Taking the
+    /// larger of the SDR curve and the shoulder keeps the HDR rendition at
+    /// least as bright as the SDR one everywhere, so the gain map never dims.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `headroom` is not finite or below 1.0.
+    pub fn with_headroom(&self, headroom: f32) -> Result<Self, PipelineError> {
+        validate_headroom(headroom)?;
+        // Every table runs from 0.0 to 1.0, so the knee lies inside it.
+        let knee_index = self
+            .values
+            .iter()
+            .position(|&value| value >= HDR_SHOULDER_KNEE)
+            .unwrap_or(BASE_RENDERING_LUT_SIZE - 1)
+            .max(1);
+        let shoulder = Shoulder::at_knee(&self.values, knee_index, f64::from(headroom));
+        let mut values = self.values;
+        let denominator = (BASE_RENDERING_LUT_SIZE - 1) as f64;
+        for (index, value) in values.iter_mut().enumerate().skip(knee_index) {
+            if index == BASE_RENDERING_LUT_SIZE - 1 {
+                *value = headroom;
+                continue;
+            }
+            let coordinate = index as f64 / denominator;
+            let input = coordinate / (1.0 - coordinate);
+            *value = value.max(shoulder.evaluate(input) as f32);
+        }
+        Ok(Self { values })
+    }
+}
+
+/// The HDR shoulder fitted to one SDR table at [`HDR_SHOULDER_KNEE`].
+struct Shoulder {
+    headroom: f64,
+    /// `X` at the knee.
+    knee_power: f64,
+    /// `Q` of the shoulder formula in [`BaseRenderingLut::with_headroom`].
+    scale: f64,
+}
+
+impl Shoulder {
+    /// `knee_index` is the first table entry at or above the knee; the one
+    /// before it is below. The table is linear in the companded coordinate
+    /// `c = x / (1 + x)` between entries, which gives the knee and its slope
+    /// in closed form.
+    fn at_knee(values: &[f32; BASE_RENDERING_LUT_SIZE], knee_index: usize, headroom: f64) -> Self {
+        let step = 1.0 / (BASE_RENDERING_LUT_SIZE - 1) as f64;
+        let lower = f64::from(values[knee_index - 1]);
+        let upper = f64::from(values[knee_index]);
+        let knee = f64::from(HDR_SHOULDER_KNEE);
+        let slope_per_coordinate = (upper - lower) / step;
+        let coordinate = (knee_index - 1) as f64 * step + (knee - lower) / slope_per_coordinate;
+        let input = coordinate / (1.0 - coordinate);
+        let exponent = f64::from(ROHDITOR_STANDARD_V1_EXPONENT);
+        // dB/dX = dB/dc * dc/dx / (dX/dx), with dc/dx = 1 / (1 + x)^2.
+        let slope_per_power =
+            slope_per_coordinate / ((1.0 + input).powi(2) * exponent * input.powf(exponent - 1.0));
+        Self {
+            headroom,
+            knee_power: input.powf(exponent),
+            scale: (headroom - knee) / slope_per_power,
+        }
+    }
+
+    fn evaluate(&self, input: f64) -> f64 {
+        let power = input.powf(f64::from(ROHDITOR_STANDARD_V1_EXPONENT));
+        let knee = f64::from(HDR_SHOULDER_KNEE);
+        self.headroom - (self.headroom - knee) * self.scale / (self.scale + power - self.knee_power)
+    }
+}
+
+/// Headroom is linear display light relative to diffuse white, so it is at
+/// least 1.0 (an SDR ceiling) and finite.
+pub(crate) fn validate_headroom(headroom: f32) -> Result<(), PipelineError> {
+    if headroom.is_finite() && headroom >= 1.0 {
+        Ok(())
+    } else {
+        Err(PipelineError::InvalidHeadroom { headroom })
     }
 }
 
@@ -237,6 +347,122 @@ mod tests {
         rendering.profile = RenderingProfileSelection::STANDARD;
         let standard = base_rendering_lut(&rendering).expect("Standard renders");
         assert_eq!(*standard, *standard_base_rendering_lut());
+    }
+
+    /// Scene-linear luminances from 12 stops below to 10 stops above middle gray.
+    fn scene_sweep() -> impl Iterator<Item = f32> {
+        (0..=2_200)
+            .map(|index| ROHDITOR_STANDARD_MIDDLE_GRAY * (index as f32 / 100.0 - 12.0).exp2())
+    }
+
+    fn camera_tones() -> [CameraTone; 2] {
+        [
+            CameraTone::static_fallback(),
+            // A strong lift, steeper than Standard just below the knee.
+            CameraTone {
+                knots: vec![[0.0, 0.0], [0.4, 0.62], [1.0, 1.0]],
+            },
+        ]
+    }
+
+    fn sdr_tables() -> Vec<BaseRenderingLut> {
+        let mut tables = vec![standard_base_rendering_lut().clone()];
+        tables.extend(
+            camera_tones()
+                .iter()
+                .map(BaseRenderingLut::from_camera_tone),
+        );
+        tables
+    }
+
+    #[test]
+    fn hdr_rendering_matches_sdr_below_the_knee() {
+        for sdr in sdr_tables() {
+            let hdr = sdr.with_headroom(8.0).expect("valid headroom");
+            for input in scene_sweep() {
+                let expected = sdr.sample(input);
+                // The knee's own table cell blends both curves; stay one cell below.
+                if expected < HDR_SHOULDER_KNEE - 0.01 {
+                    assert_eq!(hdr.sample(input), expected, "{input}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn hdr_rendering_reaches_but_never_exceeds_the_headroom() {
+        for sdr in sdr_tables() {
+            for headroom in [1.0, 2.0, 8.0, 16.0] {
+                let hdr = sdr.with_headroom(headroom).expect("valid headroom");
+                assert_eq!(hdr.values()[BASE_RENDERING_LUT_SIZE - 1], headroom);
+                let mut previous = 0.0;
+                for input in scene_sweep() {
+                    let output = hdr.sample(input);
+                    assert!(output >= previous, "{input} mapped below its predecessor");
+                    assert!(
+                        output <= headroom,
+                        "{input} mapped to {output} > {headroom}"
+                    );
+                    // Never dimmer than SDR: the gain map stays at or above 1x.
+                    assert!(output >= sdr.sample(input), "{input} is dimmer than SDR");
+                    previous = output;
+                }
+                assert!(hdr.sample(1.0e6) > 0.99 * headroom);
+            }
+        }
+    }
+
+    #[test]
+    fn hdr_standard_at_unit_headroom_is_standard() {
+        let sdr = standard_base_rendering_lut();
+        let hdr = sdr.with_headroom(1.0).expect("valid headroom");
+        for (&left, &right) in hdr.values().iter().zip(sdr.values()) {
+            assert!((left - right).abs() < 1.0e-5, "{left} vs {right}");
+        }
+    }
+
+    #[test]
+    fn hdr_shoulder_joins_the_sdr_curve_without_a_kink() {
+        for sdr in sdr_tables() {
+            let hdr = sdr.with_headroom(8.0).expect("valid headroom");
+            // Find the knee on the scene axis, then compare slopes just above it.
+            let knee = scene_sweep()
+                .find(|&input| sdr.sample(input) >= HDR_SHOULDER_KNEE)
+                .expect("every table reaches the knee");
+            let slope = |lut: &BaseRenderingLut| {
+                (lut.sample(knee * 1.02) - lut.sample(knee * 1.01)) / (knee * 0.01)
+            };
+            let (sdr_slope, hdr_slope) = (slope(&sdr), slope(&hdr));
+            assert!(
+                (hdr_slope - sdr_slope).abs() < 0.1 * sdr_slope,
+                "slope {hdr_slope} at the knee vs SDR {sdr_slope}"
+            );
+        }
+    }
+
+    #[test]
+    fn hdr_camera_tone_extends_above_linear_one() {
+        for tone in camera_tones() {
+            let sdr = BaseRenderingLut::from_camera_tone(&tone);
+            let hdr = sdr.with_headroom(8.0).expect("valid headroom");
+            assert_eq!(sdr.sample(2.0), 1.0);
+            let values = [1.0, 2.0, 4.0, 16.0].map(|input| hdr.sample(input));
+            assert!(
+                values.windows(2).all(|pair| pair[1] > pair[0]),
+                "{values:?}"
+            );
+            assert!(values[0] > 1.0);
+        }
+    }
+
+    #[test]
+    fn hdr_rendering_rejects_unusable_headroom() {
+        for headroom in [0.5, -1.0, f32::NAN, f32::INFINITY] {
+            assert!(matches!(
+                standard_base_rendering_lut().with_headroom(headroom),
+                Err(PipelineError::InvalidHeadroom { .. })
+            ));
+        }
     }
 
     #[test]

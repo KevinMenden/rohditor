@@ -37,6 +37,7 @@ use rohditor_image::LinearRgbImage;
 use rohditor_mask::{MaskError, MaskFrame, PreparedMask, ReferenceNeeds};
 
 use super::range_reference::{ReferenceRows, row_bytes};
+use super::rendition::Rendition;
 use super::stages::adjustments::{apply_light_tone, luminance};
 use crate::PipelineError;
 
@@ -241,7 +242,13 @@ impl LocalStage {
 
     /// Blends every layer's display-referred edit into `pixel` in layer order.
     #[inline]
-    pub(crate) fn apply_display(&self, pixel: &mut [f32], alphas: &RowAlphas, x: usize) {
+    pub(crate) fn apply_display(
+        &self,
+        pixel: &mut [f32],
+        alphas: &RowAlphas,
+        x: usize,
+        rendition: Rendition,
+    ) {
         for &index in &self.display {
             let alpha = alphas.values[index * self.width + x];
             if alpha.is_nan() || alpha <= 0.0 {
@@ -250,7 +257,7 @@ impl LocalStage {
             let layer = &self.layers[index];
             let mut edited = [pixel[0], pixel[1], pixel[2]];
             if let Some(tone) = &layer.tone {
-                apply_light_tone(&mut edited, tone);
+                apply_light_tone(&mut edited, tone, rendition);
             }
             if layer.saturation_scale != 1.0 {
                 // The same luminance-preserving scale as the global Saturation control.

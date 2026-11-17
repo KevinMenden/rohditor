@@ -15,13 +15,15 @@ mod presence;
 mod range_reference;
 #[cfg(test)]
 mod range_tests;
+mod rendition;
 mod sharpened_output;
 mod stages;
 mod white_balance;
 
 pub use adjustments::{
-    HSL_CHANNEL_CENTERS, HSL_HUE_SHIFT_PER_FULL_VALUE, apply_adjustments, evaluate_tone_curve,
-    hsl_channel_weights, hsl_channel_weights_from_display_rgb,
+    HSL_CHANNEL_CENTERS, HSL_HUE_SHIFT_PER_FULL_VALUE, apply_adjustments,
+    apply_adjustments_extended, evaluate_tone_curve, hsl_channel_weights,
+    hsl_channel_weights_from_display_rgb,
 };
 pub use display::{
     render_display_p3_8_with_geometry, render_display_srgb8, render_display_srgb8_dithered,
@@ -44,6 +46,7 @@ pub use mask_overlay::{
 };
 pub(crate) use normalize::preview_dimensions;
 pub(crate) use presence::presence_stage_bytes;
+pub(crate) use rendition::Rendition;
 pub(crate) use sharpened_output::{render_sharpened_export, sharpened_output_bytes};
 pub use stages::raw_crop_dimensions;
 pub(crate) use white_balance::{
