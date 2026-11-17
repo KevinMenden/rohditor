@@ -58,6 +58,20 @@ impl LightToneLut {
         self.values[lower] + (self.values[upper] - self.values[lower]) * fraction
     }
 
+    /// [`Self::sample`] for an extended-range (HDR) rendition, where values
+    /// above 1.0 are highlights to keep rather than out-of-range samples.
+    ///
+    /// Above 1.0 the curve continues from its value at 1.0 with unit slope
+    /// instead of returning to the identity, so lowered Whites (which move 1.0
+    /// down) cannot make brighter pixels end up darker than dimmer ones.
+    #[must_use]
+    pub fn sample_extended(&self, input: f32) -> f32 {
+        if input.is_finite() && input > 1.0 {
+            return input + self.values[LIGHT_TONE_LUT_SIZE - 1] - 1.0;
+        }
+        self.sample(input)
+    }
+
     /// Packed LUT samples suitable for a GPU storage-buffer upload.
     #[must_use]
     pub const fn values(&self) -> &[f32; LIGHT_TONE_LUT_SIZE] {
@@ -128,6 +142,38 @@ mod tests {
         assert_eq!(lut.sample(-0.25), -0.25);
         assert_eq!(lut.sample(1.5), 1.5);
         assert!(lut.sample(f32::NAN).is_nan());
+    }
+
+    #[test]
+    fn extended_sampling_continues_through_one_without_a_jump() {
+        let lowered_whites = LightToneLut::new(&LightAdjustments {
+            whites: -1.0,
+            ..LightAdjustments::default()
+        });
+        let at_one = lowered_whites.sample(1.0);
+        assert!(at_one < 0.9);
+        // The SDR extension jumps back to the identity; the extended one does not.
+        assert_eq!(lowered_whites.sample(1.01), 1.01);
+        assert!((lowered_whites.sample_extended(1.01) - (at_one + 0.01)).abs() < 1.0e-6);
+        let mut previous = 0.0;
+        for index in 0..=800 {
+            let input = index as f32 / 100.0;
+            let output = lowered_whites.sample_extended(input);
+            assert!(output >= previous, "{input} mapped below its predecessor");
+            previous = output;
+        }
+        // Inside [0, 1] and for invalid input it is the ordinary sample.
+        for input in [-0.5, 0.0, 0.3, 0.97, 1.0] {
+            assert_eq!(
+                lowered_whites.sample_extended(input),
+                lowered_whites.sample(input)
+            );
+        }
+        assert!(lowered_whites.sample_extended(f32::NAN).is_nan());
+        assert_eq!(
+            LightToneLut::new(&LightAdjustments::default()).sample_extended(3.0),
+            3.0
+        );
     }
 
     #[test]

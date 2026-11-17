@@ -41,9 +41,7 @@ pub fn render_extended_linear_with_geometry(
     let _guard = span.enter();
     cancellation.checkpoint()?;
     // Checked up front: the gamut mapper assumes a usable ceiling.
-    if !headroom.is_finite() || headroom < 1.0 {
-        return Err(PipelineError::InvalidHeadroom { headroom });
-    }
+    crate::rendering::validate_headroom(headroom)?;
     if image.space() != LinearRgbSpace::Rec2020D65 {
         return Err(PipelineError::WrongImageState {
             expected: LinearRgbSpace::Rec2020D65.description(),

@@ -14,6 +14,7 @@ use rohditor_image::{
 use rohditor_raw::{RawFileInfo, RawFrame};
 
 use super::local_stage::{LocalStage, RowAlphas};
+use super::rendition::Rendition;
 use crate::color::{
     CameraColorTransform, DisplayOutputTransform, LINEAR_REC2020_TO_XYZ_D65,
     XYZ_D65_TO_LINEAR_SRGB, camera_color_transform, encode_rec2020_for_srgb_output,
@@ -325,12 +326,44 @@ pub(super) mod adjustments {
         recipe: &EditRecipe,
     ) -> Result<(), PipelineError> {
         if !crate::local_detail_variants(recipe).is_empty() {
-            return Err(PipelineError::InvalidRecipe {
-                field: "local.layers.settings.detail",
-                reason: "local detail settings need the render paths of CpuPipeline".to_owned(),
-            });
+            return Err(local_detail_refused());
         }
         apply_adjustments_cancellable(image, recipe, &CancellationToken::new())
+    }
+
+    /// [`apply_adjustments`] for the extended-range (HDR) rendition of `recipe`.
+    ///
+    /// Shadows and midtones come out exactly as from [`apply_adjustments`]; highlights above
+    /// diffuse white are kept up to `headroom` (linear, 1.0 = diffuse white) instead of being
+    /// compressed into `[0, 1]`. See [`crate::BaseRenderingLut::with_headroom`] for the curve.
+    ///
+    /// # Errors
+    ///
+    /// Fails like [`apply_adjustments`], and when `headroom` is not finite or below 1.0.
+    pub fn apply_adjustments_extended(
+        image: &mut LinearRgbImage<f32>,
+        recipe: &EditRecipe,
+        headroom: f32,
+    ) -> Result<(), PipelineError> {
+        crate::rendering::validate_headroom(headroom)?;
+        if !crate::local_detail_variants(recipe).is_empty() {
+            return Err(local_detail_refused());
+        }
+        let local = LocalStage::prepare(recipe, image.width(), image.height(), &|_| None)?;
+        apply_adjustments_with_local(
+            image,
+            recipe,
+            local.as_ref(),
+            Rendition::Extended { headroom },
+            &CancellationToken::new(),
+        )
+    }
+
+    fn local_detail_refused() -> PipelineError {
+        PipelineError::InvalidRecipe {
+            field: "local.layers.settings.detail",
+            reason: "local detail settings need the render paths of CpuPipeline".to_owned(),
+        }
     }
 
     fn apply_adjustments_cancellable(
@@ -339,7 +372,7 @@ pub(super) mod adjustments {
         cancellation: &CancellationToken,
     ) -> Result<(), PipelineError> {
         let local = LocalStage::prepare(recipe, image.width(), image.height(), &|_| None)?;
-        apply_adjustments_with_local(image, recipe, local.as_ref(), cancellation)
+        apply_adjustments_with_local(image, recipe, local.as_ref(), Rendition::Sdr, cancellation)
     }
 
     /// The adjustment stage with its mask layers already resolved. Render paths prepare the
@@ -348,6 +381,7 @@ pub(super) mod adjustments {
         image: &mut LinearRgbImage<f32>,
         recipe: &EditRecipe,
         local: Option<&LocalStage>,
+        rendition: Rendition,
         cancellation: &CancellationToken,
     ) -> Result<(), PipelineError> {
         let span = tracing::info_span!(
@@ -379,6 +413,16 @@ pub(super) mod adjustments {
         }
         let reference_chain = ReferenceChain::new(recipe);
         let exposure_gain = reference_chain.exposure_gain;
+        // Range masks keep measuring the SDR reference; only the rendered pixels change.
+        let extended_rendering = match rendition {
+            Rendition::Sdr => None,
+            Rendition::Extended { headroom } => {
+                Some(reference_chain.rendering.with_headroom(headroom)?)
+            }
+        };
+        let rendering = extended_rendering
+            .as_ref()
+            .unwrap_or(&reference_chain.rendering);
         let width_samples = image.width() * 3;
         let row_stride = image.row_stride();
         let light = recipe.light.clone();
@@ -448,15 +492,15 @@ pub(super) mod adjustments {
                                 *value *= gain;
                             }
                         }
-                        reference_chain.apply_rendering(pixel);
+                        rendering.apply(pixel);
                         if let Some(light_tone_lut) = &light_tone_lut {
-                            apply_light_tone(pixel, light_tone_lut);
+                            apply_light_tone(pixel, light_tone_lut, rendition);
                         }
                         if has_tone_curve {
                             apply_tone_curve(pixel, &light.tone_curve);
                         }
                         if let Some(local) = local {
-                            local.apply_display(pixel, alphas, x);
+                            local.apply_display(pixel, alphas, x, rendition);
                         }
                         if has_saturation {
                             let luminance = luminance(pixel);
@@ -488,24 +532,25 @@ pub(super) mod adjustments {
     /// The part of the adjustment chain that range masks measure: the global exposure and the
     /// base rendering (tone and camera colourfulness), before Light, Color and every local term.
     ///
-    /// The base-rendering half is one function, [`Self::apply_rendering`], that the render loop
+    /// The base-rendering half is one function, [`BaseRendering::apply`], that the render loop
     /// and the reference both call, so a stage added there reaches both. Only the exposure is
     /// written twice: the loop adds the local exposure and white balance to it, which the
     /// reference must not see. The test
     /// `the_reference_chain_matches_what_the_stage_does_without_light_color_or_local_edits`
     /// pins the two together for every rendering profile.
+    ///
+    /// The reference is always the SDR one, also while the stage develops the extended-range
+    /// rendition, so masks select the same pixels in both renditions.
     pub(crate) struct ReferenceChain {
         exposure_gain: f32,
-        base_rendering_lut: Option<std::borrow::Cow<'static, crate::BaseRenderingLut>>,
-        camera_chroma: Option<CameraChroma>,
+        rendering: BaseRendering,
     }
 
     impl ReferenceChain {
         pub(crate) fn new(recipe: &EditRecipe) -> Self {
             Self {
                 exposure_gain: recipe.light.exposure_ev.exp2(),
-                base_rendering_lut: base_rendering_lut(&recipe.rendering),
-                camera_chroma: recipe.rendering.matched_look().and_then(|look| look.chroma),
+                rendering: BaseRendering::new(recipe),
             }
         }
 
@@ -516,12 +561,41 @@ pub(super) mod adjustments {
                     *value *= self.exposure_gain;
                 }
             }
-            self.apply_rendering(pixel);
+            self.rendering.apply(pixel);
+        }
+    }
+
+    /// The base rendering of the recipe's profile: the tone curve, then the camera chroma.
+    struct BaseRendering {
+        lut: Option<std::borrow::Cow<'static, crate::BaseRenderingLut>>,
+        camera_chroma: Option<CameraChroma>,
+    }
+
+    impl BaseRendering {
+        /// The SDR base rendering of `recipe`.
+        fn new(recipe: &EditRecipe) -> Self {
+            Self {
+                lut: base_rendering_lut(&recipe.rendering),
+                camera_chroma: recipe.rendering.matched_look().and_then(|look| look.chroma),
+            }
         }
 
-        /// The base rendering of the recipe's profile: the tone curve, then the camera chroma.
-        fn apply_rendering(&self, pixel: &mut [f32]) {
-            if let Some(base_rendering_lut) = &self.base_rendering_lut {
+        /// The same rendering for the extended-range rendition: the tone curve's shoulder ends
+        /// at `headroom`. Neutral has no tone curve and stays the identity.
+        fn with_headroom(&self, headroom: f32) -> Result<Self, PipelineError> {
+            let lut = self
+                .lut
+                .as_ref()
+                .map(|lut| lut.with_headroom(headroom).map(std::borrow::Cow::Owned))
+                .transpose()?;
+            Ok(Self {
+                lut,
+                camera_chroma: self.camera_chroma,
+            })
+        }
+
+        fn apply(&self, pixel: &mut [f32]) {
+            if let Some(base_rendering_lut) = &self.lut {
                 apply_base_rendering(pixel, base_rendering_lut);
             }
             if let Some(camera_chroma) = &self.camera_chroma {
@@ -556,9 +630,16 @@ pub(super) mod adjustments {
         }
     }
 
-    pub(in crate::cpu) fn apply_light_tone(pixel: &mut [f32], light_tone_lut: &LightToneLut) {
+    pub(in crate::cpu) fn apply_light_tone(
+        pixel: &mut [f32],
+        light_tone_lut: &LightToneLut,
+        rendition: Rendition,
+    ) {
         let current = luminance(pixel);
-        let target = light_tone_lut.sample(current);
+        let target = match rendition {
+            Rendition::Sdr => light_tone_lut.sample(current),
+            Rendition::Extended { .. } => light_tone_lut.sample_extended(current),
+        };
         if !target.is_finite() || (target - current).abs() <= f32::EPSILON {
             return;
         }

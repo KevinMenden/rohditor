@@ -29,8 +29,8 @@ pub use memory::{CPU_WORKING_SET_LIMIT_BYTES, MemoryEstimate};
 pub use prepare::{CpuPreviewWorkspace, DemosaicedBase, ReconstructedPreview};
 pub use render::CpuPipeline;
 pub use types::{
-    ExportRenderResult, OutputPolicy, PreviewOptions, RawCropPolicy, RenderOptions, RenderResult,
-    SpatialCompletionDescription, SpatialOptics, StageTimings,
+    ExportRenderResult, ExtendedRenderResult, OutputPolicy, PreviewOptions, RawCropPolicy,
+    RenderOptions, RenderResult, SpatialCompletionDescription, SpatialOptics, StageTimings,
 };
 
 pub const DEFAULT_PREVIEW_LONG_EDGE: usize = orchestration::DEFAULT_PREVIEW_LONG_EDGE;

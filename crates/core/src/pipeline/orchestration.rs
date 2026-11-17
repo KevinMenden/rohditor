@@ -17,7 +17,7 @@ use crate::color::{
     CameraCalibration, CameraProfileKey, camera_profile_key, resolve_camera_colour,
 };
 use crate::cpu::{
-    apply_adjustments_with_local, apply_camera_color_transform_cancellable,
+    Rendition, apply_adjustments_with_local, apply_camera_color_transform_cancellable,
     apply_white_balance_cancellable, preview_dimensions,
     render_display_srgb8_cancellable_with_geometry,
     render_display_srgb8_dithered_with_geometry_and_diagnostics,
@@ -987,7 +987,13 @@ pub(super) mod render {
             cancellation.checkpoint()?;
             let mut timings = StageTimings::default();
             let adjustments_started = Instant::now();
-            apply_adjustments_with_local(working, recipe, local.stage.as_ref(), cancellation)?;
+            apply_adjustments_with_local(
+                working,
+                recipe,
+                local.stage.as_ref(),
+                Rendition::Sdr,
+                cancellation,
+            )?;
             timings.adjustments = adjustments_started.elapsed();
 
             let output_started = Instant::now();
@@ -1066,6 +1072,7 @@ pub(super) mod render {
                 &mut base.image,
                 recipe,
                 local.stage.as_ref(),
+                Rendition::Sdr,
                 cancellation,
             )?;
             base.timings.adjustments = adjustments_started.elapsed();
@@ -1144,6 +1151,7 @@ pub(super) mod render {
                 &mut base.image,
                 recipe,
                 local.stage.as_ref(),
+                Rendition::Sdr,
                 &CancellationToken::new(),
             )?;
             base.timings.adjustments = adjustments_started.elapsed();
@@ -1217,6 +1225,9 @@ pub(super) mod render {
 
 #[path = "camera_source.rs"]
 mod camera_source;
+#[path = "extended_export.rs"]
+mod extended_export;
+pub use extended_export::ExtendedRenderResult;
 #[path = "local_detail.rs"]
 mod local_detail;
 #[path = "local_work.rs"]
@@ -1628,6 +1639,7 @@ fn render_base(
         &mut base.image,
         recipe,
         local.stage.as_ref(),
+        Rendition::Sdr,
         &CancellationToken::new(),
     )?;
     base.timings.adjustments = adjustments_started.elapsed();

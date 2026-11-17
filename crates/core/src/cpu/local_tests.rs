@@ -560,6 +560,7 @@ fn adjusted_with_copy(
         &mut working,
         recipe,
         Some(&stage),
+        super::Rendition::Sdr,
         &CancellationToken::new(),
     )
     .expect("adjusts");
