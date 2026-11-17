@@ -20,6 +20,7 @@ mod detail;
 pub(crate) mod diagnostics;
 pub(crate) mod export_dialog;
 pub(crate) mod icons;
+pub(crate) mod info;
 pub(crate) mod mask_overlay;
 pub(crate) mod masks;
 pub(crate) mod optics;

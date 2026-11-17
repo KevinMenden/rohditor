@@ -17,9 +17,10 @@ pub(crate) struct OpticsPanelModel {
     pub chromatic_aberration: bool,
     pub camera: Option<String>,
     pub lens: Option<String>,
-    pub focal_length_mm: Option<f32>,
-    pub aperture_f_number: Option<f32>,
-    pub focus_distance_m: Option<f32>,
+    /// Display labels, e.g. `35 mm`, `f/2.8`, `1.2 m`.
+    pub focal_length: Option<String>,
+    pub aperture: Option<String>,
+    pub focus_distance: Option<String>,
     pub match_result: Option<ProfileMatch>,
     pub candidates: Vec<LensProfileSummary>,
     pub profile_filter: String,
@@ -226,17 +227,14 @@ fn show_capture_metadata(ui: &mut egui::Ui, model: &OpticsPanelModel) {
         );
     }
     let lens = model.lens.as_deref().unwrap_or("unknown lens");
-    let focal = model.focal_length_mm.map_or_else(
-        || "unknown focal length".to_owned(),
-        |value| format!("{value:.1} mm"),
-    );
-    let aperture = model.aperture_f_number.map_or_else(
-        || "aperture unknown".to_owned(),
-        |value| format!("f/{value:.1}"),
-    );
-    let focus = model.focus_distance_m.map_or_else(
+    let focal = model
+        .focal_length
+        .as_deref()
+        .unwrap_or("unknown focal length");
+    let aperture = model.aperture.as_deref().unwrap_or("aperture unknown");
+    let focus = model.focus_distance.as_ref().map_or_else(
         || "focus distance unknown".to_owned(),
-        |value| format!("focus {value:.1} m"),
+        |value| format!("focus {value}"),
     );
     ui.label(
         egui::RichText::new(format!("Captured: {lens} · {focal} · {aperture} · {focus}"))
@@ -337,9 +335,9 @@ mod tests {
             chromatic_aberration: true,
             camera: None,
             lens: None,
-            focal_length_mm: None,
-            aperture_f_number: None,
-            focus_distance_m: None,
+            focal_length: None,
+            aperture: None,
+            focus_distance: None,
             match_result: Some(ProfileMatch::Unique(summary("lens"))),
             candidates: Vec::new(),
             profile_filter: String::new(),
@@ -361,9 +359,9 @@ mod tests {
             chromatic_aberration: true,
             camera: None,
             lens: None,
-            focal_length_mm: None,
-            aperture_f_number: None,
-            focus_distance_m: None,
+            focal_length: None,
+            aperture: None,
+            focus_distance: None,
             match_result: Some(match_result),
             candidates: Vec::new(),
             profile_filter: String::new(),

@@ -23,6 +23,7 @@ use self::color::{
 };
 use self::tone::{show_highlight_controls, show_tone_controls, show_tone_curve_controls};
 use super::detail;
+use super::info::{self, InfoPanelModel};
 use super::optics::{self, OpticsPanelModel};
 use super::presence;
 use super::theme::{self, colors};
@@ -143,6 +144,8 @@ pub(crate) struct DocumentPanelModel {
     pub file_name: String,
     pub camera: Option<String>,
     pub sensor_dimensions: Option<(usize, usize)>,
+    /// Capture and file metadata; `None` until the RAW metadata is read.
+    pub info: Option<InfoPanelModel>,
     pub revision: u64,
     pub dirty: bool,
     pub has_adjustments: bool,
@@ -274,6 +277,10 @@ pub(crate) fn show_body(
         .on_hover_text("Restore Rohditor Standard defaults")
         .clicked();
     ui.add_space(4.0);
+    if let Some(model) = &document.info {
+        // Read-only, so it bypasses `section` and has no reset button.
+        CollapsibleSection::new("Info").show_resettable(ui, |ui| info::show(ui, model));
+    }
     show_sections(ui, &mut document, &mut output);
     output
 }

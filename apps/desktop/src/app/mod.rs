@@ -84,6 +84,7 @@ mod camera_look;
 mod events;
 #[path = "gpu.rs"]
 mod gpu;
+mod info;
 #[path = "lifecycle.rs"]
 mod lifecycle;
 mod masks;
@@ -3022,11 +3023,9 @@ fn document_panel_model(
     let defaults = default_recipe_for_document(document);
     DocumentPanelModel {
         file_name: document.file_name(),
-        camera: document
-            .info
-            .as_ref()
-            .map(|info| format!("{} {}", info.clean_make, info.clean_model)),
+        camera: document.info.as_ref().map(RawFileInfo::camera_label),
         sensor_dimensions: document.info.as_ref().map(|info| (info.width, info.height)),
+        info: document.info.as_ref().map(info::info_panel_model),
         revision: document.edits.revision(),
         dirty: document.is_dirty(),
         has_adjustments: differs_from_defaults(document, &defaults),
@@ -3198,33 +3197,19 @@ fn document_panel_model(
 }
 
 fn optics_panel_model(document: &Document) -> OpticsPanelModel {
-    let (camera, lens, focal_length_mm, aperture_f_number, focus_distance_m) = document
-        .info
-        .as_ref()
-        .map_or((None, None, None, None, None), |info| {
-            let lens = info.capture.lens_model.as_ref().map(|model| {
-                info.capture
-                    .lens_make
-                    .as_deref()
-                    .map_or_else(|| model.clone(), |make| format!("{make} {model}"))
+    let (camera, lens, focal_length, aperture, focus_distance) =
+        document
+            .info
+            .as_ref()
+            .map_or((None, None, None, None, None), |info| {
+                (
+                    Some(info.camera_label()),
+                    info.capture.lens_label(),
+                    info.capture.focal_length_label(),
+                    info.capture.aperture_label(),
+                    info.capture.focus_distance_label(),
+                )
             });
-            (
-                Some(format!("{} {}", info.clean_make, info.clean_model)),
-                lens,
-                info.capture
-                    .focal_length
-                    .and_then(|value| value.as_f64())
-                    .map(|value| value as f32),
-                info.capture
-                    .aperture
-                    .and_then(|value| value.as_f64())
-                    .map(|value| value as f32),
-                info.capture
-                    .focus_distance
-                    .and_then(|value| value.as_f64())
-                    .map(|value| value as f32),
-            )
-        });
     let (applied, used_infinity_distance_fallback, scale) =
         document
             .preview_diagnostics
@@ -3242,9 +3227,9 @@ fn optics_panel_model(document: &Document) -> OpticsPanelModel {
         chromatic_aberration: document.edits.recipe().optics.chromatic_aberration,
         camera,
         lens,
-        focal_length_mm,
-        aperture_f_number,
-        focus_distance_m,
+        focal_length,
+        aperture,
+        focus_distance,
         match_result: document.optics_match.clone(),
         candidates: document.optics_candidates.clone(),
         profile_filter: document.optics_profile_filter.clone(),
