@@ -363,6 +363,21 @@ fn ramp_frame() -> RawFrame {
 
 #[test]
 fn pipeline_rendition_matches_the_sdr_export_below_the_knee() -> Result<(), Box<dyn Error>> {
+    // Rotate90 swaps the axes of the 48x32 frame; the resize then also runs on the rotated,
+    // non-square image, so a geometry mix-up between the two paths cannot pass.
+    for (size, dimensions) in [
+        (OutputSize::Original, (FRAME_HEIGHT, FRAME_WIDTH)),
+        (OutputSize::LongEdge { pixels: 30 }, (20, 30)),
+    ] {
+        compare_with_sdr_export(size, dimensions)?;
+    }
+    Ok(())
+}
+
+fn compare_with_sdr_export(
+    size: OutputSize,
+    (width, height): (usize, usize),
+) -> Result<(), Box<dyn Error>> {
     let frame = ramp_frame();
     let mut recipe = EditRecipe::default();
     recipe.light.exposure_ev = 1.5;
@@ -374,7 +389,7 @@ fn pipeline_rendition_matches_the_sdr_export_below_the_knee() -> Result<(), Box<
         options,
         OutputBitDepth::Sixteen,
         DitherMode::None,
-        OutputSize::Original,
+        size,
         None,
     )?;
     let hdr = pipeline.render_extended_export(
@@ -383,17 +398,23 @@ fn pipeline_rendition_matches_the_sdr_export_below_the_knee() -> Result<(), Box<
         options,
         RgbPrimaries::Srgb,
         HEADROOM,
-        OutputSize::Original,
+        size,
     )?;
     let ExportImage::Rgb16(sdr) = sdr.image else {
         return Err("expected a 16-bit export".into());
     };
     let hdr = hdr.image;
-    // Rotate90 swaps the axes; both renditions must agree on it.
-    assert_eq!((hdr.width(), hdr.height()), (FRAME_HEIGHT, FRAME_WIDTH));
-    assert_eq!((sdr.width(), sdr.height()), (hdr.width(), hdr.height()));
+    assert_eq!((hdr.width(), hdr.height()), (width, height), "{size:?}");
+    assert_eq!((sdr.width(), sdr.height()), (width, height), "{size:?}");
     assert_eq!(hdr.primaries(), RgbPrimaries::Srgb);
     assert_eq!(hdr.headroom(), HEADROOM);
+    // The sensor's horizontal ramp runs down the rotated output.
+    let green = |x: usize, y: usize| hdr.data()[y * hdr.row_stride() + x * 3 + 1];
+    assert!(
+        green(0, 0) < green(0, height - 1),
+        "{size:?}: ramp not rotated"
+    );
+    assert!((green(0, 0) - green(width - 1, 0)).abs() < 0.05, "{size:?}");
 
     let mut compared = 0;
     for (sdr, hdr) in sdr
@@ -403,27 +424,31 @@ fn pipeline_rendition_matches_the_sdr_export_below_the_knee() -> Result<(), Box<
         .iter()
         .zip(hdr.data().as_chunks::<3>().0.iter())
     {
-        let sdr: Vec<f32> = sdr
-            .iter()
-            .map(|&code| srgb_to_linear_srgb(f32::from(code) / 65_535.0))
-            .collect();
-        // Neutral pixels, so sRGB-primaries luminance is fine for the selection.
-        if sdr.iter().all(|&value| value < HDR_SHOULDER_KNEE - 0.02) {
+        let sdr = sdr.map(|code| srgb_to_linear_srgb(f32::from(code) / 65_535.0));
+        // Neutral pixels, so sRGB-primaries luminance is fine for the selection. The margin
+        // keeps resampled pixels whose footprint reaches above the knee out of the comparison.
+        if sdr.iter().all(|&value| value < HDR_SHOULDER_KNEE - 0.05) {
             for (sdr, hdr) in sdr.iter().zip(hdr) {
-                assert!((sdr - hdr).abs() < 1.0e-3, "SDR {sdr} vs HDR {hdr}");
+                assert!(
+                    (sdr - hdr).abs() < 1.0e-3,
+                    "{size:?}: SDR {sdr} vs HDR {hdr}"
+                );
             }
             compared += 1;
         } else {
             for (sdr, hdr) in sdr.iter().zip(hdr) {
-                assert!(*hdr >= sdr - 1.0e-3, "HDR {hdr} dimmer than SDR {sdr}");
+                assert!(
+                    *hdr >= sdr - 1.0e-3,
+                    "{size:?}: HDR {hdr} dimmer than SDR {sdr}"
+                );
             }
         }
     }
     assert!(
-        compared > FRAME_HEIGHT * 4,
-        "only {compared} pixels compared"
+        compared > width * height / 4,
+        "{size:?}: only {compared} pixels compared"
     );
     let peak = hdr.data().iter().copied().fold(0.0, f32::max);
-    assert!(peak > 2.0 && peak <= HEADROOM, "peak {peak}");
+    assert!(peak > 2.0 && peak <= HEADROOM, "{size:?}: peak {peak}");
     Ok(())
 }
