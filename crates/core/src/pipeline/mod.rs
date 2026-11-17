@@ -13,7 +13,10 @@ mod prepare;
 mod render;
 pub(crate) mod sensor;
 mod types;
-pub use orchestration::{CapturedCameraSource, DemosaicedCameraSource, SensorCameraMetadata};
+pub use orchestration::{
+    CapturedCameraSource, DemosaicedCameraSource, LocalDetailImage, SensorCameraMetadata,
+    local_detail_variants,
+};
 pub use sensor::{NormalizationContract, SensorCrop, SensorDevelopmentDescription};
 
 pub use defringe::{DEFRINGE_ALGORITHM_VERSION, DefringeContract, DefringeProvenance};
@@ -26,8 +29,8 @@ pub use memory::{CPU_WORKING_SET_LIMIT_BYTES, MemoryEstimate};
 pub use prepare::{CpuPreviewWorkspace, DemosaicedBase, ReconstructedPreview};
 pub use render::CpuPipeline;
 pub use types::{
-    ExportRenderResult, OutputPolicy, PreviewOptions, RawCropPolicy, RenderOptions, RenderResult,
-    SpatialCompletionDescription, SpatialOptics, StageTimings,
+    ExportRenderResult, ExtendedRenderResult, OutputPolicy, PreviewOptions, RawCropPolicy,
+    RenderOptions, RenderResult, SpatialCompletionDescription, SpatialOptics, StageTimings,
 };
 
 pub const DEFAULT_PREVIEW_LONG_EDGE: usize = orchestration::DEFAULT_PREVIEW_LONG_EDGE;

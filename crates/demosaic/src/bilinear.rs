@@ -4,6 +4,7 @@ use super::{
     CancellationCheck, DemosaicError, WhiteBalanceGains, checkpoint, require_finite_output,
 };
 use rohditor_image::{CfaColor, MosaicImage};
+use std::ops::Range;
 
 const CROSS_OFFSETS: [(isize, isize); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
 const DIAGONAL_OFFSETS: [(isize, isize); 4] = [(-1, -1), (1, -1), (-1, 1), (1, 1)];
@@ -17,23 +18,24 @@ pub(super) fn reconstruct(
     row_stride: usize,
     output: &mut [f32],
 ) -> Result<(), DemosaicError> {
-    reconstruct_border(mosaic, gains, 0, cancellation, row_stride, output)
+    reconstruct_outside(mosaic, gains, None, cancellation, row_stride, output)
 }
 
-/// Reconstruct everything except the interior that starts `skip` pixels from
-/// every edge. Higher quality algorithms overwrite that interior and keep
-/// this result for the outer ring, so computing it there would be wasted work.
-/// `skip = 0` reconstructs the whole image; otherwise the image must be larger
-/// than `2 * skip` in both directions.
-pub(super) fn reconstruct_border(
+/// Reconstruct everything except `interior` (an x range and a y range). Higher
+/// quality algorithms overwrite their interior and keep this result for the
+/// rest, so computing it there would be wasted work. `None` reconstructs the
+/// whole image. The interior must lie within the image.
+pub(super) fn reconstruct_outside(
     mosaic: &MosaicImage<f32>,
     gains: WhiteBalanceGains,
-    skip: usize,
+    interior: Option<(Range<usize>, Range<usize>)>,
     cancellation: &dyn CancellationCheck,
     row_stride: usize,
     output: &mut [f32],
 ) -> Result<(), DemosaicError> {
-    let (width, height) = (mosaic.width(), mosaic.height());
+    let width = mosaic.width();
+    // An empty interior skips nothing.
+    let interior = interior.filter(|(xs, ys)| !xs.is_empty() && !ys.is_empty());
     output.par_chunks_mut(row_stride).enumerate().try_for_each(
         |(y, output_row)| -> Result<(), DemosaicError> {
             checkpoint(cancellation)?;
@@ -45,10 +47,11 @@ pub(super) fn reconstruct_border(
                 pixels[x].copy_from_slice(&rgb);
                 Ok(())
             };
-            if skip == 0 || y < skip || y >= height - skip {
-                (0..width).try_for_each(fill)
-            } else {
-                (0..skip).chain(width - skip..width).try_for_each(&mut fill)
+            match &interior {
+                Some((xs, ys)) if ys.contains(&y) => {
+                    (0..xs.start).chain(xs.end..width).try_for_each(&mut fill)
+                }
+                _ => (0..width).try_for_each(fill),
             }
         },
     )

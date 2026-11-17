@@ -6,26 +6,108 @@
 //! rest of the session. Add a stage here when it lands on the CPU first, and
 //! remove it when its GPU port does.
 
-use rohditor_edit::EditRecipe;
+use rohditor_edit::{EditRecipe, MaskShape};
+
+/// Most brush components the GPU colour pass takes. Each is a coverage plane as large as the
+/// fit preview (17 MiB reserved at the default size, with its upload staging), so many more
+/// could exhaust the GPU budget, which ends GPU rendering for the session. They render on the
+/// CPU instead.
+const GPU_MAX_BRUSH_COMPONENTS: usize = 16;
 
 /// Why `recipe` has to run on the CPU, or `None` if every stage has a GPU path.
-/// Every stage has one today; a stage that lands on the CPU first is listed
-/// here until its port.
+/// A stage that lands on the CPU first is listed here until its port.
 #[must_use]
-pub fn cpu_only_stage_reason(_recipe: &EditRecipe) -> Option<&'static str> {
-    None
+pub fn cpu_only_stage_reason(recipe: &EditRecipe) -> Option<&'static str> {
+    if !crate::local_detail_variants(recipe).is_empty() {
+        return Some("local noise reduction, moiré and sharpening are not available on the GPU");
+    }
+    if recipe.presence.is_active() {
+        return Some("texture, clarity and dehaze are not available on the GPU");
+    }
+    let brushes = recipe
+        .local
+        .layers
+        .iter()
+        .filter(|layer| layer.is_active())
+        .flat_map(|layer| &layer.components)
+        .filter(|component| matches!(component.shape, MaskShape::Brush(_)))
+        .count();
+    (brushes > GPU_MAX_BRUSH_COMPONENTS)
+        .then_some("more than 16 brush components are not available on the GPU")
 }
 
 #[cfg(test)]
 mod tests {
+    use rohditor_edit::{BrushMask, LocalSettings, MaskComponent, MaskLayer, MaskMode};
+
     use super::*;
 
     #[test]
-    fn every_stage_has_a_gpu_path() {
+    fn global_stages_all_have_a_gpu_path() {
         let mut recipe = EditRecipe::default();
         recipe.false_color.steps = 1;
         recipe.noise_reduction.chroma = 0.3;
         recipe.defringe.green_amount = 0.2;
+        assert_eq!(cpu_only_stage_reason(&recipe), None);
+    }
+
+    #[test]
+    fn local_detail_runs_on_the_cpu_only_when_it_changes_something() {
+        let mut recipe = recipe_with_brushes(1);
+        recipe.local.layers[0].settings.detail.luminance_noise = 0.5;
+        assert!(cpu_only_stage_reason(&recipe).is_some());
+        // Taking away noise reduction the global settings don't have is no work at all.
+        recipe.local.layers[0].settings.detail.luminance_noise = -0.5;
+        assert_eq!(cpu_only_stage_reason(&recipe), None);
+    }
+
+    #[test]
+    fn presence_runs_on_the_cpu_only_when_a_slider_is_set() {
+        let mut recipe = EditRecipe::default();
+        assert_eq!(cpu_only_stage_reason(&recipe), None);
+        recipe.presence.dehaze = -0.2;
+        assert!(cpu_only_stage_reason(&recipe).is_some());
+    }
+
+    fn recipe_with_brushes(count: usize) -> EditRecipe {
+        let mut recipe = EditRecipe::default();
+        recipe.local.layers.push(MaskLayer {
+            id: 0,
+            name: "Painted".to_owned(),
+            enabled: true,
+            opacity: 1.0,
+            components: vec![
+                MaskComponent {
+                    mode: MaskMode::Add,
+                    invert: false,
+                    shape: MaskShape::Brush(BrushMask::default()),
+                };
+                count
+            ],
+            settings: LocalSettings {
+                exposure_ev: 0.5,
+                ..LocalSettings::default()
+            },
+        });
+        recipe
+    }
+
+    #[test]
+    fn masks_have_a_gpu_path_until_brushes_would_exhaust_it() {
+        let mut recipe = recipe_with_brushes(GPU_MAX_BRUSH_COMPONENTS);
+        assert_eq!(cpu_only_stage_reason(&recipe), None);
+        recipe
+            .local
+            .layers
+            .push(recipe_with_brushes(1).local.layers.remove(0));
+        let reason = cpu_only_stage_reason(&recipe).expect("one brush over the limit");
+        // A `&'static str` cannot format the constant, so hold the two together here.
+        assert!(
+            reason.contains(&format!("more than {GPU_MAX_BRUSH_COMPONENTS} ")),
+            "{reason}"
+        );
+        // Only active layers need planes.
+        recipe.local.layers[1].enabled = false;
         assert_eq!(cpu_only_stage_reason(&recipe), None);
     }
 }

@@ -31,7 +31,7 @@ fn develop_spatial_export(@builtin(global_invocation_id) invocation: vec3<u32>) 
         corrected_channel(source, 1u),
         corrected_channel(source, 2u),
     );
-    let encoded = encode_output(develop_camera_color(camera_native));
+    let encoded = encode_output(develop_camera_color(camera_native, source));
     var dither = 0.0;
     if spatial_export_parameters.ordered_dither != 0u {
         dither = (f32(SPATIAL_BAYER_8X8[(output.y & 7u) * 8u + (output.x & 7u)]) + 0.5)

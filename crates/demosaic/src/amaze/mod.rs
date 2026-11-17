@@ -70,13 +70,21 @@ pub(super) fn reconstruct(
     if mosaic.width() <= 2 * BORDER || mosaic.height() <= 2 * BORDER {
         return bilinear::reconstruct(mosaic, gains, cancellation, row_stride, output);
     }
-    bilinear::reconstruct_border(mosaic, gains, BORDER, cancellation, row_stride, output)?;
+    let (width, height) = (mosaic.width(), mosaic.height());
+    let interior = (BORDER..width - BORDER, BORDER..height - BORDER);
+    bilinear::reconstruct_outside(
+        mosaic,
+        gains,
+        Some(interior),
+        cancellation,
+        row_stride,
+        output,
+    )?;
 
     // Tiles are independent. Each task owns the output columns of its tile
     // (the rows of every band are split per tile with `split_at_mut`), so
     // tiles run in parallel without sharing any state, and the result does not
     // depend on the thread count.
-    let width = mosaic.width();
     let tile_columns = amaze_tile_count(width);
     let mut jobs = Vec::new();
     for (tile_y, band) in output.chunks_mut(TILE_VALID * row_stride).enumerate() {

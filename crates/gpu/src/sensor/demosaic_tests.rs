@@ -486,7 +486,7 @@ fn rcd_and_amaze_capture_budget_failure_releases_all_reservations() {
         let input = highlighted(&gpu, &frame, &description);
         let result = gpu.demosaic(input, &description, &capture, &CancellationToken::new());
         assert!(
-            matches!(result, Err(crate::GpuPreviewError::Unsupported { .. })),
+            matches!(result, Err(crate::GpuPreviewError::OverBudget { .. })),
             "{algorithm:?}"
         );
         assert_eq!(crate::gpu_memory_reservations().current_bytes, before);
@@ -806,7 +806,7 @@ fn demosaic_rejects_mismatched_cancelled_overbudget_and_nonfinite_results() {
     gpu.set_budget(64);
     assert!(matches!(
         gpu.demosaic(input, &desc, &capture, &CancellationToken::new()),
-        Err(crate::GpuPreviewError::Unsupported { .. })
+        Err(crate::GpuPreviewError::OverBudget { .. })
     ));
     normalize_raw(&frame, RawCropPolicy::Recommended).expect("immutable RAW remains usable");
 }
@@ -832,7 +832,7 @@ fn demosaic_capture_budget_counts_overlapping_lifetimes() {
     gpu.set_budget(300_000);
     assert!(matches!(
         gpu.demosaic(input, &desc, &capture, &CancellationToken::new()),
-        Err(crate::GpuPreviewError::Unsupported { .. })
+        Err(crate::GpuPreviewError::OverBudget { .. })
     ));
     assert_eq!(crate::gpu_memory_reservations().current_bytes, before);
     gpu.set_budget(super::resources::DEFAULT_BUDGET);

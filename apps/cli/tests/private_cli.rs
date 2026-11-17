@@ -13,7 +13,7 @@ fn inspect_extract_and_develop_cover_the_private_corpus() -> Result<(), Box<dyn 
     let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/private");
     let mut samples = raw_files(&corpus)?;
     samples.sort();
-    assert_eq!(samples.len(), 6, "review private CLI expectations");
+    assert_eq!(samples.len(), 11, "review private CLI expectations");
     let outputs = TempDirectory::new()?;
 
     for sample in &samples {

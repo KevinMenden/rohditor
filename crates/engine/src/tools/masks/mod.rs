@@ -1,0 +1,163 @@
+//! The Masks tool: selection, handle dragging, gradient creation and brush painting.
+//!
+//! A frontend only draws and forwards pointer input. It builds a [`MaskView`] from how the
+//! image is shown, and for one pointer gesture does:
+//!
+//! ```text
+//! press:   edits.begin_gesture();        apply(session.press(recipe, view, pos))
+//! move:                                  apply(session.drag_to(recipe, view, pos))
+//! release:                               apply(session.release(recipe));  edits.finish_gesture()
+//! ```
+//!
+//! where `apply` hands a returned recipe to `EditSession::set_during_gesture`. Every change is
+//! already in the recipe, so leaving the tool needs no commit, and one handle drag or one
+//! stroke is one undo step. All methods are pure over `EditRecipe`: the caller owns undo and
+//! revisions.
+//!
+//! Pointer positions are display positions (`0..1` over the image on screen). The tool turns
+//! them into the developed frame the recipe stores via `OutputGeometry`; see `view`.
+//!
+//! Every recipe the tool returns passes `EditRecipe::validate`. When a limit of the recipe
+//! model stops an edit, the tool does not exceed it and reports it through
+//! [`MaskToolSession::limit_reached`].
+
+mod brush;
+mod edit;
+mod gesture;
+mod handles;
+mod layers;
+mod range;
+mod view;
+
+#[cfg(test)]
+mod tests;
+
+pub use brush::{BRUSH_RADIUS_RANGE, BrushSettings};
+pub use handles::MaskHandle;
+pub use layers::{LayerEdit, LocalSlider};
+pub use range::{ColorPick, RangeSlider};
+pub use view::MaskView;
+
+use rohditor_edit::{
+    MAX_BRUSH_POINTS, MAX_BRUSH_STROKES, MAX_COLOR_SAMPLES, MAX_MASK_COMPONENTS, MAX_MASK_LAYERS,
+    MaskMode,
+};
+use thiserror::Error;
+
+use gesture::MaskDrag;
+
+/// What a pointer press does.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MaskEditMode {
+    /// Grab a handle of the selected component.
+    #[default]
+    Select,
+    /// Press-drag-release draws a linear gradient from its start to its end, then returns to
+    /// `Select`.
+    CreateLinear,
+    /// Press-drag-release draws a radial gradient with the press as its centre and the
+    /// release as a point on its outline, then returns to `Select`.
+    CreateRadial,
+    /// Paint a brush stroke, or erase from the selected brush component.
+    Paint { erase: bool },
+    /// A click samples the colour under the pointer for a colour range; see
+    /// [`MaskToolSession::pick_color`]. The frontend does the sampling, so the session ignores
+    /// presses in this mode.
+    PickColor,
+}
+
+/// A limit of the recipe model that stopped an edit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum MaskLimit {
+    #[error("A photo can have at most {MAX_MASK_LAYERS} masks")]
+    Layers,
+    #[error("A mask can have at most {MAX_MASK_COMPONENTS} components")]
+    Components,
+    #[error("A brush can have at most {MAX_BRUSH_STROKES} strokes")]
+    Strokes,
+    #[error("A photo can have at most {MAX_BRUSH_POINTS} brush points")]
+    BrushPoints,
+    #[error("A color range can have at most {MAX_COLOR_SAMPLES} samples")]
+    ColorSamples,
+}
+
+/// A point handle to draw, at a display position (`0..1` over the image on screen).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HandleMarker {
+    pub handle: MaskHandle,
+    pub position: (f64, f64),
+}
+
+/// Masks tool state that is not part of the recipe: what is selected, what a press does, and
+/// the gesture in progress.
+#[derive(Debug, Clone)]
+pub struct MaskToolSession {
+    /// Layer id. A stale id (the layer was deleted or undone away) selects nothing.
+    pub selected_layer: Option<u32>,
+    /// Index into the selected layer's components; its handles are the ones shown.
+    pub selected_component: Option<usize>,
+    pub mode: MaskEditMode,
+    /// How a gradient drawn into an existing layer combines with it (`Add` or `Subtract`). A
+    /// gradient that starts a new layer is always `Add`.
+    pub component_mode: MaskMode,
+    /// Authoring state, copied into each new stroke.
+    pub brush: BrushSettings,
+    /// Whether the selected layer's alpha is drawn over the preview. Painting shows it
+    /// regardless (see `overlay_layer`), and leaves this setting alone.
+    pub show_overlay: bool,
+    /// The temporary erase modifier (Alt) is held: a stroke that starts now does the opposite
+    /// of the painting mode. The frontend sets it from the keyboard before each press.
+    pub erase_held: bool,
+    /// The next stroke starts a new brush component instead of joining the selected brush.
+    new_brush_component: bool,
+    drag: Option<MaskDrag>,
+    limit: Option<MaskLimit>,
+}
+
+impl Default for MaskToolSession {
+    fn default() -> Self {
+        Self {
+            selected_layer: None,
+            selected_component: None,
+            mode: MaskEditMode::Select,
+            component_mode: MaskMode::Add,
+            brush: BrushSettings::default(),
+            show_overlay: true,
+            erase_held: false,
+            new_brush_component: false,
+            drag: None,
+            limit: None,
+        }
+    }
+}
+
+impl MaskToolSession {
+    /// The layer whose mask is tinted over the preview: the selected layer while the overlay is
+    /// on, or while painting, so a brush is never painted blind. The id may be stale (the layer
+    /// was deleted or undone away), so check it in the recipe.
+    pub const fn overlay_layer(&self) -> Option<u32> {
+        if self.show_overlay || self.is_painting() {
+            self.selected_layer
+        } else {
+            None
+        }
+    }
+
+    /// Back to `Select`. A request for a new brush component belongs to the painting that
+    /// asked for it, so it ends here too and cannot make a later stroke start a component.
+    fn return_to_select(&mut self) {
+        self.mode = MaskEditMode::Select;
+        self.new_brush_component = false;
+    }
+
+    /// Whether a pointer gesture is in progress (between a press that grabbed or started
+    /// something and its release).
+    pub const fn is_dragging(&self) -> bool {
+        self.drag.is_some()
+    }
+
+    /// The limit that stopped the last press or move, until the next press.
+    pub const fn limit_reached(&self) -> Option<MaskLimit> {
+        self.limit
+    }
+}

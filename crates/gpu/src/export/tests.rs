@@ -7,7 +7,7 @@ use rohditor_core::{
 use rohditor_raw::{RawDecoder, RawlerDecoder};
 use std::sync::Arc;
 
-fn processor(hardware: bool) -> Option<GpuExportProcessor> {
+pub(super) fn processor(hardware: bool) -> Option<GpuExportProcessor> {
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
         ..Default::default()
@@ -479,7 +479,7 @@ fn sample_differences(a: &ExportImage, b: &ExportImage) -> Vec<u32> {
     }
 }
 
-fn difference(a: &ExportImage, b: &ExportImage) -> (u32, f64) {
+pub(super) fn difference(a: &ExportImage, b: &ExportImage) -> (u32, f64) {
     let differences = sample_differences(a, b);
     (
         *differences

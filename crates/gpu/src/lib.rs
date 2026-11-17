@@ -23,6 +23,7 @@ pub use export_fallback::{ExportBackend, ExportRender, ExportRenderError, Fallba
 mod memory;
 pub use memory::{GpuMemoryReservations, gpu_memory_reservations};
 mod capture;
+mod masks;
 pub use capture::{CaptureMetrics, GpuCaptureProcessor, GpuCaptureResult};
 mod preview;
 mod sensor;
@@ -56,6 +57,12 @@ pub enum GpuPreviewError {
     #[error("the selected wgpu device cannot support GPU processing: {reason}")]
     Unsupported { reason: String },
 
+    /// This image and recipe do not fit: the GPU or CPU working-set budget, or a buffer or
+    /// dispatch limit of the device. The device is healthy: this is a routing answer (run it
+    /// on the CPU), not a reason to discard GPU state the way a device failure is.
+    #[error("GPU work does not fit: {reason}")]
+    OverBudget { reason: String },
+
     /// A preview dimension cannot be represented by the selected device.
     #[error("GPU image dimensions {width}x{height} are not supported: {reason}")]
     InvalidDimensions {
@@ -86,6 +93,18 @@ pub enum GpuPreviewError {
     Readback { reason: String },
 }
 
+impl GpuPreviewError {
+    /// Whether this is a per-recipe routing answer (run it on the CPU) rather than a device
+    /// failure. Routing answers must not discard the device or its processors.
+    #[must_use]
+    pub fn is_routing(&self) -> bool {
+        matches!(
+            self,
+            Self::UnsupportedEdits { .. } | Self::OverBudget { .. }
+        )
+    }
+}
+
 /// Detail contract with only capture sharpening, for tests of that step.
 #[cfg(test)]
 pub(crate) fn capture_only_contract(
@@ -94,4 +113,18 @@ pub(crate) fn capture_only_contract(
 ) -> Result<rohditor_core::DetailContract, rohditor_core::PipelineError> {
     rohditor_core::CaptureSharpeningContract::new(settings, ceilings)
         .map(rohditor_core::DetailContract::capture_only)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GpuPreviewError;
+
+    #[test]
+    fn only_unsupported_edits_and_over_budget_are_routing_answers() {
+        let reason = || String::from("x");
+        assert!(GpuPreviewError::UnsupportedEdits { reason: reason() }.is_routing());
+        assert!(GpuPreviewError::OverBudget { reason: reason() }.is_routing());
+        assert!(!GpuPreviewError::Unsupported { reason: reason() }.is_routing());
+        assert!(!GpuPreviewError::Cancelled.is_routing());
+    }
 }

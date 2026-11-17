@@ -34,7 +34,7 @@ pub fn luminance_histogram(image: &DisplayRgbImage<u8>, rect: CropRect) -> Lumin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rohditor_image::DisplayTransfer;
+    use rohditor_image::DisplayColorSpace;
 
     #[test]
     fn counts_only_the_requested_rectangle() {
@@ -43,7 +43,7 @@ mod tests {
         for row in 0..2 {
             data[row * 9..row * 9 + 3].fill(255);
         }
-        let image = DisplayRgbImage::new(3, 2, 9, DisplayTransfer::Srgb, data).expect("image");
+        let image = DisplayRgbImage::new(3, 2, 9, DisplayColorSpace::SRGB, data).expect("image");
         let all = luminance_histogram(&image, CropRect::full(&image));
         assert_eq!((all[0], all[255]), (4, 2));
         let right = luminance_histogram(

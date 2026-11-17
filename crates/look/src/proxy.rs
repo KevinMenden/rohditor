@@ -146,7 +146,7 @@ pub fn compare_proxies(rendering: &Proxy, camera: &Proxy) -> Option<ProxyDiffere
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rohditor_image::DisplayTransfer;
+    use rohditor_image::DisplayColorSpace;
 
     fn gradient(width: usize, height: usize, offset: u8) -> DisplayRgbImage<u8> {
         let mut data = Vec::new();
@@ -161,7 +161,8 @@ mod tests {
                 ]);
             }
         }
-        DisplayRgbImage::new(width, height, width * 3, DisplayTransfer::Srgb, data).expect("image")
+        DisplayRgbImage::new(width, height, width * 3, DisplayColorSpace::SRGB, data)
+            .expect("image")
     }
 
     #[test]

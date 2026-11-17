@@ -13,6 +13,7 @@ pub(crate) enum Icon {
     Photo,
     Sliders,
     Crop,
+    Mask,
 }
 
 pub(crate) fn paint(painter: &egui::Painter, rect: egui::Rect, icon: Icon, color: egui::Color32) {
@@ -187,6 +188,17 @@ pub(crate) fn paint(painter: &egui::Painter, rect: egui::Rect, icon: Icon, color
             for segment in points {
                 painter.line_segment(segment, stroke);
             }
+        }
+        Icon::Mask => {
+            // A frame with a soft-edged disc: the shape a radial mask selects.
+            let frame = rect.shrink2(egui::vec2(1.5, 2.5));
+            painter.rect_stroke(frame, 1.5, stroke, egui::StrokeKind::Inside);
+            painter.circle_filled(frame.center(), 3.0, color);
+            painter.circle_stroke(
+                frame.center(),
+                4.8,
+                egui::Stroke::new(1.0_f32, color.gamma_multiply(0.55)),
+            );
         }
     }
 }

@@ -20,6 +20,7 @@ pub(super) fn tool_panel_model(document: Option<&Document>, tool: ToolKind) -> T
     let (title, subtitle) = match tool {
         ToolKind::Edit => ("Develop", "NON-DESTRUCTIVE RAW ADJUSTMENTS"),
         ToolKind::Crop => ("Crop", "NON-DESTRUCTIVE GEOMETRY"),
+        ToolKind::Masks => ("Masks", "LOCAL ADJUSTMENTS"),
     };
     ToolPanelModel {
         title,
@@ -50,25 +51,33 @@ impl RohditorApp {
         match self.tool.kind() {
             ToolKind::Edit => self.show_adjustment_panel(context),
             ToolKind::Crop => self.show_crop_controls(context),
+            ToolKind::Masks => self.show_masks_controls(context),
         }
     }
 
     /// Rail or shortcut request. The active tool's own button returns to Edit;
-    /// leaving Crop commits its draft.
+    /// leaving Crop commits its draft, and leaving Masks has nothing to commit.
     fn select_tool(&mut self, context: &egui::Context, requested: ToolKind) {
         let target = self.tool.toggle_target(requested);
         if target == self.tool.kind() {
             return;
         }
         self.leave_tool(context, true);
-        if target == ToolKind::Crop {
-            self.enter_crop_tool(context);
+        self.exit_masks_tool();
+        match target {
+            ToolKind::Crop => self.enter_crop_tool(context),
+            ToolKind::Masks => self.enter_masks_tool(),
+            ToolKind::Edit => {}
         }
     }
 
-    /// E, C, Esc and Enter, unless a text field is being edited.
+    /// E, C, M, Esc and Enter, plus the Masks tool's own keys, unless a text field is being
+    /// edited.
     fn handle_tool_shortcuts(&mut self, context: &egui::Context) {
         if self.document.is_none() || context.wants_keyboard_input() {
+            return;
+        }
+        if self.handle_mask_shortcuts(context) {
             return;
         }
         let pressed =
@@ -77,6 +86,8 @@ impl RohditorApp {
             self.select_tool(context, ToolKind::Edit);
         } else if pressed(egui::Key::C) {
             self.select_tool(context, ToolKind::Crop);
+        } else if pressed(egui::Key::M) {
+            self.select_tool(context, ToolKind::Masks);
         } else if pressed(egui::Key::Escape) {
             self.leave_tool(context, false);
         } else if pressed(egui::Key::Enter) {

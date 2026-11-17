@@ -13,7 +13,8 @@ use rohditor_core::{
 use rohditor_core::{DatabaseProvenance, LensProfileSummary};
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_edit::{
-    EditRecipe, HighlightMethod, LensProfileSelection, RenderingProfileSelection, WhiteBalance,
+    DetailSettings, EditRecipe, HighlightMethod, LensProfileSelection, LocalAdjustments,
+    MAX_LOCAL_DETAIL_VARIANTS, MaskLayer, RenderingProfileSelection, WhiteBalance,
 };
 use rohditor_image::{DisplayRgbImage, Orientation};
 use rohditor_raw::{RawFrame, SourceIdentity};
@@ -103,6 +104,10 @@ impl PreviewCacheKeys {
             recipe_schema_version: recipe.schema_version,
             white_balance: WhiteBalanceKey::from(recipe.color.white_balance),
             camera_profile: camera_profile_key(&recipe.color.camera_profile),
+            local_detail: rohditor_core::local_detail_variants(recipe)
+                .into_iter()
+                .map(DetailKey::from_settings)
+                .collect(),
         };
         let matched_look = recipe.rendering.matched_look();
         let adjusted = AdjustedPreviewKey {
@@ -140,6 +145,12 @@ impl PreviewCacheKeys {
                 .flat_map(|channel| [channel.hue, channel.saturation, channel.luminance])
                 .map(f32::to_bits)
                 .collect(),
+            presence_bits: [
+                recipe.presence.texture.to_bits(),
+                recipe.presence.clarity.to_bits(),
+                recipe.presence.dehaze.to_bits(),
+            ],
+            local: LocalKey::from_local(&recipe.local),
             grading_bits: recipe
                 .color
                 .grading
@@ -211,11 +222,15 @@ pub(super) struct DetailKey {
 
 impl DetailKey {
     fn from_recipe(recipe: &EditRecipe) -> Self {
-        let nr = recipe.noise_reduction;
-        let sharpening = recipe.capture_sharpening;
+        Self::from_settings(recipe.detail_settings())
+    }
+
+    fn from_settings(settings: DetailSettings) -> Self {
+        let nr = settings.noise_reduction;
+        let sharpening = settings.capture_sharpening;
         Self {
-            false_color: recipe.false_color.is_active().then_some((
-                recipe.false_color.steps,
+            false_color: settings.false_color.is_active().then_some((
+                settings.false_color.steps,
                 rohditor_core::FALSE_COLOR_ALGORITHM_VERSION,
             )),
             noise_reduction: nr.is_active().then_some((
@@ -428,6 +443,9 @@ struct DemosaicedBaseKey {
     recipe_schema_version: u32,
     white_balance: WhiteBalanceKey,
     camera_profile: CameraProfileKey,
+    /// The detail settings of the copies blended into this base, not the masks that blend them:
+    /// editing a mask's shape keeps the base.
+    local_detail: Vec<DetailKey>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -484,10 +502,40 @@ struct AdjustedPreviewKey {
     vibrance_bits: u32,
     hsl_bits: Vec<u32>,
     grading_bits: Vec<u32>,
+    /// Texture, clarity and dehaze.
+    presence_bits: [u32; 3],
+    local: LocalKey,
     orientation: Orientation,
     crop_bits: Option<[u64; 4]>,
     output_policy: OutputPolicy,
     output_policy_version: Option<u16>,
+}
+
+/// The part of the mask layers that changes pixels: active layers in order, without the
+/// names and ids the UI uses. Inactive layers are left out so toggling one on or off an
+/// already-neutral recipe does not invalidate the cache.
+#[derive(Debug, Clone, PartialEq)]
+struct LocalKey(Vec<MaskLayer>);
+
+// Recipes are validated before they reach the cache and hold only finite numbers, for which
+// `==` is reflexive.
+impl Eq for LocalKey {}
+
+impl LocalKey {
+    fn from_local(local: &LocalAdjustments) -> Self {
+        Self(
+            local
+                .layers
+                .iter()
+                .filter(|layer| layer.is_active())
+                .map(|layer| MaskLayer {
+                    id: 0,
+                    name: String::new(),
+                    ..layer.clone()
+                })
+                .collect(),
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -532,6 +580,12 @@ struct ReconstructedEntry {
 }
 
 #[derive(Debug)]
+struct LocalDetailEntry {
+    key: ReconstructedCameraRgbKey,
+    preview: ReconstructedPreview,
+}
+
+#[derive(Debug)]
 struct DemosaicedEntry {
     key: DemosaicedBaseKey,
     base: DemosaicedBase,
@@ -552,6 +606,9 @@ pub struct PreviewCache {
     spatial: spatial::SpatialCache,
     decoded: Option<DecodedEntry>,
     reconstructed: Option<ReconstructedEntry>,
+    /// Reconstructions of the copies mask layers blend in, so changing one layer's detail
+    /// sliders leaves the others' work alone. See [`Self::insert_local_detail`] for the bound.
+    local_detail: Vec<LocalDetailEntry>,
     demosaiced: Option<DemosaicedEntry>,
     adjusted: Option<AdjustedPreviewEntry>,
     workspace: CpuPreviewWorkspace,
@@ -585,6 +642,7 @@ impl PreviewCache {
                 frame: Arc::clone(frame),
             });
             self.reconstructed = None;
+            self.local_detail.clear();
             self.demosaiced = None;
             self.adjusted = None;
         }
@@ -675,6 +733,7 @@ impl PreviewCache {
     > {
         self.workspace = CpuPreviewWorkspace::default();
         self.reconstructed = None;
+        self.local_detail.clear();
         self.demosaiced = None;
         self.adjusted = None;
         self.spatial
@@ -698,6 +757,7 @@ impl PreviewCache {
     > {
         self.workspace = CpuPreviewWorkspace::default();
         self.reconstructed = None;
+        self.local_detail.clear();
         self.demosaiced = None;
         self.adjusted = None;
         self.spatial
@@ -726,6 +786,52 @@ impl PreviewCache {
         });
         self.demosaiced = None;
         self.adjusted = None;
+    }
+
+    /// The reconstruction of a local detail copy; `keys` are those of its variant recipe.
+    pub fn local_detail(&self, keys: &PreviewCacheKeys) -> Option<&ReconstructedPreview> {
+        self.local_detail
+            .iter()
+            .find(|entry| entry.key == keys.reconstructed)
+            .map(|entry| &entry.preview)
+    }
+
+    /// Develops a local detail copy from the retained camera source when there is one. Leaves
+    /// the cached capture of the global settings in place.
+    pub fn prepare_local_detail(
+        &self,
+        pipeline: &CpuPipeline,
+        frame: &RawFrame,
+        variant: &EditRecipe,
+        options: PreviewOptions,
+        keys: &PreviewCacheKeys,
+        cancellation: &rohditor_core::CancellationToken,
+    ) -> Result<ReconstructedPreview, rohditor_core::PipelineError> {
+        self.spatial
+            .prepare_local_detail(pipeline, frame, variant, options, keys, cancellation)
+    }
+
+    /// Keeps one copy more than a recipe can use, so switching a layer off and on again is
+    /// instant. To stay within that, the oldest copy that `needed` doesn't name is evicted: a
+    /// slider drag on one layer must not push out the copy of another.
+    pub fn insert_local_detail(
+        &mut self,
+        keys: &PreviewCacheKeys,
+        preview: ReconstructedPreview,
+        needed: &[PreviewCacheKeys],
+    ) {
+        if self.local_detail.len() > MAX_LOCAL_DETAIL_VARIANTS
+            && let Some(unused) = self
+                .local_detail
+                .iter()
+                .position(|entry| !needed.iter().any(|keys| keys.reconstructed == entry.key))
+        {
+            self.local_detail.remove(unused);
+        }
+        self.local_detail.push(LocalDetailEntry {
+            key: keys.reconstructed.clone(),
+            preview,
+        });
     }
 
     pub fn demosaiced(&self, keys: &PreviewCacheKeys) -> Option<&DemosaicedBase> {
@@ -809,6 +915,9 @@ impl PreviewCache {
             .reconstructed
             .as_ref()
             .map_or(0, |entry| entry.preview.buffer_bytes());
+        let local_detail = self.local_detail.iter().fold(0, |bytes: usize, entry| {
+            bytes.saturating_add(entry.preview.buffer_bytes())
+        });
         let demosaiced = self
             .demosaiced
             .as_ref()
@@ -820,6 +929,7 @@ impl PreviewCache {
         decoded
             .saturating_add(self.spatial.resident_bytes())
             .saturating_add(reconstructed)
+            .saturating_add(local_detail)
             .saturating_add(demosaiced)
             .saturating_add(adjusted)
             .saturating_add(self.workspace.buffer_bytes())
@@ -906,6 +1016,27 @@ mod tests {
             cache.prepare_spatial(&pipeline, &frame, &recipe, options, &keys, false, &token),
             Err(rohditor_core::PipelineError::Cancelled)
         ));
+    }
+
+    #[test]
+    fn presence_invalidates_only_adjusted_output() {
+        let frame = frame();
+        let recipe = EditRecipe::default();
+        let options = PreviewOptions::default();
+        let original = PreviewCacheKeys::new(1, &frame, &recipe, options);
+        for index in 0..3 {
+            let mut changed = recipe.clone();
+            match index {
+                0 => changed.presence.texture = 0.5,
+                1 => changed.presence.clarity = 0.5,
+                _ => changed.presence.dehaze = 0.5,
+            }
+            let keys = PreviewCacheKeys::new(1, &frame, &changed, options);
+            assert_eq!(keys.decoded, original.decoded);
+            assert_eq!(keys.reconstructed, original.reconstructed);
+            assert_eq!(keys.demosaiced, original.demosaiced);
+            assert_ne!(keys.adjusted, original.adjusted);
+        }
     }
 
     #[test]

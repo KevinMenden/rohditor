@@ -34,8 +34,16 @@ use super::scheduler::{PreviewCompletion, PreviewMailbox};
 mod camera_look_worker;
 #[path = "export_worker.rs"]
 mod export_worker;
+#[path = "local_detail.rs"]
+mod local_detail;
+#[path = "noise_worker.rs"]
+mod noise_worker;
+#[path = "range_jobs.rs"]
+mod range_jobs;
 
 pub use camera_look_worker::CameraLookJob;
+pub use noise_worker::NoiseProfileJob;
+pub use range_jobs::{ColorSampleJob, MaskOverlayJob};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobKind {
@@ -243,6 +251,34 @@ pub enum WorkerEvent {
         ticket: PreviewTicket,
         message: String,
     },
+    /// The colour under a click of the colour-range picker.
+    ColorRangeSampleReady {
+        ticket: PreviewTicket,
+        pick: crate::tools::ColorPick,
+        sample: rohditor_edit::ColorSample,
+    },
+    ColorRangeSampleFailed {
+        ticket: PreviewTicket,
+        message: String,
+    },
+    /// The overlay of a mask layer measured on the developed image (layers with range
+    /// components).
+    MaskOverlayReady {
+        ticket: PreviewTicket,
+        layer: u32,
+        overlay: Box<rohditor_core::MaskAlphaImage>,
+    },
+    MaskOverlayFailed {
+        ticket: PreviewTicket,
+        layer: u32,
+        message: String,
+    },
+    /// The luma noise profile of a document's demosaiced frame. `Ok(None)`
+    /// means the frame is too small to profile.
+    NoiseProfileReady {
+        document_id: u64,
+        result: Result<Option<rohditor_core::NoiseProfile>, String>,
+    },
     /// The fitted camera look for a document, or why it could not be fitted.
     CameraLookReady {
         document_id: u64,
@@ -321,7 +357,10 @@ pub enum WorkerRequest {
     },
     PreviewAvailable,
     SampleWhiteBalance(Box<WhiteBalanceSampleJob>),
+    SampleColorRange(Box<ColorSampleJob>),
+    RenderMaskOverlay(Box<MaskOverlayJob>),
     FitCameraLook(Box<CameraLookJob>),
+    EstimateNoise(Box<NoiseProfileJob>),
     Export(Box<ExportJob>),
     AbandonDocument(u64),
     Shutdown,
@@ -331,6 +370,7 @@ pub struct RenderCoordinator {
     requests: mpsc::Sender<WorkerRequest>,
     events: mpsc::Receiver<WorkerEvent>,
     previews: Arc<PreviewMailbox>,
+    range_jobs: range_jobs::RangeJobControl,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -390,6 +430,7 @@ impl RenderCoordinator {
             requests: request_sender,
             events: event_receiver,
             previews,
+            range_jobs: range_jobs::RangeJobControl::default(),
             worker: Some(worker),
         })
     }
@@ -426,8 +467,7 @@ impl RenderCoordinator {
         options: PreviewOptions,
         prefer_gpu: bool,
     ) -> Result<(), String> {
-        // CPU-only stages are routed to the CPU, not treated as GPU failures.
-        let gpu = prefer_gpu && rohditor_core::cpu_only_stage_reason(&recipe).is_none();
+        let gpu = prefer_gpu && gpu_may_render(&recipe);
         self.previews.queue(
             PreviewJob {
                 ticket,
@@ -508,6 +548,49 @@ impl RenderCoordinator {
         )))
     }
 
+    /// Sample the colour under `position` (`0..1` over the image as shown) for a colour range.
+    /// The result arrives as [`WorkerEvent::ColorRangeSampleReady`] with `pick` echoed back.
+    pub fn sample_color_range(
+        &self,
+        ticket: PreviewTicket,
+        frame: Arc<RawFrame>,
+        recipe: EditRecipe,
+        position: (f64, f64),
+        pick: crate::tools::ColorPick,
+        options: PreviewOptions,
+    ) -> Result<(), String> {
+        self.send(WorkerRequest::SampleColorRange(Box::new(ColorSampleJob {
+            ticket,
+            frame,
+            recipe,
+            position,
+            pick,
+            options,
+            liveness: self.range_jobs.sample(ticket.document_id),
+        })))
+    }
+
+    /// Render the overlay of mask layer `layer` on the developed image, which layers with
+    /// luminance or colour ranges need. The result arrives as
+    /// [`WorkerEvent::MaskOverlayReady`].
+    pub fn render_mask_overlay(
+        &self,
+        ticket: PreviewTicket,
+        frame: Arc<RawFrame>,
+        recipe: EditRecipe,
+        layer: u32,
+        options: PreviewOptions,
+    ) -> Result<(), String> {
+        self.send(WorkerRequest::RenderMaskOverlay(Box::new(MaskOverlayJob {
+            ticket,
+            frame,
+            recipe,
+            layer,
+            options,
+            liveness: self.range_jobs.overlay(ticket.document_id),
+        })))
+    }
+
     /// Fit the photo's camera look (tone and colour) to its embedded JPEG in
     /// the background. The result arrives as [`WorkerEvent::CameraLookReady`].
     pub fn fit_camera_look(
@@ -522,6 +605,21 @@ impl RenderCoordinator {
             path,
             frame,
             camera_profile,
+        })))
+    }
+
+    /// Profile the photo's noise in the background. The result arrives as
+    /// [`WorkerEvent::NoiseProfileReady`].
+    pub fn estimate_noise(
+        &self,
+        document_id: u64,
+        frame: Arc<RawFrame>,
+        render_options: RenderOptions,
+    ) -> Result<(), String> {
+        self.send(WorkerRequest::EstimateNoise(Box::new(NoiseProfileJob {
+            document_id,
+            frame,
+            render_options,
         })))
     }
 
@@ -553,6 +651,7 @@ impl RenderCoordinator {
 
     pub fn abandon(&self, document_id: u64) {
         self.previews.abandon(document_id);
+        self.range_jobs.cancel_document(document_id);
         drop(
             self.requests
                 .send(WorkerRequest::AbandonDocument(document_id)),
@@ -609,6 +708,7 @@ fn worker_loop(
             CpuPipeline::default()
         }
     };
+    let noise_profiles = noise_worker::start(pipeline.clone(), sender.clone(), wake.clone());
     let exports = export_worker::start(pipeline.clone(), sender.clone(), wake.clone());
     let camera_looks = camera_look_worker::start(
         pipeline.clone(),
@@ -702,6 +802,28 @@ fn worker_loop(
                     );
                 }
             }
+            WorkerRequest::SampleColorRange(job) => {
+                if !abandoned.contains(&job.ticket.document_id) {
+                    range_jobs::process_color_sample(
+                        *job,
+                        &sender,
+                        &wake,
+                        &pipeline,
+                        &mut preview_cache,
+                    );
+                }
+            }
+            WorkerRequest::RenderMaskOverlay(job) => {
+                if !abandoned.contains(&job.ticket.document_id) {
+                    range_jobs::process_mask_overlay(
+                        *job,
+                        &sender,
+                        &wake,
+                        &pipeline,
+                        &mut preview_cache,
+                    );
+                }
+            }
             WorkerRequest::FitCameraLook(job) => {
                 let (document_id, camera_profile) = (job.document_id, job.camera_profile.clone());
                 let submitted = camera_looks
@@ -715,6 +837,22 @@ fn worker_loop(
                             document_id,
                             camera_profile,
                             result: Err("The camera look worker is unavailable".to_owned()),
+                        },
+                    );
+                }
+            }
+            WorkerRequest::EstimateNoise(job) => {
+                let document_id = job.document_id;
+                let submitted = noise_profiles
+                    .as_ref()
+                    .is_some_and(|worker| worker.send(job).is_ok());
+                if !submitted {
+                    send_event(
+                        &sender,
+                        &wake,
+                        WorkerEvent::NoiseProfileReady {
+                            document_id,
+                            result: Err("The noise worker is unavailable".to_owned()),
                         },
                     );
                 }
@@ -761,7 +899,10 @@ impl WorkerRequest {
             }
             Self::Export(job) => Some(job.document_id),
             Self::FitCameraLook(job) => Some(job.document_id),
+            Self::EstimateNoise(job) => Some(job.document_id),
             Self::SampleWhiteBalance(job) => Some(job.ticket.document_id),
+            Self::SampleColorRange(job) => Some(job.ticket.document_id),
+            Self::RenderMaskOverlay(job) => Some(job.ticket.document_id),
             Self::PreviewAvailable | Self::Shutdown | Self::CaptureDevice { .. } => None,
         }
     }
@@ -1317,6 +1458,7 @@ fn process_gpu_base(
         linear_rgb_bytes: 0,
         export_resize_bytes: 0,
         display_rgb_bytes: 0,
+        local_adjustment_bytes: 0,
         estimated_peak_bytes: description
             .decoded_raw_bytes()
             .saturating_add(if metrics.sensor_gpu {
@@ -1358,6 +1500,15 @@ fn process_gpu_base(
     PreviewCompletion::Completed
 }
 
+/// Whether the GPU may render this preview. CPU-only stages route it to the CPU by choice. That
+/// is a per-request answer, not a GPU failure: the GPU stays enabled.
+fn gpu_may_render(recipe: &EditRecipe) -> bool {
+    rohditor_core::cpu_only_stage_reason(recipe).is_none()
+}
+
+/// A CPU fit preview: the display image, its histogram, and how it was made.
+type DevelopedPreview = (DisplayRgbImage<u8>, Histogram, WorkerPreviewDiagnostics);
+
 fn develop_preview(
     job: &PreviewJob,
     options: PreviewOptions,
@@ -1366,7 +1517,7 @@ fn develop_preview(
     cancellation: &CancellationToken,
     pipeline: &CpuPipeline,
     preview_cache: &mut PreviewCache,
-) -> Result<(DisplayRgbImage<u8>, Histogram, WorkerPreviewDiagnostics), PipelineError> {
+) -> Result<DevelopedPreview, PipelineError> {
     if let Some(cached) = preview_cache.adjusted(keys) {
         let copy_started = Instant::now();
         let image = cached.image.clone();
@@ -1494,7 +1645,15 @@ fn ensure_preview_base(
             cancellation,
         )?;
         add_stage_timings(&mut timings, base.timings());
-        preview_cache.insert_demosaiced(keys, base);
+        let images = local_detail::prepare_images(
+            job,
+            options,
+            cancellation,
+            pipeline,
+            preview_cache,
+            &mut timings,
+        )?;
+        preview_cache.insert_demosaiced(keys, base.with_local_detail(images));
     }
     cancellation.checkpoint()?;
     Ok(timings)
@@ -1683,6 +1842,7 @@ fn add_stage_timings(target: &mut StageTimings, additional: StageTimings) {
     target.chroma_noise_reduction += additional.chroma_noise_reduction;
     target.luminance_noise_reduction += additional.luminance_noise_reduction;
     target.capture_sharpening += additional.capture_sharpening;
+    target.local_detail += additional.local_detail;
     target.optics += additional.optics;
     target.defringe += additional.defringe;
     target.resampling += additional.resampling;
@@ -1730,6 +1890,7 @@ fn log_preview_diagnostics(
         chroma_noise_reduction_us = diagnostics.timings.chroma_noise_reduction.as_micros(),
         luminance_noise_reduction_us = diagnostics.timings.luminance_noise_reduction.as_micros(),
         capture_sharpening_us = diagnostics.timings.capture_sharpening.as_micros(),
+        local_detail_us = diagnostics.timings.local_detail.as_micros(),
         detail = ?diagnostics.detail,
         optics_us = diagnostics.timings.optics.as_micros(),
         defringe_us = diagnostics.timings.defringe.as_micros(),
@@ -2023,6 +2184,130 @@ mod tests {
         mailbox.finish(active.job.ticket, PreviewCompletion::Cancelled);
         let replacement = mailbox.take().expect("replacement should run next");
         assert_eq!(replacement.job.ticket.revision, 2);
+    }
+
+    #[test]
+    fn local_adjustment_edits_reuse_the_demosaiced_preview_base() {
+        use rohditor_edit::{
+            LinearGradient, LocalSettings, MaskComponent, MaskLayer, MaskMode, MaskPoint, MaskShape,
+        };
+
+        let frame = Arc::new(fake_frame());
+        let options = PreviewOptions::default();
+        let mut cache = PreviewCache::default();
+        let mut base_recipe = EditRecipe::default();
+        base_recipe.raw.highlights.method = HighlightMethod::Off;
+        let masked = |ev: f32| {
+            let mut recipe = base_recipe.clone();
+            recipe.local.layers.push(MaskLayer {
+                id: 3,
+                name: "Left".to_owned(),
+                enabled: true,
+                opacity: 1.0,
+                components: vec![MaskComponent {
+                    mode: MaskMode::Add,
+                    invert: false,
+                    shape: MaskShape::Linear(LinearGradient {
+                        start: MaskPoint { x: 0.2, y: 0.5 },
+                        end: MaskPoint { x: 0.8, y: 0.5 },
+                    }),
+                }],
+                settings: LocalSettings {
+                    exposure_ev: ev,
+                    ..LocalSettings::default()
+                },
+            });
+            recipe
+        };
+        let develop = |revision: u64, recipe: EditRecipe, cache: &mut PreviewCache| {
+            let job = PreviewJob {
+                ticket: PreviewTicket {
+                    document_id: 11,
+                    revision,
+                    sequence: revision,
+                },
+                frame: Arc::clone(&frame),
+                recipe,
+                options,
+                backend: PreviewBackend::Cpu,
+                resolution: PreviewResolution::Fit,
+            };
+            let keys = PreviewCacheKeys::new(11, &frame, &job.recipe, options);
+            let hits = cache.prepare(&keys, &frame);
+            let result = develop_preview(
+                &job,
+                options,
+                &keys,
+                hits,
+                &CancellationToken::new(),
+                &CpuPipeline::default(),
+                cache,
+            )
+            .expect("preview develops");
+            (hits, result)
+        };
+
+        let (first_hits, first) = develop(0, base_recipe.clone(), &mut cache);
+        assert!(!first_hits.demosaiced);
+        // Adding a mask is an adjustment-stage edit: the base is reused and the image changes.
+        let (added_hits, added) = develop(1, masked(1.0), &mut cache);
+        assert!(added_hits.demosaiced && !added_hits.adjusted);
+        assert_ne!(first.0, added.0);
+        assert_eq!(added.2.timings.demosaic, Duration::ZERO);
+        assert_eq!(added.2.timings.normalization, Duration::ZERO);
+        assert!(added.2.workspace_reused);
+        // Moving the mask slider must not be served from the previous adjusted image.
+        let (moved_hits, moved) = develop(2, masked(-1.0), &mut cache);
+        assert!(moved_hits.demosaiced && !moved_hits.adjusted);
+        assert_ne!(added.0, moved.0);
+        assert_eq!(moved.2.timings.demosaic, Duration::ZERO);
+        // Removing it returns to the unmasked image through the same base.
+        let (removed_hits, removed) = develop(3, base_recipe.clone(), &mut cache);
+        assert!(removed_hits.demosaiced);
+        assert_eq!(removed.0, first.0);
+    }
+
+    /// A recipe with one active mask layer (id 3): full effect on the left, none on the right.
+    fn recipe_with_mask_layer() -> EditRecipe {
+        use rohditor_edit::{
+            LinearGradient, LocalSettings, MaskComponent, MaskLayer, MaskMode, MaskPoint, MaskShape,
+        };
+
+        let mut recipe = EditRecipe::default();
+        recipe.raw.highlights.method = HighlightMethod::Off;
+        recipe.local.layers.push(MaskLayer {
+            id: 3,
+            name: "Left".to_owned(),
+            enabled: true,
+            opacity: 1.0,
+            components: vec![MaskComponent {
+                mode: MaskMode::Add,
+                invert: false,
+                shape: MaskShape::Linear(LinearGradient {
+                    start: MaskPoint { x: 0.2, y: 0.5 },
+                    end: MaskPoint { x: 0.8, y: 0.5 },
+                }),
+            }],
+            settings: LocalSettings {
+                exposure_ev: 1.0,
+                ..LocalSettings::default()
+            },
+        });
+        recipe
+    }
+
+    #[test]
+    fn masks_render_on_the_gpu_unless_their_brushes_would_exhaust_it() {
+        let mut recipe = recipe_with_mask_layer();
+        assert!(gpu_may_render(&EditRecipe::default()));
+        assert!(gpu_may_render(&recipe));
+        let brush = rohditor_edit::MaskComponent {
+            mode: rohditor_edit::MaskMode::Add,
+            invert: false,
+            shape: rohditor_edit::MaskShape::Brush(rohditor_edit::BrushMask::default()),
+        };
+        recipe.local.layers[0].components = vec![brush; 17];
+        assert!(!gpu_may_render(&recipe));
     }
 
     #[test]
@@ -2546,6 +2831,59 @@ mod tests {
         }
     }
 
+    #[test]
+    fn noise_estimate_of_a_tiny_frame_reports_no_profile() {
+        let coordinator = RenderCoordinator::new(crate::wake::noop()).expect("worker starts");
+        coordinator
+            .estimate_noise(70, Arc::new(fake_frame()), RenderOptions::default())
+            .expect("request is accepted");
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            for event in coordinator.try_events() {
+                if let WorkerEvent::NoiseProfileReady {
+                    document_id,
+                    result,
+                } = event
+                {
+                    assert_eq!(document_id, 70);
+                    assert_eq!(result, Ok(None), "too small to profile");
+                    return;
+                }
+            }
+            assert!(Instant::now() < deadline, "no noise profile arrived");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the ignored Sony ARW corpus in testdata/private"]
+    fn private_noise_estimate_runs_in_the_background() -> Result<(), Box<dyn Error>> {
+        let source =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/private/DSC01166.ARW");
+        let frame = Arc::new(RawlerDecoder::default().decode(&source)?);
+        let coordinator =
+            RenderCoordinator::new(crate::wake::noop()).map_err(std::io::Error::other)?;
+        coordinator
+            .estimate_noise(71, frame, RenderOptions::default())
+            .map_err(std::io::Error::other)?;
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            for event in coordinator.try_events() {
+                if let WorkerEvent::NoiseProfileReady { result, .. } = event {
+                    let profile = result?.ok_or("a 24 MP frame must be profiled")?;
+                    // ISO 2000 on this body: noisy enough for the default to act.
+                    assert!(profile.sigma(0.18) > 0.004, "{}", profile.sigma(0.18));
+                    return Ok(());
+                }
+            }
+            if Instant::now() >= deadline {
+                return Err("timed out waiting for the noise profile".into());
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     #[derive(Debug)]
     struct FailingPreviewDecoder {
         opens: Arc<AtomicUsize>,
@@ -2585,7 +2923,7 @@ mod tests {
         }
     }
 
-    fn fake_frame() -> RawFrame {
+    pub(super) fn fake_frame() -> RawFrame {
         let width = 4;
         let height = 4;
         let mosaic = (0..width * height)

@@ -107,6 +107,9 @@ struct SiteCounts {
     changed: Option<usize>,
     fallback: Option<usize>,
     fully_unsupported: Option<usize>,
+    /// Sites lowered to the WB-aware neutral ceiling (issue #65); only
+    /// LocalRatios and Opposed neutralise.
+    neutralised: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -135,6 +138,7 @@ impl From<HighlightDiagnostics> for SiteCounts {
                 changed: Some(stats.changed_sites),
                 fallback: Some(stats.fallback_sites),
                 fully_unsupported: Some(stats.fully_unsupported_sites),
+                neutralised: Some(stats.neutralised_sites),
             },
             HighlightDiagnostics::Opposed(stats) => Self {
                 suspected_or_affected: Some(stats.suspected_clipped_sites),
@@ -142,6 +146,7 @@ impl From<HighlightDiagnostics> for SiteCounts {
                 changed: Some(stats.changed_sites),
                 fallback: Some(stats.fallback_sites),
                 fully_unsupported: Some(stats.fully_unsupported_sites),
+                neutralised: Some(stats.neutralised_sites),
             },
         }
     }

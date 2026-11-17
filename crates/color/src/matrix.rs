@@ -120,6 +120,20 @@ pub const XYZ_D65_TO_LINEAR_SRGB: Matrix3 = Matrix3::new([
     [0.055_630_08, -0.203_976_96, 1.056_971_5],
 ]);
 
+/// D65 XYZ to linear Display P3 (DCI-P3 primaries, D65 white).
+pub const XYZ_D65_TO_LINEAR_DISPLAY_P3: Matrix3 = Matrix3::new([
+    [2.493_497, -0.931_383_6, -0.402_710_8],
+    [-0.829_489, 1.762_664_1, 0.023_624_7],
+    [0.035_845_8, -0.076_172_4, 0.956_884_5],
+]);
+
+/// Linear Display P3 to D65 XYZ.
+pub const LINEAR_DISPLAY_P3_TO_XYZ_D65: Matrix3 = Matrix3::new([
+    [0.486_570_95, 0.265_667_7, 0.198_217_3],
+    [0.228_974_56, 0.691_738_5, 0.079_286_91],
+    [0.0, 0.045_113_38, 1.043_944_4],
+]);
+
 /// Bradford adaptation matrix from `source_white` to D65.
 pub fn chromatic_adaptation_to_d65(source_white: [f32; 3]) -> Result<Matrix3, ColorMathError> {
     if source_white == D65_WHITE {
@@ -190,6 +204,31 @@ mod tests {
         for (actual, expected) in adapted.into_iter().zip(D65_WHITE) {
             assert_close(actual, expected, 2.0e-4);
         }
+    }
+
+    #[test]
+    fn display_p3_matrices_are_inverses_and_map_d65_white_to_equal_rgb() {
+        let white = XYZ_D65_TO_LINEAR_DISPLAY_P3.transform(D65_WHITE);
+        for value in white {
+            assert_close(value, 1.0, 2.0e-5);
+        }
+        // Asymmetric probe so a transposed or swapped matrix fails.
+        let probe = [0.2, 0.7, 0.4];
+        let restored =
+            XYZ_D65_TO_LINEAR_DISPLAY_P3.transform(LINEAR_DISPLAY_P3_TO_XYZ_D65.transform(probe));
+        for (actual, expected) in restored.into_iter().zip(probe) {
+            assert_close(actual, expected, 2.0e-6);
+        }
+    }
+
+    #[test]
+    fn rec2020_green_primary_lies_outside_display_p3() {
+        // Pure Rec.2020 green is more saturated than P3 can show: a negative
+        // red and a slightly negative blue are the signature of an out-of-gamut colour.
+        let p3 = LINEAR_REC2020_TO_XYZ_D65
+            .then(XYZ_D65_TO_LINEAR_DISPLAY_P3)
+            .transform([0.0, 1.0, 0.0]);
+        assert!(p3[0] < -0.2 && p3[2] < 0.0 && p3[1] > 1.0, "{p3:?}");
     }
 
     #[test]

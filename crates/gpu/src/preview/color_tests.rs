@@ -225,7 +225,7 @@ fn gpu_hsl_grading_matches_cpu_and_reuses_resident_source() {
     );
 }
 
-fn read_working(processor: &GpuPreviewProcessor, frame: &GpuPreviewFrame) -> Vec<f32> {
+pub(super) fn read_working(processor: &GpuPreviewProcessor, frame: &GpuPreviewFrame) -> Vec<f32> {
     let (width, height) = frame.source_dimensions;
     let row_bytes = (width * 8).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
         * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;

@@ -12,10 +12,10 @@ use crate::{MaskError, MaskFrame};
 /// bands (alpha stays 1 before `start` and 0 after `end`), like Lightroom.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PreparedLinear {
-    start: [f32; 2],
+    pub(crate) start: [f32; 2],
     /// `start -> end` divided by its squared length, so `dot(p - start, direction)` is the
     /// position along the gradient in `0..1` between the two points.
-    direction: [f32; 2],
+    pub(crate) direction: [f32; 2],
 }
 
 impl PreparedLinear {

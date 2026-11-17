@@ -7,7 +7,7 @@ use rohditor_edit::{
     BrushMask, BrushStroke, LinearGradient, LocalSettings, MaskComponent, MaskLayer, MaskMode,
     MaskPoint, MaskShape, RadialGradient,
 };
-use rohditor_mask::{MaskFrame, PreparedMask};
+use rohditor_mask::{MaskFrame, PreparedMask, ReferenceRow};
 
 const SCALE: usize = 4;
 const LOW: MaskFrame = MaskFrame {
@@ -45,7 +45,7 @@ fn plane(layer: &MaskLayer, frame: MaskFrame) -> Vec<f32> {
     let mask = PreparedMask::prepare(layer, frame).expect("prepare");
     let mut plane = vec![0.0; frame.width * frame.height];
     for (y, row) in plane.chunks_exact_mut(frame.width).enumerate() {
-        mask.evaluate_row(y, 0..frame.width, row);
+        mask.evaluate_row(y, 0..frame.width, ReferenceRow::NONE, row);
     }
     plane
 }

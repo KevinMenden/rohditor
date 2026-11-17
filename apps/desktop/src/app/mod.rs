@@ -14,6 +14,7 @@ use rohditor_core::{
     WhiteBalanceCoordinates, WhiteBalanceMode, WhiteBalanceModeMemory, auto_tone,
     camera_color_transform, default_recipe, hsl_channel_weights_from_display_rgb,
     paths_refer_to_same_file, resolve_camera_colour, sample_rgb_patch,
+    with_default_noise_reduction,
 };
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_edit::{
@@ -34,8 +35,7 @@ use crate::config;
 use crate::ui::ViewMode;
 use crate::ui::adjustment_panel::{
     self, AdjustmentInteraction, AdjustmentRange, AdjustmentRanges, AdjustmentTarget,
-    AdjustmentValues, CameraProfileChoice, DocumentPanelModel, ExportKind, ExportUiSettings,
-    PngDepth, SizeMode,
+    AdjustmentValues, CameraProfileChoice, DocumentPanelModel, PanelDefaults, PanelSection,
 };
 use crate::ui::catalog::{
     self, FilmstripModel, LibraryEntryModel, LibraryEntryState, LibraryModel, LibrarySort,
@@ -44,6 +44,9 @@ use crate::ui::crop::CropOverlayModel;
 use crate::ui::diagnostics::{
     self, CacheModel, CatalogModel, DiagnosticsMessages, DiagnosticsModel, GpuModel,
     HighlightStatsModel, PreviewModel, QueueModel, TimingModel,
+};
+use crate::ui::export_dialog::{
+    self, ExportDialogModel, ExportKind, ExportUiSettings, PngDepth, SizeMode,
 };
 use crate::ui::optics::OpticsPanelModel;
 use crate::ui::settings as settings_ui;
@@ -83,6 +86,9 @@ mod events;
 mod gpu;
 #[path = "lifecycle.rs"]
 mod lifecycle;
+mod masks;
+mod noise_reduction;
+mod section_reset;
 mod tools;
 
 use camera_look::CameraLookState;
@@ -90,6 +96,7 @@ use gpu::{
     GpuDocumentPreview, GpuDocumentSource, GpuRuntime, PendingGpuHistogram, gpu_output_size,
     initialize_gpu_runtime, register_or_update_gpu_texture,
 };
+use noise_reduction::NoiseState;
 
 #[derive(Debug, Clone, Copy)]
 struct DocumentPreviewDiagnostics {
@@ -163,6 +170,11 @@ struct Document {
     frame: Option<Arc<RawFrame>>,
     edits: EditSession,
     texture: Option<PreviewTexture>,
+    /// The Masks tool's red tint of the selected mask.
+    mask_overlay: Option<masks::MaskTint>,
+    /// The (recipe revision, layer) whose range overlay was asked of the worker. It stays set
+    /// after a failure, so a failing request is not repeated every frame.
+    range_overlay_requested: Option<(u64, u32)>,
     preview_pixels: Option<DisplayPreviewPixels>,
     preview_source: Option<PreviewSource>,
     histogram: Option<Histogram>,
@@ -189,6 +201,7 @@ struct Document {
     notice: Option<String>,
     initialize_white_balance_from_metadata: bool,
     camera_look: CameraLookState,
+    noise: NoiseState,
 }
 
 #[derive(Debug, Clone)]
@@ -208,6 +221,8 @@ impl Document {
             frame: None,
             edits: EditSession::from_saved(recipe),
             texture: None,
+            mask_overlay: None,
+            range_overlay_requested: None,
             preview_pixels: None,
             preview_source: None,
             histogram: None,
@@ -234,6 +249,7 @@ impl Document {
             notice: None,
             initialize_white_balance_from_metadata: false,
             camera_look: CameraLookState::default(),
+            noise: NoiseState::default(),
         }
     }
 
@@ -321,6 +337,8 @@ pub(crate) struct RohditorApp {
     next_document_id: u64,
     next_export_id: u64,
     export_settings: ExportUiSettings,
+    /// The export dialog, opened from the toolbar.
+    export_dialog_open: bool,
     settings: AppSettings,
     settings_warning: Option<String>,
     recipe_save_status: Option<RecipeSaveStatus>,
@@ -338,6 +356,8 @@ pub(crate) struct RohditorApp {
     tool: ActiveTool,
     color_mixer_channel: usize,
     pending_white_balance_pick: Option<PreviewTicket>,
+    /// A click of the color-range picker waiting for its sample from the worker.
+    pending_color_pick: Option<PreviewTicket>,
     white_balance_memory: WhiteBalanceModeMemory,
     view_mode: ViewMode,
     /// Folder of the last applied scan, used to reset library selection when
@@ -452,6 +472,7 @@ impl RohditorApp {
             next_document_id: 1,
             next_export_id: 1,
             export_settings: ExportUiSettings::with_jpeg_quality(JPEG_QUALITY_DEFAULT),
+            export_dialog_open: false,
             settings,
             settings_warning,
             recipe_save_status: None,
@@ -468,6 +489,7 @@ impl RohditorApp {
             tool: ActiveTool::default(),
             color_mixer_channel: 0,
             pending_white_balance_pick: None,
+            pending_color_pick: None,
             white_balance_memory: WhiteBalanceModeMemory::default(),
             view_mode,
             library_folder: None,
@@ -787,6 +809,8 @@ impl RohditorApp {
             draft_output_policy: dialog.draft.output_policy(),
             active_cpu_only: self.settings.cpu_only(),
             draft_cpu_only: dialog.draft.cpu_only(),
+            active_auto_noise_reduction: self.settings.auto_noise_reduction(),
+            draft_auto_noise_reduction: dialog.draft.auto_noise_reduction(),
             warning: self.settings_warning.as_deref(),
         };
         let mut open = true;
@@ -809,6 +833,11 @@ impl RohditorApp {
             && let Some(dialog) = self.settings_dialog.as_mut()
         {
             dialog.draft.set_cpu_only(cpu_only);
+        }
+        if let Some(enabled) = output.selected_auto_noise_reduction
+            && let Some(dialog) = self.settings_dialog.as_mut()
+        {
+            dialog.draft.set_auto_noise_reduction(enabled);
         }
         if output.apply {
             self.apply_settings(context);
@@ -1664,6 +1693,30 @@ impl RohditorApp {
             self.queue_preview(context, document_id);
         }
         if actions.export {
+            self.export_dialog_open = true;
+        }
+    }
+
+    /// The dialog edits the export settings; its button starts the export.
+    fn show_export_dialog(&mut self, context: &egui::Context) {
+        if !self.export_dialog_open {
+            return;
+        }
+        let model = ExportDialogModel {
+            ready: self
+                .document
+                .as_ref()
+                .is_some_and(|document| document.frame.is_some()),
+            in_progress: self
+                .document
+                .as_ref()
+                .is_some_and(|document| document.export_status.is_some()),
+        };
+        let mut open = true;
+        let export_requested =
+            export_dialog::show(context, &mut open, &model, &mut self.export_settings);
+        self.export_dialog_open = open && !export_requested;
+        if export_requested {
             self.request_export();
         }
     }
@@ -1704,9 +1757,7 @@ impl RohditorApp {
             )
         });
         let panel = tools::tool_panel_model(self.document.as_ref(), ToolKind::Edit);
-        let output = tool_panel::show(context, &panel, |ui| {
-            adjustment_panel::show_body(ui, model, &mut self.export_settings)
-        });
+        let output = tool_panel::show(context, &panel, |ui| adjustment_panel::show_body(ui, model));
         let picker_mode = output.picker_mode;
         let mut changed_document = None;
         let mut white_balance_draft = None;
@@ -1786,11 +1837,22 @@ impl RohditorApp {
                 }
             }
             if output.reset_all {
-                changed |= document.edits.reset_to(default_recipe(as_shot_coordinates));
+                let defaults = default_recipe_for_document(document);
+                changed |= document.edits.reset_to(defaults);
                 // Hidden values are UI state, but reset-all should reset them
                 // too; otherwise switching away from As-shot after a reset
                 // would unexpectedly resurrect an older manual WB choice.
                 white_balance_memory = WhiteBalanceModeMemory::default();
+            }
+            if let Some(section) = output.reset_section {
+                let defaults = default_recipe_for_document(document);
+                let next =
+                    section_reset::reset_section(document.edits.recipe(), &defaults, section);
+                changed |= document.edits.set_discrete(next);
+                if section == PanelSection::WhiteBalance {
+                    // Same reason as reset-all: forget the hidden manual choice.
+                    white_balance_memory = WhiteBalanceModeMemory::default();
+                }
             }
             if changed {
                 document.notice = None;
@@ -1816,14 +1878,14 @@ impl RohditorApp {
         if output.import_camera_profile {
             self.import_camera_profile(context);
         }
+        if output.auto_noise_reduction {
+            self.apply_noise_suggestion(context);
+        }
         if let Some(picker) = picker_mode {
             self.tool.set_picker(picker);
         }
         if let Some(channel) = output.color_mixer_channel {
             self.color_mixer_channel = channel.min(HSL_CHANNEL_COUNT - 1);
-        }
-        if output.export {
-            self.request_export();
         }
     }
 
@@ -1838,6 +1900,30 @@ impl RohditorApp {
             });
         let output = if let Some(document) = self.document.as_mut() {
             let preparing = document.open_status.is_some() || document.preview_status.is_some();
+            let crop_policy = self.settings.render_options().raw_crop_policy;
+            if let Some(session) = self.tool.masks() {
+                let options = PreviewOptions {
+                    render: self.settings.render_options(),
+                    ..PreviewOptions::default()
+                };
+                masks::refresh_tint(
+                    context,
+                    document,
+                    session,
+                    crop_policy,
+                    &self.coordinator,
+                    options,
+                );
+            }
+            let masks = self.tool.masks().and_then(|session| {
+                masks::overlay_model(
+                    session,
+                    &document.edits,
+                    document.frame.as_deref(),
+                    crop_policy,
+                    document.mask_overlay.as_ref(),
+                )
+            });
             viewport::show(
                 context,
                 ViewportModel {
@@ -1847,6 +1933,7 @@ impl RohditorApp {
                     source: document.preview_source,
                     picker_mode: self.tool.picker(),
                     crop: crop_overlay,
+                    masks,
                 },
                 &mut document.view,
             )
@@ -1861,6 +1948,7 @@ impl RohditorApp {
                     source: None,
                     picker_mode: None,
                     crop: None,
+                    masks: None,
                 },
                 &mut empty_view,
             )
@@ -1886,6 +1974,7 @@ impl RohditorApp {
         {
             session.finish_drag();
         }
+        self.apply_mask_pointer(context, &output.masks);
     }
 
     fn apply_white_balance_pick(&mut self, context: &egui::Context, normalized: egui::Pos2) {
@@ -2559,6 +2648,7 @@ impl RohditorApp {
                                 changed_sites: stats.changed_sites,
                                 fallback_sites: stats.fallback_sites,
                                 fully_unsupported_sites: stats.fully_unsupported_sites,
+                                neutralised_sites: stats.neutralised_sites,
                                 suspected_by_channel: stats.suspected_by_channel,
                             }
                         }
@@ -2568,6 +2658,7 @@ impl RohditorApp {
                             changed_sites: stats.changed_sites,
                             fallback_sites: stats.fallback_sites,
                             fully_unsupported_sites: stats.fully_unsupported_sites,
+                            neutralised_sites: stats.neutralised_sites,
                             suspected_by_channel: stats.suspected_by_channel,
                         },
                     },
@@ -2927,6 +3018,8 @@ fn document_panel_model(
             tint,
         ),
     };
+    // Built once per frame and shared by everything that compares to defaults.
+    let defaults = default_recipe_for_document(document);
     DocumentPanelModel {
         file_name: document.file_name(),
         camera: document
@@ -2936,7 +3029,9 @@ fn document_panel_model(
         sensor_dimensions: document.info.as_ref().map(|info| (info.width, info.height)),
         revision: document.edits.revision(),
         dirty: document.is_dirty(),
-        has_adjustments: has_user_adjustments(document),
+        has_adjustments: differs_from_defaults(document, &defaults),
+        white_balance_changed: document.edits.recipe().color.white_balance
+            != defaults.color.white_balance,
         camera_profile,
         camera_profile_choices,
         rendering_profile: document.edits.recipe().rendering.profile,
@@ -3082,16 +3177,23 @@ fn document_panel_model(
                 neutral: COLOR_GRADING_RANGE.neutral,
             },
         },
-        export_ready: document.frame.is_some(),
-        export_in_progress: document.export_status.is_some(),
         auto_tone_available: document.histogram_revision == Some(document.edits.revision()),
         picker_mode,
         color_mixer_channel,
         optics: optics_panel_model(document),
         false_color: document.edits.recipe().false_color,
         noise_reduction: document.edits.recipe().noise_reduction,
+        defaults: PanelDefaults {
+            camera_profile: defaults.color.camera_profile.clone(),
+            rendering_profile: defaults.rendering.profile,
+            highlights: defaults.raw.highlights,
+            noise_reduction: defaults.noise_reduction,
+            capture_sharpening: defaults.capture_sharpening,
+        },
         capture_sharpening: document.edits.recipe().capture_sharpening,
         defringe: document.edits.recipe().defringe,
+        presence: document.edits.recipe().presence,
+        noise_suggestion: document.noise.suggestion(),
     }
 }
 
@@ -3202,17 +3304,27 @@ fn camera_profile_choice(
     }
 }
 
+#[cfg(test)]
+fn has_user_adjustments(document: &Document) -> bool {
+    differs_from_defaults(document, &default_recipe_for_document(document))
+}
+
 /// Whether the recipe differs from the document's defaults. The fitted camera
 /// look is derived from the photo rather than chosen, so it does not count.
-fn has_user_adjustments(document: &Document) -> bool {
+fn differs_from_defaults(document: &Document, defaults: &EditRecipe) -> bool {
     let mut current = document.edits.recipe().clone();
     current.rendering.camera_tone = None;
     current.rendering.camera_chroma = None;
-    current != default_recipe_for_document(document)
+    current != *defaults
 }
 
+/// The recipe a document is reset to: camera-specific white balance, plus the
+/// noise reduction derived from its own noise estimate when it has one.
 fn default_recipe_for_document(document: &Document) -> EditRecipe {
-    default_recipe(document_as_shot_coordinates(document))
+    with_default_noise_reduction(
+        default_recipe(document_as_shot_coordinates(document)),
+        document.noise.default_profile(),
+    )
 }
 
 fn set_highlight_method(edits: &mut EditSession, method: HighlightMethod) -> bool {
@@ -3312,6 +3424,9 @@ fn apply_adjustment_interaction(
                 | AdjustmentTarget::GradingShadows(_)
                 | AdjustmentTarget::GradingMidtones(_)
                 | AdjustmentTarget::GradingHighlights(_)
+                | AdjustmentTarget::PresenceTexture
+                | AdjustmentTarget::PresenceClarity
+                | AdjustmentTarget::PresenceDehaze
                 | AdjustmentTarget::HighlightThreshold
                 | AdjustmentTarget::FalseColorSteps
                 | AdjustmentTarget::ChromaNoiseReduction
@@ -3387,6 +3502,9 @@ fn apply_adjustment_interaction(
         AdjustmentTarget::DefringeGreenHueEnd => {
             next.defringe.green_hue = with_hue_edge(next.defringe.green_hue, 1, interaction.value)
         }
+        AdjustmentTarget::PresenceTexture => next.presence.texture = interaction.value,
+        AdjustmentTarget::PresenceClarity => next.presence.clarity = interaction.value,
+        AdjustmentTarget::PresenceDehaze => next.presence.dehaze = interaction.value,
         AdjustmentTarget::Exposure => next.light.exposure_ev = interaction.value,
         AdjustmentTarget::Contrast => next.light.contrast = interaction.value,
         AdjustmentTarget::Highlights => next.light.highlights = interaction.value,
@@ -3471,6 +3589,7 @@ impl eframe::App for RohditorApp {
         }
         self.show_developer_diagnostics(context);
         self.show_application_settings(context);
+        self.show_export_dialog(context);
         self.update_autosave(context);
         self.update_window_title(context);
         // eframe normally wakes the event loop from the worker's

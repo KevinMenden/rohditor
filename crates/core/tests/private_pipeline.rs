@@ -2,8 +2,9 @@ use std::error::Error;
 use std::path::{Path, PathBuf};
 
 use rohditor_core::{
-    CancellationToken, CpuPipeline, PreviewOptions, RenderOptions, decode_camera_preview,
-    match_camera_look,
+    CancellationToken, CpuPipeline, Histogram, OutputPolicy, PreviewOptions, RenderOptions,
+    auto_tone, decode_camera_preview, estimate_noise_profile, match_camera_look,
+    with_default_noise_reduction,
 };
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_edit::{CameraProfileSelection, EditRecipe, RenderingProfileSelection};
@@ -236,6 +237,142 @@ fn fitted_camera_tone_matches_the_embedded_jpeg_brightness() -> Result<(), Box<d
             "{name}: Standard bias {:+.3}, Matched bias {:+.3}",
             bias[0],
             bias[1]
+        );
+    }
+    Ok(())
+}
+
+/// Auto tone refines the camera rendering: on real renders the median moves
+/// towards the typical value without passing it, highlights do not clip more,
+/// and a second press leaves the sliders alone.
+#[test]
+#[ignore = "requires the ignored Sony ARW corpus in testdata/private"]
+fn auto_tone_refines_the_camera_rendering_of_every_private_sample() -> Result<(), Box<dyn Error>> {
+    const TYPICAL_MEDIAN: i32 = 105;
+    const SECOND_PRESS_TOLERANCE: f32 = 0.05;
+    let clipped_share = |histogram: &Histogram| {
+        let total = histogram.luminance.iter().sum::<u64>() as f64;
+        histogram.highlight_clipped.into_iter().max().unwrap_or(0) as f64 / total
+    };
+    let decoder = RawlerDecoder::default();
+    let pipeline = CpuPipeline::default();
+    let options = PreviewOptions {
+        max_long_edge: 1_024,
+        ..PreviewOptions::default()
+    };
+
+    for name in SAMPLES {
+        let path = private_corpus_directory().join(name);
+        let frame = decoder.decode(&path)?;
+        let preview = decoder
+            .embedded_preview(&path)?
+            .ok_or_else(|| format!("{name} has no embedded preview"))?;
+        let look = match_camera_look(
+            &pipeline,
+            &frame,
+            &preview,
+            &CameraProfileSelection::Automatic,
+        )?;
+        let mut recipe = EditRecipe::default();
+        recipe.rendering.profile = RenderingProfileSelection::MATCHED;
+        look.store_in(&mut recipe.rendering);
+
+        let base = pipeline.prepare_preview_base(&frame, &recipe, options)?;
+        let histogram = |recipe: &EditRecipe| {
+            pipeline
+                .render_preview_from_base(&base, recipe, OutputPolicy::ClipToSrgb)
+                .map(|result| result.histogram)
+        };
+        let start = histogram(&recipe)?;
+        let first = auto_tone(&recipe, &start).ok_or("no usable midtone")?;
+        let end = histogram(&first)?;
+        let second = auto_tone(&first, &end).ok_or("no usable midtone")?;
+
+        let start_median = i32::from(start.luminance_percentile(0.5));
+        let end_median = i32::from(end.luminance_percentile(0.5));
+        assert!(
+            (end_median - TYPICAL_MEDIAN).abs() <= (start_median - TYPICAL_MEDIAN).abs()
+                && (end_median - TYPICAL_MEDIAN).signum()
+                    * (start_median - TYPICAL_MEDIAN).signum()
+                    >= 0,
+            "{name}: median moved from {start_median} to {end_median}"
+        );
+        assert!(
+            clipped_share(&end) <= clipped_share(&start) + 0.005,
+            "{name}: clipped share grew from {} to {}",
+            clipped_share(&start),
+            clipped_share(&end)
+        );
+        for (control, before, after) in [
+            (
+                "exposure",
+                first.light.exposure_ev,
+                second.light.exposure_ev,
+            ),
+            ("shadows", first.light.shadows, second.light.shadows),
+            (
+                "highlights",
+                first.light.highlights,
+                second.light.highlights,
+            ),
+            ("blacks", first.light.blacks, second.light.blacks),
+        ] {
+            assert!(
+                (before - after).abs() < SECOND_PRESS_TOLERANCE,
+                "{name}: second press moved {control} from {before} to {after}"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Chroma strength the derived default picks per corpus file, as recorded by
+/// `rohditor-cli detail-corpus`. Base-ISO files must stay off so they keep the
+/// GPU path.
+#[test]
+#[ignore = "requires the ignored Sony ARW corpus in testdata/private"]
+fn default_noise_reduction_follows_each_private_files_noise() -> Result<(), Box<dyn Error>> {
+    let decoder = RawlerDecoder::default();
+    let pipeline = CpuPipeline::default();
+    let mut recipe = EditRecipe::default();
+    recipe.rendering.profile = RenderingProfileSelection::NEUTRAL;
+    let options = RenderOptions {
+        demosaic: DemosaicAlgorithm::Amaze,
+        ..RenderOptions::default()
+    };
+    // (file, minimum, maximum) of the derived chroma strength.
+    let expected = [
+        ("DSC00851.ARW", 0.0, 0.0),
+        ("DSC01166.ARW", 0.3, 0.4),
+        ("DSC02382.ARW", 0.0, 0.0),
+        ("DSC03270.ARW", 0.1, 0.25),
+        ("DSC03687.ARW", 0.3, 0.4),
+        ("DSC03821.ARW", 0.1, 0.25),
+        ("DSC00554.ARW", 0.1, 0.25),
+        ("DSC00850.ARW", 0.0, 0.0),
+        ("DSC01109.ARW", 0.3, 0.4),
+        ("DSC02616.ARW", 0.25, 0.4),
+        ("DSC01787.ARW", 0.3, 0.4),
+    ];
+    for (name, minimum, maximum) in expected {
+        let frame = decoder.decode(&private_corpus_directory().join(name))?;
+        let profile = estimate_noise_profile(&pipeline, &frame, &recipe, options)?;
+        let derived = with_default_noise_reduction(recipe.clone(), profile.as_ref());
+        let chroma = derived.noise_reduction.chroma;
+        assert!(
+            (minimum..=maximum).contains(&chroma),
+            "{name}: derived chroma {chroma}, expected {minimum}..={maximum}"
+        );
+        assert!(
+            !derived.noise_reduction.luminance_active(),
+            "{name}: luminance reduction must stay off"
+        );
+        // The derived recipe renders, and the chroma stage runs exactly when on.
+        let rendered = pipeline.render(&frame, &derived, options)?;
+        assert_eq!(
+            !rendered.timings.chroma_noise_reduction.is_zero(),
+            chroma > 0.0,
+            "{name}"
         );
     }
     Ok(())

@@ -1,6 +1,6 @@
 // The preview facade keeps the wgpu processor private to this crate.
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
 #[cfg(test)]
@@ -14,12 +14,14 @@ use rohditor_core::{
 };
 use rohditor_demosaic::WhiteBalanceGains;
 use rohditor_edit::{
-    EditRecipe, HighlightAdjustments, LIGHT_TONE_LUT_SIZE, LensProfileSelection, LightToneLut,
+    EditRecipe, HighlightAdjustments, LensProfileSelection, LightToneLut,
     RenderingProfileSelection, WhiteBalance,
 };
 use rohditor_image::{LinearRgbSpace, Orientation};
 use wgpu::util::DeviceExt;
 
+use crate::masks::coverage::{self, BandCoverage, FitCoverage};
+use crate::masks::tables::{self, MaskTables};
 use crate::{GpuCapabilities, GpuPreviewError};
 
 // Export reuses private source provenance, uniform preparation, and LUT owners.
@@ -40,8 +42,9 @@ const FULL_OUTPUT_BAND_ROWS: u32 = 128;
 // Words 52..84 hold eight HSL vec4s (controls + shared hue center), 84..96
 // hold grading vec4s, 96..100 hold flags and shared numerical constants, and
 // 100..112 hold the camera chroma gains (nine) and their active flag, and
-// 112..144 hold the DCP table headers and the ProPhoto matrices.
-const PARAMETER_WORDS: usize = 144;
+// 112..144 hold the DCP table headers and the ProPhoto matrices. Words 144..149
+// are the mask words (masks/tables.rs); the struct is padded to sixteen bytes.
+const PARAMETER_WORDS: usize = 152;
 
 /// Float capacity of one DCP table in the shared table buffer: the largest
 /// table the profile parser accepts, three floats per entry. The shader
@@ -573,7 +576,12 @@ pub struct GpuPreviewProcessor {
     parameters: wgpu::Buffer,
     base_rendering_lut: wgpu::Buffer,
     pub(crate) profile_tables: wgpu::Buffer,
-    light_tone_lut: wgpu::Buffer,
+    /// The global Light tone LUT and the mask tables (`masks.wgsl`).
+    adjustment_tables: wgpu::Buffer,
+    /// Bound when a recipe has no brushes.
+    empty_coverage: wgpu::TextureView,
+    /// Brush planes of the fit preview, kept between renders. `render` takes `&self`.
+    fit_coverage: Mutex<FitCoverage>,
 }
 
 impl GpuPreviewProcessor {
@@ -663,6 +671,16 @@ impl GpuPreviewProcessor {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Uint,
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -677,6 +695,8 @@ impl GpuPreviewProcessor {
                     include_str!("../preview.wgsl"),
                     "\n",
                     include_str!("../color_adjustments.wgsl"),
+                    "\n",
+                    include_str!("../masks/masks.wgsl"),
                     "\n",
                     include_str!("../preview_output.wgsl")
                 )
@@ -699,6 +719,8 @@ impl GpuPreviewProcessor {
                     "\n",
                     include_str!("../color_adjustments.wgsl"),
                     "\n",
+                    include_str!("../masks/masks.wgsl"),
+                    "\n",
                     include_str!("../spatial/spatial.wgsl"),
                     "\n",
                     include_str!("../spatial/full_output.wgsl")
@@ -720,9 +742,9 @@ impl GpuPreviewProcessor {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let light_tone_lut = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("rohditor shared Light tone LUT"),
-            size: (LIGHT_TONE_LUT_SIZE * size_of::<f32>()) as u64,
+        let adjustment_tables = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("rohditor Light tone LUT and mask tables"),
+            size: tables::TABLE_BYTES,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -747,7 +769,7 @@ impl GpuPreviewProcessor {
         Ok(Self {
             device: device.clone(),
             _memory: crate::memory::Reservation::try_new(
-                64 * 1024,
+                64 * 1024 + tables::TABLE_BYTES,
                 crate::spatial::resources::DEFAULT_BUDGET,
             )?,
             queue: queue.clone(),
@@ -758,7 +780,9 @@ impl GpuPreviewProcessor {
             parameters,
             base_rendering_lut,
             profile_tables,
-            light_tone_lut,
+            adjustment_tables,
+            empty_coverage: coverage::empty_view(device),
+            fit_coverage: Mutex::default(),
         })
     }
 
@@ -768,19 +792,27 @@ impl GpuPreviewProcessor {
         &self.capabilities
     }
 
-    /// Upload the transfer tables a recipe selects. Both live in buffers shared
-    /// by every render, so they are rewritten before each one: the base
-    /// rendering may be Standard, a fitted camera tone, or unused (Neutral
-    /// skips the table in the shader).
-    pub(crate) fn upload_recipe_luts(&self, recipe: &EditRecipe, look: Option<&ProfileLook>) {
+    /// Upload the tables a recipe selects, for a developed frame of `frame`
+    /// pixels. They live in buffers shared by every render, so they are
+    /// rewritten before each one: the base rendering may be Standard, a fitted
+    /// camera tone, or unused (Neutral skips the table in the shader). Returns
+    /// the brushes that still need coverage planes.
+    pub(crate) fn upload_recipe_tables<'recipe>(
+        &self,
+        recipe: &'recipe EditRecipe,
+        look: Option<&ProfileLook>,
+        frame: (u32, u32),
+    ) -> Result<Vec<&'recipe rohditor_edit::BrushMask>, GpuPreviewError> {
+        let masks = MaskTables::resolve(recipe, frame)?;
         if let Some(look) = look {
             self.upload_profile_tables(look);
         }
         self.queue.write_buffer(
-            &self.light_tone_lut,
+            &self.adjustment_tables,
             0,
             bytemuck::cast_slice(LightToneLut::new(&recipe.light).values()),
         );
+        masks.upload(&self.queue, &self.adjustment_tables);
         if let Some(lut) = base_rendering_lut(&recipe.rendering) {
             self.queue.write_buffer(
                 &self.base_rendering_lut,
@@ -788,6 +820,7 @@ impl GpuPreviewProcessor {
                 bytemuck::cast_slice(lut.values()),
             );
         }
+        Ok(masks.brushes)
     }
 
     /// Upload a DCP profile's tables. The shader reads the header words in the
@@ -809,12 +842,24 @@ impl GpuPreviewProcessor {
     }
 
     /// Whether the GPU implements every stage of a recipe. Downstream
-    /// adjustments all have shaders; the source-resolution detail stage may
-    /// be CPU-only (see [`rohditor_core::cpu_only_stage_reason`]). Source
+    /// adjustments all have shaders; a recipe with very many brush components
+    /// is CPU-only (see [`rohditor_core::cpu_only_stage_reason`]). Source
     /// provenance and device capabilities are checked separately when rendering.
     #[must_use]
     pub fn supports_recipe(recipe: &EditRecipe) -> bool {
         rohditor_core::cpu_only_stage_reason(recipe).is_none()
+    }
+
+    /// Refuses a recipe that needs a CPU-only stage. This is a per-recipe routing answer, not
+    /// a device failure: callers render that recipe on the CPU and keep using the GPU for the
+    /// next one.
+    fn require_supported_stages(recipe: &EditRecipe) -> Result<(), GpuPreviewError> {
+        match rohditor_core::cpu_only_stage_reason(recipe) {
+            Some(reason) => Err(GpuPreviewError::UnsupportedEdits {
+                reason: reason.to_owned(),
+            }),
+            None => Ok(()),
+        }
     }
 
     /// Poll callbacks for non-blocking GPU work, including asynchronous
@@ -1047,6 +1092,7 @@ impl GpuPreviewProcessor {
             .map_err(|error| GpuPreviewError::InvalidInput {
                 reason: error.to_string(),
             })?;
+        Self::require_supported_stages(recipe)?;
         let description = &source.description;
         if description.detail() != rohditor_core::DetailProvenance::for_recipe(recipe)
             || description.defringe() != rohditor_core::DefringeProvenance::for_recipe(recipe)
@@ -1111,7 +1157,7 @@ impl GpuPreviewProcessor {
             .saturating_add(output_bytes)
             > crate::spatial::resources::DEFAULT_BUDGET.saturating_sub(64 * 1024)
         {
-            return Err(GpuPreviewError::Unsupported {
+            return Err(GpuPreviewError::OverBudget {
                 reason: "resident camera source and Source 1:1 display exceed the GPU budget"
                     .into(),
             });
@@ -1137,7 +1183,16 @@ impl GpuPreviewProcessor {
         );
         self.queue
             .write_buffer(&self.parameters, 0, bytemuck::cast_slice(&parameters));
-        self.upload_recipe_luts(recipe, resolved.profile_look.as_ref());
+        let brushes =
+            self.upload_recipe_tables(recipe, resolved.profile_look.as_ref(), source_dimensions)?;
+        let mut coverage = BandCoverage::new(
+            &self.device,
+            &brushes,
+            source_dimensions,
+            output_geometry,
+            FULL_OUTPUT_BAND_ROWS,
+            crate::spatial::resources::DEFAULT_BUDGET,
+        )?;
         let optics = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1177,7 +1232,7 @@ impl GpuPreviewProcessor {
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
-                    resource: self.light_tone_lut.as_entire_binding(),
+                    resource: self.adjustment_tables.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 5,
@@ -1186,6 +1241,12 @@ impl GpuPreviewProcessor {
                 wgpu::BindGroupEntry {
                     binding: 6,
                     resource: self.profile_tables.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::TextureView(
+                        coverage.view().unwrap_or(&self.empty_coverage),
+                    ),
                 },
             ],
         });
@@ -1229,6 +1290,7 @@ impl GpuPreviewProcessor {
             let row_count = (output_dimensions.1 - first_row).min(FULL_OUTPUT_BAND_ROWS);
             self.queue
                 .write_buffer(&band, 0, bytemuck::cast_slice(&[first_row, row_count]));
+            coverage.write_rows(&self.queue, &self.parameters, first_row, row_count);
             let mut encoder = self
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1272,6 +1334,7 @@ impl GpuPreviewProcessor {
             .map_err(|error| GpuPreviewError::InvalidInput {
                 reason: error.to_string(),
             })?;
+        Self::require_supported_stages(recipe)?;
         if !highlight_adjustments_match(source.highlight_adjustments(), recipe.raw.highlights) {
             return Err(GpuPreviewError::BaseMismatch {
                 reason: "the GPU source was prepared with different RAW highlight settings"
@@ -1348,7 +1411,19 @@ impl GpuPreviewProcessor {
         );
         self.queue
             .write_buffer(&self.parameters, 0, bytemuck::cast_slice(&parameters));
-        self.upload_recipe_luts(recipe, profile_look.as_ref());
+        let brushes =
+            self.upload_recipe_tables(recipe, profile_look.as_ref(), source_dimensions)?;
+        let coverage = self
+            .fit_coverage
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .update(
+                &self.device,
+                &self.queue,
+                &brushes,
+                source_dimensions,
+                crate::spatial::resources::DEFAULT_BUDGET,
+            )?;
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("rohditor GPU preview bind group"),
             layout: &self.bind_group_layout,
@@ -1376,7 +1451,7 @@ impl GpuPreviewProcessor {
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
-                    resource: self.light_tone_lut.as_entire_binding(),
+                    resource: self.adjustment_tables.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 5,
@@ -1385,6 +1460,12 @@ impl GpuPreviewProcessor {
                 wgpu::BindGroupEntry {
                     binding: 6,
                     resource: self.profile_tables.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::TextureView(
+                        coverage.as_ref().unwrap_or(&self.empty_coverage),
+                    ),
                 },
             ],
         });
@@ -1871,6 +1952,8 @@ fn build_parameters(
             Matrix3::new(look.from_prophoto.values()),
         );
     }
+    let masks = tables::parameter_words(recipe);
+    words[tables::PARAMETER_WORD..tables::PARAMETER_WORD + masks.len()].copy_from_slice(&masks);
     words
 }
 
@@ -1915,6 +1998,9 @@ fn orientation_code(orientation: Orientation) -> u32 {
 #[cfg(test)]
 #[path = "color_tests.rs"]
 mod color_tests;
+#[cfg(test)]
+#[path = "mask_tests.rs"]
+mod mask_tests;
 
 #[cfg(test)]
 pub(crate) mod tests {
@@ -2045,6 +2131,15 @@ pub(crate) mod tests {
 
         recipe = EditRecipe::default();
         recipe.color.grading.highlights[2] = 0.1;
+        assert!(GpuPreviewProcessor::supports_recipe(&recipe));
+    }
+
+    #[test]
+    fn gpu_capability_predicate_refuses_presence() {
+        let mut recipe = EditRecipe::default();
+        recipe.presence.texture = 0.1;
+        assert!(!GpuPreviewProcessor::supports_recipe(&recipe));
+        recipe.presence.texture = 0.0;
         assert!(GpuPreviewProcessor::supports_recipe(&recipe));
     }
 

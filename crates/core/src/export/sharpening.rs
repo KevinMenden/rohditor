@@ -74,7 +74,7 @@ impl OutputSharpening {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use rohditor_detail::{NeverCancelled, sharpen_output};
-    use rohditor_image::{DisplayRgbImage, DisplayTransfer};
+    use rohditor_image::{DisplayColorSpace, DisplayRgbImage};
 
     use super::*;
 
@@ -132,7 +132,7 @@ mod tests {
             .flat_map(|i| [down[i % down.len()]; 3])
             .collect();
         let mut image =
-            DisplayRgbImage::new(down.len(), 8, down.len() * 3, DisplayTransfer::Srgb, data)
+            DisplayRgbImage::new(down.len(), 8, down.len() * 3, DisplayColorSpace::SRGB, data)
                 .unwrap();
         let preset = OutputSharpening {
             medium: OutputMedium::Screen,

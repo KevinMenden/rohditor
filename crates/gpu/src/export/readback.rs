@@ -13,6 +13,7 @@ impl GpuExportProcessor {
         staging: &wgpu::Buffer,
         band_parameters: &wgpu::Buffer,
         bindings: &wgpu::BindGroup,
+        coverage: &mut BandCoverage,
     ) -> Result<ExportImage, GpuPreviewError> {
         self.read_bands_with_pipeline(
             width,
@@ -25,6 +26,7 @@ impl GpuExportProcessor {
             band_parameters,
             &self.pipeline,
             &[(0, bindings)],
+            coverage,
         )
     }
 
@@ -41,6 +43,7 @@ impl GpuExportProcessor {
         band_parameters: &wgpu::Buffer,
         pipeline: &wgpu::ComputePipeline,
         bindings: &[(u32, &wgpu::BindGroup)],
+        coverage: &mut BandCoverage,
     ) -> Result<ExportImage, GpuPreviewError> {
         self.read_bands_with(
             width,
@@ -59,6 +62,12 @@ impl GpuExportProcessor {
                 self.processor
                     .queue
                     .write_buffer(band_parameters, 0, bytemuck::cast_slice(&words));
+                coverage.write_rows(
+                    &self.processor.queue,
+                    &self.processor.parameters,
+                    first,
+                    rows,
+                );
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("rohditor export color band"),
                     timestamp_writes: None,
@@ -165,12 +174,12 @@ impl GpuExportProcessor {
         check_cancel(cancellation)?;
         match depth {
             OutputBitDepth::Eight => {
-                DisplayRgbImage::new(width, height, width * 3, DisplayTransfer::Srgb, eight)
+                DisplayRgbImage::new(width, height, width * 3, DisplayColorSpace::SRGB, eight)
                     .map(ExportImage::Rgb8)
                     .map_err(input_error)
             }
             OutputBitDepth::Sixteen => {
-                DisplayRgbImage::new(width, height, width * 3, DisplayTransfer::Srgb, sixteen)
+                DisplayRgbImage::new(width, height, width * 3, DisplayColorSpace::SRGB, sixteen)
                     .map(ExportImage::Rgb16)
                     .map_err(input_error)
             }

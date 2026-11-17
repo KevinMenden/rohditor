@@ -112,6 +112,21 @@ impl CellSummaries {
         })
     }
 
+    /// Bitmask of the channels with a suspected-clipped sample in one cell,
+    /// without loading its means.
+    #[must_use]
+    pub(crate) fn clipped_channels_at(&self, x: usize, y: usize) -> u8 {
+        self.flags[y * self.width + x] >> 3
+    }
+
+    /// True when `channel` of a cell is usable and unclipped, decided from
+    /// the flag byte alone. A cheap pre-filter before loading the means.
+    #[must_use]
+    pub(crate) fn is_usable_and_clean(&self, x: usize, y: usize, channel: usize) -> bool {
+        let flags = self.flags[y * self.width + x];
+        flags & (1 << channel) != 0 && flags & (1 << (channel + 3)) == 0
+    }
+
     #[must_use]
     pub(crate) fn get(&self, x: usize, y: usize) -> CellSummary {
         let index = y * self.width + x;
@@ -135,6 +150,6 @@ pub(crate) const fn ceil_halved(value: usize) -> usize {
     value / 2 + value % 2
 }
 
-fn allocation_error(elements: usize) -> HighlightError {
+pub(crate) fn allocation_error(elements: usize) -> HighlightError {
     HighlightError::Image(rohditor_image::ImageError::Allocation { elements })
 }

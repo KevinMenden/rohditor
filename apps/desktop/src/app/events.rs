@@ -105,6 +105,7 @@ impl RohditorApp {
                 };
                 if should_preview {
                     self.queue_preview(context, document_id);
+                    self.start_default_noise_estimate(document_id);
                 }
             }
             WorkerEvent::PreviewReady {
@@ -278,6 +279,20 @@ impl RohditorApp {
                     self.queue_preview(context, document_id);
                 }
             }
+            WorkerEvent::ColorRangeSampleReady {
+                ticket,
+                pick,
+                sample,
+            } => self.apply_color_sample(context, ticket, pick, sample),
+            WorkerEvent::ColorRangeSampleFailed { ticket, message } => {
+                self.fail_color_sample(ticket, message);
+            }
+            WorkerEvent::MaskOverlayReady {
+                ticket,
+                layer,
+                overlay,
+            } => self.install_range_overlay(context, ticket, layer, &overlay),
+            WorkerEvent::MaskOverlayFailed { ticket, .. } => self.fail_range_overlay(ticket),
             WorkerEvent::WhiteBalanceSampleFailed { ticket, message } => {
                 if self.pending_white_balance_pick != Some(ticket) {
                     return;
@@ -329,6 +344,10 @@ impl RohditorApp {
                     ));
                 }
             }
+            WorkerEvent::NoiseProfileReady {
+                document_id,
+                result,
+            } => self.noise_profile_ready(context, document_id, result),
             WorkerEvent::CameraLookReady {
                 document_id,
                 camera_profile,

@@ -44,6 +44,12 @@ struct PreviewParameters {
     // Linear Rec.2020 <-> linear ProPhoto RGB, the space DNG tables use.
     to_prophoto: array<vec4<f32>, 3>,
     from_prophoto: array<vec4<f32>, 3>,
+    // Active mask layers, which range references they read (masks/masks.wgsl),
+    // the origin of the brush coverage planes, and recipe.light.exposure_ev.
+    mask_layer_count: u32,
+    mask_reference: u32,
+    coverage_origin: vec2<u32>,
+    light_exposure_ev: f32,
 };
 
 @group(0) @binding(0)
@@ -52,8 +58,9 @@ var source_base: texture_2d<f32>;
 @group(0) @binding(3)
 var<uniform> parameters: PreviewParameters;
 
+// The global Light tone LUT first, then the mask tables (masks/masks.wgsl).
 @group(0) @binding(4)
-var<storage, read> light_tone_lut: array<f32, 4096>;
+var<storage, read> adjustment_tables: array<f32>;
 
 @group(0) @binding(5)
 var<storage, read> base_rendering_lut: array<f32, 4096>;
@@ -258,6 +265,11 @@ fn apply_camera_chroma(pixel: vec3<f32>) -> vec3<f32> {
 }
 
 fn apply_light_tone(pixel: vec3<f32>) -> vec3<f32> {
+    return apply_light_tone_table(pixel, 0u);
+}
+
+// `table` is the first word of a 4096-entry LUT in adjustment_tables.
+fn apply_light_tone_table(pixel: vec3<f32>, table: u32) -> vec3<f32> {
     let current = dot(pixel, vec3<f32>(0.2627, 0.6780, 0.0593));
     if current < 0.0 || current > 1.0 {
         return pixel;
@@ -265,7 +277,7 @@ fn apply_light_tone(pixel: vec3<f32>) -> vec3<f32> {
     let position = current * 4095.0;
     let lower = u32(floor(position));
     let upper = min(lower + 1u, 4095u);
-    let desired = mix(light_tone_lut[lower], light_tone_lut[upper], position - f32(lower));
+    let desired = mix(adjustment_tables[table + lower], adjustment_tables[table + upper], position - f32(lower));
     if desired == current {
         return pixel;
     }
@@ -497,16 +509,23 @@ fn apply_profile_look(rgb: vec3<f32>) -> vec3<f32> {
     );
 }
 
-fn develop_camera_color(camera_native: vec3<f32>) -> vec3<f32> {
+// `source` is the pixel's position in the developed frame, which masks live in.
+fn develop_camera_color(camera_native: vec3<f32>, source: vec2<u32>) -> vec3<f32> {
     let balanced = camera_native * parameters.white_balance.xyz;
     let base = vec3<f32>(
         dot(parameters.camera_to_rec2020_row0.xyz, balanced),
         dot(parameters.camera_to_rec2020_row1.xyz, balanced),
         dot(parameters.camera_to_rec2020_row2.xyz, balanced),
     );
-    let exposed = apply_profile_look(base) * parameters.exposure_gain;
-    let rendered = apply_camera_chroma(apply_base_rendering(exposed));
-    let toned = apply_tone_curve(apply_light_tone(rendered));
+    let look = apply_profile_look(base);
+    if parameters.mask_layer_count == 0u {
+        let rendered = apply_camera_chroma(apply_base_rendering(look * parameters.exposure_gain));
+        return apply_color_controls(apply_tone_curve(apply_light_tone(rendered)));
+    }
+    return apply_color_controls(develop_masked(look, source));
+}
+
+fn apply_color_controls(toned: vec3<f32>) -> vec3<f32> {
     let luminance = dot(toned, vec3<f32>(0.2627, 0.6780, 0.0593));
     let saturation = parameters.saturation
         * (1.0 + parameters.vibrance * (1.0 - color_saturation(toned, luminance)));
@@ -515,7 +534,7 @@ fn develop_camera_color(camera_native: vec3<f32>) -> vec3<f32> {
 }
 
 fn develop_color(source: vec2<u32>) -> vec3<f32> {
-    return develop_camera_color(textureLoad(source_base, vec2<i32>(source), 0).rgb);
+    return develop_camera_color(textureLoad(source_base, vec2<i32>(source), 0).rgb, source);
 }
 
 fn encode_output(adjusted: vec3<f32>) -> vec3<f32> {

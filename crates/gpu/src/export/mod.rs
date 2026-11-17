@@ -9,9 +9,13 @@ use rohditor_core::{
     CpuPipeline, DitherMode, ExportImage, OutputBitDepth, OutputSharpening, OutputSize,
     RenderOptions,
 };
-use rohditor_image::{DisplayRgbImage, DisplayTransfer};
+use rohditor_image::{DisplayColorSpace, DisplayRgbImage};
 use rohditor_raw::RawFrame;
 
+#[cfg(test)]
+mod mask_tests;
+#[cfg(test)]
+mod memory_tests;
 mod readback;
 mod staged;
 #[cfg(test)]
@@ -70,6 +74,8 @@ impl GpuExportProcessor {
                     "\n",
                     include_str!("../color_adjustments.wgsl"),
                     "\n",
+                    include_str!("../masks/masks.wgsl"),
+                    "\n",
                     include_str!("output.wgsl")
                 )
                 .into(),
@@ -91,6 +97,8 @@ impl GpuExportProcessor {
                     include_str!("../preview.wgsl"),
                     "\n",
                     include_str!("../color_adjustments.wgsl"),
+                    "\n",
+                    include_str!("../masks/masks.wgsl"),
                     "\n",
                     include_str!("../spatial/spatial.wgsl"),
                     "\n",
@@ -114,6 +122,8 @@ impl GpuExportProcessor {
                     include_str!("../preview.wgsl"),
                     "\n",
                     include_str!("../color_adjustments.wgsl"),
+                    "\n",
+                    include_str!("../masks/masks.wgsl"),
                     "\n",
                     include_str!("../spatial/spatial.wgsl"),
                     "\n",
@@ -407,13 +417,17 @@ impl GpuExportProcessor {
             0,
             bytemuck::cast_slice(&parameters),
         );
-        self.processor
-            .upload_recipe_luts(recipe, resolved.profile_look.as_ref());
+        let brushes = self.processor.upload_recipe_tables(
+            recipe,
+            resolved.profile_look.as_ref(),
+            (source_width, source_height),
+        )?;
         let target = size.resolve(width, height);
         if target != (width, height) || sharpening.is_some() {
             return self.render_staged(
                 source,
-                (width, height),
+                geometry,
+                &brushes,
                 target,
                 depth,
                 dithering,
@@ -422,6 +436,14 @@ impl GpuExportProcessor {
                 spatial_metrics,
             );
         }
+        let mut coverage = BandCoverage::new(
+            &self.processor.device,
+            &brushes,
+            (source_width, source_height),
+            geometry,
+            BAND_ROWS,
+            MEMORY_BUDGET,
+        )?;
 
         let band_bytes = width as u64 * u64::from(BAND_ROWS) * 12;
         let output_peak = source
@@ -429,10 +451,11 @@ impl GpuExportProcessor {
             .saturating_add(band_bytes.saturating_mul(2))
             .saturating_add(64 * 1024);
         let estimated_gpu_bytes = output_peak
+            .saturating_add(coverage.reserved_bytes())
             .max(spatial_metrics.estimated_gpu_bytes)
             .max(spatial_metrics.capture.estimated_gpu_bytes);
         if estimated_gpu_bytes > MEMORY_BUDGET {
-            return Err(GpuPreviewError::Unsupported {
+            return Err(GpuPreviewError::OverBudget {
                 reason: format!(
                     "resident export needs an estimated {estimated_gpu_bytes} GPU bytes; budget is {MEMORY_BUDGET}"
                 ),
@@ -449,9 +472,10 @@ impl GpuExportProcessor {
                 source_pixels * 12
             }
             + output_pixels * 3 * u64::from(depth.bits() / 8)
-            + band_bytes;
+            + band_bytes
+            + coverage.cpu_bytes();
         if estimated_cpu_bytes > rohditor_core::CPU_WORKING_SET_LIMIT_BYTES as u64 {
-            return Err(GpuPreviewError::Unsupported {
+            return Err(GpuPreviewError::OverBudget {
                 reason: format!(
                     "export CPU buffers need {estimated_cpu_bytes} bytes, exceeding the CPU working-set budget"
                 ),
@@ -483,7 +507,7 @@ impl GpuExportProcessor {
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             },
         );
-        let shared = self.shared_bindings(&self.spatial_pipeline, source);
+        let shared = self.shared_bindings(&self.spatial_pipeline, source, coverage.view());
         let output_bindings = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("resident export output bindings"),
             layout: &self.spatial_pipeline.get_bind_group_layout(1),
@@ -514,6 +538,7 @@ impl GpuExportProcessor {
                 (1, &output_bindings),
                 (2, &shared.camera),
             ],
+            &mut coverage,
         )?;
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("resident export failure readback"),
@@ -537,7 +562,7 @@ impl GpuExportProcessor {
             color_and_readback_time: started.elapsed(),
             estimated_gpu_bytes,
             estimated_cpu_bytes,
-            uploaded_bytes: spatial_metrics.uploaded_bytes,
+            uploaded_bytes: spatial_metrics.uploaded_bytes + coverage.uploaded_bytes(),
             readback_bytes: output_pixels * 12 + 4 + spatial_metrics.readback_bytes,
             submissions: spatial_metrics.submissions + (height as u32).div_ceil(BAND_ROWS) + 1,
         })
@@ -549,6 +574,7 @@ impl GpuExportProcessor {
         &self,
         pipeline: &wgpu::ComputePipeline,
         source: &crate::GpuSpatialFullSource,
+        coverage: Option<&wgpu::TextureView>,
     ) -> SharedBindings {
         let device = &self.processor.device;
         let queue = &self.processor.queue;
@@ -589,7 +615,7 @@ impl GpuExportProcessor {
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
-                    resource: self.processor.light_tone_lut.as_entire_binding(),
+                    resource: self.processor.adjustment_tables.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 5,
@@ -598,6 +624,12 @@ impl GpuExportProcessor {
                 wgpu::BindGroupEntry {
                     binding: 6,
                     resource: self.processor.profile_tables.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::TextureView(
+                        coverage.unwrap_or(&self.processor.empty_coverage),
+                    ),
                 },
             ],
         });
@@ -642,7 +674,7 @@ impl GpuExportProcessor {
             || band > u64::from(limits.max_storage_buffer_binding_size)
             || w.max(h).div_ceil(WORKGROUP_EDGE) > limits.max_compute_workgroups_per_dimension
         {
-            return Err(GpuPreviewError::Unsupported {
+            return Err(GpuPreviewError::OverBudget {
                 reason: format!(
                     "export {w}x{h} needs an estimated {bytes} GPU bytes; budget is {MEMORY_BUDGET}, or a buffer/dispatch limit was exceeded"
                 ),
@@ -679,7 +711,7 @@ impl GpuExportProcessor {
                 * 12)
             .max(prepared.preparation_peak_bytes() as u64);
         if estimated_cpu_bytes > rohditor_core::CPU_WORKING_SET_LIMIT_BYTES as u64 {
-            return Err(GpuPreviewError::Unsupported {
+            return Err(GpuPreviewError::OverBudget {
                 reason: format!(
                     "export CPU buffers need {estimated_cpu_bytes} bytes, exceeding the CPU working-set budget"
                 ),
@@ -729,8 +761,19 @@ impl GpuExportProcessor {
             0,
             bytemuck::cast_slice(&parameters),
         );
-        self.processor
-            .upload_recipe_luts(recipe, profile_look.as_ref());
+        let brushes = self.processor.upload_recipe_tables(
+            recipe,
+            profile_look.as_ref(),
+            source.source_dimensions(),
+        )?;
+        let mut coverage = BandCoverage::new(
+            &self.processor.device,
+            &brushes,
+            source.source_dimensions(),
+            geometry,
+            BAND_ROWS,
+            MEMORY_BUDGET,
+        )?;
         let band_bytes = width as u64 * u64::from(BAND_ROWS) * 12;
         let output = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("rohditor export integer band"),
@@ -775,7 +818,7 @@ impl GpuExportProcessor {
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
-                    resource: self.processor.light_tone_lut.as_entire_binding(),
+                    resource: self.processor.adjustment_tables.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 5,
@@ -784,6 +827,12 @@ impl GpuExportProcessor {
                 wgpu::BindGroupEntry {
                     binding: 6,
                     resource: self.processor.profile_tables.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::TextureView(
+                        coverage.view().unwrap_or(&self.processor.empty_coverage),
+                    ),
                 },
             ],
         });
@@ -797,6 +846,7 @@ impl GpuExportProcessor {
             &staging,
             &band_parameters,
             &bindings,
+            &mut coverage,
         )?;
         Ok(GpuExportResult {
             combined_gpu_reservations: crate::gpu_memory_reservations(),
@@ -806,9 +856,10 @@ impl GpuExportProcessor {
             preparation: prepared.timings(),
             upload_time,
             color_and_readback_time: started.elapsed(),
-            estimated_gpu_bytes,
-            estimated_cpu_bytes,
-            uploaded_bytes: u64::from(source.width) * u64::from(source.height) * 16,
+            estimated_gpu_bytes: estimated_gpu_bytes + coverage.reserved_bytes(),
+            estimated_cpu_bytes: estimated_cpu_bytes + coverage.cpu_bytes(),
+            uploaded_bytes: u64::from(source.width) * u64::from(source.height) * 16
+                + coverage.uploaded_bytes(),
             readback_bytes: width as u64 * height as u64 * 12,
             submissions: (height as u32).div_ceil(BAND_ROWS),
         })

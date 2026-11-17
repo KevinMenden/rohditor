@@ -2885,6 +2885,7 @@ dependencies = [
  "rohditor-highlight",
  "rohditor-image",
  "rohditor-look",
+ "rohditor-mask",
  "rohditor-optics",
  "rohditor-raw",
  "serde",
@@ -2900,6 +2901,8 @@ dependencies = [
  "criterion",
  "rayon",
  "rohditor-image",
+ "serde",
+ "serde_json",
  "thiserror 2.0.20",
 ]
 
@@ -2973,6 +2976,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rohditor-gainmap"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "rayon",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "rohditor-gpu"
 version = "0.1.0"
 dependencies = [
@@ -2980,6 +2992,7 @@ dependencies = [
  "half",
  "image",
  "pollster",
+ "rayon",
  "rohditor-camera-profile",
  "rohditor-color",
  "rohditor-core",
@@ -2988,6 +3001,7 @@ dependencies = [
  "rohditor-edit",
  "rohditor-highlight",
  "rohditor-image",
+ "rohditor-mask",
  "rohditor-raw",
  "serde_json",
  "thiserror 2.0.20",
@@ -3028,6 +3042,7 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "rayon",
+ "rohditor-color",
  "rohditor-edit",
  "thiserror 2.0.20",
 ]
@@ -3062,8 +3077,10 @@ dependencies = [
 name = "rohditor-reference"
 version = "0.1.0"
 dependencies = [
+ "rohditor-core",
  "rohditor-demosaic",
  "rohditor-detail",
+ "rohditor-edit",
  "rohditor-image",
  "rohditor-raw",
  "thiserror 2.0.20",

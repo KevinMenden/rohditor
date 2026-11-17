@@ -64,7 +64,7 @@ fn developed_pixel(cropped: vec2<u32>) -> vec3<f32> {
         corrected_channel(source, 1u),
         corrected_channel(source, 2u),
     );
-    return develop_camera_color(camera_native);
+    return develop_camera_color(camera_native, source);
 }
 
 fn encoded_at(row_in_band: u32, x: u32) -> vec3<f32> {

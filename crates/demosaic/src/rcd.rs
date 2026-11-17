@@ -6,13 +6,15 @@
 //! is not available.
 
 use super::rcd_geometry::{
-    RCD_BORDER as BORDER, RCD_MIN_DIMENSION, RCD_TILE_SIZE as TILE_SIZE, rcd_tiles,
+    RCD_BORDER as BORDER, RCD_TILE_SIZE as TILE_SIZE, RcdTileGeometry, rcd_tiles,
 };
 use super::{
     CancellationCheck, DemosaicError, WhiteBalanceGains, bilinear, checkpoint,
     require_finite_output,
 };
+use rayon::prelude::*;
 use rohditor_image::{BayerPattern, MosaicImage, allocate_zeroed_f32};
+use std::sync::{Mutex, PoisonError};
 
 use super::rcd_stages::{
     calculate_low_pass, find_directions, interpolate_green, interpolate_red_blue,
@@ -36,19 +38,36 @@ pub(super) fn reconstruct(
     row_stride: usize,
     output: &mut [f32],
 ) -> Result<(), DemosaicError> {
-    // This gives RCD a deterministic edge policy and means narrow images do
-    // not need special-case indexing in the directional stages.
-    bilinear::reconstruct(mosaic, gains, cancellation, row_stride, output)?;
+    // Pixels outside every tile core (the outer ring and any partial tile
+    // without a complete neighbourhood) keep the bilinear result. This gives
+    // RCD a deterministic edge policy and means narrow images do not need
+    // special-case indexing in the directional stages. The cores themselves
+    // are overwritten below, so bilinear skips them.
+    let tiles: Vec<RcdTileGeometry> = rcd_tiles(mosaic.width(), mosaic.height()).collect();
+    let covered = tiles
+        .iter()
+        .fold((BORDER, BORDER, 0, 0), |(x0, y0, x1, y1), tile| {
+            let (_, _, right, bottom) = tile.core();
+            (x0, y0, x1.max(right), y1.max(bottom))
+        });
+    let interior = (!tiles.is_empty()).then_some((covered.0..covered.2, covered.1..covered.3));
+    bilinear::reconstruct_outside(mosaic, gains, interior, cancellation, row_stride, output)?;
 
-    let mut scratch = if mosaic.width() > RCD_MIN_DIMENSION && mosaic.height() > RCD_MIN_DIMENSION {
-        Some(RcdScratch::new()?)
-    } else {
-        None
-    };
-    for geometry in rcd_tiles(mosaic.width(), mosaic.height()) {
+    // Tiles are independent and their cores are disjoint, so each task owns
+    // the output rows of its core and the result does not depend on the
+    // thread count. Scratch sets are large and zero-filled per tile, so
+    // finished tiles return theirs to a pool (one set per running tile).
+    let jobs = tile_jobs(&tiles, row_stride, output);
+    let pool = Mutex::new(Vec::<RcdScratch>::new());
+    jobs.into_par_iter().try_for_each(|job| {
         checkpoint(cancellation)?;
-        let scratch = scratch.as_mut().expect("eligible RCD tile has scratch");
+        let pooled = pool.lock().unwrap_or_else(PoisonError::into_inner).pop();
+        let mut scratch = match pooled {
+            Some(scratch) => scratch,
+            None => RcdScratch::new()?,
+        };
         scratch.clear();
+        let geometry = job.geometry;
         let tile = RcdTile {
             origin_x: geometry.origin_x,
             origin_y: geometry.origin_y,
@@ -58,22 +77,77 @@ pub(super) fn reconstruct(
                 .pattern()
                 .shifted(geometry.origin_x, geometry.origin_y),
         };
-        populate(scratch, mosaic, tile, cancellation)?;
-        find_directions(scratch, tile.width, tile.height, cancellation)?;
-        calculate_low_pass(scratch, tile.pattern, tile.width, tile.height, cancellation)?;
-        interpolate_green(scratch, tile.pattern, tile.width, tile.height, cancellation)?;
-        interpolate_red_blue(scratch, tile.pattern, tile.width, tile.height, cancellation)?;
-        write_tile(
-            scratch,
-            mosaic,
-            gains,
-            tile,
-            row_stride,
-            output,
+        populate(&mut scratch, mosaic, tile, cancellation)?;
+        find_directions(&mut scratch, tile.width, tile.height, cancellation)?;
+        calculate_low_pass(
+            &mut scratch,
+            tile.pattern,
+            tile.width,
+            tile.height,
             cancellation,
         )?;
+        interpolate_green(
+            &mut scratch,
+            tile.pattern,
+            tile.width,
+            tile.height,
+            cancellation,
+        )?;
+        interpolate_red_blue(
+            &mut scratch,
+            tile.pattern,
+            tile.width,
+            tile.height,
+            cancellation,
+        )?;
+        write_tile(&scratch, mosaic, gains, tile, job.rows, cancellation)?;
+        pool.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(scratch);
+        Ok(())
+    })
+}
+
+/// One tile's share of the output: for each row of the tile's core, the
+/// output samples of that core's columns.
+struct TileJob<'a> {
+    geometry: RcdTileGeometry,
+    rows: Vec<&'a mut [f32]>,
+}
+
+/// Split `output` into one job per tile. `tiles` must be in the row-major
+/// order of `rcd_tiles`, so tiles of one band share their core rows and the
+/// bands follow each other from the first core row downwards.
+fn tile_jobs<'a>(
+    tiles: &[RcdTileGeometry],
+    row_stride: usize,
+    output: &'a mut [f32],
+) -> Vec<TileJob<'a>> {
+    let mut jobs = Vec::with_capacity(tiles.len());
+    let mut remaining = output.get_mut(BORDER * row_stride..).unwrap_or_default();
+    for band in tiles.chunk_by(|a, b| a.origin_y == b.origin_y) {
+        let (first_x, top, _, bottom) = band[0].core();
+        let band_rows = bottom - top;
+        let (rows, rest) = remaining.split_at_mut(band_rows * row_stride);
+        remaining = rest;
+
+        let mut columns: Vec<Vec<&mut [f32]>> = band.iter().map(|_| Vec::new()).collect();
+        for row in rows.chunks_mut(row_stride) {
+            let mut row = &mut row[first_x * 3..];
+            for (tile, column) in band.iter().zip(&mut columns) {
+                let (left, _, right, _) = tile.core();
+                let (head, tail) = row.split_at_mut((right - left) * 3);
+                column.push(head);
+                row = tail;
+            }
+        }
+        jobs.extend(
+            band.iter()
+                .zip(columns)
+                .map(|(&geometry, rows)| TileJob { geometry, rows }),
+        );
     }
-    Ok(())
+    jobs
 }
 
 #[derive(Clone, Copy)]
@@ -156,18 +230,18 @@ fn populate(
     Ok(())
 }
 
+/// Write the core of `tile` to `rows`, one slice per core row.
 fn write_tile(
     scratch: &RcdScratch,
     mosaic: &MosaicImage<f32>,
     gains: WhiteBalanceGains,
     tile: RcdTile,
-    row_stride: usize,
-    output: &mut [f32],
+    rows: Vec<&mut [f32]>,
     cancellation: &dyn CancellationCheck,
 ) -> Result<(), DemosaicError> {
-    for local_y in BORDER..tile.height - BORDER {
+    for (local_y, row) in (BORDER..tile.height - BORDER).zip(rows) {
         checkpoint(cancellation)?;
-        for local_x in BORDER..tile.width - BORDER {
+        for (local_x, pixel) in (BORDER..tile.width - BORDER).zip(row.as_chunks_mut::<3>().0) {
             let index = local_y * TILE_SIZE + local_x;
             let global_x = tile.origin_x + local_x;
             let global_y = tile.origin_y + local_y;
@@ -187,8 +261,7 @@ fn write_tile(
             rgb[measured_channel] = *mosaic.sample(global_x, global_y);
             gains.apply(&mut rgb);
             require_finite_output(&rgb, global_x, global_y)?;
-            let output_index = global_y * row_stride + global_x * 3;
-            output[output_index..output_index + 3].copy_from_slice(&rgb);
+            *pixel = rgb;
         }
     }
     Ok(())

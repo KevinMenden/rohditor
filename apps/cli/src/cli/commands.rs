@@ -25,7 +25,7 @@ use rohditor_edit::{
     TEMPERATURE_RANGE, TINT_RANGE, TONE_CURVE_RANGE, VIBRANCE_RANGE, WHITES_RANGE, WhiteBalance,
 };
 use rohditor_gpu::{ExportBackend, ExportRender, FallbackExporter};
-use rohditor_image::{DisplayRgbImage, DisplayTransfer, Orientation};
+use rohditor_image::{DisplayColorSpace, DisplayRgbImage, Orientation};
 use rohditor_raw::{
     EncodedPreviewFormat, ImageRect, PhotometricInterpretation, RawDecoder, RawFileInfo,
     RawlerDecoder,
@@ -34,6 +34,7 @@ use serde::{Deserialize, Serialize};
 use tracing_subscriber::EnvFilter;
 
 use super::detail_compare::{DetailStage, StageSettings, detail_compare};
+use super::detail_corpus::detail_corpus;
 use super::highlight_compare::highlight_compare;
 use super::look_report::{fit_recipe_camera_tone, look_report};
 
@@ -347,6 +348,31 @@ enum Command {
         /// Also score every readable RAW file in this directory.
         #[arg(long, value_name = "RAW_DIR")]
         raw_dir: Option<PathBuf>,
+    },
+
+    /// Render a grid of detail settings (noise reduction, false colour,
+    /// defringe, capture sharpening) on the quality-crop manifest, and write
+    /// 1:1 before/after sheets with the noise profile and timings per file.
+    DetailCorpus {
+        /// JSON manifest containing private source names and crop coordinates.
+        #[arg(value_name = "MANIFEST")]
+        manifest: PathBuf,
+
+        /// Directory containing the private RAW sources named by the manifest.
+        #[arg(value_name = "CORPUS_DIR")]
+        corpus: PathBuf,
+
+        /// Destination directory for the sheet PNGs and report.json.
+        #[arg(value_name = "OUTPUT_DIR")]
+        output: PathBuf,
+
+        /// CPU demosaic algorithm used for every preset.
+        #[arg(long, value_enum, default_value_t = CliDemosaic::Amaze)]
+        demosaic: CliDemosaic,
+
+        /// Replace existing generated files and report.json.
+        #[arg(long)]
+        force: bool,
     },
 
     /// Render every highlight method on the quality-crop manifest and report
@@ -768,6 +794,13 @@ pub(crate) fn run() -> Result<()> {
             },
             raw_dir.as_deref(),
         ),
+        Command::DetailCorpus {
+            manifest,
+            corpus,
+            output,
+            demosaic,
+            force,
+        } => detail_corpus(&manifest, &corpus, &output, demosaic.into(), force),
         Command::HighlightCompare {
             manifest,
             corpus,
@@ -1320,23 +1353,25 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
             stats.affected_by_channel[2],
         ),
         HighlightDiagnostics::LocalRatios(stats) => format!(
-            "Highlight Local ratios: {} suspected, {} reconstructed, {} changed, {} fallback, {} fully unsupported (R {}, G {}, B {})",
+            "Highlight Local ratios: {} suspected, {} reconstructed, {} changed, {} fallback, {} fully unsupported, {} neutralised (R {}, G {}, B {})",
             stats.suspected_clipped_sites,
             stats.reconstructed_sites,
             stats.changed_sites,
             stats.fallback_sites,
             stats.fully_unsupported_sites,
+            stats.neutralised_sites,
             stats.suspected_by_channel[0],
             stats.suspected_by_channel[1],
             stats.suspected_by_channel[2],
         ),
         HighlightDiagnostics::Opposed(stats) => format!(
-            "Highlight Opposed: {} suspected, {} reconstructed, {} changed, {} fallback, {} fully unsupported (R {}, G {}, B {})",
+            "Highlight Opposed: {} suspected, {} reconstructed, {} changed, {} fallback, {} fully unsupported, {} neutralised (R {}, G {}, B {})",
             stats.suspected_clipped_sites,
             stats.reconstructed_sites,
             stats.changed_sites,
             stats.fallback_sites,
             stats.fully_unsupported_sites,
+            stats.neutralised_sites,
             stats.suspected_by_channel[0],
             stats.suspected_by_channel[1],
             stats.suspected_by_channel[2],
@@ -1945,7 +1980,7 @@ pub(super) fn crop_display_image(
         crop.width,
         crop.height,
         row_stride,
-        image.transfer(),
+        image.color_space(),
         pixels,
     )?)
 }
@@ -1979,7 +2014,7 @@ fn nearest_neighbor_2x(image: &DisplayRgbImage<u8>) -> Result<DisplayRgbImage<u8
         width,
         height,
         row_stride,
-        DisplayTransfer::Srgb,
+        DisplayColorSpace::SRGB,
         pixels,
     )?)
 }
@@ -2291,7 +2326,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use clap::Parser;
-    use rohditor_image::{DisplayRgbImage, DisplayTransfer};
+    use rohditor_image::{DisplayColorSpace, DisplayRgbImage};
     use rohditor_raw::{CfaPattern, EncodedPreviewFormat, PhotometricInterpretation};
 
     use super::{
@@ -2766,7 +2801,7 @@ mod tests {
             3,
             2,
             9,
-            DisplayTransfer::Srgb,
+            DisplayColorSpace::SRGB,
             vec![
                 1, 2, 3, 4, 5, 6, 7, 8, 9, // row 0
                 10, 11, 12, 13, 14, 15, 16, 17, 18, // row 1

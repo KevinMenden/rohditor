@@ -22,6 +22,10 @@ pub struct AppSettings {
     /// Disables all GPU image processing. Read once at startup, so a change
     /// takes effect on the next launch.
     cpu_only: bool,
+    /// Estimate each newly opened photo's noise and start it with colour noise
+    /// reduction when it is noisy enough to matter. Photos with saved edits
+    /// keep what they have.
+    auto_noise_reduction: bool,
 }
 
 impl Default for AppSettings {
@@ -31,6 +35,7 @@ impl Default for AppSettings {
             demosaic: DemosaicAlgorithm::Amaze,
             output_policy: OutputPolicy::ClipToSrgb,
             cpu_only: false,
+            auto_noise_reduction: true,
         }
     }
 }
@@ -61,6 +66,14 @@ impl AppSettings {
         self.cpu_only = cpu_only;
     }
 
+    pub const fn auto_noise_reduction(self) -> bool {
+        self.auto_noise_reduction
+    }
+
+    pub fn set_auto_noise_reduction(&mut self, enabled: bool) {
+        self.auto_noise_reduction = enabled;
+    }
+
     pub fn render_options(self) -> RenderOptions {
         RenderOptions {
             demosaic: self.demosaic,
@@ -85,6 +98,8 @@ struct StoredSettings {
     output_policy: Option<String>,
     #[serde(default)]
     cpu_only: Option<bool>,
+    #[serde(default)]
+    auto_noise_reduction: Option<bool>,
 }
 
 /// Load settings from `config_directory`; `None` means the application could
@@ -176,6 +191,7 @@ fn decode(bytes: &[u8]) -> Result<AppSettings, String> {
         demosaic,
         output_policy,
         cpu_only: stored.cpu_only.unwrap_or(false),
+        auto_noise_reduction: stored.auto_noise_reduction.unwrap_or(true),
     })
 }
 
@@ -197,6 +213,7 @@ fn save_to_path(path: &Path, settings: AppSettings) -> io::Result<()> {
             .to_owned(),
         ),
         cpu_only: Some(settings.cpu_only),
+        auto_noise_reduction: Some(settings.auto_noise_reduction),
     };
     let mut bytes = serde_json::to_vec_pretty(&stored).map_err(io::Error::other)?;
     bytes.push(b'\n');
@@ -289,6 +306,21 @@ mod tests {
         save_to_path(&path, settings).expect("save cpu-only setting");
         let text = fs::read_to_string(&path).expect("read saved settings");
         assert!(text.contains("\"cpu_only\": true"));
+        assert_eq!(load_from_path(&path).settings, settings);
+    }
+
+    #[test]
+    fn auto_noise_reduction_defaults_to_on_and_round_trips() {
+        let defaults = decode(br#"{"schema_version":1}"#).expect("missing field uses default");
+        assert!(defaults.auto_noise_reduction());
+
+        let directory = TestDirectory::new();
+        let path = directory.path().join("settings.json");
+        let mut settings = AppSettings::default();
+        settings.set_auto_noise_reduction(false);
+        save_to_path(&path, settings).expect("save auto noise reduction setting");
+        let text = fs::read_to_string(&path).expect("read saved settings");
+        assert!(text.contains("\"auto_noise_reduction\": false"));
         assert_eq!(load_from_path(&path).settings, settings);
     }
 

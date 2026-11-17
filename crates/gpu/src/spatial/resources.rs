@@ -150,7 +150,7 @@ impl ResidentLayout {
                 }
             }
         }
-        best.ok_or_else(|| GpuPreviewError::Unsupported {
+        best.ok_or_else(|| GpuPreviewError::OverBudget {
             reason: format!(
                 "camera source {width}x{height} cannot fit a tiled planar R32Float backing and minimum work unit within the {budget}-byte budget/device limits"
             ),

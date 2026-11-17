@@ -163,6 +163,33 @@ impl SpatialCache {
         cpu.complete_camera_source(captured, cancellation)
     }
 
+    /// A local detail copy of the image: the same camera source, other detail settings.
+    pub fn prepare_local_detail(
+        &self,
+        cpu: &CpuPipeline,
+        frame: &RawFrame,
+        variant: &EditRecipe,
+        options: PreviewOptions,
+        keys: &PreviewCacheKeys,
+        cancellation: &CancellationToken,
+    ) -> Result<ReconstructedPreview, PipelineError> {
+        let key = PreCaptureKey {
+            decoded: keys.decoded.clone(),
+            crop: options.render.raw_crop_policy,
+            demosaic: options.render.demosaic,
+            highlight: keys.reconstructed.highlight.clone(),
+            profile: camera_profile_key(&variant.color.camera_profile),
+            version: keys.reconstructed.reconstruction_version,
+        };
+        let source = match &self.source {
+            Some((stored, source)) if *stored == key => {
+                source.clone().with_recipe(variant, options)?
+            }
+            _ => cpu.prepare_camera_source(frame, variant, options, cancellation)?,
+        };
+        cpu.complete_camera_source(source.capture_cpu(cancellation)?, cancellation)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn prepare_gpu(
         &mut self,
@@ -276,8 +303,10 @@ impl SpatialCache {
             Err(GpuPreviewError::Cancelled) => return Err(GpuPreviewError::Cancelled),
             Err(error) => {
                 self.sensor_source = None;
-                self.sensor = None;
-                if !matches!(error, GpuPreviewError::UnsupportedEdits { .. }) {
+                // Routing answers (an unsupported recipe, or one that does not fit the
+                // budget) leave the device healthy, so its processors stay.
+                if !error.is_routing() {
+                    self.sensor = None;
                     self.gpu = None;
                     self.gpu_display = None;
                 }
@@ -519,9 +548,11 @@ impl SpatialCache {
             self.recovery = Some(error.to_string());
             self.gpu_captured = None;
             self.sensor_source = None;
-            self.sensor = None;
-            self.gpu = None;
-            self.gpu_display = None;
+            if !error.is_routing() {
+                self.sensor = None;
+                self.gpu = None;
+                self.gpu_display = None;
+            }
         }
     }
 }
@@ -562,8 +593,28 @@ mod tests {
         assert!(cache.gpu_display.is_none());
         assert!(cache.gpu_captured.is_none());
     }
+
+    #[test]
+    fn a_recipe_over_budget_schedules_cpu_recovery_and_drops_resident_images() {
+        let mut cache = SpatialCache::default();
+        cache.record_gpu_result::<()>(&Err(GpuPreviewError::OverBudget {
+            reason: "48 MP with defringe".into(),
+        }));
+        assert!(
+            cache
+                .recovery
+                .as_deref()
+                .is_some_and(|reason| reason.contains("48 MP with defringe"))
+        );
+        assert!(cache.gpu_captured.is_none());
+        assert!(cache.sensor_source.is_none());
+    }
 }
 
 #[cfg(test)]
 #[path = "sensor_tests.rs"]
 mod sensor_tests;
+
+#[cfg(test)]
+#[path = "detail_latency_tests.rs"]
+mod detail_latency_tests;

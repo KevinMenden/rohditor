@@ -1,0 +1,24 @@
+{
+  "common": {
+    "algorithm": "rcd",
+    "algorithm_version": 3,
+    "width": 96,
+    "height": 80,
+    "patterns": ["Rggb", "Bggr", "Grbg", "Gbrg"],
+    "interior_border": 16,
+    "balance": "identity",
+    "metric": "PSNR in dB vs the analytic ground truth, pooled over the 4 patterns, camera-native RGB, interior only",
+    "provenance": "measured on x86-64 Linux, Rust 1.99, at f0a289527b227b47f949c3f7a93b35dfe88ce110, with the fixtures in rcd_clean_baseline.rs (same analytic definitions as demosaic_quality.rs); floors = measured minus margin for cross-platform f32/libm drift",
+    "regenerate": "cargo test -p rohditor-demosaic --test rcd_clean_baseline -- --nocapture prints measured values; verify the algorithm change against crates/reference (level1_clean_fixtures), bump algorithm_version in lib.rs, then update measured_* and floors in this file",
+    "recorded": "2026-11-09"
+  },
+  "fixtures": [
+    { "id": "slanted-edge",       "measured_rcd_psnr_db": 53.34, "measured_bilinear_psnr_db": 37.85, "min_rcd_psnr_db": 52.5, "min_improvement_over_bilinear_db": 14.7 },
+    { "id": "curved-edge",        "measured_rcd_psnr_db": 52.22, "measured_bilinear_psnr_db": 36.52, "min_rcd_psnr_db": 51.4, "min_improvement_over_bilinear_db": 14.9 },
+    { "id": "zone-plate",         "measured_rcd_psnr_db": 12.68, "measured_bilinear_psnr_db": 11.02, "min_rcd_psnr_db": 11.8, "min_improvement_over_bilinear_db": 0.9 },
+    { "id": "one-pixel-lines",    "measured_rcd_psnr_db": 20.17, "measured_bilinear_psnr_db": 12.85, "min_rcd_psnr_db": 19.3, "min_improvement_over_bilinear_db": 6.6 },
+    { "id": "saturated-boundary", "measured_rcd_psnr_db": 40.58, "measured_bilinear_psnr_db": 34.15, "min_rcd_psnr_db": 39.7, "min_improvement_over_bilinear_db": 5.7 },
+    { "id": "smooth-gradient",    "measured_rcd_psnr_db": 100.03, "measured_bilinear_psnr_db": 155.78, "min_rcd_psnr_db": 60.0, "min_improvement_over_bilinear_db": 0.0 },
+    { "id": "noise",              "measured_rcd_psnr_db": 28.46, "measured_bilinear_psnr_db": 26.44, "min_rcd_psnr_db": 27.6, "min_improvement_over_bilinear_db": 1.3 }
+  ]
+}

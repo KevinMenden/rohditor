@@ -48,6 +48,7 @@ fn local_ratio_fixture(pattern: BayerPattern) -> MosaicImage<f32> {
 fn options() -> LocalRatioOptions {
     LocalRatioOptions {
         detection_levels: levels(0.9),
+        neutral_ceiling: None,
     }
 }
 
@@ -297,6 +298,7 @@ fn lower_bound_and_recovery_bound_are_conservative() {
         mosaic,
         LocalRatioOptions {
             detection_levels: levels(0.9),
+            neutral_ceiling: None,
         },
     )
     .expect("lower-bound reconstruction");
@@ -318,6 +320,7 @@ fn lower_bound_and_recovery_bound_are_conservative() {
         pathological,
         LocalRatioOptions {
             detection_levels: levels(0.9),
+            neutral_ceiling: None,
         },
     )
     .expect("bounded reconstruction");
@@ -348,6 +351,7 @@ fn invalid_levels_and_non_finite_visible_samples_are_rejected() {
                 red: f32::NAN,
                 ..levels(0.9)
             },
+            neutral_ceiling: None,
         },
     )
     .expect_err("invalid threshold");
@@ -391,4 +395,255 @@ fn cancellation_is_checked_before_and_during_processing() {
     .expect_err("cancellation should interrupt reconstruction");
     assert_eq!(error, HighlightError::Cancelled);
     assert!(checks.load(Ordering::Relaxed) >= 2);
+}
+
+fn ceilings(red: f32, green: f32, blue: f32) -> rohditor_highlight::ChannelClipLevels {
+    rohditor_highlight::ChannelClipLevels { red, green, blue }
+}
+
+fn local_options_with_ceiling(
+    ceiling: Option<rohditor_highlight::ChannelClipLevels>,
+) -> LocalRatioOptions {
+    LocalRatioOptions {
+        detection_levels: levels(0.9),
+        neutral_ceiling: ceiling,
+    }
+}
+
+/// A 2x2 fully blown cell at the top-left corner of a 4x4 frame: zero
+/// usable support channels, so every suspected site falls back.
+fn blown_cell_fixture() -> MosaicImage<f32> {
+    let mut data = vec![0.2; 4 * 4];
+    data[0] = 1.0;
+    data[1] = 1.0;
+    data[4] = 1.0;
+    data[5] = 1.0;
+    MosaicImage::new(4, 4, 4, BayerPattern::Rggb, data).expect("fixture")
+}
+
+#[test]
+fn neutral_ceiling_none_reproduces_legacy_output_bit_exactly() {
+    let mosaic = blown_cell_fixture();
+    let original = mosaic.clone();
+    let result = reconstruct_local_ratios(mosaic, options()).expect("legacy reconstruction");
+    assert_eq!(result.mosaic.data(), original.data());
+    assert_eq!(result.stats.neutralised_sites, 0);
+    assert_eq!(result.stats.fallback_sites, 4);
+}
+
+#[test]
+fn fallback_sites_above_ceiling_land_exactly_on_it() {
+    let result = reconstruct_local_ratios(
+        blown_cell_fixture(),
+        local_options_with_ceiling(Some(ceilings(0.6, 0.65, 0.7))),
+    )
+    .expect("neutralised reconstruction");
+    assert_eq!(result.stats.fallback_sites, 4);
+    assert_eq!(result.stats.neutralised_sites, 4);
+    assert_eq!(result.stats.changed_sites, 0);
+    assert_eq!(*result.mosaic.sample(0, 0), 0.6);
+    assert_eq!(*result.mosaic.sample(1, 0), 0.65);
+    assert_eq!(*result.mosaic.sample(0, 1), 0.65);
+    assert_eq!(*result.mosaic.sample(1, 1), 0.7);
+}
+
+#[test]
+fn suspected_sites_at_or_below_ceiling_stay_untouched() {
+    let mosaic = blown_cell_fixture();
+    let original = mosaic.clone();
+    let result = reconstruct_local_ratios(
+        mosaic,
+        local_options_with_ceiling(Some(ceilings(1.0, 1.0, 1.0))),
+    )
+    .expect("ceiling == input");
+    assert_eq!(result.mosaic.data(), original.data());
+    assert_eq!(result.stats.neutralised_sites, 0);
+}
+
+#[test]
+fn raised_sites_are_not_lowered_to_the_ceiling() {
+    // The flat-patch fixture raises its clipped red site to ~0.96; a
+    // ceiling below the estimate must leave the raised value alone.
+    let result = reconstruct_local_ratios(
+        local_ratio_fixture(BayerPattern::Rggb),
+        local_options_with_ceiling(Some(ceilings(0.9, 0.9, 0.9))),
+    )
+    .expect("raised-not-lowered");
+    assert_eq!(result.stats.changed_sites, 1);
+    assert_eq!(result.stats.neutralised_sites, 0);
+    assert!(*result.mosaic.sample(4, 4) > 0.9);
+}
+
+#[test]
+fn unsuspected_sites_above_ceiling_are_never_touched() {
+    // Background sites (R 0.6, G 0.5, B 0.25) all sit above a low ceiling
+    // but below the detection level: the neutraliser must not see them.
+    let mosaic = local_ratio_fixture(BayerPattern::Rggb);
+    let original = mosaic.clone();
+    let result = reconstruct_local_ratios(
+        mosaic,
+        local_options_with_ceiling(Some(ceilings(0.5, 0.45, 0.2))),
+    )
+    .expect("unsuspected-above-ceiling");
+    let row_stride = original.row_stride();
+    for y in 0..original.height() {
+        for x in 0..original.width() {
+            if (x, y) == (4, 4) {
+                continue; // the raised site is expected to move
+            }
+            assert_eq!(
+                result.mosaic.data()[y * row_stride + x],
+                original.data()[y * row_stride + x],
+                "at ({x}, {y})"
+            );
+        }
+    }
+    assert_eq!(result.stats.neutralised_sites, 0);
+}
+
+#[test]
+fn reconstructed_but_not_applied_sites_are_neutralised() {
+    // Same shape as `lower_bound_and_recovery_bound_are_conservative`: the
+    // estimate (about 0.96) cannot raise the 1.0 sample, so the site keeps
+    // its raw value — the subtle fallback-for-neutralisation set.
+    let mut mosaic = local_ratio_fixture(BayerPattern::Rggb);
+    let row_stride = mosaic.row_stride();
+    mosaic.data_mut()[4 * row_stride + 4] = 1.0;
+    let result = reconstruct_local_ratios(
+        mosaic,
+        local_options_with_ceiling(Some(ceilings(0.8, 0.9, 0.9))),
+    )
+    .expect("not-applied neutralisation");
+    assert_eq!(result.stats.reconstructed_sites, 1);
+    assert_eq!(result.stats.changed_sites, 0);
+    assert_eq!(result.stats.neutralised_sites, 1);
+    assert_eq!(*result.mosaic.sample(4, 4), 0.8);
+}
+
+#[test]
+fn neutral_ceiling_never_feeds_estimation() {
+    let with_low = reconstruct_local_ratios(
+        blown_cell_fixture(),
+        local_options_with_ceiling(Some(ceilings(0.6, 0.65, 0.7))),
+    )
+    .expect("low ceiling");
+    let with_high = reconstruct_local_ratios(
+        blown_cell_fixture(),
+        local_options_with_ceiling(Some(ceilings(1.0, 1.0, 1.0))),
+    )
+    .expect("high ceiling");
+    assert_eq!(
+        with_low.stats.suspected_clipped_sites,
+        with_high.stats.suspected_clipped_sites
+    );
+    assert_eq!(
+        with_low.stats.reconstructed_sites,
+        with_high.stats.reconstructed_sites
+    );
+    assert_eq!(
+        with_low.stats.fallback_sites,
+        with_high.stats.fallback_sites
+    );
+    assert_eq!(with_low.stats.neutralised_sites, 4);
+    assert_eq!(with_high.stats.neutralised_sites, 0);
+}
+
+#[test]
+fn neutralisation_is_deterministic_on_odd_dimensions_across_threads() {
+    let width = 11;
+    let height = 7;
+    let mut data = vec![0.2; width * height];
+    for y in 0..4 {
+        for x in 0..4 {
+            data[y * width + x] = 1.0;
+        }
+    }
+    let mosaic = MosaicImage::new(width, height, width, BayerPattern::Rggb, data).expect("fixture");
+    let single = ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .expect("thread pool")
+        .install(|| {
+            reconstruct_local_ratios(
+                mosaic.clone(),
+                local_options_with_ceiling(Some(ceilings(0.5, 0.5, 0.5))),
+            )
+        })
+        .expect("single-thread neutralisation");
+    let multiple = ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .expect("thread pool")
+        .install(|| {
+            reconstruct_local_ratios(
+                mosaic,
+                local_options_with_ceiling(Some(ceilings(0.5, 0.5, 0.5))),
+            )
+        })
+        .expect("multi-thread neutralisation");
+    assert_eq!(single, multiple);
+    assert_eq!(single.stats.neutralised_sites, 16);
+}
+
+#[test]
+fn neutralised_sites_aggregate_across_rayon_row_chunks() {
+    let width = 64;
+    let height = 60;
+    let mut data = vec![0.2; width * height];
+    let mut blown_cells = 0;
+    for cell_y in (0..height / 2).step_by(3) {
+        for cell_x in (0..width / 2).step_by(3) {
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    data[(cell_y * 2 + dy) * width + cell_x * 2 + dx] = 1.0;
+                }
+            }
+            blown_cells += 1;
+        }
+    }
+    let mosaic =
+        MosaicImage::new(width, height, width, BayerPattern::Rggb, data).expect("grid fixture");
+    let options = local_options_with_ceiling(Some(ceilings(0.8, 0.8, 0.8)));
+    let single = ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .expect("thread pool")
+        .install(|| reconstruct_local_ratios(mosaic.clone(), options))
+        .expect("single-thread grid neutralisation");
+    let parallel = ThreadPoolBuilder::new()
+        .num_threads(8)
+        .build()
+        .expect("thread pool")
+        .install(|| reconstruct_local_ratios(mosaic, options))
+        .expect("parallel grid neutralisation");
+    assert_eq!(single, parallel);
+    assert_eq!(single.stats.suspected_clipped_sites, blown_cells * 4);
+    assert_eq!(single.stats.neutralised_sites, blown_cells * 4);
+}
+
+#[test]
+fn invalid_neutral_ceilings_are_rejected_before_any_write() {
+    for red in [f32::NAN, 0.0] {
+        let error = reconstruct_local_ratios(
+            blown_cell_fixture(),
+            local_options_with_ceiling(Some(ceilings(red, 0.65, 0.7))),
+        )
+        .expect_err("invalid ceiling");
+        assert!(matches!(
+            error,
+            HighlightError::InvalidLevel { channel: "red", .. }
+        ));
+    }
+    let error = reconstruct_local_ratios(
+        blown_cell_fixture(),
+        local_options_with_ceiling(Some(ceilings(0.6, 0.65, f32::NAN))),
+    )
+    .expect_err("invalid blue ceiling");
+    assert!(matches!(
+        error,
+        HighlightError::InvalidLevel {
+            channel: "blue",
+            value,
+        } if value.is_nan()
+    ));
 }

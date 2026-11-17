@@ -21,8 +21,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BLACKS_RANGE, CONTRAST_RANGE, EXPOSURE_EV_RANGE, EditError, HIGHLIGHTS_RANGE, ParameterRange,
-    SHADOWS_RANGE, WHITES_RANGE,
+    BLACKS_RANGE, CONTRAST_RANGE, ColorRange, EXPOSURE_EV_RANGE, EditError, HIGHLIGHTS_RANGE,
+    LocalDetail, LuminanceRange, MAX_LOCAL_DETAIL_VARIANTS, ParameterRange, SHADOWS_RANGE,
+    WHITES_RANGE, local_detail_count,
 };
 
 /// Most mask layers in one recipe.
@@ -132,6 +133,10 @@ pub enum MaskShape {
     Linear(LinearGradient),
     Radial(RadialGradient),
     Brush(BrushMask),
+    /// Selects by sRGB-encoded luminance of the reference pixel; see `local_range`.
+    Luminance(LuminanceRange),
+    /// Selects by OkLab distance of the reference pixel to sampled colours.
+    Color(ColorRange),
 }
 
 /// Normalized position in the developed frame; see the module docs.
@@ -191,6 +196,18 @@ pub struct LocalSettings {
     pub whites: f32,
     pub blacks: f32,
     pub saturation: f32,
+    pub detail: LocalDetail,
+}
+
+impl MaskLayer {
+    /// True when this layer would change pixels: enabled, visible, shaped and non-neutral.
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        self.enabled
+            && self.opacity > 0.0
+            && !self.components.is_empty()
+            && !self.settings.is_neutral()
+    }
 }
 
 impl LocalSettings {
@@ -229,7 +246,8 @@ impl LocalSettings {
             "local.layers.settings.saturation",
             self.saturation,
             LOCAL_SATURATION_RANGE,
-        )
+        )?;
+        self.detail.validate()
     }
 }
 
@@ -237,12 +255,7 @@ impl LocalAdjustments {
     /// True when at least one layer would change pixels; the pipeline skips the stage otherwise.
     #[must_use]
     pub fn is_active(&self) -> bool {
-        self.layers.iter().any(|layer| {
-            layer.enabled
-                && layer.opacity > 0.0
-                && !layer.components.is_empty()
-                && !layer.settings.is_neutral()
-        })
+        self.layers.iter().any(MaskLayer::is_active)
     }
 
     /// An id no current layer uses (one past the largest). Ids of deleted layers can only be
@@ -308,6 +321,12 @@ impl LocalAdjustments {
                 ));
             }
         }
+        if local_detail_count(&self.layers) > MAX_LOCAL_DETAIL_VARIANTS {
+            return Err(error(
+                "local.layers.settings.detail",
+                format!("at most {MAX_LOCAL_DETAIL_VARIANTS} different settings per recipe"),
+            ));
+        }
         Ok(())
     }
 }
@@ -357,6 +376,13 @@ impl MaskLayer {
 }
 
 impl MaskShape {
+    /// True for shapes that select by image content and so need the pipeline's reference
+    /// pixels; they are usually Intersect components that refine a gradient or brush.
+    #[must_use]
+    pub const fn is_range(&self) -> bool {
+        matches!(self, Self::Luminance(_) | Self::Color(_))
+    }
+
     fn validate(&self) -> Result<(), EditError> {
         match self {
             Self::Linear(gradient) => {
@@ -396,6 +422,8 @@ impl MaskShape {
                     MASK_UNIT_RANGE,
                 )?;
             }
+            Self::Luminance(range) => range.validate()?,
+            Self::Color(range) => range.validate()?,
             Self::Brush(brush) => {
                 if brush.strokes.len() > MAX_BRUSH_STROKES {
                     return Err(error(
@@ -455,11 +483,15 @@ impl BrushStroke {
     }
 }
 
-fn error(field: &'static str, reason: String) -> EditError {
+pub(crate) fn error(field: &'static str, reason: String) -> EditError {
     EditError { field, reason }
 }
 
-fn check(field: &'static str, value: f32, range: ParameterRange) -> Result<(), EditError> {
+pub(crate) fn check(
+    field: &'static str,
+    value: f32,
+    range: ParameterRange,
+) -> Result<(), EditError> {
     if range.contains(value) {
         Ok(())
     } else {

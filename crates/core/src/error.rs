@@ -58,6 +58,9 @@ pub enum PipelineError {
         expected: &'static str,
         actual: &'static str,
     },
+
+    #[error("output headroom {headroom} must be finite and at least 1.0 (diffuse white)")]
+    InvalidHeadroom { headroom: f32 },
 }
 
 impl From<ImageError> for PipelineError {

@@ -55,11 +55,11 @@ impl Reservation {
             let requested =
                 current
                     .checked_add(bytes)
-                    .ok_or_else(|| GpuPreviewError::Unsupported {
+                    .ok_or_else(|| GpuPreviewError::OverBudget {
                         reason: "GPU memory reservation overflowed".to_owned(),
                     })?;
             if requested > budget {
-                return Err(GpuPreviewError::Unsupported {
+                return Err(GpuPreviewError::OverBudget {
                     reason: format!(
                         "GPU working-set budget exhausted: {current} resident bytes plus {bytes} requested bytes exceed the {budget}-byte limit"
                     ),
@@ -78,6 +78,11 @@ impl Reservation {
                 Err(observed) => current = observed,
             }
         }
+    }
+
+    /// Bytes currently held by this reservation.
+    pub(crate) const fn bytes(&self) -> u64 {
+        self.0
     }
 
     /// Release a completed operation's transient allocation while retaining

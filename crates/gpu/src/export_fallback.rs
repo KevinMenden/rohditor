@@ -151,10 +151,99 @@ impl FallbackExporter {
                 capabilities,
             }),
             Err(error) => {
-                // A failed device must not poison later exports.
-                self.gpu = None;
+                // A failed device must not poison later exports. A routing answer (an image
+                // that does not fit, or edits the GPU lacks) is no device failure, so the
+                // device stays for the next export.
+                if !error.is_routing() {
+                    self.gpu = None;
+                }
                 Err(error.to_string())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rohditor_image::Orientation;
+
+    use super::*;
+    use crate::preview::processor::tests::synthetic_frame;
+
+    /// A CPU-only stage (here presence) must route to the CPU without touching a GPU device,
+    /// and must fail a GPU-required export instead of silently rendering it on the CPU.
+    #[test]
+    fn a_cpu_only_stage_never_reaches_the_gpu() {
+        let frame = synthetic_frame(Orientation::Normal);
+        let mut recipe = EditRecipe::default();
+        recipe.presence.clarity = 0.5;
+        let render = |backend| {
+            let mut fallback = None;
+            let result = FallbackExporter::default().render(
+                backend,
+                &CpuPipeline::default(),
+                &frame,
+                &recipe,
+                RenderOptions::default(),
+                OutputBitDepth::Eight,
+                DitherMode::None,
+                OutputSize::Original,
+                None,
+                |reason| fallback = Some(reason.to_owned()),
+            );
+            (result, fallback)
+        };
+
+        let (result, reported) = render(ExportBackend::PreferGpu);
+        assert!(matches!(
+            result,
+            Ok(ExportRender::Cpu {
+                gpu_error: Some(_),
+                ..
+            })
+        ));
+        assert!(reported.is_some_and(|reason| reason.contains("clarity")));
+
+        let (result, _) = render(ExportBackend::RequireGpu);
+        assert!(matches!(result, Err(ExportRenderError::GpuRequired(_))));
+    }
+
+    /// An export that does not fit the GPU budget (here 48 MP with the detail stage, see #30)
+    /// renders on the CPU and keeps the device, so the next export does not create a new one.
+    #[test]
+    #[ignore = "requires Vulkan; renders a 48 MP detail export on the CPU after the GPU refuses it"]
+    fn an_export_over_budget_falls_back_and_keeps_the_device() {
+        let _guard = crate::preview::processor::tests::gpu_test_guard();
+        let frame = crate::masks::test_recipes::colored_frame(8000, 6000, Orientation::Normal);
+        let mut recipe = EditRecipe::default();
+        recipe.noise_reduction.chroma = 0.5;
+        recipe.capture_sharpening.enabled = true;
+        let mut exporter = FallbackExporter::default();
+        let result = exporter
+            .render(
+                ExportBackend::PreferGpu,
+                &CpuPipeline::default(),
+                &frame,
+                &recipe,
+                RenderOptions::default(),
+                OutputBitDepth::Eight,
+                DitherMode::None,
+                OutputSize::LongEdge { pixels: 512 },
+                None,
+                |_| {},
+            )
+            .expect("CPU fallback export");
+        let ExportRender::Cpu {
+            gpu_error: Some(reason),
+            ..
+        } = result
+        else {
+            panic!("48 MP with the detail stage should not fit the GPU budget");
+        };
+        assert!(reason.contains("does not fit"), "{reason}");
+        assert!(
+            matches!(exporter.gpu, Some(Ok(_))),
+            "an over-budget export must keep the device"
+        );
     }
 }

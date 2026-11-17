@@ -294,7 +294,7 @@ fn describe_spatial_completion(
     })
 }
 
-fn prepare_camera_source(
+pub(super) fn prepare_camera_source(
     frame: &RawFrame,
     recipe: &EditRecipe,
     options: PreviewOptions,
@@ -422,7 +422,7 @@ pub(super) fn prepare_reconstructed_preview(
     complete_camera_source(optics, source.capture_cpu(cancellation)?, cancellation)
 }
 
-fn complete_camera_source(
+pub(super) fn complete_camera_source(
     optics: Option<&OpticsService>,
     captured: CapturedCameraSource,
     cancellation: &CancellationToken,
