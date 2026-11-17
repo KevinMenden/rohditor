@@ -2220,43 +2220,17 @@ fn human_readable(output: &InspectionOutput<'_>) -> String {
         "ISO:               {}",
         format_option(info.capture.iso)
     );
-    let _ = writeln!(
-        text,
-        "Exposure time:     {}",
-        info.capture
-            .exposure_time
-            .map_or_else(|| "unknown".to_owned(), |value| format!("{value} s"))
-    );
-    let _ = writeln!(
-        text,
-        "Aperture:          {}",
-        info.capture.aperture.map_or_else(
-            || "unknown".to_owned(),
-            |value| value
-                .as_f64()
-                .map_or_else(|| value.to_string(), |number| format!("f/{number:.1}"))
-        )
-    );
-    let _ = writeln!(
-        text,
-        "Focal length:      {}",
-        info.capture.focal_length.map_or_else(
-            || "unknown".to_owned(),
-            |value| value
-                .as_f64()
-                .map_or_else(|| value.to_string(), |number| format!("{number:.1} mm"))
-        )
-    );
-    let _ = writeln!(
-        text,
-        "Captured at:       {}",
-        info.capture.captured_at.as_deref().unwrap_or("unknown")
-    );
-    let _ = writeln!(
-        text,
-        "Lens:              {}",
-        info.capture.lens_model.as_deref().unwrap_or("unknown")
-    );
+    let capture = &info.capture;
+    let labels = [
+        ("Exposure time:     ", capture.exposure_time_label()),
+        ("Aperture:          ", capture.aperture_label()),
+        ("Focal length:      ", capture.focal_length_label()),
+        ("Captured at:       ", capture.captured_at_label()),
+        ("Lens:              ", capture.lens_label()),
+    ];
+    for (label, value) in labels {
+        let _ = writeln!(text, "{label}{}", value.as_deref().unwrap_or("unknown"));
+    }
     let _ = writeln!(
         text,
         "Embedded preview:  {}",

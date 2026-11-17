@@ -4,6 +4,7 @@
 //! intentional because `rawler` does not currently promise a stable API.
 
 mod decoder;
+mod display;
 mod model;
 mod rawler_adapter;
 
