@@ -145,7 +145,8 @@ enum Command {
         #[arg(long, value_enum, default_value_t = CliHighlightMethod::Clip)]
         highlight_reconstruction: CliHighlightMethod,
 
-        /// Effective normalized white threshold for highlight clipping (0.5 to 1.5).
+        /// Effective normalized white threshold for highlight clipping (0.5 to 1.5);
+        /// levels resolve at threshold x 0.987 safety margin below nominal white.
         #[arg(
             long = "highlight-clip-threshold",
             alias = "highlight-threshold",
@@ -153,7 +154,8 @@ enum Command {
         )]
         highlight_clip_threshold: Option<f32>,
 
-        /// Camera-native detection threshold for Opposed (0.5 to 1.5).
+        /// Camera-native detection threshold for Opposed (0.5 to 1.5);
+        /// detection resolves at threshold x 0.987 safety margin below nominal white.
         #[arg(long, allow_hyphen_values = true)]
         highlight_detection_threshold: Option<f32>,
 

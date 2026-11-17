@@ -490,8 +490,10 @@ fn clip_uses_active_wb_limits_and_reaches_a_common_post_wb_ceiling() -> Result<(
     let base =
         CpuPipeline::default().prepare_preview_base_from_reconstruction(&clipped, &recipe)?;
     let pixel = base.image().pixel(2, 2).expect("interior pixel");
+    // Issue #64: the common ceiling carries the detection safety margin, so
+    // blown sites land just below nominal white, still neutral per channel.
     assert!(
-        pixel.iter().all(|value| (*value - 1.0).abs() < 1.0e-5),
+        pixel.iter().all(|value| (*value - 0.987).abs() < 1.0e-5),
         "{pixel:?}"
     );
     assert_eq!(base.highlight_stats(), clipped.highlight_stats());

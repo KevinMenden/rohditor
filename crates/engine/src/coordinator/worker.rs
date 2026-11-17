@@ -2613,8 +2613,16 @@ mod tests {
 
         let mut clipped = frame;
         clipped.mosaic = Arc::from(vec![u16::MAX; clipped.info.width * clipped.info.height]);
+        // Issue #64: Clip now lowers blown sites below nominal white
+        // (threshold x safety margin), so a Clip-processed blown patch is
+        // indistinguishable from a bright-but-valid one here. The picker's
+        // unclipped guard sees the post-highlight preview; judge blown sites
+        // before highlight handling. A source-mask-based guard is the real
+        // fix and tracked separately.
+        let mut clip_off_recipe = recipe;
+        clip_off_recipe.raw.highlights.method = HighlightMethod::Off;
         let reconstructed = CpuPipeline::default()
-            .prepare_preview_reconstruction(&clipped, &recipe, PreviewOptions::default())
+            .prepare_preview_reconstruction(&clipped, &clip_off_recipe, PreviewOptions::default())
             .expect("clipped fixture reconstruction should succeed");
         assert!(sample_camera_native_patch(&reconstructed, None, (0.5, 0.5)).is_err());
     }

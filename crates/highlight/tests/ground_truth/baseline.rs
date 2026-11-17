@@ -54,7 +54,7 @@ pub struct BaselineRow {
 /// the date of the measurement pass that set it (the date is part of the
 /// meaning: it says which capture the ceiling tracks).
 const RAISED_SLACK: usize = 2;
-const RAISED_SLACK_DATE: &str = "2026-11-04";
+const RAISED_SLACK_DATE: &str = "2026-11-17";
 
 /// Baseline bound for the `raised` column:
 /// - Off/Clip: `Exact(0)` — raises nothing; WB-aware Clip only *lowers*
@@ -299,7 +299,7 @@ use Bound::{AtLeast, AtMost, Exact};
 #[rustfmt::skip]
 pub const BASELINES: &[BaselineRow] = &[
     BaselineRow { scene: "disk_small", sat: 1.00, method: "off", suspected: 9, raised: Exact(0), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 0.754080, p95_abs_logerr_max: 1.028429, hue_max_at_most: 1.526664 },
-    BaselineRow { scene: "disk_small", sat: 1.00, method: "clip", suspected: 9, raised: Exact(0), lowered: AtLeast(1), neutralised: Exact(0), med_abs_logerr_max: 0.754080, p95_abs_logerr_max: 1.028429, hue_max_at_most: 1.526664 },
+    BaselineRow { scene: "disk_small", sat: 1.00, method: "clip", suspected: 9, raised: Exact(0), lowered: AtLeast(5), neutralised: Exact(0), med_abs_logerr_max: 0.773707, p95_abs_logerr_max: 1.048057, hue_max_at_most: 1.567528 },
     // Not recoverable from chroma: truth G is ~6.0 against R/B of ~0.5 behind a
     // ~2 px edge, so estimates stay below the clip level and are never applied
     // (see disk_soft for the region-aware Opposed regime, #66).
@@ -310,9 +310,9 @@ pub const BASELINES: &[BaselineRow] = &[
     // (see disk_soft for the region-aware Opposed regime, #66).
     // #65: this raised ceiling is unaffected by neutralisation; see the
     // neutralised floor on the same row for the lowering-side signal.
-    BaselineRow { scene: "disk_small", sat: 1.00, method: "opposed", suspected: 9, raised: AtMost(2), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 0.754080, p95_abs_logerr_max: 1.028429, hue_max_at_most: 1.526664 },
+    BaselineRow { scene: "disk_small", sat: 1.00, method: "opposed", suspected: 9, raised: AtMost(2), lowered: AtLeast(4), neutralised: AtLeast(4), med_abs_logerr_max: 0.773707, p95_abs_logerr_max: 1.048057, hue_max_at_most: 1.567528 },
     BaselineRow { scene: "disk_small", sat: 0.98, method: "off", suspected: 9, raised: Exact(0), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 0.784384, p95_abs_logerr_max: 1.058733, hue_max_at_most: 1.589631 },
-    BaselineRow { scene: "disk_small", sat: 0.98, method: "clip", suspected: 9, raised: Exact(0), lowered: AtLeast(1), neutralised: Exact(0), med_abs_logerr_max: 0.784384, p95_abs_logerr_max: 1.058733, hue_max_at_most: 1.589631 },
+    BaselineRow { scene: "disk_small", sat: 0.98, method: "clip", suspected: 9, raised: Exact(0), lowered: AtLeast(5), neutralised: Exact(0), med_abs_logerr_max: 0.788783, p95_abs_logerr_max: 1.063132, hue_max_at_most: 1.598711 },
     // Not recoverable from chroma: truth G is ~6.0 against R/B of ~0.5 behind a
     // ~2 px edge, so estimates stay below the clip level and are never applied
     // (see disk_soft for the region-aware Opposed regime, #66).
@@ -323,13 +323,13 @@ pub const BASELINES: &[BaselineRow] = &[
     // (see disk_soft for the region-aware Opposed regime, #66).
     // #65: this raised ceiling is unaffected by neutralisation; see the
     // neutralised floor on the same row for the lowering-side signal.
-    BaselineRow { scene: "disk_small", sat: 0.98, method: "opposed", suspected: 9, raised: AtMost(2), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 0.784384, p95_abs_logerr_max: 1.058733, hue_max_at_most: 1.589631 },
-    BaselineRow { scene: "disk_large", sat: 1.00, method: "off", suspected: 8073, raised: Exact(0), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 2.403506, p95_abs_logerr_max: 2.753494, hue_max_at_most: 2.086022 },
-    BaselineRow { scene: "disk_large", sat: 1.00, method: "clip", suspected: 8073, raised: Exact(0), lowered: AtLeast(1247), neutralised: Exact(0), med_abs_logerr_max: 2.403506, p95_abs_logerr_max: 2.753494, hue_max_at_most: 2.086022 },
+    BaselineRow { scene: "disk_small", sat: 0.98, method: "opposed", suspected: 9, raised: AtMost(2), lowered: AtLeast(4), neutralised: AtLeast(4), med_abs_logerr_max: 0.788783, p95_abs_logerr_max: 1.063132, hue_max_at_most: 1.598711 },
+    BaselineRow { scene: "disk_large", sat: 1.00, method: "off", suspected: 8081, raised: Exact(0), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 2.403117, p95_abs_logerr_max: 2.753460, hue_max_at_most: 2.086022 },
+    BaselineRow { scene: "disk_large", sat: 1.00, method: "clip", suspected: 8081, raised: Exact(0), lowered: AtLeast(5322), neutralised: Exact(0), med_abs_logerr_max: 2.422745, p95_abs_logerr_max: 2.773088, hue_max_at_most: 2.127875 },
     // Not recoverable from chroma: truth G is ~6.0 against R/B of ~0.5 behind a
     // ~2 px edge, so estimates stay below the clip level and are never applied
     // (see disk_soft for the region-aware Opposed regime, #66).
-    // 2026-11-04: measured 4 + slack 2 for estimator-bit drift across codegen
+    // 2026-11-17: measured 4 + slack 2 for estimator-bit drift across codegen
     // #65: this raised ceiling is unaffected by neutralisation; see the
     // neutralised floor on the same row for the lowering-side signal.
     // Not recoverable from chroma: truth G is ~6.0 against R/B of ~0.5 behind a
@@ -337,13 +337,13 @@ pub const BASELINES: &[BaselineRow] = &[
     // (see disk_soft for the region-aware Opposed regime, #66).
     // #65: this raised ceiling is unaffected by neutralisation; see the
     // neutralised floor on the same row for the lowering-side signal.
-    BaselineRow { scene: "disk_large", sat: 1.00, method: "opposed", suspected: 8073, raised: AtMost(2), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 2.403506, p95_abs_logerr_max: 2.753494, hue_max_at_most: 2.086022 },
-    BaselineRow { scene: "disk_large", sat: 0.98, method: "off", suspected: 8086, raised: Exact(0), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 2.433040, p95_abs_logerr_max: 2.783764, hue_max_at_most: 2.150477 },
-    BaselineRow { scene: "disk_large", sat: 0.98, method: "clip", suspected: 8086, raised: Exact(0), lowered: AtLeast(1306), neutralised: Exact(0), med_abs_logerr_max: 2.433040, p95_abs_logerr_max: 2.783764, hue_max_at_most: 2.150477 },
+    BaselineRow { scene: "disk_large", sat: 1.00, method: "opposed", suspected: 8081, raised: AtMost(2), lowered: AtLeast(4040), neutralised: AtLeast(4040), med_abs_logerr_max: 2.422745, p95_abs_logerr_max: 2.773088, hue_max_at_most: 2.127875 },
+    BaselineRow { scene: "disk_large", sat: 0.98, method: "off", suspected: 8087, raised: Exact(0), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 2.432811, p95_abs_logerr_max: 2.783764, hue_max_at_most: 2.150477 },
+    BaselineRow { scene: "disk_large", sat: 0.98, method: "clip", suspected: 8087, raised: Exact(0), lowered: AtLeast(5360), neutralised: Exact(0), med_abs_logerr_max: 2.437210, p95_abs_logerr_max: 2.788164, hue_max_at_most: 2.159755 },
     // Not recoverable from chroma: truth G is ~6.0 against R/B of ~0.5 behind a
     // ~2 px edge, so estimates stay below the clip level and are never applied
     // (see disk_soft for the region-aware Opposed regime, #66).
-    // 2026-11-04: measured 2 + slack 2 for estimator-bit drift across codegen
+    // 2026-11-17: measured 2 + slack 2 for estimator-bit drift across codegen
     // #65: this raised ceiling is unaffected by neutralisation; see the
     // neutralised floor on the same row for the lowering-side signal.
     // Not recoverable from chroma: truth G is ~6.0 against R/B of ~0.5 behind a
@@ -351,47 +351,47 @@ pub const BASELINES: &[BaselineRow] = &[
     // (see disk_soft for the region-aware Opposed regime, #66).
     // #65: this raised ceiling is unaffected by neutralisation; see the
     // neutralised floor on the same row for the lowering-side signal.
-    BaselineRow { scene: "disk_large", sat: 0.98, method: "opposed", suspected: 8086, raised: AtMost(2), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 2.433040, p95_abs_logerr_max: 2.783764, hue_max_at_most: 2.150477 },
-    BaselineRow { scene: "disk_soft", sat: 1.00, method: "off", suspected: 1026, raised: Exact(0), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 0.162798, p95_abs_logerr_max: 0.302952, hue_max_at_most: 0.450014 },
-    BaselineRow { scene: "disk_soft", sat: 1.00, method: "clip", suspected: 1026, raised: Exact(0), lowered: AtLeast(1136), neutralised: Exact(0), med_abs_logerr_max: 0.162798, p95_abs_logerr_max: 0.302952, hue_max_at_most: 0.450014 },
-    BaselineRow { scene: "disk_soft", sat: 1.00, method: "opposed", suspected: 1026, raised: AtLeast(467), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 0.077667, p95_abs_logerr_max: 0.132857, hue_max_at_most: 0.249586 },
-    BaselineRow { scene: "disk_soft", sat: 0.98, method: "off", suspected: 1126, raised: Exact(0), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 0.176199, p95_abs_logerr_max: 0.331650, hue_max_at_most: 0.477948 },
-    BaselineRow { scene: "disk_soft", sat: 0.98, method: "clip", suspected: 1126, raised: Exact(0), lowered: AtLeast(1194), neutralised: Exact(0), med_abs_logerr_max: 0.176199, p95_abs_logerr_max: 0.331650, hue_max_at_most: 0.477948 },
-    BaselineRow { scene: "disk_soft", sat: 0.98, method: "opposed", suspected: 1126, raised: AtLeast(516), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 0.084315, p95_abs_logerr_max: 0.142942, hue_max_at_most: 0.265251 },
-    BaselineRow { scene: "two_channel", sat: 1.00, method: "off", suspected: 42, raised: Exact(0), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 0.450329, p95_abs_logerr_max: 0.828959, hue_max_at_most: 0.612795 },
-    BaselineRow { scene: "two_channel", sat: 1.00, method: "clip", suspected: 42, raised: Exact(0), lowered: AtLeast(21), neutralised: Exact(0), med_abs_logerr_max: 0.719794, p95_abs_logerr_max: 1.800280, hue_max_at_most: 3.657449 },
-    BaselineRow { scene: "two_channel", sat: 1.00, method: "opposed", suspected: 42, raised: AtLeast(4), lowered: AtLeast(6), neutralised: AtLeast(6), med_abs_logerr_max: 0.663621, p95_abs_logerr_max: 1.789400, hue_max_at_most: 3.625005 },
+    BaselineRow { scene: "disk_large", sat: 0.98, method: "opposed", suspected: 8087, raised: AtMost(2), lowered: AtLeast(4043), neutralised: AtLeast(4043), med_abs_logerr_max: 2.437210, p95_abs_logerr_max: 2.788164, hue_max_at_most: 2.159755 },
+    BaselineRow { scene: "disk_soft", sat: 1.00, method: "off", suspected: 1084, raised: Exact(0), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 0.153737, p95_abs_logerr_max: 0.302463, hue_max_at_most: 0.450014 },
+    BaselineRow { scene: "disk_soft", sat: 1.00, method: "clip", suspected: 1084, raised: Exact(0), lowered: AtLeast(1719), neutralised: Exact(0), med_abs_logerr_max: 0.173365, p95_abs_logerr_max: 0.322091, hue_max_at_most: 0.468321 },
+    BaselineRow { scene: "disk_soft", sat: 1.00, method: "opposed", suspected: 1084, raised: AtLeast(447), lowered: AtLeast(94), neutralised: AtLeast(94), med_abs_logerr_max: 0.080777, p95_abs_logerr_max: 0.137917, hue_max_at_most: 0.257274 },
+    BaselineRow { scene: "disk_soft", sat: 0.98, method: "off", suspected: 1137, raised: Exact(0), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 0.174228, p95_abs_logerr_max: 0.331650, hue_max_at_most: 0.477948 },
+    BaselineRow { scene: "disk_soft", sat: 0.98, method: "clip", suspected: 1137, raised: Exact(0), lowered: AtLeast(1769), neutralised: Exact(0), med_abs_logerr_max: 0.178628, p95_abs_logerr_max: 0.336049, hue_max_at_most: 0.481849 },
+    BaselineRow { scene: "disk_soft", sat: 0.98, method: "opposed", suspected: 1137, raised: AtLeast(510), lowered: AtLeast(58), neutralised: AtLeast(58), med_abs_logerr_max: 0.086489, p95_abs_logerr_max: 0.145369, hue_max_at_most: 0.268872 },
+    BaselineRow { scene: "two_channel", sat: 1.00, method: "off", suspected: 43, raised: Exact(0), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 0.446749, p95_abs_logerr_max: 0.828959, hue_max_at_most: 0.612795 },
+    BaselineRow { scene: "two_channel", sat: 1.00, method: "clip", suspected: 43, raised: Exact(0), lowered: AtLeast(35), neutralised: Exact(0), med_abs_logerr_max: 0.726657, p95_abs_logerr_max: 1.819908, hue_max_at_most: 3.675017 },
+    BaselineRow { scene: "two_channel", sat: 1.00, method: "opposed", suspected: 43, raised: AtLeast(4), lowered: AtLeast(17), neutralised: AtLeast(17), med_abs_logerr_max: 0.672514, p95_abs_logerr_max: 1.809028, hue_max_at_most: 3.648338 },
     BaselineRow { scene: "two_channel", sat: 0.98, method: "off", suspected: 43, raised: Exact(0), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 0.477053, p95_abs_logerr_max: 0.859263, hue_max_at_most: 0.668729 },
-    BaselineRow { scene: "two_channel", sat: 0.98, method: "clip", suspected: 43, raised: Exact(0), lowered: AtLeast(21), neutralised: Exact(0), med_abs_logerr_max: 0.737333, p95_abs_logerr_max: 1.830584, hue_max_at_most: 3.684205 },
-    BaselineRow { scene: "two_channel", sat: 0.98, method: "opposed", suspected: 43, raised: AtLeast(4), lowered: AtLeast(6), neutralised: AtLeast(6), med_abs_logerr_max: 0.672514, p95_abs_logerr_max: 1.819704, hue_max_at_most: 3.660458 },
-    BaselineRow { scene: "sun_core_halo", sat: 1.00, method: "off", suspected: 268, raised: Exact(0), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 0.704530, p95_abs_logerr_max: 1.989775, hue_max_at_most: 2.697371 },
-    BaselineRow { scene: "sun_core_halo", sat: 1.00, method: "clip", suspected: 268, raised: Exact(0), lowered: AtLeast(399), neutralised: Exact(0), med_abs_logerr_max: 1.245692, p95_abs_logerr_max: 3.029496, hue_max_at_most: 3.087307 },
-    BaselineRow { scene: "sun_core_halo", sat: 1.00, method: "opposed", suspected: 268, raised: AtLeast(35), lowered: AtLeast(57), neutralised: AtLeast(57), med_abs_logerr_max: 1.078413, p95_abs_logerr_max: 3.029496, hue_max_at_most: 3.087307 },
-    BaselineRow { scene: "sun_core_halo", sat: 0.98, method: "off", suspected: 276, raised: Exact(0), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 0.693285, p95_abs_logerr_max: 2.020079, hue_max_at_most: 2.716664 },
-    BaselineRow { scene: "sun_core_halo", sat: 0.98, method: "clip", suspected: 276, raised: Exact(0), lowered: AtLeast(410), neutralised: Exact(0), med_abs_logerr_max: 1.263992, p95_abs_logerr_max: 3.059800, hue_max_at_most: 3.093362 },
-    BaselineRow { scene: "sun_core_halo", sat: 0.98, method: "opposed", suspected: 276, raised: AtLeast(37), lowered: AtLeast(57), neutralised: AtLeast(57), med_abs_logerr_max: 1.034050, p95_abs_logerr_max: 3.059800, hue_max_at_most: 3.093362 },
-    BaselineRow { scene: "warm_cool_adjacent", sat: 1.00, method: "off", suspected: 31, raised: Exact(0), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 0.473335, p95_abs_logerr_max: 0.921391, hue_max_at_most: 0.720534 },
-    BaselineRow { scene: "warm_cool_adjacent", sat: 1.00, method: "clip", suspected: 31, raised: Exact(0), lowered: AtLeast(37), neutralised: Exact(0), med_abs_logerr_max: 1.359861, p95_abs_logerr_max: 1.961111, hue_max_at_most: 1.907816 },
-    BaselineRow { scene: "warm_cool_adjacent", sat: 1.00, method: "opposed", suspected: 31, raised: AtLeast(4), lowered: AtLeast(11), neutralised: AtLeast(11), med_abs_logerr_max: 1.085803, p95_abs_logerr_max: 1.821018, hue_max_at_most: 1.907816 },
+    BaselineRow { scene: "two_channel", sat: 0.98, method: "clip", suspected: 43, raised: Exact(0), lowered: AtLeast(36), neutralised: Exact(0), med_abs_logerr_max: 0.741733, p95_abs_logerr_max: 1.834984, hue_max_at_most: 3.687919 },
+    BaselineRow { scene: "two_channel", sat: 0.98, method: "opposed", suspected: 43, raised: AtLeast(4), lowered: AtLeast(17), neutralised: AtLeast(17), med_abs_logerr_max: 0.672514, p95_abs_logerr_max: 1.824103, hue_max_at_most: 3.665340 },
+    BaselineRow { scene: "sun_core_halo", sat: 1.00, method: "off", suspected: 271, raised: Exact(0), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 0.699836, p95_abs_logerr_max: 1.989775, hue_max_at_most: 2.697371 },
+    BaselineRow { scene: "sun_core_halo", sat: 1.00, method: "clip", suspected: 271, raised: Exact(0), lowered: AtLeast(449), neutralised: Exact(0), med_abs_logerr_max: 1.256255, p95_abs_logerr_max: 3.049124, hue_max_at_most: 3.091249 },
+    BaselineRow { scene: "sun_core_halo", sat: 1.00, method: "opposed", suspected: 271, raised: AtLeast(35), lowered: AtLeast(100), neutralised: AtLeast(100), med_abs_logerr_max: 1.086346, p95_abs_logerr_max: 3.049124, hue_max_at_most: 3.091249 },
+    BaselineRow { scene: "sun_core_halo", sat: 0.98, method: "off", suspected: 279, raised: Exact(0), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 0.680555, p95_abs_logerr_max: 2.020079, hue_max_at_most: 2.716664 },
+    BaselineRow { scene: "sun_core_halo", sat: 0.98, method: "clip", suspected: 279, raised: Exact(0), lowered: AtLeast(456), neutralised: Exact(0), med_abs_logerr_max: 1.264783, p95_abs_logerr_max: 3.064199, hue_max_at_most: 3.094226 },
+    BaselineRow { scene: "sun_core_halo", sat: 0.98, method: "opposed", suspected: 279, raised: AtLeast(36), lowered: AtLeast(103), neutralised: AtLeast(103), med_abs_logerr_max: 1.038861, p95_abs_logerr_max: 3.064199, hue_max_at_most: 3.094226 },
+    BaselineRow { scene: "warm_cool_adjacent", sat: 1.00, method: "off", suspected: 33, raised: Exact(0), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 0.469849, p95_abs_logerr_max: 0.921391, hue_max_at_most: 0.720534 },
+    BaselineRow { scene: "warm_cool_adjacent", sat: 1.00, method: "clip", suspected: 33, raised: Exact(0), lowered: AtLeast(38), neutralised: Exact(0), med_abs_logerr_max: 1.357854, p95_abs_logerr_max: 1.980739, hue_max_at_most: 1.943537 },
+    BaselineRow { scene: "warm_cool_adjacent", sat: 1.00, method: "opposed", suspected: 33, raised: AtLeast(4), lowered: AtLeast(12), neutralised: AtLeast(12), med_abs_logerr_max: 1.045970, p95_abs_logerr_max: 1.840646, hue_max_at_most: 1.943537 },
     BaselineRow { scene: "warm_cool_adjacent", sat: 0.98, method: "off", suspected: 35, raised: Exact(0), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 0.492658, p95_abs_logerr_max: 0.951695, hue_max_at_most: 0.765011 },
-    BaselineRow { scene: "warm_cool_adjacent", sat: 0.98, method: "clip", suspected: 35, raised: Exact(0), lowered: AtLeast(38), neutralised: Exact(0), med_abs_logerr_max: 1.365733, p95_abs_logerr_max: 1.991415, hue_max_at_most: 1.962792 },
-    BaselineRow { scene: "warm_cool_adjacent", sat: 0.98, method: "opposed", suspected: 35, raised: AtLeast(3), lowered: AtLeast(14), neutralised: AtLeast(14), med_abs_logerr_max: 1.116107, p95_abs_logerr_max: 1.851322, hue_max_at_most: 1.962792 },
+    BaselineRow { scene: "warm_cool_adjacent", sat: 0.98, method: "clip", suspected: 35, raised: Exact(0), lowered: AtLeast(38), neutralised: Exact(0), med_abs_logerr_max: 1.370133, p95_abs_logerr_max: 1.995815, hue_max_at_most: 1.970680 },
+    BaselineRow { scene: "warm_cool_adjacent", sat: 0.98, method: "opposed", suspected: 35, raised: AtLeast(3), lowered: AtLeast(14), neutralised: AtLeast(14), med_abs_logerr_max: 1.120506, p95_abs_logerr_max: 1.855721, hue_max_at_most: 1.970680 },
     BaselineRow { scene: "border_clip", sat: 1.00, method: "off", suspected: 157, raised: Exact(0), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 0.861791, p95_abs_logerr_max: 0.892948, hue_max_at_most: 1.971580 },
-    BaselineRow { scene: "border_clip", sat: 1.00, method: "clip", suspected: 157, raised: Exact(0), lowered: AtLeast(54), neutralised: Exact(0), med_abs_logerr_max: 0.861791, p95_abs_logerr_max: 0.892948, hue_max_at_most: 1.971580 },
+    BaselineRow { scene: "border_clip", sat: 1.00, method: "clip", suspected: 157, raised: Exact(0), lowered: AtLeast(138), neutralised: Exact(0), med_abs_logerr_max: 0.881419, p95_abs_logerr_max: 0.912575, hue_max_at_most: 2.002160 },
     // raised below the acting threshold (5) at baseline; flip to AtLeast when
     // methods act here.
     // #65: this raised ceiling is unaffected by neutralisation; see the
     // neutralised floor on the same row for the lowering-side signal.
-    BaselineRow { scene: "border_clip", sat: 1.00, method: "opposed", suspected: 157, raised: AtMost(2), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 0.861791, p95_abs_logerr_max: 0.892948, hue_max_at_most: 1.971580 },
+    BaselineRow { scene: "border_clip", sat: 1.00, method: "opposed", suspected: 157, raised: AtMost(2), lowered: AtLeast(78), neutralised: AtLeast(78), med_abs_logerr_max: 0.881419, p95_abs_logerr_max: 0.912575, hue_max_at_most: 2.002160 },
     BaselineRow { scene: "border_clip", sat: 0.98, method: "off", suspected: 157, raised: Exact(0), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 0.892095, p95_abs_logerr_max: 0.923252, hue_max_at_most: 2.018326 },
-    BaselineRow { scene: "border_clip", sat: 0.98, method: "clip", suspected: 157, raised: Exact(0), lowered: AtLeast(63), neutralised: Exact(0), med_abs_logerr_max: 0.892095, p95_abs_logerr_max: 0.923252, hue_max_at_most: 2.018326 },
+    BaselineRow { scene: "border_clip", sat: 0.98, method: "clip", suspected: 157, raised: Exact(0), lowered: AtLeast(143), neutralised: Exact(0), med_abs_logerr_max: 0.896495, p95_abs_logerr_max: 0.927651, hue_max_at_most: 2.024893 },
     // raised below the acting threshold (5) at baseline; flip to AtLeast when
     // methods act here.
     // #65: this raised ceiling is unaffected by neutralisation; see the
     // neutralised floor on the same row for the lowering-side signal.
-    BaselineRow { scene: "border_clip", sat: 0.98, method: "opposed", suspected: 157, raised: AtMost(2), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 0.892095, p95_abs_logerr_max: 0.923252, hue_max_at_most: 2.018326 },
+    BaselineRow { scene: "border_clip", sat: 0.98, method: "opposed", suspected: 157, raised: AtMost(2), lowered: AtLeast(78), neutralised: AtLeast(78), med_abs_logerr_max: 0.896495, p95_abs_logerr_max: 0.927651, hue_max_at_most: 2.024893 },
     BaselineRow { scene: "speculars", sat: 1.00, method: "off", suspected: 14, raised: Exact(0), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 1.132601, p95_abs_logerr_max: 1.472744, hue_max_at_most: 1.880613 },
-    BaselineRow { scene: "speculars", sat: 1.00, method: "clip", suspected: 14, raised: Exact(0), lowered: AtLeast(12), neutralised: Exact(0), med_abs_logerr_max: 1.789983, p95_abs_logerr_max: 2.512464, hue_max_at_most: 2.277433 },
+    BaselineRow { scene: "speculars", sat: 1.00, method: "clip", suspected: 14, raised: Exact(0), lowered: AtLeast(16), neutralised: Exact(0), med_abs_logerr_max: 1.809611, p95_abs_logerr_max: 2.532092, hue_max_at_most: 2.302189 },
     // Known #62 shape: estimates produced, none applied on isolated tiny
     // speculars; flip to AtLeast when methods act here.
     // #65: this raised ceiling is unaffected by neutralisation; see the
@@ -400,9 +400,9 @@ pub const BASELINES: &[BaselineRow] = &[
     // speculars; flip to AtLeast when methods act here.
     // #65: this raised ceiling is unaffected by neutralisation; see the
     // neutralised floor on the same row for the lowering-side signal.
-    BaselineRow { scene: "speculars", sat: 1.00, method: "opposed", suspected: 14, raised: AtMost(2), lowered: AtLeast(5), neutralised: AtLeast(5), med_abs_logerr_max: 1.789983, p95_abs_logerr_max: 2.512464, hue_max_at_most: 2.277433 },
+    BaselineRow { scene: "speculars", sat: 1.00, method: "opposed", suspected: 14, raised: AtMost(2), lowered: AtLeast(7), neutralised: AtLeast(7), med_abs_logerr_max: 1.809611, p95_abs_logerr_max: 2.532092, hue_max_at_most: 2.302189 },
     BaselineRow { scene: "speculars", sat: 0.98, method: "off", suspected: 14, raised: Exact(0), lowered: Exact(0), neutralised: Exact(0), med_abs_logerr_max: 1.162905, p95_abs_logerr_max: 1.503048, hue_max_at_most: 1.910010 },
-    BaselineRow { scene: "speculars", sat: 0.98, method: "clip", suspected: 14, raised: Exact(0), lowered: AtLeast(14), neutralised: Exact(0), med_abs_logerr_max: 1.820287, p95_abs_logerr_max: 2.542768, hue_max_at_most: 2.315410 },
+    BaselineRow { scene: "speculars", sat: 0.98, method: "clip", suspected: 14, raised: Exact(0), lowered: AtLeast(17), neutralised: Exact(0), med_abs_logerr_max: 1.824686, p95_abs_logerr_max: 2.547168, hue_max_at_most: 2.320809 },
     // Known #62 shape: estimates produced, none applied on isolated tiny
     // speculars; flip to AtLeast when methods act here.
     // #65: this raised ceiling is unaffected by neutralisation; see the
@@ -411,5 +411,5 @@ pub const BASELINES: &[BaselineRow] = &[
     // speculars; flip to AtLeast when methods act here.
     // #65: this raised ceiling is unaffected by neutralisation; see the
     // neutralised floor on the same row for the lowering-side signal.
-    BaselineRow { scene: "speculars", sat: 0.98, method: "opposed", suspected: 14, raised: AtMost(2), lowered: AtLeast(5), neutralised: AtLeast(5), med_abs_logerr_max: 1.820287, p95_abs_logerr_max: 2.542768, hue_max_at_most: 2.315410 },
+    BaselineRow { scene: "speculars", sat: 0.98, method: "opposed", suspected: 14, raised: AtMost(2), lowered: AtLeast(7), neutralised: AtLeast(7), med_abs_logerr_max: 1.824686, p95_abs_logerr_max: 2.547168, hue_max_at_most: 2.320809 },
 ];
