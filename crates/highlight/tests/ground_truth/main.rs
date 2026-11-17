@@ -1,12 +1,12 @@
 //! Ground-truth reconstruction harness for the highlight crate (issue #63).
 //!
 //! Generates synthetic scenes with a known unclipped truth, mosaics + clamps
-//! them, runs Off / Clip / LocalRatios / Opposed at the crate boundary, and
+//! them, runs Off / Clip / Opposed at the crate boundary, and
 //! scores reconstruction quality. Three tests:
 //! - `scene_guards`: exact-sat margin + mask-from-bits guards, no method
 //!   runs — fast.
 //! - `margin_negative_control`: the #62 margin trap as a one-liner.
-//! - `ground_truth_matrix`: 8 scenes x 2 sat levels x 4 methods = 64 runs,
+//! - `ground_truth_matrix`: 8 scenes x 2 sat levels x 3 methods = 48 runs,
 //!   prints the human table, the pasteable baseline literal block, and the
 //!   elapsed time (timing is printed, never asserted), then checks every run
 //!   against the pinned `baseline::BASELINES` rows and fails once with the
@@ -17,7 +17,7 @@
 //! this harness from pending #64. Since issue #65 the Clip rows run with
 //! production-shaped WB-aware ceilings (`sat * min(METRIC_WB) / gain`,
 //! the METRIC_WB vector standing in for as-shot balance) and the
-//! LocalRatios/Opposed rows receive the same vector as `neutral_ceiling`,
+//! Opposed rows receive the same vector as `neutral_ceiling`,
 //! so clause A/B of #65 compare like-for-like. Off rows are unchanged.
 
 mod baseline;
@@ -31,27 +31,22 @@ use std::time::Instant;
 
 use rohditor_highlight::{
     ChannelClipLevels, ChannelDetectionLevels, HighlightExecution, HighlightExecutionOutput,
-    detect_local_ratios,
+    detect_opposed,
 };
 use rohditor_image::BayerPattern;
 
 use metrics::{METRIC_WB, MeasuredRow, SiteSet, abs_log_errors};
 
-/// The four methods named by the issue, driven at the crate boundary.
+/// The three methods remaining after LocalRatios removal (#67), driven at
+/// the crate boundary.
 #[derive(Clone, Copy)]
 enum Method {
     Off,
     Clip,
-    LocalRatios,
     Opposed,
 }
 
-const METHODS: [Method; 4] = [
-    Method::Off,
-    Method::Clip,
-    Method::LocalRatios,
-    Method::Opposed,
-];
+const METHODS: [Method; 3] = [Method::Off, Method::Clip, Method::Opposed];
 
 fn detection_levels(sat: f32) -> ChannelDetectionLevels {
     ChannelDetectionLevels {
@@ -89,16 +84,6 @@ fn execution(
             green: ceilings[1],
             blue: ceilings[2],
         }),
-        Method::LocalRatios => {
-            HighlightExecution::LocalRatios(rohditor_highlight::LocalRatioOptions {
-                detection_levels: detection,
-                neutral_ceiling: Some(ChannelClipLevels {
-                    red: ceilings[0],
-                    green: ceilings[1],
-                    blue: ceilings[2],
-                }),
-            })
-        }
         Method::Opposed => HighlightExecution::Opposed(rohditor_highlight::OpposedOptions {
             detection_levels: detection,
             neutral_ceiling: Some(ChannelClipLevels {
@@ -120,7 +105,7 @@ struct RunResult {
     /// Stats-reported suspected count for comparison against the
     /// mask-from-bits set; `None` for Off.
     stats_suspected: Option<usize>,
-    /// `suspected_by_channel`, LocalRatios/Opposed only.
+    /// `suspected_by_channel`, Opposed only.
     by_channel: Option<[usize; 3]>,
     /// `stats.neutralised_sites` (issue #65); zero for Off/Clip, which
     /// have no neutraliser.
@@ -153,14 +138,6 @@ fn run(
             stats_suspected: Some(output.stats.affected_sites),
             by_channel: None,
             neutralised_sites: 0,
-        },
-        HighlightExecutionOutput::LocalRatios(output) => RunResult {
-            mosaic: output.mosaic,
-            changed_sites: output.stats.changed_sites,
-            recon: Some(output.stats.reconstructed_sites),
-            stats_suspected: Some(output.stats.suspected_clipped_sites),
-            by_channel: Some(output.stats.suspected_by_channel),
-            neutralised_sites: output.stats.neutralised_sites,
         },
         HighlightExecutionOutput::Opposed(output) => RunResult {
             mosaic: output.mosaic,
@@ -229,7 +206,7 @@ fn scene_guards() {
             }
             // Guard B: expected set derived from the generated bits with the
             // crate's own predicate, never from analytic geometry.
-            let mask = detect_local_ratios(&scene.mosaic, detection_levels(sat))
+            let mask = detect_opposed(&scene.mosaic, detection_levels(sat))
                 .expect("harness mosaic and levels are valid");
             let bit_count = scene
                 .mosaic
@@ -271,7 +248,7 @@ fn scene_guards() {
 #[test]
 fn margin_negative_control() {
     let scene = generator::generate(&scenes::DISK_LARGE, 0.98);
-    let mask = detect_local_ratios(&scene.mosaic, detection_levels(1.0))
+    let mask = detect_opposed(&scene.mosaic, detection_levels(1.0))
         .expect("harness mosaic and levels are valid");
     assert_eq!(
         mask.data().iter().filter(|&&hit| hit).count(),
@@ -296,7 +273,7 @@ fn ground_truth_matrix() {
         for sat in scenes::SAT_LEVELS {
             let scene = generator::generate(&spec, sat);
             let ceilings = shared_ceilings(sat);
-            let mask = detect_local_ratios(&scene.mosaic, detection_levels(sat))
+            let mask = detect_opposed(&scene.mosaic, detection_levels(sat))
                 .expect("harness mosaic and levels are valid");
             let suspected = mask.data();
             let per_channel = suspected_by_channel(suspected, spec.width);
@@ -400,7 +377,7 @@ fn ground_truth_matrix() {
                             );
                         }
                     }
-                    Method::LocalRatios | Method::Opposed => {
+                    Method::Opposed => {
                         assert_eq!(
                             raised, out.changed_sites,
                             "{}@{} {}: raised != stats.changed_sites",

@@ -26,10 +26,9 @@ use super::commands::{
 };
 
 /// Methods in report order; Clip is the comparison reference.
-const METHODS: [HighlightMethod; 4] = [
+const METHODS: [HighlightMethod; 3] = [
     HighlightMethod::Off,
     HighlightMethod::Clip,
-    HighlightMethod::LocalRatios,
     HighlightMethod::Opposed,
 ];
 
@@ -49,7 +48,6 @@ const fn method_name(method: HighlightMethod) -> &'static str {
     match method {
         HighlightMethod::Off => "off",
         HighlightMethod::Clip => "clip",
-        HighlightMethod::LocalRatios => "local-ratios",
         HighlightMethod::Opposed => "opposed",
     }
 }
@@ -108,7 +106,7 @@ struct SiteCounts {
     fallback: Option<usize>,
     fully_unsupported: Option<usize>,
     /// Sites lowered to the WB-aware neutral ceiling (issue #65); only
-    /// LocalRatios and Opposed neutralise.
+    /// Opposed neutralises.
     neutralised: Option<usize>,
 }
 
@@ -131,14 +129,6 @@ impl From<HighlightDiagnostics> for SiteCounts {
                 suspected_or_affected: Some(stats.affected_sites),
                 changed: Some(stats.changed_sites),
                 ..Self::default()
-            },
-            HighlightDiagnostics::LocalRatios(stats) => Self {
-                suspected_or_affected: Some(stats.suspected_clipped_sites),
-                reconstructed: Some(stats.reconstructed_sites),
-                changed: Some(stats.changed_sites),
-                fallback: Some(stats.fallback_sites),
-                fully_unsupported: Some(stats.fully_unsupported_sites),
-                neutralised: Some(stats.neutralised_sites),
             },
             HighlightDiagnostics::Opposed(stats) => Self {
                 suspected_or_affected: Some(stats.suspected_clipped_sites),

@@ -1718,10 +1718,6 @@ fn highlight_adjustments_match(
         rohditor_edit::HighlightMethod::Clip => {
             retained.clip.threshold.to_bits() == requested.clip.threshold.to_bits()
         }
-        rohditor_edit::HighlightMethod::LocalRatios => {
-            retained.local_ratios.detection_threshold.to_bits()
-                == requested.local_ratios.detection_threshold.to_bits()
-        }
         rohditor_edit::HighlightMethod::Opposed => {
             retained.opposed.detection_threshold.to_bits()
                 == requested.opposed.detection_threshold.to_bits()
@@ -2174,35 +2170,6 @@ pub(crate) mod tests {
             ),
             Err(GpuPreviewError::BaseMismatch { .. })
         ));
-    }
-
-    #[test]
-    fn local_ratio_reconstruction_upload_keeps_dynamic_white_balance() {
-        let mut recipe = EditRecipe::default();
-        recipe.raw.highlights.method = HighlightMethod::LocalRatios;
-        let frame = synthetic_frame(Orientation::Normal);
-        let reconstructed = CpuPipeline::default()
-            .prepare_preview_reconstruction(&frame, &recipe, PreviewOptions::default())
-            .expect("synthetic Local-ratio reconstruction should develop");
-
-        let upload = GpuPreviewUpload::from_reconstructed_preview(
-            &reconstructed,
-            recipe.color.white_balance,
-        )
-        .expect("Local-ratio camera-native source should pack");
-        assert!(upload.supports_dynamic_white_balance());
-
-        let changed = WhiteBalance::ManualMultipliers {
-            red: 1.2,
-            green: 1.0,
-            blue: 0.8,
-        };
-        let changed_upload = GpuPreviewUpload::from_reconstructed_preview(&reconstructed, changed)
-            .expect("dynamic white balance should remain supported");
-        assert_eq!(
-            changed_upload.highlight_adjustments(),
-            recipe.raw.highlights
-        );
     }
 
     #[test]

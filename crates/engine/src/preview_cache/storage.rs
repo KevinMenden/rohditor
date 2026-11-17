@@ -4,10 +4,10 @@ use std::sync::Arc;
 
 use rohditor_core::{
     AREA_REDUCTION_ALGORITHM_VERSION, CameraProfileKey, CorrectionComponents, CpuPipeline,
-    CpuPreviewWorkspace, DemosaicedBase, GamutMappingDiagnostics, LOCAL_RATIOS_ALGORITHM_VERSION,
-    MemoryEstimate, OPPOSED_ALGORITHM_VERSION, OPTICS_ALGORITHM_VERSION, OpticsProvenance,
-    OutputPolicy, PreviewOptions, RawCropPolicy, ReconstructedPreview,
-    WHITE_BALANCE_ALGORITHM_VERSION, camera_profile_key,
+    CpuPreviewWorkspace, DemosaicedBase, GamutMappingDiagnostics, MemoryEstimate,
+    OPPOSED_ALGORITHM_VERSION, OPTICS_ALGORITHM_VERSION, OpticsProvenance, OutputPolicy,
+    PreviewOptions, RawCropPolicy, ReconstructedPreview, WHITE_BALANCE_ALGORITHM_VERSION,
+    camera_profile_key,
 };
 #[cfg(test)]
 use rohditor_core::{DatabaseProvenance, LensProfileSummary};
@@ -391,10 +391,6 @@ enum HighlightKey {
         camera_profile: Option<CameraProfileKey>,
         white_balance_algorithm_version: u8,
     },
-    LocalRatios {
-        detection_threshold_bits: u32,
-        algorithm_version: u8,
-    },
     Opposed {
         detection_threshold_bits: u32,
         algorithm_version: u8,
@@ -414,15 +410,6 @@ impl HighlightKey {
                 )
                 .then(|| camera_profile_key(&recipe.color.camera_profile)),
                 white_balance_algorithm_version: WHITE_BALANCE_ALGORITHM_VERSION,
-            },
-            HighlightMethod::LocalRatios => Self::LocalRatios {
-                detection_threshold_bits: recipe
-                    .raw
-                    .highlights
-                    .local_ratios
-                    .detection_threshold
-                    .to_bits(),
-                algorithm_version: LOCAL_RATIOS_ALGORITHM_VERSION,
             },
             HighlightMethod::Opposed => Self::Opposed {
                 detection_threshold_bits: recipe
@@ -1360,35 +1347,10 @@ mod tests {
         clip_threshold.raw.highlights.clip.threshold = 1.25;
         assert_ne!(clip_keys.reconstructed, keys(&clip_threshold).reconstructed);
 
-        let mut local = off.clone();
-        local.raw.highlights.method = HighlightMethod::LocalRatios;
-        let local_keys = keys(&local);
-        assert_ne!(off_keys.reconstructed, local_keys.reconstructed);
-        assert_eq!(local_keys.reconstructed, keys(&local).reconstructed);
-        assert_eq!(
-            local_keys.reconstructed,
-            keys(&{
-                let mut changed_wb = local.clone();
-                changed_wb.color.white_balance = off_wb.color.white_balance;
-                changed_wb
-            })
-            .reconstructed
-        );
-        let mut local_threshold = local;
-        local_threshold
-            .raw
-            .highlights
-            .local_ratios
-            .detection_threshold = 1.25;
-        assert_ne!(
-            local_keys.reconstructed,
-            keys(&local_threshold).reconstructed
-        );
-
         let mut opposed = off.clone();
         opposed.raw.highlights.method = HighlightMethod::Opposed;
         let opposed_keys = keys(&opposed);
-        assert_ne!(local_keys.reconstructed, opposed_keys.reconstructed);
+        assert_ne!(clip_keys.reconstructed, opposed_keys.reconstructed);
         assert_ne!(off_keys.reconstructed, opposed_keys.reconstructed);
         assert_eq!(opposed_keys.reconstructed, keys(&opposed).reconstructed);
         assert_eq!(
@@ -1639,24 +1601,23 @@ mod tests {
             keys(&selected_other).reconstructed,
         );
 
-        for method in [HighlightMethod::LocalRatios, HighlightMethod::Opposed] {
-            let mut dynamic = EditRecipe::default();
-            dynamic.raw.highlights.method = method;
-            dynamic.color.white_balance = WhiteBalance::TemperatureTint {
-                temperature: 5_500.0,
-                tint: 0.1,
-            };
-            let mut dynamic_other = dynamic.clone();
-            dynamic.color.camera_profile =
-                rohditor_edit::CameraProfileSelection::Matrix(first.clone());
-            dynamic_other.color.camera_profile =
-                rohditor_edit::CameraProfileSelection::Matrix(second.clone());
-            assert_eq!(
-                keys(&dynamic).reconstructed,
-                keys(&dynamic_other).reconstructed,
-                "{method:?} should reuse camera-native RGB"
-            );
-        }
+        // #67: Opposed is the only camera-native reconstruction left; the
+        // former LocalRatios/Opposed loop is this direct check.
+        let mut dynamic = EditRecipe::default();
+        dynamic.raw.highlights.method = HighlightMethod::Opposed;
+        dynamic.color.white_balance = WhiteBalance::TemperatureTint {
+            temperature: 5_500.0,
+            tint: 0.1,
+        };
+        let mut dynamic_other = dynamic.clone();
+        dynamic.color.camera_profile = rohditor_edit::CameraProfileSelection::Matrix(first.clone());
+        dynamic_other.color.camera_profile =
+            rohditor_edit::CameraProfileSelection::Matrix(second.clone());
+        assert_eq!(
+            keys(&dynamic).reconstructed,
+            keys(&dynamic_other).reconstructed,
+            "Opposed should reuse camera-native RGB"
+        );
 
         let mut clipped_temperature = EditRecipe::default();
         clipped_temperature.raw.highlights.method = HighlightMethod::Clip;

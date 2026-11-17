@@ -2642,17 +2642,6 @@ impl RohditorApp {
                             nominal_over_white_sites: stats.nominal_over_white_sites,
                             affected_by_channel: stats.affected_by_channel,
                         },
-                        HighlightDiagnostics::LocalRatios(stats) => {
-                            HighlightStatsModel::LocalRatios {
-                                suspected_clipped_sites: stats.suspected_clipped_sites,
-                                reconstructed_sites: stats.reconstructed_sites,
-                                changed_sites: stats.changed_sites,
-                                fallback_sites: stats.fallback_sites,
-                                fully_unsupported_sites: stats.fully_unsupported_sites,
-                                neutralised_sites: stats.neutralised_sites,
-                                suspected_by_channel: stats.suspected_by_channel,
-                            }
-                        }
                         HighlightDiagnostics::Opposed(stats) => HighlightStatsModel::Opposed {
                             suspected_clipped_sites: stats.suspected_clipped_sites,
                             reconstructed_sites: stats.reconstructed_sites,
@@ -3050,15 +3039,6 @@ fn document_panel_model(
             highlight_method: document.edits.recipe().raw.highlights.method,
             highlight_threshold: match document.edits.recipe().raw.highlights.method {
                 HighlightMethod::Clip => document.edits.recipe().raw.highlights.clip.threshold,
-                HighlightMethod::LocalRatios => {
-                    document
-                        .edits
-                        .recipe()
-                        .raw
-                        .highlights
-                        .local_ratios
-                        .detection_threshold
-                }
                 HighlightMethod::Opposed => {
                     document
                         .edits
@@ -3335,10 +3315,6 @@ fn gpu_base_highlights_match(
         HighlightMethod::Clip => {
             retained.clip.threshold.to_bits() == requested.clip.threshold.to_bits()
         }
-        HighlightMethod::LocalRatios => {
-            retained.local_ratios.detection_threshold.to_bits()
-                == requested.local_ratios.detection_threshold.to_bits()
-        }
         HighlightMethod::Opposed => {
             retained.opposed.detection_threshold.to_bits()
                 == requested.opposed.detection_threshold.to_bits()
@@ -3499,9 +3475,6 @@ fn apply_adjustment_interaction(
         AdjustmentTarget::HighlightThreshold => match next.raw.highlights.method {
             HighlightMethod::Off => {}
             HighlightMethod::Clip => next.raw.highlights.clip.threshold = interaction.value,
-            HighlightMethod::LocalRatios => {
-                next.raw.highlights.local_ratios.detection_threshold = interaction.value
-            }
             HighlightMethod::Opposed => {
                 next.raw.highlights.opposed.detection_threshold = interaction.value
             }
@@ -4083,13 +4056,13 @@ mod tests {
         different_threshold.clip.threshold = 1.25;
         assert!(!gpu_base_highlights_match(clip, different_threshold));
 
-        let mut local = off;
-        local.method = HighlightMethod::LocalRatios;
-        assert!(!gpu_base_highlights_match(off, local));
-        assert!(gpu_base_highlights_match(local, local));
-        let mut different_detection = local;
-        different_detection.local_ratios.detection_threshold = 1.25;
-        assert!(!gpu_base_highlights_match(local, different_detection));
+        let mut opposed = off;
+        opposed.method = HighlightMethod::Opposed;
+        assert!(!gpu_base_highlights_match(off, opposed));
+        assert!(gpu_base_highlights_match(opposed, opposed));
+        let mut different_detection = opposed;
+        different_detection.opposed.detection_threshold = 1.25;
+        assert!(!gpu_base_highlights_match(opposed, different_detection));
     }
 
     #[test]

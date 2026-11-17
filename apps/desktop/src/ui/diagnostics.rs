@@ -53,15 +53,6 @@ pub(crate) enum HighlightStatsModel {
         nominal_over_white_sites: usize,
         affected_by_channel: [usize; 3],
     },
-    LocalRatios {
-        suspected_clipped_sites: usize,
-        reconstructed_sites: usize,
-        changed_sites: usize,
-        fallback_sites: usize,
-        fully_unsupported_sites: usize,
-        neutralised_sites: usize,
-        suspected_by_channel: [usize; 3],
-    },
     Opposed {
         suspected_clipped_sites: usize,
         reconstructed_sites: usize,
@@ -301,31 +292,6 @@ pub(crate) fn show(
                     ui.label(format!(
                         "Affected CFA sites: R {} · G {} · B {}",
                         affected_by_channel[0], affected_by_channel[1], affected_by_channel[2],
-                    ));
-                }
-                HighlightStatsModel::LocalRatios {
-                    suspected_clipped_sites,
-                    reconstructed_sites,
-                    changed_sites,
-                    fallback_sites,
-                    fully_unsupported_sites,
-                    neutralised_sites,
-                    suspected_by_channel,
-                } => {
-                    ui.label(format!(
-                        "Highlight Local ratios: {} suspected · {} reconstructed · {} changed",
-                        suspected_clipped_sites, reconstructed_sites, changed_sites,
-                    ));
-                    ui.label(format!(
-                        "Fallback: {} · fully unsupported: {} · suspected CFA sites: R {} · G {} · B {}",
-                        fallback_sites,
-                        fully_unsupported_sites,
-                        suspected_by_channel[0],
-                        suspected_by_channel[1],
-                        suspected_by_channel[2],
-                    ));
-                    ui.label(format!(
-                        "Neutralised to the as-shot WB ceiling: {neutralised_sites}"
                     ));
                 }
                 HighlightStatsModel::Opposed {
@@ -604,15 +570,6 @@ pub(crate) enum HighlightReport {
         nominal_over_white_sites: usize,
         affected_by_channel: [usize; 3],
     },
-    LocalRatios {
-        suspected_clipped_sites: usize,
-        reconstructed_sites: usize,
-        changed_sites: usize,
-        fallback_sites: usize,
-        fully_unsupported_sites: usize,
-        neutralised_sites: usize,
-        suspected_by_channel: [usize; 3],
-    },
     Opposed {
         suspected_clipped_sites: usize,
         reconstructed_sites: usize,
@@ -638,23 +595,6 @@ impl From<HighlightStatsModel> for HighlightReport {
                 changed_sites,
                 nominal_over_white_sites,
                 affected_by_channel,
-            },
-            HighlightStatsModel::LocalRatios {
-                suspected_clipped_sites,
-                reconstructed_sites,
-                changed_sites,
-                fallback_sites,
-                fully_unsupported_sites,
-                neutralised_sites,
-                suspected_by_channel,
-            } => Self::LocalRatios {
-                suspected_clipped_sites,
-                reconstructed_sites,
-                changed_sites,
-                fallback_sites,
-                fully_unsupported_sites,
-                neutralised_sites,
-                suspected_by_channel,
             },
             HighlightStatsModel::Opposed {
                 suspected_clipped_sites,

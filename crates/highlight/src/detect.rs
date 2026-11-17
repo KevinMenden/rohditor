@@ -69,18 +69,18 @@ pub fn detect_clipping_cancellable(
     ))
 }
 
-/// Materialize Local ratios' camera-native suspected-clipping classification.
+/// Materialize Opposed's camera-native suspected-clipping classification.
 /// The mask is useful for diagnostics and focused tests; reconstruction itself
 /// uses the same scalar detector while it validates and updates the mosaic.
-pub fn detect_local_ratios(
+pub fn detect_opposed(
     mosaic: &MosaicImage<f32>,
     levels: ChannelDetectionLevels,
 ) -> Result<ClippingMask, HighlightError> {
-    detect_local_ratios_cancellable(mosaic, levels, &|| false)
+    detect_opposed_cancellable(mosaic, levels, &|| false)
 }
 
-/// Cancellable form of [`detect_local_ratios`].
-pub fn detect_local_ratios_cancellable(
+/// Cancellable form of [`detect_opposed`].
+pub fn detect_opposed_cancellable(
     mosaic: &MosaicImage<f32>,
     levels: ChannelDetectionLevels,
     cancellation: &dyn crate::CancellationCheck,
@@ -95,7 +95,7 @@ pub fn detect_local_ratios_cancellable(
                 width: mosaic.width(),
                 height: mosaic.height(),
                 row_stride: mosaic.row_stride(),
-                reason: "local-ratio clipping mask sample count overflowed".to_owned(),
+                reason: "clipping mask sample count overflowed".to_owned(),
             })
         })?;
     let mut data = Vec::new();
@@ -123,21 +123,4 @@ pub fn detect_local_ratios_cancellable(
         mosaic.row_stride(),
         data,
     ))
-}
-
-/// Materialize Opposed's camera-native suspected-clipping classification.
-pub fn detect_opposed(
-    mosaic: &MosaicImage<f32>,
-    levels: ChannelDetectionLevels,
-) -> Result<ClippingMask, HighlightError> {
-    detect_opposed_cancellable(mosaic, levels, &|| false)
-}
-
-/// Cancellable form of [`detect_opposed`].
-pub fn detect_opposed_cancellable(
-    mosaic: &MosaicImage<f32>,
-    levels: ChannelDetectionLevels,
-    cancellation: &dyn crate::CancellationCheck,
-) -> Result<ClippingMask, HighlightError> {
-    detect_local_ratios_cancellable(mosaic, levels, cancellation)
 }

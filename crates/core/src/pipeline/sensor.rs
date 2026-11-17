@@ -11,8 +11,7 @@ use rohditor_edit::{
     CameraProfileSelection, EditRecipe, HighlightAdjustments, HighlightMethod, WhiteBalance,
 };
 use rohditor_highlight::{
-    ChannelClipLevels, ChannelDetectionLevels, HighlightExecution, LocalRatioOptions,
-    OpposedOptions,
+    ChannelClipLevels, ChannelDetectionLevels, HighlightExecution, OpposedOptions,
 };
 use rohditor_image::{
     BayerPattern, CfaColor, ImageRegion, MosaicImage, Orientation, allocate_zeroed_f32,
@@ -420,9 +419,9 @@ fn highlight_execution(
                 blue: common_ceiling / gains.blue,
             })
         }
-        HighlightMethod::LocalRatios => {
-            let level = adjustments.local_ratios.detection_threshold;
-            HighlightExecution::LocalRatios(LocalRatioOptions {
+        HighlightMethod::Opposed => {
+            let level = adjustments.opposed.detection_threshold;
+            HighlightExecution::Opposed(OpposedOptions {
                 detection_levels: ChannelDetectionLevels {
                     red: level,
                     green: level,
@@ -432,17 +431,6 @@ fn highlight_execution(
                 // the user WB: white-balance edits keep this execution (and
                 // its cache identity) bit-equal, exactly like the
                 // `demosaic_balance` trade-off documented on the field above.
-                neutral_ceiling: Some(neutral_ceiling(level, demosaic_balance)),
-            })
-        }
-        HighlightMethod::Opposed => {
-            let level = adjustments.opposed.detection_threshold;
-            HighlightExecution::Opposed(OpposedOptions {
-                detection_levels: ChannelDetectionLevels {
-                    red: level,
-                    green: level,
-                    blue: level,
-                },
                 neutral_ceiling: Some(neutral_ceiling(level, demosaic_balance)),
             })
         }
@@ -862,46 +850,42 @@ mod tests {
             ..RenderOptions::default()
         };
         let threshold = 1.2;
-        for (method, level) in [
-            (HighlightMethod::LocalRatios, threshold),
-            (HighlightMethod::Opposed, threshold),
-        ] {
-            let mut recipe = EditRecipe::default();
-            recipe.raw.highlights.method = method;
-            recipe.raw.highlights.local_ratios.detection_threshold = level;
-            recipe.raw.highlights.opposed.detection_threshold = level;
-            recipe.color.white_balance = WhiteBalance::ManualMultipliers {
-                red: 1.3,
-                green: 1.0,
-                blue: 0.9,
-            };
-            let description = SensorDevelopmentDescription::from_frame(&frame, &recipe, options)
-                .expect("valid description");
-            assert_ne!(
-                description.white_balance_gains(),
-                description.demosaic_balance(),
-                "fixture must actually differ user WB from as-shot"
-            );
-            let ceiling = match description.highlight_execution() {
-                HighlightExecution::LocalRatios(options) => options.neutral_ceiling,
-                HighlightExecution::Opposed(options) => options.neutral_ceiling,
-                other => panic!("expected a reconstruction execution, got {other:?}"),
-            }
-            .expect("core always fills the neutral ceiling");
-            // threshold * min(as-shot gains) / gain per channel, the same
-            // arithmetic shape as the Clip branch. Exact equality holds:
-            // identical single mul/div in the same order.
-            let common = level * 1.0_f32.min(2.0).min(1.55);
-            assert_eq!(ceiling.red, common / 2.0);
-            assert_eq!(ceiling.green, common / 1.0);
-            assert_eq!(ceiling.blue, common / 1.55);
+        // #67: Opposed is the only reconstruction method; the former
+        // LocalRatios/Opposed loop is this direct check.
+        let level = threshold;
+        let mut recipe = EditRecipe::default();
+        recipe.raw.highlights.method = HighlightMethod::Opposed;
+        recipe.raw.highlights.opposed.detection_threshold = level;
+        recipe.color.white_balance = WhiteBalance::ManualMultipliers {
+            red: 1.3,
+            green: 1.0,
+            blue: 0.9,
+        };
+        let description = SensorDevelopmentDescription::from_frame(&frame, &recipe, options)
+            .expect("valid description");
+        assert_ne!(
+            description.white_balance_gains(),
+            description.demosaic_balance(),
+            "fixture must actually differ user WB from as-shot"
+        );
+        let ceiling = match description.highlight_execution() {
+            HighlightExecution::Opposed(options) => options.neutral_ceiling,
+            other => panic!("expected a reconstruction execution, got {other:?}"),
         }
+        .expect("core always fills the neutral ceiling");
+        // threshold * min(as-shot gains) / gain per channel, the same
+        // arithmetic shape as the Clip branch. Exact equality holds:
+        // identical single mul/div in the same order.
+        let common = level * 1.0_f32.min(2.0).min(1.55);
+        assert_eq!(ceiling.red, common / 2.0);
+        assert_eq!(ceiling.green, common / 1.0);
+        assert_eq!(ceiling.blue, common / 1.55);
     }
 
     /// Issue #65 cache identity: two recipes differing only in the user
-    /// white balance produce bit-equal `HighlightExecution::LocalRatios` /
-    /// `Opposed` (the sensor-source invalidation compare stays quiet), while
-    /// `Clip(_)` — which uses the user gains — differs.
+    /// white balance produce bit-equal `HighlightExecution::Opposed` (the
+    /// sensor-source invalidation compare stays quiet), while `Clip(_)` —
+    /// which uses the user gains — differs.
     #[test]
     fn user_white_balance_edit_leaves_reconstruction_execution_bit_equal() {
         let mut frame = frame("RGGB");
@@ -911,48 +895,45 @@ mod tests {
             demosaic: DemosaicAlgorithm::MalvarHeCutler,
             ..RenderOptions::default()
         };
-        for method in [HighlightMethod::LocalRatios, HighlightMethod::Opposed] {
-            let mut as_shot_recipe = EditRecipe::default();
-            as_shot_recipe.raw.highlights.method = method;
-            as_shot_recipe.color.white_balance = WhiteBalance::AsShot;
-            let mut manual_recipe = EditRecipe::default();
-            manual_recipe.raw.highlights.method = method;
-            manual_recipe.color.white_balance = WhiteBalance::ManualMultipliers {
-                red: 1.4,
-                green: 1.0,
-                blue: 0.8,
-            };
-            let as_shot =
-                SensorDevelopmentDescription::from_frame(&frame, &as_shot_recipe, options)
-                    .expect("valid description");
-            let manual = SensorDevelopmentDescription::from_frame(&frame, &manual_recipe, options)
-                .expect("valid description");
-            assert_ne!(
-                as_shot.white_balance_gains(),
-                manual.white_balance_gains(),
-                "the two recipes must resolve different user gains"
-            );
-            assert_eq!(
-                as_shot.highlight_execution(),
-                manual.highlight_execution(),
-                "a user WB edit must not change the reconstruction execution"
-            );
+        // #67: Opposed is the only reconstruction method; the former
+        // LocalRatios/Opposed loop is this direct check.
+        let mut as_shot_recipe = EditRecipe::default();
+        as_shot_recipe.raw.highlights.method = HighlightMethod::Opposed;
+        as_shot_recipe.color.white_balance = WhiteBalance::AsShot;
+        let mut manual_recipe = EditRecipe::default();
+        manual_recipe.raw.highlights.method = HighlightMethod::Opposed;
+        manual_recipe.color.white_balance = WhiteBalance::ManualMultipliers {
+            red: 1.4,
+            green: 1.0,
+            blue: 0.8,
+        };
+        let as_shot = SensorDevelopmentDescription::from_frame(&frame, &as_shot_recipe, options)
+            .expect("valid description");
+        let manual = SensorDevelopmentDescription::from_frame(&frame, &manual_recipe, options)
+            .expect("valid description");
+        assert_ne!(
+            as_shot.white_balance_gains(),
+            manual.white_balance_gains(),
+            "the two recipes must resolve different user gains"
+        );
+        assert_eq!(
+            as_shot.highlight_execution(),
+            manual.highlight_execution(),
+            "a user WB edit must not change the reconstruction execution"
+        );
 
-            let mut clip_as_shot = as_shot_recipe;
-            clip_as_shot.raw.highlights.method = HighlightMethod::Clip;
-            let mut clip_manual = manual_recipe;
-            clip_manual.raw.highlights.method = HighlightMethod::Clip;
-            let clip_as_shot =
-                SensorDevelopmentDescription::from_frame(&frame, &clip_as_shot, options)
-                    .expect("valid description");
-            let clip_manual =
-                SensorDevelopmentDescription::from_frame(&frame, &clip_manual, options)
-                    .expect("valid description");
-            assert_ne!(
-                clip_as_shot.highlight_execution(),
-                clip_manual.highlight_execution(),
-                "Clip resolves user gains, so it must differ here"
-            );
-        }
+        let mut clip_as_shot = as_shot_recipe;
+        clip_as_shot.raw.highlights.method = HighlightMethod::Clip;
+        let mut clip_manual = manual_recipe;
+        clip_manual.raw.highlights.method = HighlightMethod::Clip;
+        let clip_as_shot = SensorDevelopmentDescription::from_frame(&frame, &clip_as_shot, options)
+            .expect("valid description");
+        let clip_manual = SensorDevelopmentDescription::from_frame(&frame, &clip_manual, options)
+            .expect("valid description");
+        assert_ne!(
+            clip_as_shot.highlight_execution(),
+            clip_manual.highlight_execution(),
+            "Clip resolves user gains, so it must differ here"
+        );
     }
 }

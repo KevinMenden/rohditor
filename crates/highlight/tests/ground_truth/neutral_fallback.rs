@@ -6,7 +6,6 @@
 //! match the WB-aware Clip row TWO-SIDED: `|Δ hue_max| <= HUE_MATCH_TOL`
 //! (a one-sided bound cannot fail — pre-#65 raw magenta cores sit *closer*
 //! to the warm scene truth than the neutral landing: measured Δ ≈ −0.26).
-//! Same form for LocalRatios.
 //!
 //! Clause B ("no scene renders more coloured than Clip"): the
 //! load-bearing falsifier is the DIRECT chroma comparison over the
@@ -38,8 +37,8 @@ const HUE_MATCH_TOL: f64 = 1e-3;
 /// content is only *bounded*, not pinned, so this stays a tolerance.
 /// The pre-#65 discriminating margins that make it fail-able (measured on
 /// the unmodified methods, same assertion code): two_channel 0.2242 /
-/// 0.2165, sun_core_halo 0.2341 / 0.2339 (LR@0.98: 0.0670 — LR raises
-/// more of the set there), warm_cool 0.2554 / 0.2556, speculars 0.2445 /
+/// 0.2165, sun_core_halo 0.2341 / 0.2339 (pre-#65 historical: LR@0.98
+/// 0.0670 — LR raises more of the set there), warm_cool 0.2554 / 0.2556, speculars 0.2445 /
 /// 0.2440, worst overall 0.2556 — roughly 200x the tolerance, so the
 /// pinned value is neither flip-able by drift nor vacuously tight.
 const CHROMA_TOL: f64 = 1e-3;
@@ -101,7 +100,6 @@ fn neutral_fallback_matches_clip() {
             }
             let ceilings = shared_ceilings(sat);
             let clip = run(Method::Clip, sat, ceilings, &scene.mosaic);
-            let lr = run(Method::LocalRatios, sat, ceilings, &scene.mosaic);
             let opposed = run(Method::Opposed, sat, ceilings, &scene.mosaic);
             println!("\n--- #65 section {} @ sat {:.2} ---", spec.name, sat);
 
@@ -131,118 +129,110 @@ fn neutral_fallback_matches_clip() {
                     suspected: &core_mask,
                 };
                 let clip_max = hue_max_over(&base, &core_mask, clip.mosaic.data());
-                for (name, out) in [
-                    ("local_ratios", lr.mosaic.data()),
-                    ("opposed", opposed.mosaic.data()),
-                ] {
-                    let method_max = hue_max_over(&base, &core_mask, out);
-                    match (clip_max, method_max) {
-                        (Some(clip_hue), Some(method_hue)) => {
-                            let delta = (method_hue - clip_hue).abs();
-                            println!(
-                                "  core sites {}: hue_max {name} {method_hue:.4} vs clip {clip_hue:.4} |Δ| {delta:.4}",
-                                core.len()
-                            );
-                            assert!(
-                                delta <= HUE_MATCH_TOL,
-                                "{}@{:.2} {name}: |hue_max − clip hue_max| = {delta:.4} exceeds HUE_MATCH_TOL {HUE_MATCH_TOL}",
-                                spec.name,
-                                sat
-                            );
-                        }
-                        (Some(_), None) => println!(
-                            "  core sites {}: {name} hue set empty over cores (satisfied by the existing empty-set convention)",
+                // #67: a single Opposed row — direct call, no loop over one
+                // element (`clippy::single_element_loop`).
+                let method_max = hue_max_over(&base, &core_mask, opposed.mosaic.data());
+                match (clip_max, method_max) {
+                    (Some(clip_hue), Some(method_hue)) => {
+                        let delta = (method_hue - clip_hue).abs();
+                        println!(
+                            "  core sites {}: hue_max opposed {method_hue:.4} vs clip {clip_hue:.4} |Δ| {delta:.4}",
                             core.len()
-                        ),
-                        _ => println!(
-                            "  core sites {}: clip hue set empty; nothing to match against",
-                            core.len()
-                        ),
+                        );
+                        assert!(
+                            delta <= HUE_MATCH_TOL,
+                            "{}@{:.2} opposed: |hue_max − clip hue_max| = {delta:.4} exceeds HUE_MATCH_TOL {HUE_MATCH_TOL}",
+                            spec.name,
+                            sat
+                        );
                     }
+                    (Some(_), None) => println!(
+                        "  core sites {}: opposed hue set empty over cores (satisfied by the existing empty-set convention)",
+                        core.len()
+                    ),
+                    _ => println!(
+                        "  core sites {}: clip hue set empty; nothing to match against",
+                        core.len()
+                    ),
                 }
             }
 
             // ---- Clause B: direct chroma parity on the fallback set. ----
-            for (name, out) in [
-                ("local_ratios", lr.mosaic.data()),
-                ("opposed", opposed.mosaic.data()),
-            ] {
-                let mut fallback = 0;
-                let mut checked = 0;
-                let mut max_delta = 0.0_f64;
-                let mut neutralised_sites = 0;
-                let mut raised_sites = 0;
-                for (index, &suspected_site) in mask.iter().enumerate() {
-                    if !suspected_site {
-                        continue;
-                    }
-                    let before = scene.mosaic.data()[index];
-                    let after = out[index];
-                    if after > before {
-                        raised_sites += 1;
-                        continue; // raised sites: estimator's domain (v1)
-                    }
-                    fallback += 1;
-                    if after < before {
-                        neutralised_sites += 1;
-                    }
-                    let (x, y) = (index % width, index / width);
-                    let channel = BayerPattern::Rggb.color_at(x, y).channel_index();
-                    let Some(method_chroma) =
-                        metrics::site_chroma(&scene.truth[index], channel, after)
-                    else {
-                        continue; // sum <= 1e-3: nothing measurable
-                    };
-                    let clip_chroma = metrics::site_chroma(
-                        &scene.truth[index],
-                        channel,
-                        clip.mosaic.data()[index],
-                    )
-                    .expect("fallback site is bright; the clip triple sum matches");
-                    max_delta = max_delta.max(method_chroma - clip_chroma);
-                    checked += 1;
+            // #67: Opposed is the only reconstruction method now, so the
+            // former per-method loop is a direct check (no
+            // `clippy::single_element_loop` over one element).
+            let out = opposed.mosaic.data();
+            let mut fallback = 0;
+            let mut checked = 0;
+            let mut max_delta = 0.0_f64;
+            let mut neutralised_sites = 0;
+            let mut raised_sites = 0;
+            for (index, &suspected_site) in mask.iter().enumerate() {
+                if !suspected_site {
+                    continue;
                 }
-                println!(
-                    "  {name}: |fallback| {fallback} · |chroma-checked| {checked} · neutralised {neutralised_sites} · raised {raised_sites} · max(chroma−chroma_clip) {max_delta:.6} (TOL {CHROMA_TOL})"
-                );
-                if spec.name == "sun_core_halo" {
-                    assert!(
-                        checked >= 1,
-                        "sun_core_halo@{sat:.2} {name}: empty chroma-checked fallback set — clause B would be silently true"
-                    );
+                let before = scene.mosaic.data()[index];
+                let after = out[index];
+                if after > before {
+                    raised_sites += 1;
+                    continue; // raised sites: estimator's domain (v1)
                 }
+                fallback += 1;
+                if after < before {
+                    neutralised_sites += 1;
+                }
+                let (x, y) = (index % width, index / width);
+                let channel = BayerPattern::Rggb.color_at(x, y).channel_index();
+                let Some(method_chroma) = metrics::site_chroma(&scene.truth[index], channel, after)
+                else {
+                    continue; // sum <= 1e-3: nothing measurable
+                };
+                let clip_chroma =
+                    metrics::site_chroma(&scene.truth[index], channel, clip.mosaic.data()[index])
+                        .expect("fallback site is bright; the clip triple sum matches");
+                max_delta = max_delta.max(method_chroma - clip_chroma);
+                checked += 1;
+            }
+            println!(
+                "  opposed: |fallback| {fallback} · |chroma-checked| {checked} · neutralised {neutralised_sites} · raised {raised_sites} · max(chroma−chroma_clip) {max_delta:.6} (TOL {CHROMA_TOL})"
+            );
+            if spec.name == "sun_core_halo" {
                 assert!(
-                    max_delta <= CHROMA_TOL,
-                    "{}@{:.2} {name}: fallback chroma exceeds clip chroma by {max_delta:.6} (> CHROMA_TOL {CHROMA_TOL})",
-                    spec.name,
-                    sat
-                );
-
-                // ---- boundary step (print-only, feeds the #65
-                // follow-up decision on reconstructed-vs-neutral smoothing). ----
-                let mut boundary = BoundaryScan::default();
-                scan_boundary_steps(
-                    &mask,
-                    scene.mosaic.data(),
-                    out,
-                    width,
-                    spec.height,
-                    &mut boundary,
-                );
-                println!(
-                    "  {name}: boundary step (neutralised↔raised across a cell border): {}",
-                    boundary.max.map_or_else(
-                        || "— (no adjacent pair)".to_owned(),
-                        |step| format!("{step:.4}")
-                    )
+                    checked >= 1,
+                    "sun_core_halo@{sat:.2} opposed: empty chroma-checked fallback set — clause B would be silently true"
                 );
             }
+            assert!(
+                max_delta <= CHROMA_TOL,
+                "{}@{:.2} opposed: fallback chroma exceeds clip chroma by {max_delta:.6} (> CHROMA_TOL {CHROMA_TOL})",
+                spec.name,
+                sat
+            );
+
+            // ---- boundary step (print-only, feeds the #65
+            // follow-up decision on reconstructed-vs-neutral smoothing). ----
+            let mut boundary = BoundaryScan::default();
+            scan_boundary_steps(
+                &mask,
+                scene.mosaic.data(),
+                out,
+                width,
+                spec.height,
+                &mut boundary,
+            );
+            println!(
+                "  opposed: boundary step (neutralised↔raised across a cell border): {}",
+                boundary.max.map_or_else(
+                    || "— (no adjacent pair)".to_owned(),
+                    |step| format!("{step:.4}")
+                )
+            );
         }
     }
 }
 
 fn suspected_mask(scene: &generator::Generated, sat: f32) -> Vec<bool> {
-    rohditor_highlight::detect_local_ratios(&scene.mosaic, detection_levels(sat))
+    rohditor_highlight::detect_opposed(&scene.mosaic, detection_levels(sat))
         .expect("harness mosaic and levels are valid")
         .data()
         .to_vec()

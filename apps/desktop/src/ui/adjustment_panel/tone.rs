@@ -22,17 +22,11 @@ pub(super) fn show_highlight_controls(
         match highlight_method {
             HighlightMethod::Off => "Off",
             HighlightMethod::Clip => "Clip",
-            HighlightMethod::LocalRatios => "Local ratios",
             HighlightMethod::Opposed => "Opposed / local inpainting",
         },
         |ui| {
             ui.selectable_value(&mut highlight_method, HighlightMethod::Off, "Off");
             ui.selectable_value(&mut highlight_method, HighlightMethod::Clip, "Clip");
-            ui.selectable_value(
-                &mut highlight_method,
-                HighlightMethod::LocalRatios,
-                "Local ratios",
-            );
             ui.selectable_value(
                 &mut highlight_method,
                 HighlightMethod::Opposed,
@@ -50,11 +44,6 @@ pub(super) fn show_highlight_controls(
                 "Effective threshold",
                 "Clip caps channel values using a white-balance-dependent treatment ceiling.",
                 "× white",
-            ),
-            HighlightMethod::LocalRatios => (
-                "Detection threshold",
-                "Lower values classify more RAW samples as potentially clipped; too low can reconstruct legitimate over-range color.",
-                "× normalized white",
             ),
             HighlightMethod::Opposed => (
                 "Detection threshold",

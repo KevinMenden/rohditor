@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rayon::ThreadPoolBuilder;
 use rohditor_highlight::{
-    ChannelDetectionLevels, HighlightError, OpposedOptions, local_ratio_scratch_bytes,
-    opposed_scratch_bytes, reconstruct_opposed, reconstruct_opposed_cancellable,
+    ChannelDetectionLevels, HighlightError, OpposedOptions, opposed_scratch_bytes,
+    reconstruct_opposed, reconstruct_opposed_cancellable,
 };
 use rohditor_image::{BayerPattern, MosaicImage};
 
@@ -242,9 +242,8 @@ fn every_checkpoint_of_the_region_passes_observes_cancellation() {
 fn scratch_bytes_cover_the_region_state_and_fail_checked() {
     let (width, height) = (6_000, 4_000);
     let cells = (width / 2) * (height / 2);
-    let local = local_ratio_scratch_bytes(width, height).expect("fits");
     let opposed = opposed_scratch_bytes(width, height).expect("fits");
     // At least one `u32` label per cell on top of the cell summaries.
-    assert!(opposed >= local + 4 * cells, "{opposed} vs {local}");
+    assert!(opposed >= 4 * cells, "{opposed} labels-only floor");
     assert_eq!(opposed_scratch_bytes(usize::MAX, usize::MAX), None);
 }

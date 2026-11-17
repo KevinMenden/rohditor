@@ -305,7 +305,7 @@ fn highlight_compare_reports_every_method_against_clip() -> Result<(), Box<dyn E
             .iter()
             .filter_map(|m| m["method"].as_str())
             .collect();
-        assert_eq!(names, ["off", "clip", "local-ratios", "opposed"]);
+        assert_eq!(names, ["off", "clip", "opposed"]);
         for crop in methods[1]["crops"].as_array().ok_or("missing crops")? {
             assert_eq!(crop["max_abs_diff_vs_clip"], 0, "Clip must match itself");
             assert!(

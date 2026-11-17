@@ -2,8 +2,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rayon::ThreadPoolBuilder;
 use rohditor_highlight::{
-    ChannelDetectionLevels, HighlightError, OpposedOptions, OpposedStats, ReconstructionStats,
-    detect_opposed, reconstruct_local_ratios, reconstruct_opposed, reconstruct_opposed_cancellable,
+    ChannelDetectionLevels, HighlightError, OpposedOptions, OpposedStats, detect_opposed,
+    reconstruct_opposed, reconstruct_opposed_cancellable,
 };
 use rohditor_image::{BayerPattern, CfaColor, MosaicImage};
 
@@ -75,9 +75,9 @@ fn single_clipped_fixture() -> MosaicImage<f32> {
 }
 
 #[test]
-fn opposed_recovers_multiple_clipped_channels_where_local_ratios_is_conservative() {
+fn opposed_recovers_multiple_clipped_channels() {
     let mosaic = double_clipped_fixture(BayerPattern::Rggb);
-    let opposed = reconstruct_opposed(mosaic.clone(), options()).expect("opposed reconstruction");
+    let opposed = reconstruct_opposed(mosaic, options()).expect("opposed reconstruction");
     assert_eq!(
         opposed.stats,
         OpposedStats {
@@ -93,29 +93,6 @@ fn opposed_recovers_multiple_clipped_channels_where_local_ratios_is_conservative
     assert!(*opposed.mosaic.sample(6, 6) > 0.9);
     assert!(*opposed.mosaic.sample(7, 6) > 0.9);
     assert!(*opposed.mosaic.sample(6, 7) > 0.9);
-
-    let local = reconstruct_local_ratios(
-        mosaic,
-        rohditor_highlight::LocalRatioOptions {
-            detection_levels: levels(0.9),
-            neutral_ceiling: None,
-        },
-    )
-    .expect("local-ratio reconstruction");
-    assert_eq!(local.stats.reconstructed_sites, 0);
-    assert_eq!(local.stats.fallback_sites, 3);
-    assert_eq!(
-        local.stats,
-        ReconstructionStats {
-            suspected_clipped_sites: 3,
-            reconstructed_sites: 0,
-            changed_sites: 0,
-            fallback_sites: 3,
-            fully_unsupported_sites: 0,
-            neutralised_sites: 0,
-            suspected_by_channel: [1, 2, 0],
-        }
-    );
 }
 
 #[test]

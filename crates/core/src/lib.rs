@@ -87,7 +87,7 @@ pub use rohditor_color::{
 pub use rohditor_detail::NoiseProfile;
 pub use rohditor_highlight::{
     CLIP_ALGORITHM_VERSION, ChannelClipLevels, ClipStats, HighlightExecution,
-    LOCAL_RATIOS_ALGORITHM_VERSION, OPPOSED_ALGORITHM_VERSION, OpposedStats, ReconstructionStats,
+    OPPOSED_ALGORITHM_VERSION, OpposedStats,
 };
 pub use rohditor_optics::{
     CorrectionComponents, DatabaseProvenance, DistortionModel, LensProfileSummary, MetadataField,

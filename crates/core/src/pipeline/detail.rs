@@ -331,7 +331,6 @@ pub(super) fn ceilings(recipe: &EditRecipe, gains: WhiteBalanceGains) -> [f32; 3
                 ceiling / gains.blue,
             ]
         }
-        HighlightMethod::LocalRatios => [recipe.raw.highlights.local_ratios.detection_threshold; 3],
         HighlightMethod::Opposed => [recipe.raw.highlights.opposed.detection_threshold; 3],
         HighlightMethod::Off => [1.0; 3],
     }
