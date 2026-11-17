@@ -12,11 +12,12 @@
 //!
 //! Differences from upstream, all about storage and edges: tiles are 256
 //! pixels wide with the usual 16-pixel halo; every plane has its own buffer
-//! instead of sharing memory between stages; the halo is filled by mirroring;
-//! the outer 16-pixel image boundary keeps the bilinear reference result;
-//! samples are 0..1 instead of 0..65535; and the tile's measured sample is
-//! written back unchanged. Like upstream, reconstructed values are clamped at
-//! zero. Rows of tiles are processed in parallel.
+//! instead of sharing memory between stages; the halo is filled by mirroring,
+//! so reconstruction reaches the image edge (images no larger than twice the
+//! halo are entirely bilinear); samples are 0..1 instead of 0..65535; and the
+//! tile's measured sample is written back unchanged. Like upstream,
+//! reconstructed values are clamped at zero. Rows of tiles are processed in
+//! parallel.
 //!
 //! AMaZE was authored by Emil Martinec and optimized by Ingo Weyrich, with
 //! additional ideas from Luis Sanz Rodríguez and Paul Lee. The upstream code
@@ -64,22 +65,14 @@ pub(super) fn reconstruct(
     row_stride: usize,
     output: &mut [f32],
 ) -> Result<(), DemosaicError> {
-    // AMaZE stages only produce pixels with a complete 16-pixel neighbourhood;
-    // the outer ring keeps the bilinear reference result, consistent with the
-    // other higher quality algorithms.
+    // Images no larger than twice the halo have no room for a mirrored
+    // neighbourhood and stay entirely bilinear. Larger images are
+    // reconstructed directionally to their edges: the tile halo mirrors into
+    // the mosaic, so no bilinear prepass is needed.
     if mosaic.width() <= 2 * BORDER || mosaic.height() <= 2 * BORDER {
         return bilinear::reconstruct(mosaic, gains, cancellation, row_stride, output);
     }
-    let (width, height) = (mosaic.width(), mosaic.height());
-    let interior = (BORDER..width - BORDER, BORDER..height - BORDER);
-    bilinear::reconstruct_outside(
-        mosaic,
-        gains,
-        Some(interior),
-        cancellation,
-        row_stride,
-        output,
-    )?;
+    let width = mosaic.width();
 
     // Tiles are independent. Each task owns the output columns of its tile
     // (the rows of every band are split per tile with `split_at_mut`), so
@@ -98,21 +91,15 @@ pub(super) fn reconstruct(
                 rest = tail;
             }
         }
-        // A tile whose core lies entirely in the border ring writes nothing.
+        // Every tile's core reaches into this band, clipped only to the image.
         jobs.extend(
             columns
                 .into_iter()
                 .enumerate()
-                .filter_map(|(tile_x, rows)| {
-                    let geometry = AmazeTileGeometry {
-                        origin_x: tile_x * TILE_VALID,
-                        origin_y: tile_y * TILE_VALID,
-                    };
-                    (!geometry.write_window(width, mosaic.height()).is_empty()).then_some(TileJob {
-                        tile_x,
-                        tile_y,
-                        rows,
-                    })
+                .map(|(tile_x, rows)| TileJob {
+                    tile_x,
+                    tile_y,
+                    rows,
                 }),
         );
     }

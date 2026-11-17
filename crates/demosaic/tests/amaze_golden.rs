@@ -71,14 +71,14 @@ fn amaze_output_matches_the_pinned_hashes() {
         }
     }
     let expected = [
-        "Rggb identity 82901f8b6efe2140",
-        "Rggb balanced 705390860f10ba6e",
-        "Bggr identity 76f5f3df21953518",
-        "Bggr balanced f10c556f00cf50b5",
-        "Grbg identity a353fcb22289c4bb",
-        "Grbg balanced 1d34ec0c26a1010e",
-        "Gbrg identity 4d11566d39adde2b",
-        "Gbrg balanced ce58ea2860d154b7",
+        "Rggb identity c60f3fec92045b18",
+        "Rggb balanced d57793d2c96ccba7",
+        "Bggr identity 4ee5cebe694421fc",
+        "Bggr balanced b9c80f0cf7e9638e",
+        "Grbg identity 2a4e9926ffacb7e2",
+        "Grbg balanced 269fc286e320f8b8",
+        "Gbrg identity aa4084ee82afc286",
+        "Gbrg balanced 6fa2848f15978563",
     ];
     assert_eq!(
         actual, expected,

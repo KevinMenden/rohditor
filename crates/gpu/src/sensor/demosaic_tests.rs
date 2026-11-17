@@ -3,7 +3,9 @@ use std::sync::Arc;
 use rohditor_core::{
     CancellationToken, RawCropPolicy, RenderOptions, SensorDevelopmentDescription, normalize_raw,
 };
-use rohditor_demosaic::{ChannelBalance, DemosaicAlgorithm, WhiteBalanceGains, demosaic};
+use rohditor_demosaic::{
+    ChannelBalance, DemosaicAlgorithm, WhiteBalanceGains, demosaic, mirror_coordinate,
+};
 use rohditor_edit::{CaptureSharpening, EditRecipe, HighlightMethod};
 use rohditor_raw::{ImageRect, LevelPattern, RawFrame};
 
@@ -117,7 +119,7 @@ fn rcd_and_amaze_support_is_limited_to_off_and_clip_highlights() {
     )
     .expect("RCD highlight description");
     assert!(!GpuSensorProcessor::supports(&unsupported));
-    assert_eq!(DemosaicAlgorithm::Rcd.contract().algorithm_version(), 3);
+    assert_eq!(DemosaicAlgorithm::Rcd.contract().algorithm_version(), 4);
 }
 
 pub(super) fn highlighted(
@@ -402,7 +404,9 @@ fn rcd_intermediate_stages_match_signed_partial_tile_cpu_snapshot() {
     assert_eq!(snapshots.len(), 9);
     let full = 194 * 194;
     let half = full / 2;
-    let red = 10 * 194 + 10;
+    // The window origin is (-10, -10), so the CPU snapshot's probe sites at
+    // global (10, 10) and (11, 10) sit at scratch local (20, 20) and (20, 21).
+    let red = 20 * 194 + 20;
     let green = red + 1;
     let probes = [
         (1, 4 * full + red, 0.51112366_f32),
@@ -423,7 +427,15 @@ fn rcd_intermediate_stages_match_signed_partial_tile_cpu_snapshot() {
         );
     }
     for stage in &snapshots {
-        assert_eq!(stage[full - 1], 0.0, "unused CFA scratch must be clear");
+        // The far window corner mirrors into the image (there is no longer an
+        // unused zero region beyond the clipped window).
+        let corner_x = mirror_coordinate(183, 29);
+        let corner_y = mirror_coordinate(183, 31);
+        assert_eq!(
+            stage[full - 1],
+            values[corner_y * 29 + corner_x],
+            "far window corner must hold the mirrored sample"
+        );
     }
     drop(executor);
     drop(planes);

@@ -3,9 +3,10 @@
 //! Tiles are `AMAZE_TILE_SIZE` pixels wide with an `AMAZE_BORDER` halo, so each
 //! tile's valid core is `AMAZE_TILE_VALID` pixels. Tile origins are relative to
 //! the complete mosaic and are always even, so a tile's local Bayer phase equals
-//! the image's phase. The outer `AMAZE_BORDER` ring of the image keeps the
-//! bilinear reference result; the halo beyond the image edge is filled by
-//! mirroring ([`mirror_coordinate`]), which preserves coordinate parity.
+//! the image's phase. Cores tile the image exactly: reconstruction reaches the
+//! image edges, with the halo beyond an image edge filled by mirroring
+//! ([`mirror_coordinate`]), which preserves coordinate parity. Images no larger
+//! than twice the border have no tiles and stay entirely bilinear.
 
 use std::ops::Range;
 
@@ -29,8 +30,7 @@ pub struct AmazeWriteWindow {
 }
 
 impl AmazeTileGeometry {
-    /// The pixels this tile reconstructs: its core, minus the bilinear border
-    /// ring of the image. Empty when the ring leaves nothing of the core.
+    /// The pixels this tile reconstructs: its core, clipped only to the image.
     #[must_use]
     pub fn write_window(self, width: usize, height: usize) -> AmazeWriteWindow {
         AmazeWriteWindow {
@@ -40,11 +40,9 @@ impl AmazeTileGeometry {
     }
 }
 
-/// Core range along one axis, clipped to the image and its border ring.
+/// Core range along one axis, clipped only to the image.
 fn core_range(origin: usize, length: usize) -> Range<usize> {
-    let start = origin.max(AMAZE_BORDER);
-    let end = (origin + AMAZE_TILE_VALID).min(length.saturating_sub(AMAZE_BORDER));
-    start..end.max(start)
+    origin..(origin + AMAZE_TILE_VALID).min(length)
 }
 
 impl AmazeWriteWindow {
@@ -60,8 +58,8 @@ pub fn amaze_tile_count(length: usize) -> usize {
     length.div_ceil(AMAZE_TILE_VALID)
 }
 
-/// Tiles in row-major order that write at least one pixel. Images no larger
-/// than twice the border yield none; they are entirely bilinear.
+/// Tiles in row-major order; their cores tile the image exactly. Images no
+/// larger than twice the border yield none; they are entirely bilinear.
 pub fn amaze_tiles(width: usize, height: usize) -> impl Iterator<Item = AmazeTileGeometry> {
     let (columns, rows) = if width <= 2 * AMAZE_BORDER || height <= 2 * AMAZE_BORDER {
         (0, 0)
@@ -69,12 +67,9 @@ pub fn amaze_tiles(width: usize, height: usize) -> impl Iterator<Item = AmazeTil
         (amaze_tile_count(width), amaze_tile_count(height))
     };
     (0..rows).flat_map(move |tile_y| {
-        (0..columns).filter_map(move |tile_x| {
-            let tile = AmazeTileGeometry {
-                origin_x: tile_x * AMAZE_TILE_VALID,
-                origin_y: tile_y * AMAZE_TILE_VALID,
-            };
-            (!tile.write_window(width, height).is_empty()).then_some(tile)
+        (0..columns).map(move |tile_x| AmazeTileGeometry {
+            origin_x: tile_x * AMAZE_TILE_VALID,
+            origin_y: tile_y * AMAZE_TILE_VALID,
         })
     })
 }
@@ -109,43 +104,47 @@ mod tests {
     }
 
     #[test]
-    fn tiles_stop_where_the_border_ring_leaves_nothing_to_write() {
-        // The second column would start at 224, inside the ring (224..240).
-        assert_eq!(tiles(240, 33), [(0, 0)]);
+    fn tiles_reach_the_image_edges() {
+        // The second column starts at 224 and its core runs to the edge.
+        assert_eq!(tiles(240, 33), [(0, 0), (224, 0)]);
         assert_eq!(tiles(241, 33), [(0, 0), (224, 0)]);
         let tile = amaze_tiles(500, 33).nth(2).expect("last tile");
-        assert_eq!(tile.write_window(500, 33).x, 448..484);
-        assert_eq!(tile.write_window(500, 33).y, 16..17);
+        assert_eq!(tile.write_window(500, 33).x, 448..500);
+        assert_eq!(tile.write_window(500, 33).y, 0..33);
         assert_eq!(tiles(500, 500).len(), 9);
+        // 450 = 2 * 224 + 2: the third column is a two-pixel sliver at the edge.
+        assert_eq!(tiles(450, 33).len(), 3);
+        let third = amaze_tiles(450, 33).nth(2).expect("third tile");
+        assert_eq!(third.write_window(450, 33).x, 448..450);
     }
 
     #[test]
-    fn a_last_tile_inside_the_ring_clips_the_previous_core_to_the_ring() {
-        // 450 = 2 * 224 + 2: the third column (448..450) is all ring, and the
-        // second ends where the ring starts instead of reaching into it.
-        let second = amaze_tiles(450, 33).nth(1).expect("second tile");
-        assert_eq!(second.write_window(450, 33).x, 224..434);
-        assert_eq!(tiles(450, 33).len(), 2);
-    }
-
-    #[test]
-    fn every_interior_pixel_is_written_exactly_once() {
-        let (width, height) = (450, 460);
-        let mut written = vec![0_u8; width * height];
-        for tile in amaze_tiles(width, height) {
-            let window = tile.write_window(width, height);
-            for y in window.y {
-                for x in window.x.clone() {
-                    written[y * width + x] += 1;
+    fn every_image_pixel_is_written_exactly_once() {
+        for (width, height) in [
+            (33, 33),
+            (224, 224),
+            (225, 225),
+            (195, 195),
+            (240, 225),
+            (33, 257),
+            (257, 33),
+            (450, 460),
+            (513, 389),
+        ] {
+            let mut written = vec![0_u8; width * height];
+            for tile in amaze_tiles(width, height) {
+                let window = tile.write_window(width, height);
+                assert!(!window.is_empty(), "empty core at {width}x{height}");
+                for y in window.y {
+                    for x in window.x.clone() {
+                        written[y * width + x] += 1;
+                    }
                 }
             }
-        }
-        for y in 0..height {
-            for x in 0..width {
-                let interior = (AMAZE_BORDER..width - AMAZE_BORDER).contains(&x)
-                    && (AMAZE_BORDER..height - AMAZE_BORDER).contains(&y);
-                assert_eq!(written[y * width + x], u8::from(interior), "({x}, {y})");
-            }
+            assert!(
+                written.iter().all(|&count| count == 1),
+                "{width}x{height}: a pixel was not written exactly once"
+            );
         }
     }
 

@@ -252,8 +252,9 @@ fn amaze_batches_of_any_size_ignore_stale_scratch() {
                     .expect("GPU AMaZE batches");
                 let tiles = amaze_tiles(width, height).count();
                 assert_eq!(submissions, tiles.div_ceil(batch));
-                // The executor writes only the tiles' cores; the border ring is
-                // the bilinear base that `demosaic` lays down first.
+                // The executor writes the tile cores, i.e. every pixel of an
+                // eligible image; the bilinear base only survives for images
+                // too small to have tiles.
                 let actual = readback_planes(&gpu, &fixture.planes);
                 for tile in amaze_tiles(width, height) {
                     let window = tile.write_window(width, height);

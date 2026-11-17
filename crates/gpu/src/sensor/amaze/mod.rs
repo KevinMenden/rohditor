@@ -2,8 +2,9 @@
 //! sequence of shader passes mirroring `rohditor_demosaic`'s CPU stages.
 //!
 //! Tiles come from the shared geometry ([`amaze_tiles`]), so partial tiles,
-//! mirrored halos and the bilinear border ring match the CPU. Each batch of up
-//! to [`MAX_BATCH`] tiles is one submission: every pass is dispatched for all
+//! mirrored halos and the mirrored image edges match the CPU; only images
+//! without any tile keep the bilinear base. Each batch of up to
+//! [`MAX_BATCH`] tiles is one submission: every pass is dispatched for all
 //! tiles of the batch, with the tile slot in the dispatch's z coordinate.
 
 use rohditor_core::CancellationToken;

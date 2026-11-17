@@ -142,6 +142,11 @@ pub enum DemosaicBorderPolicy {
     /// Use the bilinear reference reconstruction at image and incomplete-tile
     /// borders. This is also the complete Bilinear algorithm policy.
     BilinearReference,
+    /// Reconstruct the image border directionally: the tile halo mirrors into
+    /// the mosaic (whole-sample reflection, parity preserving), so no pixel
+    /// falls back to the bilinear reference. Images too small for a complete
+    /// mirrored halo are reconstructed bilinear as a whole.
+    MirrorHaloReconstruction,
 }
 
 /// Pixel-storage-independent execution facts for a selectable demosaic method.
@@ -162,18 +167,28 @@ impl DemosaicContract {
             DemosaicAlgorithm::Rcd => RCD_HALO,
             DemosaicAlgorithm::Amaze => AMAZE_HALO,
         };
-        // RCD and AMaZE version 2 reconstruct on a channel-balanced mosaic. RCD
-        // version 3 also matches the reference tools' low-pass neighbours;
-        // AMaZE version 3 keeps the whole 16 px border ring bilinear.
+        // RCD and AMaZE version 2 reconstruct on a channel-balanced mosaic.
+        // RCD version 3 also matches the reference tools' low-pass neighbours.
+        // Version 4 of both reconstructs the whole image directionally with a
+        // mirrored tile halo; bilinear remains only below the size gate
+        // (images with a side of RCD_MIN_DIMENSION / twice the AMaZE border
+        // or less).
         let algorithm_version = match algorithm {
-            DemosaicAlgorithm::Rcd => 3,
-            DemosaicAlgorithm::Amaze => 3,
+            DemosaicAlgorithm::Rcd | DemosaicAlgorithm::Amaze => 4,
             DemosaicAlgorithm::Bilinear | DemosaicAlgorithm::MalvarHeCutler => 1,
+        };
+        let border_policy = match algorithm {
+            DemosaicAlgorithm::Rcd | DemosaicAlgorithm::Amaze => {
+                DemosaicBorderPolicy::MirrorHaloReconstruction
+            }
+            DemosaicAlgorithm::Bilinear | DemosaicAlgorithm::MalvarHeCutler => {
+                DemosaicBorderPolicy::BilinearReference
+            }
         };
         Self {
             algorithm,
             required_halo,
-            border_policy: DemosaicBorderPolicy::BilinearReference,
+            border_policy,
             algorithm_version,
         }
     }
@@ -384,12 +399,28 @@ mod contract_tests {
     use super::*;
 
     #[test]
-    fn contracts_expose_each_algorithm_halo_and_common_edge_policy() {
-        for (algorithm, halo) in [
-            (DemosaicAlgorithm::Bilinear, 1),
-            (DemosaicAlgorithm::MalvarHeCutler, 2),
-            (DemosaicAlgorithm::Rcd, 10),
-            (DemosaicAlgorithm::Amaze, 16),
+    fn contracts_expose_each_algorithm_halo_and_edge_policy() {
+        for (algorithm, halo, border_policy) in [
+            (
+                DemosaicAlgorithm::Bilinear,
+                1,
+                DemosaicBorderPolicy::BilinearReference,
+            ),
+            (
+                DemosaicAlgorithm::MalvarHeCutler,
+                2,
+                DemosaicBorderPolicy::BilinearReference,
+            ),
+            (
+                DemosaicAlgorithm::Rcd,
+                10,
+                DemosaicBorderPolicy::MirrorHaloReconstruction,
+            ),
+            (
+                DemosaicAlgorithm::Amaze,
+                16,
+                DemosaicBorderPolicy::MirrorHaloReconstruction,
+            ),
         ] {
             let contract = algorithm.contract();
             assert_eq!(contract.algorithm(), algorithm);
@@ -397,16 +428,12 @@ mod contract_tests {
             assert_eq!(contract.required_halo().right, halo);
             assert_eq!(contract.required_halo().top, halo);
             assert_eq!(contract.required_halo().bottom, halo);
-            assert_eq!(
-                contract.border_policy(),
-                DemosaicBorderPolicy::BilinearReference
-            );
+            assert_eq!(contract.border_policy(), border_policy);
             assert_eq!(contract.stable_name(), algorithm.stable_name());
-            // AMaZE is at version 3 (channel-balanced, whole border ring
-            // bilinear), RCD at 3 (channel-balanced, reference low-pass).
+            // AMaZE and RCD are at version 4 (channel-balanced, reference
+            // low-pass, mirrored-halo reconstruction of the whole image).
             let expected_version = match algorithm {
-                DemosaicAlgorithm::Rcd => 3,
-                DemosaicAlgorithm::Amaze => 3,
+                DemosaicAlgorithm::Rcd | DemosaicAlgorithm::Amaze => 4,
                 _ => 1,
             };
             assert_eq!(contract.algorithm_version(), expected_version);
