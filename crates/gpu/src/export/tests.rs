@@ -202,7 +202,6 @@ fn capture_bridge_precedes_reduction_and_matches_export() {
     for method in [
         rohditor_edit::HighlightMethod::Off,
         rohditor_edit::HighlightMethod::Clip,
-        rohditor_edit::HighlightMethod::LocalRatios,
         rohditor_edit::HighlightMethod::Opposed,
     ] {
         let mut recipe = neutral_recipe();

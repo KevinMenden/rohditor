@@ -52,9 +52,8 @@ fn soft_disk_is_reconstructed_from_its_border() {
     for sat in scenes::SAT_LEVELS {
         let scene = generator::generate(&spec, sat);
         let ceilings = shared_ceilings(sat);
-        let suspected =
-            rohditor_highlight::detect_local_ratios(&scene.mosaic, detection_levels(sat))
-                .expect("harness mosaic and levels are valid");
+        let suspected = rohditor_highlight::detect_opposed(&scene.mosaic, detection_levels(sat))
+            .expect("harness mosaic and levels are valid");
         let mask = suspected.data();
         let total = mask.iter().filter(|&&hit| hit).count();
 
@@ -111,9 +110,8 @@ fn adjacent_objects_keep_their_own_hue() {
     for sat in scenes::SAT_LEVELS {
         let scene = generator::generate(&spec, sat);
         let ceilings = shared_ceilings(sat);
-        let suspected =
-            rohditor_highlight::detect_local_ratios(&scene.mosaic, detection_levels(sat))
-                .expect("harness mosaic and levels are valid");
+        let suspected = rohditor_highlight::detect_opposed(&scene.mosaic, detection_levels(sat))
+            .expect("harness mosaic and levels are valid");
         let opposed = run(Method::Opposed, sat, ceilings, &scene.mosaic);
         let clip = run(Method::Clip, sat, ceilings, &scene.mosaic);
         // The warm object clips R, the cool one clips B.

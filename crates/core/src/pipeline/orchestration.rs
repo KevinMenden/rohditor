@@ -1579,10 +1579,6 @@ fn highlight_adjustments_match(
         HighlightMethod::Clip => {
             retained.clip.threshold.to_bits() == requested.clip.threshold.to_bits()
         }
-        HighlightMethod::LocalRatios => {
-            retained.local_ratios.detection_threshold.to_bits()
-                == requested.local_ratios.detection_threshold.to_bits()
-        }
         HighlightMethod::Opposed => {
             retained.opposed.detection_threshold.to_bits()
                 == requested.opposed.detection_threshold.to_bits()
@@ -1597,9 +1593,6 @@ fn estimated_highlight_scratch_bytes(
     height: usize,
 ) -> Result<usize, PipelineError> {
     let needs_scratch = match diagnostics {
-        HighlightDiagnostics::LocalRatios(stats) if method == HighlightMethod::LocalRatios => {
-            stats.suspected_clipped_sites > 0
-        }
         HighlightDiagnostics::Opposed(stats) if method == HighlightMethod::Opposed => {
             stats.suspected_clipped_sites > 0
         }
@@ -1609,7 +1602,6 @@ fn estimated_highlight_scratch_bytes(
         return Ok(0);
     }
     let scratch = match method {
-        HighlightMethod::LocalRatios => rohditor_highlight::local_ratio_scratch_bytes,
         HighlightMethod::Opposed => rohditor_highlight::opposed_scratch_bytes,
         HighlightMethod::Off | HighlightMethod::Clip => unreachable!("scratch is not needed"),
     };
@@ -1788,10 +1780,6 @@ fn validate_base_working_set(
         .checked_mul(3 * size_of::<f32>())
         .ok_or_else(|| dimension_overflow(frame.info.width, frame.info.height))?;
     let highlight_scratch_bytes = match highlight_method {
-        HighlightMethod::LocalRatios => {
-            rohditor_highlight::local_ratio_scratch_bytes(frame.info.width, frame.info.height)
-                .ok_or_else(|| dimension_overflow(frame.info.width, frame.info.height))?
-        }
         HighlightMethod::Opposed => {
             rohditor_highlight::opposed_scratch_bytes(frame.info.width, frame.info.height)
                 .ok_or_else(|| dimension_overflow(frame.info.width, frame.info.height))?
@@ -1852,10 +1840,6 @@ fn validate_preview_working_set(
         .and_then(|pixels| pixels.checked_mul(3 * size_of::<f32>()))
         .ok_or_else(|| dimension_overflow(target_width, full_height))?;
     let highlight_scratch_bytes = match highlight_method {
-        HighlightMethod::LocalRatios => {
-            rohditor_highlight::local_ratio_scratch_bytes(full_width, full_height)
-                .ok_or_else(|| dimension_overflow(full_width, full_height))?
-        }
         HighlightMethod::Opposed => {
             rohditor_highlight::opposed_scratch_bytes(full_width, full_height)
                 .ok_or_else(|| dimension_overflow(full_width, full_height))?

@@ -106,7 +106,7 @@ fn rcd_and_amaze_support_is_limited_to_off_and_clip_highlights() {
         false
     )));
     let mut recipe = EditRecipe::default();
-    recipe.raw.highlights.method = HighlightMethod::LocalRatios;
+    recipe.raw.highlights.method = HighlightMethod::Opposed;
     let unsupported = SensorDevelopmentDescription::from_frame(
         &frame,
         &recipe,

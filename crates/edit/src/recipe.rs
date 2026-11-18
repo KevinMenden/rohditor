@@ -42,7 +42,7 @@ pub struct EditError {
 }
 
 /// Schema version of the current non-destructive edit recipe.
-pub const EDIT_RECIPE_SCHEMA_VERSION: u32 = 18;
+pub const EDIT_RECIPE_SCHEMA_VERSION: u32 = 19;
 const LEGACY_EDIT_RECIPE_SCHEMA_VERSION: u32 = 1;
 const PREVIOUS_EDIT_RECIPE_SCHEMA_VERSION: u32 = 2;
 const PREVIOUS_RAW_EDIT_RECIPE_SCHEMA_VERSION: u32 = 3;
@@ -52,6 +52,7 @@ const PREVIOUS_OPPOSED_EDIT_RECIPE_SCHEMA_VERSION: u32 = 6;
 const PREVIOUS_CAMERA_PROFILE_EDIT_RECIPE_SCHEMA_VERSION: u32 = 7;
 const PREVIOUS_OPTICS_EDIT_RECIPE_SCHEMA_VERSION: u32 = 8;
 const PREVIOUS_WHITE_BALANCE_EDIT_RECIPE_SCHEMA_VERSION: u32 = 9;
+const PREVIOUS_LOCAL_RATIOS_REMOVAL_EDIT_RECIPE_SCHEMA_VERSION: u32 = 18;
 
 /// Inclusive range and neutral value for one adjustment parameter.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -252,7 +253,6 @@ pub(super) mod raw_settings {
         #[default]
         Clip,
         Off,
-        LocalRatios,
         Opposed,
     }
 
@@ -266,20 +266,6 @@ pub(super) mod raw_settings {
         fn default() -> Self {
             Self {
                 threshold: HIGHLIGHT_THRESHOLD_RANGE.neutral,
-            }
-        }
-    }
-
-    #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-    pub struct LocalRatioAdjustments {
-        #[serde(default = "default_local_ratio_detection_threshold")]
-        pub detection_threshold: f32,
-    }
-
-    impl Default for LocalRatioAdjustments {
-        fn default() -> Self {
-            Self {
-                detection_threshold: HIGHLIGHT_THRESHOLD_RANGE.neutral,
             }
         }
     }
@@ -305,8 +291,6 @@ pub(super) mod raw_settings {
         #[serde(default)]
         pub clip: ClipAdjustments,
         #[serde(default)]
-        pub local_ratios: LocalRatioAdjustments,
-        #[serde(default)]
         pub opposed: OpposedAdjustments,
     }
 
@@ -315,20 +299,41 @@ pub(super) mod raw_settings {
             Self {
                 method: HighlightMethod::Clip,
                 clip: ClipAdjustments::default(),
-                local_ratios: LocalRatioAdjustments::default(),
                 opposed: OpposedAdjustments::default(),
             }
         }
     }
 
+    /// Highlight method as recorded in serialized recipes. `local_ratios` was
+    /// removed in schema 19 (superseded by Opposed); old sidecars keep
+    /// loading it and map onto `Opposed`, mirroring how schema 4 stored
+    /// Clip's threshold directly.
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    enum WireHighlightMethod {
+        #[default]
+        Clip,
+        Off,
+        LocalRatios,
+        Opposed,
+    }
+
+    /// Removed in schema 19; kept only to carry an old recipe's active
+    /// detection threshold into Opposed.
+    #[derive(Deserialize)]
+    struct LegacyLocalRatioAdjustments {
+        #[serde(default = "default_highlight_threshold")]
+        detection_threshold: f32,
+    }
+
     #[derive(Deserialize)]
     struct HighlightAdjustmentsFields {
         #[serde(default)]
-        method: HighlightMethod,
+        method: WireHighlightMethod,
         #[serde(default)]
         clip: Option<ClipAdjustments>,
         #[serde(default)]
-        local_ratios: Option<LocalRatioAdjustments>,
+        local_ratios: Option<LegacyLocalRatioAdjustments>,
         #[serde(default)]
         opposed: Option<OpposedAdjustments>,
         // Schema version 4 stored Clip's threshold directly on this object.
@@ -346,11 +351,25 @@ pub(super) mod raw_settings {
             if let Some(threshold) = fields.legacy_threshold {
                 clip.threshold = threshold;
             }
+            let method = match fields.method {
+                WireHighlightMethod::Clip => HighlightMethod::Clip,
+                WireHighlightMethod::Off => HighlightMethod::Off,
+                WireHighlightMethod::LocalRatios | WireHighlightMethod::Opposed => {
+                    HighlightMethod::Opposed
+                }
+            };
+            let mut opposed = fields.opposed.unwrap_or_default();
+            if fields.method == WireHighlightMethod::LocalRatios {
+                // The removed method was the active one, so its detection
+                // threshold is the value the user actually set.
+                if let Some(local_ratios) = fields.local_ratios {
+                    opposed.detection_threshold = local_ratios.detection_threshold;
+                }
+            }
             Ok(Self {
-                method: fields.method,
+                method,
                 clip,
-                local_ratios: fields.local_ratios.unwrap_or_default(),
-                opposed: fields.opposed.unwrap_or_default(),
+                opposed,
             })
         }
     }
@@ -606,11 +625,6 @@ impl EditRecipe {
             HIGHLIGHT_THRESHOLD_RANGE,
         )?;
         validate_parameter(
-            "raw.highlights.local_ratios.detection_threshold",
-            self.raw.highlights.local_ratios.detection_threshold,
-            HIGHLIGHT_THRESHOLD_RANGE,
-        )?;
-        validate_parameter(
             "raw.highlights.opposed.detection_threshold",
             self.raw.highlights.opposed.detection_threshold,
             HIGHLIGHT_THRESHOLD_RANGE,
@@ -857,7 +871,10 @@ impl<'de> Deserialize<'de> for EditRecipe {
             }
         } else {
             Self {
-                schema_version: if matches!(fields.schema_version, 10..=17) {
+                schema_version: if matches!(
+                    fields.schema_version,
+                    10..=PREVIOUS_LOCAL_RATIOS_REMOVAL_EDIT_RECIPE_SCHEMA_VERSION
+                ) {
                     EDIT_RECIPE_SCHEMA_VERSION
                 } else {
                     fields.schema_version
@@ -886,10 +903,6 @@ const fn neutral_saturation() -> f32 {
 }
 
 const fn default_highlight_threshold() -> f32 {
-    HIGHLIGHT_THRESHOLD_RANGE.neutral
-}
-
-const fn default_local_ratio_detection_threshold() -> f32 {
     HIGHLIGHT_THRESHOLD_RANGE.neutral
 }
 
@@ -960,10 +973,6 @@ mod tests {
         assert_eq!(recipe.raw.highlights.method, HighlightMethod::Clip);
         assert_eq!(
             recipe.raw.highlights.clip.threshold,
-            HIGHLIGHT_THRESHOLD_RANGE.neutral
-        );
-        assert_eq!(
-            recipe.raw.highlights.local_ratios.detection_threshold,
             HIGHLIGHT_THRESHOLD_RANGE.neutral
         );
         assert_eq!(
@@ -1147,7 +1156,6 @@ mod tests {
         assert_eq!(recipe.raw.highlights.method, HighlightMethod::Clip);
         assert_eq!(recipe.color.white_balance, WhiteBalance::default());
         assert_eq!(recipe.raw.highlights.clip.threshold, 1.0);
-        assert_eq!(recipe.raw.highlights.local_ratios.detection_threshold, 1.0);
         assert_eq!(recipe.raw.highlights.opposed.detection_threshold, 1.0);
     }
 
@@ -1220,7 +1228,6 @@ mod tests {
         assert_eq!(recipe.schema_version, EDIT_RECIPE_SCHEMA_VERSION);
         assert_eq!(recipe.raw.highlights.method, HighlightMethod::Off);
         assert_eq!(recipe.raw.highlights.clip.threshold, 1.0);
-        assert_eq!(recipe.raw.highlights.local_ratios.detection_threshold, 1.0);
         assert_eq!(recipe.raw.highlights.opposed.detection_threshold, 1.0);
     }
 
@@ -1267,10 +1274,6 @@ mod tests {
         assert!(recipe.validate().is_err());
 
         recipe.raw.highlights.clip.threshold = 1.0;
-        recipe.raw.highlights.local_ratios.detection_threshold = 2.0;
-        assert!(recipe.validate().is_err());
-
-        recipe.raw.highlights.local_ratios.detection_threshold = 1.0;
         recipe.raw.highlights.opposed.detection_threshold = 2.0;
         assert!(recipe.validate().is_err());
     }
@@ -1288,12 +1291,11 @@ mod tests {
         assert_eq!(recipe.schema_version, EDIT_RECIPE_SCHEMA_VERSION);
         assert_eq!(recipe.raw.highlights.method, HighlightMethod::Clip);
         assert_eq!(recipe.raw.highlights.clip.threshold, 1.23);
-        assert_eq!(recipe.raw.highlights.local_ratios.detection_threshold, 1.0);
         assert_eq!(recipe.raw.highlights.opposed.detection_threshold, 1.0);
     }
 
     #[test]
-    fn version_five_recipe_migrates_with_an_opposed_default() {
+    fn version_five_recipe_migrates_local_ratios_to_opposed() {
         let json = r#"{
             "schema_version": 5,
             "raw": {
@@ -1308,8 +1310,221 @@ mod tests {
         }"#;
         let recipe = serde_json::from_str::<EditRecipe>(json).expect("v5 migration");
         assert_eq!(recipe.schema_version, EDIT_RECIPE_SCHEMA_VERSION);
-        assert_eq!(recipe.raw.highlights.local_ratios.detection_threshold, 0.74);
+        assert_eq!(recipe.raw.highlights.method, HighlightMethod::Opposed);
+        assert_eq!(recipe.raw.highlights.opposed.detection_threshold, 0.74);
+    }
+
+    /// Highlights object of a schema-18 recipe serialized at base `069d827`
+    /// (LocalRatios active at 0.72), pinned verbatim for the schema-19
+    /// migration (issue #67).
+    const SCHEMA_18_LR_DEFAULT_HIGHLIGHTS: &str = r#"{"method":"local_ratios","clip":{"threshold":1.0},"local_ratios":{"detection_threshold":0.72},"opposed":{"detection_threshold":1.0}}"#;
+
+    /// Same base fixture with a dormant edited Opposed threshold (0.83).
+    const SCHEMA_18_LR_BOTH_HIGHLIGHTS: &str = r#"{"method":"local_ratios","clip":{"threshold":1.0},"local_ratios":{"detection_threshold":0.72},"opposed":{"detection_threshold":0.83}}"#;
+
+    fn parse_with_highlights(
+        schema_version: u32,
+        highlights: &str,
+    ) -> Result<EditRecipe, serde_json::Error> {
+        serde_json::from_str(&format!(
+            r#"{{"schema_version":{schema_version},"raw":{{"highlights":{highlights}}}}}"#
+        ))
+    }
+
+    #[test]
+    fn schema_eighteen_local_ratios_recipe_migrates_to_opposed() {
+        let recipe = parse_with_highlights(18, SCHEMA_18_LR_DEFAULT_HIGHLIGHTS)
+            .expect("schema-18 LocalRatios recipe must keep loading");
+        assert_eq!(recipe.schema_version, EDIT_RECIPE_SCHEMA_VERSION);
+        assert_eq!(recipe.raw.highlights.method, HighlightMethod::Opposed);
+        assert_eq!(recipe.raw.highlights.opposed.detection_threshold, 0.72);
+        assert_eq!(recipe.raw.highlights.clip.threshold, 1.0);
+        // Re-serialization drops the removed token and round-trips stable.
+        let json = serde_json::to_string(&recipe).expect("serialize migrated recipe");
+        assert!(
+            !json.contains("local_ratios"),
+            "migrated recipe must not contain the removed token: {json}"
+        );
+        let round_trip = serde_json::from_str::<EditRecipe>(&json).expect("round-trip");
+        assert_eq!(round_trip, recipe);
+    }
+
+    #[test]
+    fn active_local_ratios_threshold_wins_over_dormant_opposed() {
+        // The active LocalRatios threshold carries into Opposed even when an
+        // Opposed block exists: the stored LocalRatios value was the user's
+        // active slider, so a dormant Opposed value for such a recipe never
+        // took effect and is replaced — the lr-both base fixture pins 0.72.
+        let recipe =
+            parse_with_highlights(18, SCHEMA_18_LR_BOTH_HIGHLIGHTS).expect("lr-both fixture");
+        assert_eq!(recipe.raw.highlights.opposed.detection_threshold, 0.72);
+        let recipe = parse_with_highlights(
+            18,
+            r#"{"method":"local_ratios","local_ratios":{"detection_threshold":0.9},"opposed":{"detection_threshold":0.7}}"#,
+        )
+        .expect("adversarial lr-both");
+        assert_eq!(recipe.raw.highlights.opposed.detection_threshold, 0.9);
+    }
+
+    #[test]
+    fn default_local_ratios_threshold_still_wins_over_edited_opposed() {
+        // The default-clobber sub-case, pinned both directions: an untouched
+        // LocalRatios slider (default 1.0) still carries into Opposed and
+        // replaces a dormant edited Opposed value, because only the active
+        // slider was ever in effect.
+        let recipe = parse_with_highlights(
+            18,
+            r#"{"method":"local_ratios","local_ratios":{"detection_threshold":1.0},"opposed":{"detection_threshold":0.7}}"#,
+        )
+        .expect("lr default + edited opposed");
         assert_eq!(recipe.raw.highlights.opposed.detection_threshold, 1.0);
+    }
+
+    #[test]
+    fn schema_eighteen_clip_control_is_unaffected_by_the_migration() {
+        let recipe = parse_with_highlights(
+            18,
+            r#"{"method":"clip","clip":{"threshold":1.0},"local_ratios":{"detection_threshold":1.0},"opposed":{"detection_threshold":1.0}}"#,
+        )
+        .expect("clip control");
+        assert_eq!(recipe.schema_version, EDIT_RECIPE_SCHEMA_VERSION);
+        assert_eq!(recipe.raw.highlights.method, HighlightMethod::Clip);
+        assert_eq!(recipe.raw.highlights.opposed.detection_threshold, 1.0);
+    }
+
+    #[test]
+    fn local_ratios_without_subobject_defaults_to_neutral() {
+        let recipe = parse_with_highlights(18, r#"{"method":"local_ratios"}"#).expect("bare lr");
+        assert_eq!(recipe.raw.highlights.method, HighlightMethod::Opposed);
+        assert_eq!(
+            recipe.raw.highlights.opposed.detection_threshold,
+            HIGHLIGHT_THRESHOLD_RANGE.neutral
+        );
+    }
+
+    #[test]
+    fn missing_local_ratios_block_falls_back_to_the_opposed_threshold() {
+        // The removed method's sidecar block is optional on read, so the
+        // migration silently keeps what the Opposed block records. Without
+        // either block the neutral default applies — that bare case is
+        // pinned by `local_ratios_without_subobject_defaults_to_neutral`.
+        let recipe = parse_with_highlights(
+            18,
+            r#"{"method":"local_ratios","opposed":{"detection_threshold":0.75}}"#,
+        )
+        .expect("lr method without its block");
+        assert_eq!(recipe.raw.highlights.method, HighlightMethod::Opposed);
+        assert_eq!(recipe.raw.highlights.opposed.detection_threshold, 0.75);
+    }
+
+    #[test]
+    fn highlights_without_method_still_default_to_clip() {
+        // The wire `method` keeps its serde default: a missing method loads
+        // as Clip, like the typed default before the alias existed.
+        let recipe = parse_with_highlights(18, "{}").expect("empty highlights");
+        assert_eq!(recipe.raw.highlights.method, HighlightMethod::Clip);
+    }
+
+    #[test]
+    fn opposed_method_ignores_stale_local_ratios_object() {
+        let recipe = parse_with_highlights(
+            18,
+            r#"{"method":"opposed","opposed":{"detection_threshold":0.8},"local_ratios":{"detection_threshold":0.5}}"#,
+        )
+        .expect("opposed + stale lr object");
+        assert_eq!(recipe.raw.highlights.opposed.detection_threshold, 0.8);
+        let json = serde_json::to_string(&recipe).expect("serialize");
+        assert!(!json.contains("local_ratios"));
+    }
+
+    #[test]
+    fn ladder_versions_migrate_local_ratios_uniformly() {
+        // Every ladder-accepted version that can carry
+        // `"method": "local_ratios"` (5..=18) routes through the same
+        // version-agnostic wire alias. `as_shot` white balance avoids the
+        // pre-existing schema-9 relative-WB refusal, which is unrelated to
+        // this migration.
+        for schema_version in [5u32, 6, 7, 8, 9, 12, 17, 18] {
+            let json = format!(
+                r#"{{"schema_version":{schema_version},
+                    "raw": {{"highlights":
+                        {{"method":"local_ratios","local_ratios":{{"detection_threshold":0.66}}}}
+                    }},
+                    "color": {{"white_balance": {{"mode": "as_shot"}}}}
+                }}"#
+            );
+            let recipe = serde_json::from_str::<EditRecipe>(&json)
+                .unwrap_or_else(|error| panic!("schema {schema_version} must load: {error}"));
+            assert_eq!(
+                recipe.raw.highlights.method,
+                HighlightMethod::Opposed,
+                "schema {schema_version}"
+            );
+            assert_eq!(
+                recipe.raw.highlights.opposed.detection_threshold, 0.66,
+                "schema {schema_version}"
+            );
+            assert_eq!(recipe.schema_version, 19, "schema {schema_version}");
+        }
+    }
+
+    #[test]
+    fn future_schema_version_is_rejected_with_a_clear_message() {
+        // A build from before this change reads schema-19 output and rejects
+        // it cleanly ("version 19 is not supported; expected 18" — verified
+        // by running the base build against migrated bytes), so the schema
+        // number protects both reader directions.
+        let json = format!(
+            r#"{{"schema_version": {}, "raw": {{ "highlights": {{ "method": "opposed" }} }}}}"#,
+            EDIT_RECIPE_SCHEMA_VERSION + 1
+        );
+        let error =
+            serde_json::from_str::<EditRecipe>(&json).expect_err("future schema must be rejected");
+        let message = error.to_string();
+        assert!(
+            message.contains(&format!("version {}", EDIT_RECIPE_SCHEMA_VERSION + 1))
+                && message.contains(&format!("expected {EDIT_RECIPE_SCHEMA_VERSION}")),
+            "{message}"
+        );
+    }
+
+    /// Exact mirror of `engine/persistence.rs::ProjectFile` (the sidecar
+    /// wrapper). The wrapper itself never bumps `format_version` for recipe
+    /// schema changes; migration lives inside `EditRecipe::deserialize`.
+    #[derive(Debug, serde::Serialize, serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ProjectFileMirror {
+        format_version: u32,
+        recipe: EditRecipe,
+    }
+
+    fn sidecar(highlights: &str) -> String {
+        format!(
+            r#"{{"format_version":1,"recipe":{{"schema_version":18,"raw":{{"highlights":{highlights}}}}}}}"#
+        )
+    }
+
+    #[test]
+    fn sidecar_wrapper_migrates_local_ratios_and_double_save_is_byte_stable() {
+        let wire = sidecar(SCHEMA_18_LR_DEFAULT_HIGHLIGHTS);
+        let first: ProjectFileMirror = serde_json::from_str(&wire).expect("LR sidecar must load");
+        assert_eq!(first.format_version, 1);
+        assert_eq!(first.recipe.schema_version, 19);
+        assert_eq!(first.recipe.raw.highlights.method, HighlightMethod::Opposed);
+        assert_eq!(
+            first.recipe.raw.highlights.opposed.detection_threshold,
+            0.72
+        );
+
+        let saved = serde_json::to_string(&first).expect("save");
+        assert!(
+            !saved.contains("local_ratios"),
+            "migrated save must not contain the removed token: {saved}"
+        );
+        let second: ProjectFileMirror = serde_json::from_str(&saved).expect("reload");
+        assert_eq!(second.recipe, first.recipe);
+        let saved_again = serde_json::to_string(&second).expect("re-save");
+        assert_eq!(saved, saved_again, "double save must be byte-stable");
     }
 
     #[test]
@@ -1334,18 +1549,6 @@ mod tests {
         assert!(recipe.optics.vignetting);
         assert!(recipe.optics.chromatic_aberration);
         assert_eq!(recipe.raw.highlights.method, HighlightMethod::Opposed);
-    }
-
-    #[test]
-    fn local_ratios_serializes_and_round_trips_its_own_threshold() {
-        let mut recipe = EditRecipe::default();
-        recipe.raw.highlights.method = HighlightMethod::LocalRatios;
-        recipe.raw.highlights.local_ratios.detection_threshold = 0.72;
-        recipe.raw.highlights.opposed.detection_threshold = 0.83;
-        recipe.raw.highlights.clip.threshold = 1.31;
-        let json = serde_json::to_string(&recipe).expect("serialize recipe");
-        let round_trip = serde_json::from_str::<EditRecipe>(&json).expect("deserialize recipe");
-        assert_eq!(round_trip, recipe);
     }
 
     #[test]
@@ -1378,15 +1581,12 @@ mod tests {
     fn switching_methods_does_not_copy_thresholds() {
         let mut recipe = EditRecipe::default();
         recipe.raw.highlights.clip.threshold = 1.3;
-        recipe.raw.highlights.local_ratios.detection_threshold = 0.7;
         recipe.raw.highlights.opposed.detection_threshold = 0.8;
-        recipe.raw.highlights.method = HighlightMethod::LocalRatios;
+        recipe.raw.highlights.method = HighlightMethod::Opposed;
         assert_eq!(recipe.raw.highlights.clip.threshold, 1.3);
-        assert_eq!(recipe.raw.highlights.local_ratios.detection_threshold, 0.7);
         assert_eq!(recipe.raw.highlights.opposed.detection_threshold, 0.8);
         recipe.raw.highlights.method = HighlightMethod::Clip;
         assert_eq!(recipe.raw.highlights.clip.threshold, 1.3);
-        assert_eq!(recipe.raw.highlights.local_ratios.detection_threshold, 0.7);
         assert_eq!(recipe.raw.highlights.opposed.detection_threshold, 0.8);
     }
 }

@@ -62,7 +62,7 @@ pub fn below_floor(sites: &SiteSet<'_>, ceilings: [f32; 3]) -> Option<(usize, f3
 
 /// Sites whose output bit dropped strictly below the input bit
 /// (`out < in`). For Clip this is the pass that lowers strictly-above
-/// samples; for LocalRatios/Opposed it is exactly the neutralisation pass
+/// samples; for Opposed it is exactly the neutralisation pass
 /// (the asserted data equalities of the #65 invariant matrix).
 #[must_use]
 pub fn lowered_count(sites: &SiteSet<'_>) -> usize {
@@ -302,7 +302,7 @@ pub struct MeasuredRow {
     pub suspected: usize,
     pub raised: usize,
     /// Data-driven lowering (`out < in`): Clip's ceiling pass on its rows,
-    /// the neutraliser's on LocalRatios/Opposed rows (issue #65).
+    /// the neutraliser's on Opposed rows (issue #65).
     pub lowered: usize,
     /// `stats.neutralised_sites`; zero for Off and Clip, which have no
     /// neutraliser.

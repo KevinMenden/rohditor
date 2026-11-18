@@ -7,7 +7,6 @@
 mod cells;
 mod clip;
 mod detect;
-mod local_ratios;
 mod opposed;
 mod region_correction;
 mod regions;
@@ -15,19 +14,9 @@ mod support;
 
 pub use clip::{ClipOutput, clip, clip_cancellable};
 pub use detect::{
-    detect_clipping, detect_clipping_cancellable, detect_local_ratios,
-    detect_local_ratios_cancellable, detect_opposed, detect_opposed_cancellable,
-};
-pub use local_ratios::{
-    local_ratio_scratch_bytes, reconstruct_local_ratios, reconstruct_local_ratios_cancellable,
+    detect_clipping, detect_clipping_cancellable, detect_opposed, detect_opposed_cancellable,
 };
 pub use opposed::{opposed_scratch_bytes, reconstruct_opposed, reconstruct_opposed_cancellable};
-
-/// Version of the deterministic Local ratios estimator used in recipe/cache
-/// identities. Numerical contract changes must increment this value.
-/// v2: suspected sites that reconstruction did not raise are lowered to the
-/// optional WB-aware `neutral_ceiling` (issue #65).
-pub const LOCAL_RATIOS_ALGORITHM_VERSION: u8 = 2;
 
 /// Version of the deterministic Opposed estimator used in recipe/cache
 /// identities. Numerical contract changes must increment this value.
@@ -88,7 +77,7 @@ impl ChannelClipLevels {
 
 /// Camera-native thresholds used to classify samples that may have lost
 /// highlight information. These levels intentionally do not contain active
-/// white-balance gains; Local ratios and Opposed run before white balance.
+/// white-balance gains; Opposed runs before white balance.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ChannelDetectionLevels {
     pub red: f32,
@@ -129,64 +118,6 @@ impl ChannelDetectionLevels {
     }
 }
 
-/// Configuration for local-ratio reconstruction.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct LocalRatioOptions {
-    pub detection_levels: ChannelDetectionLevels,
-    /// WB-aware neutral ceiling per channel, computed from the as-shot white
-    /// balance by the caller; `None` disables neutralisation. Values are
-    /// camera-native (pre-WB) — suspected sites that reconstruction did not
-    /// raise are lowered to this ceiling so they land neutral after the
-    /// as-shot balance, mirroring Clip's common-ceiling rule (issue #65).
-    ///
-    /// Because the ceiling derives from as-shot metadata (constant per file)
-    /// and never from the recipe, a big user white-balance change can leave a
-    /// slight tint in fully blown areas — the same trade-off the demosaic
-    /// stage documents for `demosaic_balance` in `rohditor-core`.
-    pub neutral_ceiling: Option<ChannelClipLevels>,
-}
-
-/// Counts produced by Local ratios reconstruction.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ReconstructionStats {
-    pub suspected_clipped_sites: usize,
-    pub reconstructed_sites: usize,
-    /// Sites strictly *raised* by an applied estimate. Neutralisation is
-    /// counted separately in [`Self::neutralised_sites`] (issue #65).
-    pub changed_sites: usize,
-    pub fallback_sites: usize,
-    pub fully_unsupported_sites: usize,
-    /// Sites the neutraliser lowered strictly below their input to the
-    /// `neutral_ceiling`; zero when the option is `None`.
-    pub neutralised_sites: usize,
-    pub suspected_by_channel: [usize; 3],
-}
-
-impl ReconstructionStats {
-    pub(crate) fn add_assign(&mut self, other: Self) {
-        self.suspected_clipped_sites += other.suspected_clipped_sites;
-        self.reconstructed_sites += other.reconstructed_sites;
-        self.changed_sites += other.changed_sites;
-        self.fallback_sites += other.fallback_sites;
-        self.fully_unsupported_sites += other.fully_unsupported_sites;
-        self.neutralised_sites += other.neutralised_sites;
-        for (target, source) in self
-            .suspected_by_channel
-            .iter_mut()
-            .zip(other.suspected_by_channel)
-        {
-            *target += source;
-        }
-    }
-}
-
-/// Output of Local ratios reconstruction.
-#[derive(Debug, PartialEq)]
-pub struct LocalRatioOutput {
-    pub mosaic: rohditor_image::MosaicImage<f32>,
-    pub stats: ReconstructionStats,
-}
-
 /// Fully resolved highlight operation, independent of recipe and RAW metadata.
 ///
 /// Core resolves recipe controls and white-balance-dependent Clip ceilings into
@@ -196,7 +127,6 @@ pub struct LocalRatioOutput {
 pub enum HighlightExecution {
     Off,
     Clip(ChannelClipLevels),
-    LocalRatios(LocalRatioOptions),
     Opposed(OpposedOptions),
 }
 
@@ -205,7 +135,6 @@ pub enum HighlightExecution {
 pub enum HighlightExecutionOutput {
     Off(rohditor_image::MosaicImage<f32>),
     Clip(ClipOutput),
-    LocalRatios(LocalRatioOutput),
     Opposed(OpposedOutput),
 }
 
@@ -215,7 +144,6 @@ impl HighlightExecution {
         match self {
             Self::Off => "off",
             Self::Clip(_) => "clip",
-            Self::LocalRatios(_) => "local_ratios",
             Self::Opposed(_) => "opposed",
         }
     }
@@ -226,7 +154,6 @@ impl HighlightExecution {
         match self {
             Self::Off => None,
             Self::Clip(_) => Some(CLIP_ALGORITHM_VERSION),
-            Self::LocalRatios(_) => Some(LOCAL_RATIOS_ALGORITHM_VERSION),
             Self::Opposed(_) => Some(OPPOSED_ALGORITHM_VERSION),
         }
     }
@@ -244,10 +171,6 @@ impl HighlightExecution {
             }
             Self::Clip(levels) => {
                 clip_cancellable(mosaic, levels, cancellation).map(HighlightExecutionOutput::Clip)
-            }
-            Self::LocalRatios(options) => {
-                reconstruct_local_ratios_cancellable(mosaic, options, cancellation)
-                    .map(HighlightExecutionOutput::LocalRatios)
             }
             Self::Opposed(options) => {
                 reconstruct_opposed_cancellable(mosaic, options, cancellation)

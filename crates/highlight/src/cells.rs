@@ -28,7 +28,7 @@ impl CellSummary {
     }
 }
 
-/// Structure-of-arrays storage for immutable local-ratio evidence.
+/// Structure-of-arrays storage for immutable cell evidence.
 #[derive(Debug)]
 pub(crate) struct CellSummaries {
     pub(crate) width: usize,
@@ -50,7 +50,7 @@ impl CellSummaries {
                 width: mosaic.width(),
                 height: mosaic.height(),
                 row_stride: mosaic.row_stride(),
-                reason: "local-ratio cell count overflowed".to_owned(),
+                reason: "cell count overflowed".to_owned(),
             })
         })?;
         let mut means = Vec::new();

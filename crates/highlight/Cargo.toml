@@ -18,10 +18,6 @@ name = "clip"
 harness = false
 
 [[bench]]
-name = "local_ratios"
-harness = false
-
-[[bench]]
 name = "opposed"
 harness = false
 

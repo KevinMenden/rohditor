@@ -180,13 +180,13 @@ fn editor_sensor_cache_reuses_camera_pixels_and_invalidates_upstream_dependencie
     // Highlight reconstruction that has no GPU implementation falls back to the
     // CPU and records why.
     let method = recipe.raw.highlights.method;
-    recipe.raw.highlights.method = rohditor_edit::HighlightMethod::LocalRatios;
+    recipe.raw.highlights.method = rohditor_edit::HighlightMethod::Opposed;
     assert!(!prepare(&mut cache, &frame, &recipe, options).sensor_gpu);
     assert!(
         cache
             .recovery
             .as_ref()
-            .is_some_and(|reason| reason.contains("local_ratios"))
+            .is_some_and(|reason| reason.contains("opposed"))
     );
     assert!(cache.sensor_source.is_none());
     recipe.raw.highlights.method = method;

@@ -1,8 +1,6 @@
 //! Pipeline adapter for normalized RAW highlight handling.
 
-use rohditor_highlight::{
-    ClipStats, HighlightExecution, HighlightExecutionOutput, OpposedStats, ReconstructionStats,
-};
+use rohditor_highlight::{ClipStats, HighlightExecution, HighlightExecutionOutput, OpposedStats};
 use rohditor_image::MosaicImage;
 
 use crate::{CancellationToken, PipelineError};
@@ -18,15 +16,14 @@ pub enum HighlightDiagnostics {
     #[default]
     Off,
     Clip(ClipStats),
-    LocalRatios(ReconstructionStats),
     Opposed(OpposedStats),
 }
 
 impl HighlightDiagnostics {
     /// Compatibility projection for callers that only understand Clip's
     /// original counters. Reconstruction diagnostics remain available through
-    /// [`Self::local_ratios`] and [`Self::opposed`] and are never presented as
-    /// Clip statistics by the current diagnostics path.
+    /// [`Self::opposed`] and are never presented as Clip statistics by the
+    /// current diagnostics path.
     #[must_use]
     pub const fn legacy_clip_stats(self) -> ClipStats {
         match self {
@@ -37,12 +34,6 @@ impl HighlightDiagnostics {
                 affected_by_channel: [0; 3],
             },
             Self::Clip(stats) => stats,
-            Self::LocalRatios(stats) => ClipStats {
-                affected_sites: stats.suspected_clipped_sites,
-                changed_sites: stats.changed_sites,
-                nominal_over_white_sites: 0,
-                affected_by_channel: stats.suspected_by_channel,
-            },
             Self::Opposed(stats) => ClipStats {
                 affected_sites: stats.suspected_clipped_sites,
                 changed_sites: stats.changed_sites,
@@ -53,18 +44,10 @@ impl HighlightDiagnostics {
     }
 
     #[must_use]
-    pub const fn local_ratios(self) -> Option<ReconstructionStats> {
-        match self {
-            Self::LocalRatios(stats) => Some(stats),
-            Self::Off | Self::Clip(_) | Self::Opposed(_) => None,
-        }
-    }
-
-    #[must_use]
     pub const fn opposed(self) -> Option<OpposedStats> {
         match self {
             Self::Opposed(stats) => Some(stats),
-            Self::Off | Self::Clip(_) | Self::LocalRatios(_) => None,
+            Self::Off | Self::Clip(_) => None,
         }
     }
 }
@@ -91,10 +74,6 @@ pub(crate) fn apply_cancellable(
         HighlightExecutionOutput::Clip(output) => Ok(HighlightOutput {
             mosaic: output.mosaic,
             diagnostics: HighlightDiagnostics::Clip(output.stats),
-        }),
-        HighlightExecutionOutput::LocalRatios(output) => Ok(HighlightOutput {
-            mosaic: output.mosaic,
-            diagnostics: HighlightDiagnostics::LocalRatios(output.stats),
         }),
         HighlightExecutionOutput::Opposed(output) => Ok(HighlightOutput {
             mosaic: output.mosaic,

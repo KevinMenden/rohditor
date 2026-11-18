@@ -153,7 +153,7 @@ enum Command {
         )]
         highlight_clip_threshold: Option<f32>,
 
-        /// Camera-native detection threshold for Local ratios or Opposed (0.5 to 1.5).
+        /// Camera-native detection threshold for Opposed (0.5 to 1.5).
         #[arg(long, allow_hyphen_values = true)]
         highlight_detection_threshold: Option<f32>,
 
@@ -474,8 +474,6 @@ enum CliHighlightMethod {
     #[default]
     Off,
     Clip,
-    #[value(name = "local-ratios")]
-    LocalRatios,
     #[value(name = "opposed")]
     Opposed,
 }
@@ -522,7 +520,6 @@ impl From<CliHighlightMethod> for HighlightMethod {
         match value {
             CliHighlightMethod::Off => Self::Off,
             CliHighlightMethod::Clip => Self::Clip,
-            CliHighlightMethod::LocalRatios => Self::LocalRatios,
             CliHighlightMethod::Opposed => Self::Opposed,
         }
     }
@@ -1229,9 +1226,6 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
         .highlight_detection_threshold
         .unwrap_or(HIGHLIGHT_THRESHOLD_RANGE.neutral);
     match recipe.raw.highlights.method {
-        HighlightMethod::LocalRatios => {
-            recipe.raw.highlights.local_ratios.detection_threshold = detection_threshold;
-        }
         HighlightMethod::Opposed => {
             recipe.raw.highlights.opposed.detection_threshold = detection_threshold;
         }
@@ -1351,18 +1345,6 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
             stats.affected_by_channel[0],
             stats.affected_by_channel[1],
             stats.affected_by_channel[2],
-        ),
-        HighlightDiagnostics::LocalRatios(stats) => format!(
-            "Highlight Local ratios: {} suspected, {} reconstructed, {} changed, {} fallback, {} fully unsupported, {} neutralised (R {}, G {}, B {})",
-            stats.suspected_clipped_sites,
-            stats.reconstructed_sites,
-            stats.changed_sites,
-            stats.fallback_sites,
-            stats.fully_unsupported_sites,
-            stats.neutralised_sites,
-            stats.suspected_by_channel[0],
-            stats.suspected_by_channel[1],
-            stats.suspected_by_channel[2],
         ),
         HighlightDiagnostics::Opposed(stats) => format!(
             "Highlight Opposed: {} suspected, {} reconstructed, {} changed, {} fallback, {} fully unsupported, {} neutralised (R {}, G {}, B {})",
@@ -1510,15 +1492,8 @@ fn validate_highlight_options(
     if clip_threshold.is_some() && !matches!(method, CliHighlightMethod::Clip) {
         bail!("--highlight-clip-threshold requires --highlight-reconstruction clip");
     }
-    if detection_threshold.is_some()
-        && !matches!(
-            method,
-            CliHighlightMethod::LocalRatios | CliHighlightMethod::Opposed
-        )
-    {
-        bail!(
-            "--highlight-detection-threshold requires --highlight-reconstruction local-ratios or opposed"
-        );
+    if detection_threshold.is_some() && !matches!(method, CliHighlightMethod::Opposed) {
+        bail!("--highlight-detection-threshold requires --highlight-reconstruction opposed");
     }
     for (name, value) in [
         ("--highlight-clip-threshold", clip_threshold),
@@ -2684,39 +2659,19 @@ mod tests {
             validate_highlight_options(CliHighlightMethod::Clip, Some(f32::NAN), None).is_err()
         );
 
-        let local = Cli::try_parse_from([
-            "rohditor-cli",
-            "develop",
-            "input.arw",
-            "output.jpg",
-            "--highlight-reconstruction",
-            "local-ratios",
-            "--highlight-detection-threshold",
-            "0.75",
-        ])
-        .expect("local-ratios threshold options should parse");
-        let Command::Develop {
-            highlight_reconstruction,
-            highlight_clip_threshold,
-            highlight_detection_threshold,
-            ..
-        } = local.command
-        else {
-            panic!("expected develop command");
-        };
-        assert!(matches!(
-            highlight_reconstruction,
-            CliHighlightMethod::LocalRatios
-        ));
-        assert_eq!(highlight_clip_threshold, None);
-        assert_eq!(highlight_detection_threshold, Some(0.75));
+        // #67: the removed method is rejected outright rather than silently
+        // aliasing to a different reconstruction algorithm.
         assert!(
-            validate_highlight_options(
-                highlight_reconstruction,
-                highlight_clip_threshold,
-                highlight_detection_threshold,
-            )
-            .is_ok()
+            Cli::try_parse_from([
+                "rohditor-cli",
+                "develop",
+                "input.arw",
+                "output.jpg",
+                "--highlight-reconstruction",
+                "local-ratios",
+            ])
+            .is_err(),
+            "the removed local-ratios method must not parse"
         );
 
         let opposed = Cli::try_parse_from([
