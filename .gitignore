@@ -10,6 +10,12 @@ target/
 
 *.idea
 
-ml/data/
-
+# Neural demosaic datasets, shards, training runs and the Python environment.
+# ml/data/ itself is not ignored wholesale: ml/data/noise_params.json is tracked.
+/ml/data/raw/
+/ml/data/shards/
+/ml/runs/
+/ml/.venv/
+__pycache__/
+.pytest_cache/
 *.pyc
