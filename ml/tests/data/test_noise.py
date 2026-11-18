@@ -62,3 +62,16 @@ def test_calibration_recovers_known_parameters():
     params = fit_camera(estimates)
     assert abs(params.sigma_log_slope - 0.5) < 0.1 and abs(params.sigma_log_intercept - np.log(0.0949)) < 0.3
     assert params.k_min < 2e-4 and params.k_max > 2e-3
+
+
+def test_calibration_resolves_read_noise_far_below_shot_noise():
+    # The real-camera regime: 3 electrons of read noise (sigma = 3 K), so sigma^2 is
+    # 10-100x below the shot noise of even the darkest flat areas. An unweighted
+    # line fit loses the intercept here (it comes out negative or far too high).
+    rng = np.random.default_rng(1)
+    _, xx = np.mgrid[0:1024, 0:1024]
+    clean = (0.02 + 0.6 * (xx / 1024) ** 1.5).astype(np.float32)
+    for k in (2e-4, 1e-3, 4e-3):
+        noisy = apply_noise(clean, NoiseSample(k, 3 * k, 0.0, (0, 0, 0, 0)), rng)
+        estimate = estimate_pair(noisy, clean, 1e3, rng)
+        assert abs(np.sqrt(estimate.sigma2) / (3 * k) - 1) < 0.25

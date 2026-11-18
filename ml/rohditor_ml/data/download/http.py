@@ -96,6 +96,10 @@ def _stream_to(part: Path, file: RemoteFile) -> None:
         with part.open("ab" if resumed else "wb") as out:
             while chunk := response.read(CHUNK):
                 out.write(chunk)
+    # Some servers (Dataverse) end a long transfer early without an error. That is
+    # a transient failure: raising a retryable error resumes from the `.part` file.
+    if file.exact_size and part.stat().st_size < file.size:
+        raise ConnectionError(f"{file.name}: transfer ended early at {part.stat().st_size} of {file.size} bytes")
 
 
 def download(file: RemoteFile, directory: Path, *, verify: bool = False, retries: int = 5) -> str:

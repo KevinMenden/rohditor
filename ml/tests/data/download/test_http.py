@@ -27,12 +27,39 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
+class TruncatingHandler(Handler):
+    """Ends every response after 400 kB without an error, like Dataverse sometimes does."""
+
+    def do_GET(self):
+        start = int(self.headers.get("Range", "bytes=0-").removeprefix("bytes=").rstrip("-"))
+        body = PAYLOAD[start : start + 400_000]
+        self.send_response(206 if start else 200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def serve(handler):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, f"http://127.0.0.1:{server.server_port}/file.bin"
+
+
 @pytest.fixture
 def url():
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    yield f"http://127.0.0.1:{server.server_port}/file.bin"
+    server, address = serve(Handler)
+    yield address
     server.shutdown()
+
+
+def test_resumes_when_the_server_ends_transfers_early(tmp_path, monkeypatch):
+    monkeypatch.setattr("rohditor_ml.data.download.http.time.sleep", lambda _: None)
+    server, address = serve(TruncatingHandler)
+    try:
+        assert download(remote(address), tmp_path) == "downloaded"
+    finally:
+        server.shutdown()
+    assert (tmp_path / "file.bin").read_bytes() == PAYLOAD
 
 
 def remote(url, digest=None):

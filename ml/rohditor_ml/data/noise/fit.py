@@ -73,7 +73,11 @@ def estimate_pair(noisy: np.ndarray, clean: np.ndarray, iso: float, rng: np.rand
             variances.append(r_all[chunk].var())
     if len(means) < 4:
         return None
-    k, sigma2 = np.polyfit(means, variances, 1)
+    # A bin's sample variance has an error proportional to the variance itself, so
+    # weight by 1/variance (polyfit squares `w`). Unweighted, the bright, noisy bins
+    # dominate and the intercept (the read noise, often 100x smaller than the shot
+    # noise of the darkest bin) is lost in their error, even going negative.
+    k, sigma2 = np.polyfit(means, variances, 1, w=1.0 / np.asarray(variances))
     if k <= 0:
         return None
     return PairEstimate(float(k), float(sigma2), _row_variance(resid, mask, float(np.mean(variances))), gain, iso)

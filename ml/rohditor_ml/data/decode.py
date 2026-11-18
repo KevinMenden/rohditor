@@ -14,7 +14,6 @@ from pathlib import Path
 import numpy as np
 import rawpy
 import scipy.io
-from PIL import Image
 
 from ..paths import assert_not_private
 from .bayer import rggb_origin
@@ -32,7 +31,6 @@ class UnsupportedRaw(Exception):
 class Mosaic:
     data: np.ndarray  # float32 [H, W]; H and W even; (0, 0) is a red photosite
     wb: np.ndarray  # as-shot gains [R, G, B], green = 1
-    camera: str
 
 
 @dataclass
@@ -47,31 +45,6 @@ def _normalised_gains(rgbg: list[float] | None) -> np.ndarray:
     if rgbg is not None and len(rgbg) >= 3 and rgbg[1] > 0 and rgbg[0] > 0 and rgbg[2] > 0:
         return np.array([rgbg[0] / rgbg[1], 1.0, rgbg[2] / rgbg[1]], np.float32)
     return np.ones(3, np.float32)
-
-
-def camera_name(path: Path) -> str:
-    """"Make Model" from the EXIF of TIFF-based raws, else a sensor fingerprint.
-
-    libraw (and so `rawpy`) doesn't expose the model, and a few formats (Canon CRW)
-    can't be read by Pillow. The fallback groups by file type and sensor size,
-    which is what matters for "same sensor" splits.
-    """
-    try:
-        with Image.open(path) as image:
-            exif = image.getexif()
-        make, model = str(exif.get(271, "")).strip(" \0"), str(exif.get(272, "")).strip(" \0")
-        if model:
-            # Models often repeat the make ("NIKON CORPORATION" / "NIKON D40").
-            repeats = make and model.lower().startswith(make.split()[0].lower())
-            return model if repeats else f"{make} {model}".strip()
-    except Exception:  # noqa: BLE001 - any unreadable container falls back
-        pass
-    try:
-        with rawpy.imread(str(path)) as raw:
-            width, height = raw.sizes.width, raw.sizes.height
-    except Exception:  # noqa: BLE001
-        width = height = 0
-    return f"unknown-{path.suffix.lstrip('.').lower()}-{width}x{height}"
 
 
 def decode_raw(path: Path) -> Mosaic:
@@ -103,7 +76,7 @@ def decode_raw(path: Path) -> Mosaic:
     image = (image - per_pixel_black) / (white - per_pixel_black)
     image = image[dy:, dx:]
     image = np.ascontiguousarray(image[: image.shape[0] // 2 * 2, : image.shape[1] // 2 * 2])
-    return Mosaic(image, _normalised_gains(list(gains) if gains is not None else None), camera_name(path))
+    return Mosaic(image, _normalised_gains(list(gains) if gains is not None else None))
 
 
 def decode_pixelshift(path: Path, camera: str) -> PixelShiftScene:

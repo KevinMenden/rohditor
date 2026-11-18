@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .decode import camera_name
+from .cameras import canonical_camera, exif_camera
 from .download.http import file_checksum
 from .split import assign_split, choose_holdout_camera, scenes_by_camera
 
@@ -48,14 +48,15 @@ def load_items(raw_dir: Path, sources: list[str], allowed: frozenset[str]) -> li
                 continue
             meta = entry["meta"]
             if source == "pixls":
+                # The site's table names every camera, even where the file's EXIF can't be read.
                 scene, is_clean, reserved = f"pixls-{meta['pixls_id']}", True, False
-                camera = camera_name(path)
+                camera = canonical_camera(meta["make"], meta["model"])
             elif source == "pixelshift200":
                 scene, is_clean, reserved = meta["scene"], True, meta["upstream_split"] == "test"
-                camera = meta["camera"]
-            else:  # rawnind
+                camera = canonical_camera(*meta["camera"].split(" ", 1))
+            else:  # rawnind: the file names don't say, so read the files' own metadata
                 scene, is_clean, reserved = meta["scene"], meta["is_clean"], meta["test_reserve"]
-                camera = camera_name(path)
+                camera = exif_camera(path)
             items.append(Item(source, entry["name"], path, entry["license"], camera, scene,
                               _iso(meta.get("iso")), is_clean, reserved, meta=meta))
     return items
