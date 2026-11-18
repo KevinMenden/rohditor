@@ -365,6 +365,30 @@ mod tests {
         }
     }
 
+    /// Many random interior coordinates on a deterministic pseudo-random
+    /// image of the given size.
+    fn assert_grid_parity(width: usize, height: usize, samples: usize) {
+        let mut rng = Lcg(0x9E37_79B9_7F4A_7C15 ^ (width as u64) << 32);
+        let image = LinearRgbImage::new(
+            width,
+            height,
+            width * 3,
+            LinearRgbSpace::CameraNative,
+            (0..width * height * 3)
+                .map(|index| 0.05 + (index % 977) as f32 * 0.001)
+                .collect::<Vec<_>>(),
+        )
+        .expect("test image");
+        let data = image.data();
+        for _ in 0..samples {
+            let x = rng.next_f32(2.0, width as f32 - 3.0);
+            let y = rng.next_f32(2.0, height as f32 - 3.0);
+            for channel in 0..3 {
+                assert_same_sample(data, image.row_stride(), width, height, channel, x, y);
+            }
+        }
+    }
+
     #[test]
     fn radial_sampling_equals_cubic_sample() {
         // Small asymmetric image, dense fractional grid over the safe range.
@@ -405,31 +429,13 @@ mod tests {
             }
         }
 
-        // The parity grid size and the full-size fixture: many random
-        // interior coordinates on a deterministic pseudo-random image.
-        for (width, height, samples) in [
-            (1_024_usize, 768_usize, 4_096_usize),
-            (6_048, 4_024, 16_384),
-        ] {
-            let mut rng = Lcg(0x9E37_79B9_7F4A_7C15 ^ (width as u64) << 32);
-            let image = LinearRgbImage::new(
-                width,
-                height,
-                width * 3,
-                LinearRgbSpace::CameraNative,
-                (0..width * height * 3)
-                    .map(|index| 0.05 + (index % 977) as f32 * 0.001)
-                    .collect::<Vec<_>>(),
-            )
-            .expect("test image");
-            let data = image.data();
-            for _ in 0..samples {
-                let x = rng.next_f32(2.0, width as f32 - 3.0);
-                let y = rng.next_f32(2.0, height as f32 - 3.0);
-                for channel in 0..3 {
-                    assert_same_sample(data, image.row_stride(), width, height, channel, x, y);
-                }
-            }
-        }
+        // The parity grid size on a deterministic pseudo-random image.
+        assert_grid_parity(1_024, 768, 4_096);
+    }
+
+    #[test]
+    #[ignore = "allocates a full-size 24 MP image (~290 MB) to sample 16k coordinates; run with --ignored for full-frame hoisting parity"]
+    fn radial_sampling_equals_cubic_sample_full_frame() {
+        assert_grid_parity(6_048, 4_024, 16_384);
     }
 }
