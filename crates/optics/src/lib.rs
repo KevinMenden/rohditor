@@ -8,6 +8,7 @@ mod catalog;
 mod correction;
 mod matching;
 mod plan;
+mod radial;
 mod resample;
 
 pub use catalog::OpticsService;
@@ -15,7 +16,10 @@ pub use correction::{Cancellation, CorrectionResult};
 pub use plan::{DistortionModel, OpticsExecution, TcaModel, VignettingModel};
 
 /// Version of Rohditor's optics plan and sampling contract.
-pub const OPTICS_ALGORITHM_VERSION: u32 = 1;
+///
+/// v2: coordinates from radial multiplier LUT with freeze-boundary handling;
+/// fallback is authority-identical — issue #55.
+pub const OPTICS_ALGORITHM_VERSION: u32 = 2;
 
 /// Components a profile can request or actually provide for one shot.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

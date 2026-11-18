@@ -109,6 +109,36 @@ impl OpticsExecution {
         }
         map_coordinates_execution(self, x, y)
     }
+
+    /// One axis of the pre-transform that maps an output pixel to the input
+    /// (lens) coordinate, in the exact operation order of
+    /// `map_coordinates_values`. Shared by the radial-LUT branch, its corner
+    /// radius setup, and its test helpers. The authority loop keeps its own
+    /// copy inside `map_coordinates_values`: the bit-exact fallback there is
+    /// a shipped guarantee, so that loop stays untouched by design.
+    pub(crate) fn input_coordinate_x(&self, x: usize) -> f64 {
+        let center_px_x = self.center_x * self.norm_unscale;
+        let mapped_x = center_px_x + (x as f64 - center_px_x) / f64::from(self.scale);
+        mapped_x * self.norm_scale - self.center_x
+    }
+
+    /// The other axis of [`Self::input_coordinate_x`].
+    pub(crate) fn input_coordinate_y(&self, y: usize) -> f64 {
+        let center_px_y = self.center_y * self.norm_unscale;
+        let mapped_y = center_px_y + (y as f64 - center_px_y) / f64::from(self.scale);
+        mapped_y * self.norm_scale - self.center_y
+    }
+
+    /// The post-transform that maps a multiplied input (lens) coordinate back
+    /// to a source pixel, in the exact operation order of
+    /// `map_coordinates_values` (f32 input, widen once, add center, unscale,
+    /// narrow once). Same sharing note as [`Self::input_coordinate_x`].
+    pub(crate) fn source_coordinate(&self, x: f32, y: f32) -> (f32, f32) {
+        (
+            ((f64::from(x) + self.center_x) * self.norm_unscale) as f32,
+            ((f64::from(y) + self.center_y) * self.norm_unscale) as f32,
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

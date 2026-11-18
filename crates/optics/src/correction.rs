@@ -2,7 +2,8 @@ use rayon::prelude::*;
 use rohditor_image::{LinearRgbImage, LinearRgbSpace, allocate_zeroed_f32};
 
 use crate::plan::map_coordinates_execution;
-use crate::resample::cubic_sample;
+use crate::radial::RadialMultipliers;
+use crate::resample::{cubic_sample, cubic_weight};
 use crate::{CorrectionComponents, LensCorrectionPlan, OpticsError, OpticsProvenance};
 
 /// Minimal cancellation contract implemented by core's cancellation token.
@@ -47,8 +48,29 @@ impl crate::OpticsExecution {
     /// Execute a previously resolved Lensfun-free correction contract.
     pub fn apply_cancellable(
         &self,
+        image: LinearRgbImage<f32>,
+        cancellation: &dyn Cancellation,
+    ) -> Result<CorrectionResult, OpticsError> {
+        self.apply_inner(image, cancellation, None)
+    }
+
+    /// Test seam: run one apply with an externally supplied radial table, so
+    /// crafted-invalid tables can prove the fallback stays authority-identical.
+    #[cfg(test)]
+    pub(crate) fn apply_cancellable_forced(
+        &self,
+        image: LinearRgbImage<f32>,
+        cancellation: &dyn Cancellation,
+        radial: &RadialMultipliers,
+    ) -> Result<CorrectionResult, OpticsError> {
+        self.apply_inner(image, cancellation, Some(radial))
+    }
+
+    fn apply_inner(
+        &self,
         mut image: LinearRgbImage<f32>,
         cancellation: &dyn Cancellation,
+        forced_radial: Option<&RadialMultipliers>,
     ) -> Result<CorrectionResult, OpticsError> {
         if image.space() != LinearRgbSpace::CameraNative
             || image.width() != self.width
@@ -85,30 +107,79 @@ impl crate::OpticsExecution {
             })?;
             let input = image.data();
             let output_row_stride = output.row_stride();
-            output
-                .data_mut()
-                .par_chunks_mut(output_row_stride)
-                .enumerate()
-                .try_for_each(|(y, row)| -> Result<(), OpticsError> {
-                    if cancellation.is_cancelled() {
-                        return Err(OpticsError::Cancelled);
-                    }
-                    for x in 0..self.width {
-                        let coordinates = map_coordinates_execution(self, x, y)?;
-                        for channel in 0..3 {
-                            row[x * 3 + channel] = cubic_sample(
-                                input,
-                                image.row_stride(),
-                                self.width,
-                                self.height,
-                                channel,
-                                coordinates[channel].0,
-                                coordinates[channel].1,
-                            )?;
+            // The radial-LUT branch is chosen once per apply, before the row
+            // loop, so a partially LUT-applied frame is impossible. An invalid
+            // (or forced-invalid) table keeps the authority loop byte-for-byte.
+            let built;
+            let radial = match forced_radial {
+                Some(table) if table.guard.is_none() => Some(table),
+                Some(_) => None,
+                None => {
+                    built = RadialMultipliers::build(self);
+                    built.as_ref().filter(|table| table.guard.is_none())
+                }
+            };
+            if let Some(table) = radial {
+                output
+                    .data_mut()
+                    .par_chunks_mut(output_row_stride)
+                    .enumerate()
+                    .try_for_each(|(y, row)| -> Result<(), OpticsError> {
+                        if cancellation.is_cancelled() {
+                            return Err(OpticsError::Cancelled);
                         }
-                    }
-                    Ok(())
-                })?;
+                        let input_y = self.input_coordinate_y(y) as f32;
+                        for x in 0..self.width {
+                            let input_x = self.input_coordinate_x(x) as f32;
+                            let multipliers = table.lookup(input_x.hypot(input_y));
+                            for channel in 0..3 {
+                                // The authority's exact post-multiply step
+                                // (shared with it via `source_coordinate`):
+                                // f32 multiply, widen, add center, unscale,
+                                // narrow once.
+                                let (source_x, source_y) = self.source_coordinate(
+                                    input_x * multipliers[channel],
+                                    input_y * multipliers[channel],
+                                );
+                                row[x * 3 + channel] = sample_cubic_hoisted(
+                                    input,
+                                    image.row_stride(),
+                                    self.width,
+                                    self.height,
+                                    channel,
+                                    source_x,
+                                    source_y,
+                                )?;
+                            }
+                        }
+                        Ok(())
+                    })?;
+            } else {
+                output
+                    .data_mut()
+                    .par_chunks_mut(output_row_stride)
+                    .enumerate()
+                    .try_for_each(|(y, row)| -> Result<(), OpticsError> {
+                        if cancellation.is_cancelled() {
+                            return Err(OpticsError::Cancelled);
+                        }
+                        for x in 0..self.width {
+                            let coordinates = map_coordinates_execution(self, x, y)?;
+                            for channel in 0..3 {
+                                row[x * 3 + channel] = cubic_sample(
+                                    input,
+                                    image.row_stride(),
+                                    self.width,
+                                    self.height,
+                                    channel,
+                                    coordinates[channel].0,
+                                    coordinates[channel].1,
+                                )?;
+                            }
+                        }
+                        Ok(())
+                    })?;
+            }
             image = output;
         }
 
@@ -188,7 +259,175 @@ fn apply_vignetting(
     )
 }
 
+/// Cubic sampling core for the radial-LUT branch: identical weights, tap
+/// order, accumulation and rounding as `resample::cubic_sample` (bit-exact
+/// given the same coordinates — pinned by `radial_sampling_equals_cubic_sample`
+/// in this file's tests), with the eight unique tap weights hoisted out of
+/// the four-by-four tap loop. That hoist only pays off once the per-pixel
+/// Newton solves are gone, so it lives only in this branch; the authority
+/// path keeps `resample::cubic_sample` untouched.
+fn sample_cubic_hoisted(
+    data: &[f32],
+    row_stride: usize,
+    width: usize,
+    height: usize,
+    channel: usize,
+    x: f32,
+    y: f32,
+) -> Result<f32, OpticsError> {
+    if !x.is_finite() || !y.is_finite() {
+        return Err(OpticsError::Correction {
+            reason: "non-finite cubic source coordinate".to_owned(),
+        });
+    }
+    let floor_x = x.floor() as isize;
+    let floor_y = y.floor() as isize;
+    if floor_x - 1 < 0
+        || floor_y - 1 < 0
+        || floor_x + 2 >= width as isize
+        || floor_y + 2 >= height as isize
+    {
+        return Err(OpticsError::InvalidFootprint);
+    }
+    let mut weight_x = [0.0_f32; 4];
+    for (offset, weight) in weight_x.iter_mut().enumerate() {
+        *weight = cubic_weight(x - (floor_x + offset as isize - 1) as f32);
+    }
+    let base = (floor_x - 1) as usize * 3 + channel;
+    let mut value = 0.0_f32;
+    for offset_y in -1..=2 {
+        let weight_y = cubic_weight(y - (floor_y + offset_y) as f32);
+        let row_base = (floor_y + offset_y) as usize * row_stride + base;
+        for (offset_x, weight_x) in weight_x.iter().enumerate() {
+            value += data[row_base + offset_x * 3] * (weight_y * weight_x);
+        }
+    }
+    if !value.is_finite() {
+        return Err(OpticsError::Correction {
+            reason: "cubic resampling produced a non-finite pixel".to_owned(),
+        });
+    }
+    Ok(value)
+}
+
 #[allow(dead_code)]
 fn _requested_components(plan: &LensCorrectionPlan) -> CorrectionComponents {
     plan.provenance().requested
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Deterministic xorshift for sampling interior coordinates.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next_f32(&mut self, low: f32, high: f32) -> f32 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            low + (x >> 40) as f32 / (1u64 << 24) as f32 * (high - low)
+        }
+    }
+
+    fn assert_same_sample(
+        data: &[f32],
+        row_stride: usize,
+        width: usize,
+        height: usize,
+        channel: usize,
+        x: f32,
+        y: f32,
+    ) {
+        let authority = cubic_sample(data, row_stride, width, height, channel, x, y);
+        let branch = sample_cubic_hoisted(data, row_stride, width, height, channel, x, y);
+        match (authority, branch) {
+            (Ok(authority), Ok(branch)) => assert_eq!(
+                authority.to_bits(),
+                branch.to_bits(),
+                "sampler diverged at channel {channel} coordinate ({x}, {y})"
+            ),
+            (Err(_), Err(_)) => {}
+            (authority, branch) => panic!(
+                "sampler error behaviour diverged at ({x}, {y}): {authority:?} vs {branch:?}"
+            ),
+        }
+    }
+
+    /// Many random interior coordinates on a deterministic pseudo-random
+    /// image of the given size.
+    fn assert_grid_parity(width: usize, height: usize, samples: usize) {
+        let mut rng = Lcg(0x9E37_79B9_7F4A_7C15 ^ (width as u64) << 32);
+        let image = LinearRgbImage::new(
+            width,
+            height,
+            width * 3,
+            LinearRgbSpace::CameraNative,
+            (0..width * height * 3)
+                .map(|index| 0.05 + (index % 977) as f32 * 0.001)
+                .collect::<Vec<_>>(),
+        )
+        .expect("test image");
+        let data = image.data();
+        for _ in 0..samples {
+            let x = rng.next_f32(2.0, width as f32 - 3.0);
+            let y = rng.next_f32(2.0, height as f32 - 3.0);
+            for channel in 0..3 {
+                assert_same_sample(data, image.row_stride(), width, height, channel, x, y);
+            }
+        }
+    }
+
+    #[test]
+    fn radial_sampling_equals_cubic_sample() {
+        // Small asymmetric image, dense fractional grid over the safe range.
+        let width = 48;
+        let height = 36;
+        let pixels = (0..width * height * 3)
+            .map(|index| ((index % 133) as f32 - 66.0) / 64.0)
+            .collect::<Vec<_>>();
+        for channel in 0..3 {
+            let mut y = 1.0;
+            while y < height as f32 - 2.0 {
+                let mut x = 1.0;
+                while x < width as f32 - 2.0 {
+                    assert_same_sample(&pixels, width * 3, width, height, channel, x, y);
+                    x += 0.125;
+                }
+                y += 0.25;
+            }
+        }
+        // Out-of-footprint and non-finite coordinates must agree too.
+        for (x, y) in [
+            (0.5_f32, 4.0_f32),
+            (-0.25, 4.0),
+            (width as f32 - 2.0, 4.0),
+            (4.0, height as f32 - 2.0),
+            (f32::NAN, 4.0),
+            (4.0, f32::INFINITY),
+        ] {
+            let authority = cubic_sample(&pixels, width * 3, width, height, 0, x, y);
+            let branch = sample_cubic_hoisted(&pixels, width * 3, width, height, 0, x, y);
+            match (&authority, &branch) {
+                (Err(authority), Err(branch)) => assert_eq!(
+                    std::mem::discriminant(authority),
+                    std::mem::discriminant(branch),
+                    "({x}, {y})"
+                ),
+                _ => panic!("({x}, {y}) must fail in both samplers"),
+            }
+        }
+
+        // The parity grid size on a deterministic pseudo-random image.
+        assert_grid_parity(1_024, 768, 4_096);
+    }
+
+    #[test]
+    #[ignore = "allocates a full-size 24 MP image (~290 MB) to sample 16k coordinates; run with --ignored for full-frame hoisting parity"]
+    fn radial_sampling_equals_cubic_sample_full_frame() {
+        assert_grid_parity(6_048, 4_024, 16_384);
+    }
 }
