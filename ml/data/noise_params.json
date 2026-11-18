@@ -1,77 +1,107 @@
 {
  "cameras": {
-  "Canon EOS 7D": {
-   "k_min": 0.00011856463469910736,
-   "k_max": 0.006953099416510673,
-   "sigma_log_slope": 1.1044557867292748,
-   "sigma_log_intercept": 1.3348814329768552,
-   "sigma_log_std": 0.13125501576333218,
-   "row_sigma_max": 0.000697999925162705,
+  "unknown-arw-6024x4024": {
+   "k_min": 7.113064232946812e-06,
+   "k_max": 0.023985998582188292,
+   "sigma_log_slope": 0.797012867151329,
+   "sigma_log_intercept": -1.2057714511573476,
+   "sigma_log_std": 0.45802160338368286,
+   "row_sigma_max": 0.0024122286302371834,
    "black_offset_std": 0.0003
   },
-  "unknown-crw-3088x2056": {
-   "k_min": 6.257235450362155e-05,
-   "k_max": 0.000414379820251336,
-   "sigma_log_slope": 1.0064458077020102,
-   "sigma_log_intercept": 2.0838776615088994,
-   "sigma_log_std": 0.25343561101698653,
+  "canon eos 7d": {
+   "k_min": 8.157510568341313e-05,
+   "k_max": 0.007435563081892138,
+   "sigma_log_slope": 0.9294846368257987,
+   "sigma_log_intercept": 0.40211465390056206,
+   "sigma_log_std": 0.4085465973403098,
+   "row_sigma_max": 0.0008513284093202817,
+   "black_offset_std": 0.0003
+  },
+  "canon eos 6d": {
+   "k_min": 2.3699271110933533e-05,
+   "k_max": 0.019096548540253278,
+   "sigma_log_slope": 0.7423099028518706,
+   "sigma_log_intercept": -0.920894328170519,
+   "sigma_log_std": 0.4236643652485156,
+   "row_sigma_max": 0.009388919720735552,
+   "black_offset_std": 0.0003
+  },
+  "canon eos d60": {
+   "k_min": 5.9593405586810424e-05,
+   "k_max": 0.00033010383714162457,
+   "sigma_log_slope": 1.2294674979359017,
+   "sigma_log_intercept": 4.252307990887701,
+   "sigma_log_std": 0.07877670206695436,
    "row_sigma_max": 0.00020994902556029335,
    "black_offset_std": 0.0003
   },
-  "NIKON D40": {
-   "k_min": 0.00013766058172417472,
-   "k_max": 0.0012344574783974727,
-   "sigma_log_slope": 1.1393902281918515,
-   "sigma_log_intercept": 2.8706371136487605,
-   "sigma_log_std": 0.5546300864622572,
+  "nikon d40": {
+   "k_min": 0.00014192388865591886,
+   "k_max": 0.0015205797389451837,
+   "sigma_log_slope": 1.1778546577552669,
+   "sigma_log_intercept": 2.964585373024928,
+   "sigma_log_std": 0.19631929283960176,
    "row_sigma_max": 0.00010912658775438722,
    "black_offset_std": 0.0003
   },
-  "Canon EOS 500D": {
-   "k_min": 8.598038635059803e-05,
-   "k_max": 0.002154784477915477,
-   "sigma_log_slope": 0.8909465259370816,
-   "sigma_log_intercept": 0.11849938286431581,
-   "sigma_log_std": 0.2279543373622029,
-   "row_sigma_max": 0.0004080912917002878,
+  "canon eos m100": {
+   "k_min": 8.216916945004259e-05,
+   "k_max": 0.007507750259609536,
+   "sigma_log_slope": 1.036484020463848,
+   "sigma_log_intercept": 1.3499152659014262,
+   "sigma_log_std": 0.2205741834605521,
+   "row_sigma_max": 0.0008313596074235721,
    "black_offset_std": 0.0003
   },
-  "Panasonic DMC-GH1": {
-   "k_min": 0.00014284126013301484,
-   "k_max": 0.0020306274878160195,
-   "sigma_log_slope": 1.4255363026358043,
-   "sigma_log_intercept": 4.311102337228634,
-   "sigma_log_std": 0.06434288057625302,
+  "canon eos 500d": {
+   "k_min": 7.121804646931244e-05,
+   "k_max": 0.001921315553066046,
+   "sigma_log_slope": 0.7545619331450526,
+   "sigma_log_intercept": -0.7878948806575313,
+   "sigma_log_std": 0.3119795265286546,
+   "row_sigma_max": 0.0005471998560420499,
+   "black_offset_std": 0.0003
+  },
+  "panasonic dmc-gh1": {
+   "k_min": 0.00012400554870031766,
+   "k_max": 0.0021580380929412243,
+   "sigma_log_slope": 1.4457889730392868,
+   "sigma_log_intercept": 4.284612664466996,
+   "sigma_log_std": 0.13917624792613673,
    "row_sigma_max": 0.0016669581551312085,
    "black_offset_std": 0.0003
   },
-  "NIKON Z 6": {
-   "k_min": 9.694684321778376e-06,
-   "k_max": 0.008524873348493861,
-   "sigma_log_slope": 0.6132030125315641,
-   "sigma_log_intercept": -1.99980039743486,
-   "sigma_log_std": 0.5593576913459073,
+  "nikon z 6": {
+   "k_min": 9.482855626212228e-06,
+   "k_max": 0.008925842232398918,
+   "sigma_log_slope": 0.5848092675396805,
+   "sigma_log_intercept": -2.2959722422923132,
+   "sigma_log_std": 0.4194905597467925,
    "row_sigma_max": 0.00023079037115236013,
    "black_offset_std": 0.0003
   }
  },
  "pooled": {
-  "k_min": 9.694684321778376e-06,
-  "k_max": 0.008524873348493861,
-  "sigma_log_slope": 0.6483550403036429,
-  "sigma_log_intercept": -1.4431229225908977,
-  "sigma_log_std": 0.5779179970835486,
-  "row_sigma_max": 0.0016669581551312085,
+  "k_min": 7.113064232946812e-06,
+  "k_max": 0.023985998582188292,
+  "sigma_log_slope": 0.7963585547938974,
+  "sigma_log_intercept": -1.0571058667211475,
+  "sigma_log_std": 0.5577657525053997,
+  "row_sigma_max": 0.009388919720735552,
   "black_offset_std": 0.0003
  },
  "pair_counts": {
-  "Canon EOS 7D": 7,
-  "unknown-crw-3088x2056": 12,
-  "NIKON D40": 8,
-  "Canon EOS 500D": 21,
-  "Panasonic DMC-GH1": 5,
-  "NIKON Z 6": 24
+  "unknown-arw-6024x4024": 1421,
+  "canon eos 7d": 49,
+  "canon eos 6d": 80,
+  "canon eos d60": 12,
+  "nikon d40": 8,
+  "canon eos m100": 50,
+  "canon eos 500d": 71,
+  "panasonic dmc-gh1": 5,
+  "nikon z 6": 36
  },
- "subset": "small",
+ "subset": "full",
  "seed": 0
 }
