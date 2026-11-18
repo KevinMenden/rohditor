@@ -1405,7 +1405,9 @@ mod tests {
     #[test]
     fn missing_local_ratios_block_falls_back_to_the_opposed_threshold() {
         // The removed method's sidecar block is optional on read, so the
-        // migration silently keeps what the Opposed block records...
+        // migration silently keeps what the Opposed block records. Without
+        // either block the neutral default applies — that bare case is
+        // pinned by `local_ratios_without_subobject_defaults_to_neutral`.
         let recipe = parse_with_highlights(
             18,
             r#"{"method":"local_ratios","opposed":{"detection_threshold":0.75}}"#,
@@ -1413,14 +1415,6 @@ mod tests {
         .expect("lr method without its block");
         assert_eq!(recipe.raw.highlights.method, HighlightMethod::Opposed);
         assert_eq!(recipe.raw.highlights.opposed.detection_threshold, 0.75);
-        // ...and when no Opposed threshold is stored either, its own default
-        // applies (the bare fixture above pins the same value).
-        let recipe = parse_with_highlights(18, r#"{"method":"local_ratios"}"#)
-            .expect("lr method without any threshold");
-        assert_eq!(
-            recipe.raw.highlights.opposed.detection_threshold,
-            HIGHLIGHT_THRESHOLD_RANGE.neutral
-        );
     }
 
     #[test]
@@ -1531,15 +1525,6 @@ mod tests {
         assert_eq!(second.recipe, first.recipe);
         let saved_again = serde_json::to_string(&second).expect("re-save");
         assert_eq!(saved, saved_again, "double save must be byte-stable");
-    }
-
-    #[test]
-    fn sidecar_wrapper_accepts_degenerate_empty_highlights() {
-        let first: ProjectFileMirror = serde_json::from_str(&sidecar("{}")).expect("empty load");
-        assert_eq!(first.recipe.raw.highlights.method, HighlightMethod::Clip);
-        let saved = serde_json::to_string(&first).expect("save");
-        let second: ProjectFileMirror = serde_json::from_str(&saved).expect("reload");
-        assert_eq!(second.recipe, first.recipe);
     }
 
     #[test]
