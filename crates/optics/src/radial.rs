@@ -161,6 +161,10 @@ impl RadialMultipliers {
     /// freeze boundary; elsewhere it is a linear blend of the adjacent knots.
     #[inline]
     pub(crate) fn lookup(&self, radius: f32) -> [f32; 3] {
+        debug_assert!(
+            radius.is_finite() && radius >= 0.0,
+            "call sites pass hypots over finite plan constants"
+        );
         let position = radius / self.step;
         let index = (position as usize).min(self.table.len() - 2);
         if !self.step_segments.is_empty() {
@@ -172,7 +176,16 @@ impl RadialMultipliers {
                 }
             }
         }
+        // The outermost corner pixel reproduces `corner_input_radius` through
+        // the same f32 arithmetic, so `position` can round to just past the
+        // last knot while `index` is clamped one segment back. Clamping the
+        // blend turns that rounding into selecting the outer knot instead of
+        // extrapolating past it. Only the upper bound is reachable (`index`
+        // truncates a non-negative position); the bare comparison also keeps
+        // a hypothetical NaN propagating to the sampler's finiteness guard
+        // instead of silently selecting a knot.
         let blend = position - index as f32;
+        let blend = if blend > 1.0 { 1.0 } else { blend };
         let low = self.table[index];
         let high = self.table[index + 1];
         [
