@@ -19,11 +19,10 @@ def record(**changes):
 
 
 def test_manifest_accepts_allowed_licenses():
-    validate_manifest({"files": [record(), record(license=licenses.CC_BY)]})
+    validate_manifest({"files": [record(), record(license=licenses.CC_BY), record(license=licenses.CC_BY_SA)]})
 
 
 @pytest.mark.parametrize("bad", [
-    record(license=licenses.CC_BY_SA),
     record(license="CC-BY-NC-SA-4.0"),
     record(license=licenses.RESEARCH_ONLY),
     record(license=None),

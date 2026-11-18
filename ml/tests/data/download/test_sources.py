@@ -30,7 +30,7 @@ def test_rawnind_license_comes_from_permissions_or_dataset():
         dataverse_entry(f"Bayer_TEST_Pen-pile_ISOHi 3200_sha1={sha}.nef", 6),
         dataverse_entry("permissions.txt", 7),
     ]}}
-    scenes, skipped = rawnind.build_files(listing, permissions, {"Pen-pile"}, licenses.DEFAULT_ALLOWED)
+    scenes, skipped = rawnind.build_files(listing, permissions, {"Pen-pile"}, frozenset({licenses.CC0, licenses.CC_BY}))
     assert set(scenes) == {"bananapi"}
     clean = {f.name: f.meta["is_clean"] for f in scenes["bananapi"]}
     assert sorted(clean.values()) == [False, True]
@@ -39,11 +39,10 @@ def test_rawnind_license_comes_from_permissions_or_dataset():
     assert skipped["not a Bayer raw (X-Trans, sidecar or metadata)"] == 2
 
 
-def test_rawnind_dataset_license_opt_in():
+def test_rawnind_dataset_license_is_allowed_by_default():
     sha = "1" * 40
     listing = {"data": {"files": [dataverse_entry(f"Bayer_unlisted_GT_ISO100_sha1={sha}.arw", 3)]}}
-    allowed = licenses.DEFAULT_ALLOWED | {licenses.CC_BY_SA}
-    scenes, _ = rawnind.build_files(listing, {}, set(), allowed)
+    scenes, _ = rawnind.build_files(listing, {}, set(), licenses.DEFAULT_ALLOWED)
     assert scenes["unlisted"][0].license == licenses.CC_BY_SA
 
 

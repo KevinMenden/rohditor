@@ -5,14 +5,16 @@ CC_BY = "CC-BY-4.0"
 CC_BY_SA = "CC-BY-SA-4.0"
 RESEARCH_ONLY = "LicenseRef-research-only"
 
-# Files are only downloaded when their license is allowed. The default is
-# deliberately narrow (permissive licenses only); widen it with `--allow-license`
-# once the share-alike / non-commercial implications have been decided.
-DEFAULT_ALLOWED = frozenset({CC0, CC_BY})
+# Files are only downloaded when their license is allowed. Non-commercial and
+# research-only data stay out; widen with `--allow-license` for experiments only.
+#
+# CC BY-SA is allowed (decision for #116): it brings in most of RawNIND (its
+# dataset-level license). The weights are not distributed for now; publishing
+# them later would likely require releasing them under CC BY-SA too.
+DEFAULT_ALLOWED = frozenset({CC0, CC_BY, CC_BY_SA})
 
 # The licenses a *training/evaluation manifest* may contain. The build refuses
-# anything else, and a test enforces it. Changing this is a licensing decision
-# (e.g. adding CC_BY_SA means the model weights may need to be share-alike).
+# anything else, and a test enforces it. Changing this is a licensing decision.
 TRAINING_ALLOWED = DEFAULT_ALLOWED
 
 
