@@ -11,7 +11,8 @@ use rohditor_edit::{
     CameraProfileSelection, EditRecipe, HighlightAdjustments, HighlightMethod, WhiteBalance,
 };
 use rohditor_highlight::{
-    ChannelClipLevels, ChannelDetectionLevels, HighlightExecution, OpposedOptions,
+    ChannelClipLevels, ChannelDetectionLevels, DETECTION_SAFETY_MARGIN, HighlightExecution,
+    OpposedOptions,
 };
 use rohditor_image::{
     BayerPattern, CfaColor, ImageRegion, MosaicImage, Orientation, allocate_zeroed_f32,
@@ -411,8 +412,9 @@ fn highlight_execution(
     match adjustments.method {
         HighlightMethod::Off => HighlightExecution::Off,
         HighlightMethod::Clip => {
-            let common_ceiling =
-                adjustments.clip.threshold * gains.red.min(gains.green).min(gains.blue);
+            let common_ceiling = adjustments.clip.threshold
+                * DETECTION_SAFETY_MARGIN
+                * gains.red.min(gains.green).min(gains.blue);
             HighlightExecution::Clip(ChannelClipLevels {
                 red: common_ceiling / gains.red,
                 green: common_ceiling / gains.green,
@@ -420,7 +422,7 @@ fn highlight_execution(
             })
         }
         HighlightMethod::Opposed => {
-            let level = adjustments.opposed.detection_threshold;
+            let level = adjustments.opposed.detection_threshold * DETECTION_SAFETY_MARGIN;
             HighlightExecution::Opposed(OpposedOptions {
                 detection_levels: ChannelDetectionLevels {
                     red: level,
@@ -439,9 +441,10 @@ fn highlight_execution(
 
 /// WB-aware neutral ceiling for highlight sites a reconstruction method did
 /// not raise (issue #65): mirrors Clip's common-ceiling formula but with the
-/// method's own detection threshold and the file's as-shot gains, so a
-/// neutralised site lands at `threshold * min(gains)` after white balance —
-/// neutral white, like Clip.
+/// method's own detection level (threshold x `DETECTION_SAFETY_MARGIN`,
+/// issue #64) and the file's as-shot gains, so a neutralised site lands at
+/// `threshold * margin * min(gains)` after white balance — neutral, like
+/// Clip, just below nominal white.
 fn neutral_ceiling(threshold: f32, balance: WhiteBalanceGains) -> ChannelClipLevels {
     let common_ceiling = threshold * balance.red.min(balance.green).min(balance.blue);
     ChannelClipLevels {
@@ -832,7 +835,7 @@ mod tests {
             description.highlight_execution(),
             HighlightExecution::Clip(_)
         ));
-        assert_eq!(description.highlight_algorithm_version(), Some(1));
+        assert_eq!(description.highlight_algorithm_version(), Some(2));
     }
 
     /// Issue #65: the LR/Opposed neutral ceiling is derived from the
@@ -873,10 +876,10 @@ mod tests {
             other => panic!("expected a reconstruction execution, got {other:?}"),
         }
         .expect("core always fills the neutral ceiling");
-        // threshold * min(as-shot gains) / gain per channel, the same
-        // arithmetic shape as the Clip branch. Exact equality holds:
-        // identical single mul/div in the same order.
-        let common = level * 1.0_f32.min(2.0).min(1.55);
+        // threshold * DETECTION_SAFETY_MARGIN * min(as-shot gains) / gain
+        // per channel, the same arithmetic shape as the Clip branch.
+        // Exact equality holds: identical mul/mul/div in the same order.
+        let common = (level * DETECTION_SAFETY_MARGIN) * 1.0_f32.min(2.0).min(1.55);
         assert_eq!(ceiling.red, common / 2.0);
         assert_eq!(ceiling.green, common / 1.0);
         assert_eq!(ceiling.blue, common / 1.55);

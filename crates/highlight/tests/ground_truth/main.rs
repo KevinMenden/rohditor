@@ -12,10 +12,14 @@
 //!   against the pinned `baseline::BASELINES` rows and fails once with the
 //!   full violation list.
 //!
-//! Levels are pinned at the crate boundary (`{sat} x 3` for detection)
-//! instead of going through `rohditor_core` resolution, which decouples
-//! this harness from pending #64. Since issue #65 the Clip rows run with
-//! production-shaped WB-aware ceilings (`sat * min(METRIC_WB) / gain`,
+//! Levels mirror production `rohditor_core` resolution (issue #64):
+//! `threshold * DETECTION_SAFETY_MARGIN`, with the recipe threshold at its
+//! neutral 1.0 for the sat 1.00 rows and at 0.99 for the sub-nominal sat
+//! 0.98 rows (declared default from the issue thread, 2026-11-03: without
+//! a threshold below ~0.992 no margin composes low enough to flag a
+//! sensor clipping at 0.98). Since issue #65 the Clip rows run with
+//! production-shaped WB-aware ceilings
+//! (`effective_level(sat) * min(METRIC_WB) / gain`,
 //! the METRIC_WB vector standing in for as-shot balance) and the
 //! Opposed rows receive the same vector as `neutral_ceiling`,
 //! so clause A/B of #65 compare like-for-like. Off rows are unchanged.
@@ -48,25 +52,43 @@ enum Method {
 
 const METHODS: [Method; 3] = [Method::Off, Method::Clip, Method::Opposed];
 
+/// Recipe threshold paired with each saturation level (issue #64): neutral
+/// 1.0 at nominal saturation; 0.99 on the sub-nominal scenes, the declared
+/// default from the issue thread because 1.0 x the margin still sits above
+/// 0.98 and would detect nothing.
+fn recipe_threshold(sat: f32) -> f32 {
+    if sat < 1.0 { 0.99 } else { 1.0 }
+}
+
+/// Production-shaped effective detection level: `threshold x margin` of the
+/// file's nominal white (1.0), NOT the scene's real saturation — resolving
+/// below nominal is the whole point of issue #64.
+fn effective_level(sat: f32) -> f32 {
+    recipe_threshold(sat) * rohditor_highlight::DETECTION_SAFETY_MARGIN
+}
+
 fn detection_levels(sat: f32) -> ChannelDetectionLevels {
+    let level = effective_level(sat);
     ChannelDetectionLevels {
-        red: sat,
-        green: sat,
-        blue: sat,
+        red: level,
+        green: level,
+        blue: level,
     }
 }
 
 /// WB-aware per-channel ceilings used by BOTH the Clip rows (as Clip
 /// limits) and the reconstruction rows (as `neutral_ceiling`):
-/// `sat * min(METRIC_WB) / METRIC_WB_c`, mirroring production
-/// `sensor.rs` Clip resolution with the metric vector standing in for
-/// the as-shot balance (issue #65: the harness as-shot *is*
-/// `METRIC_WB`, so "neutral under the ceilings" and the hue metric
-/// agree). Computed ONCE per (scene, sat) section and shared, so the
-/// Clip↔neutraliser bit-parity claim never depends on recomputation.
+/// `effective_level(sat) * min(METRIC_WB) / METRIC_WB_c`, mirroring
+/// production `sensor.rs` Clip resolution (threshold x margin x min,
+/// per #64) with the metric vector standing in for the as-shot balance
+/// (issue #65: the harness as-shot *is* `METRIC_WB`, so "neutral under
+/// the ceilings" and the hue metric agree). Computed ONCE per
+/// (scene, sat) section and shared, so the Clip↔neutraliser bit-parity
+/// claim never depends on recomputation.
 fn shared_ceilings(sat: f32) -> [f32; 3] {
     let min = METRIC_WB[0].min(METRIC_WB[1]).min(METRIC_WB[2]);
-    METRIC_WB.map(|gain| sat * min / gain)
+    let common = effective_level(sat) * min;
+    METRIC_WB.map(|gain| common / gain)
 }
 
 fn execution(
@@ -208,11 +230,12 @@ fn scene_guards() {
             // crate's own predicate, never from analytic geometry.
             let mask = detect_opposed(&scene.mosaic, detection_levels(sat))
                 .expect("harness mosaic and levels are valid");
+            let level = effective_level(sat);
             let bit_count = scene
                 .mosaic
                 .data()
                 .iter()
-                .filter(|&&sample| sample >= sat)
+                .filter(|&&sample| sample >= level)
                 .count();
             assert_eq!(
                 mask.data().iter().filter(|&&hit| hit).count(),
@@ -242,18 +265,34 @@ fn scene_guards() {
     }
 }
 
-/// The #62 margin trap: a mosaic clamped at 0.98 detected at level 1.0
-/// yields zero suspected sites. Documents why sat and level are swept
-/// together in the matrix.
+/// The #62 margin trap and its #64 cure, as a one-liner each: a mosaic
+/// clamped at 0.98 detected at the margin-free level 1.0 yields zero
+/// suspected sites; at the production effective level for the declared
+/// 0.99 threshold (0.99 x `DETECTION_SAFETY_MARGIN` ≈ 0.977 ≤ 0.98) it
+/// detects. Together these pin the declared interpretation of the issue
+/// thread (2026-11-03): the 0.98 scenes are driven at threshold 0.99.
 #[test]
 fn margin_negative_control() {
     let scene = generator::generate(&scenes::DISK_LARGE, 0.98);
-    let mask = detect_opposed(&scene.mosaic, detection_levels(1.0))
-        .expect("harness mosaic and levels are valid");
+    let nominal = ChannelDetectionLevels {
+        red: 1.0,
+        green: 1.0,
+        blue: 1.0,
+    };
+    let mask = detect_opposed(&scene.mosaic, nominal).expect("harness mosaic and levels are valid");
     assert_eq!(
         mask.data().iter().filter(|&&hit| hit).count(),
         0,
         "green blown at 0.98 must give 0 suspected sites at level 1.0"
+    );
+    let fixed = detect_opposed(&scene.mosaic, detection_levels(0.98))
+        .expect("harness mosaic and levels are valid");
+    assert!(
+        fixed.data().iter().any(|&hit| hit),
+        "green blown at 0.98 must detect at the effective level for \
+         threshold 0.99 (0.99 x {} = {})",
+        rohditor_highlight::DETECTION_SAFETY_MARGIN,
+        effective_level(0.98),
     );
 }
 

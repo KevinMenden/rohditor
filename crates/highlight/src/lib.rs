@@ -18,17 +18,27 @@ pub use detect::{
 };
 pub use opposed::{opposed_scratch_bytes, reconstruct_opposed, reconstruct_opposed_cancellable};
 
+/// Fixed safety margin between nominal white and the highest level the
+/// detection predicate may use (issue #64). Many sensors clip a little
+/// below the metadata white level, so a sample just below 1.0 can already
+/// have lost data. Callers resolve effective detection levels and Clip
+/// ceilings as `threshold * DETECTION_SAFETY_MARGIN`, mirroring
+/// darktable's `0.987 x clip`.
+pub const DETECTION_SAFETY_MARGIN: f32 = 0.987;
+
 /// Version of the deterministic Opposed estimator used in recipe/cache
 /// identities. Numerical contract changes must increment this value.
 /// v2: suspected sites that reconstruction did not raise are lowered to the
 /// optional WB-aware `neutral_ceiling` (issue #65).
 /// v3: region-aware correction from clipped-region border rings with an
 /// image-wide fallback, blended with the local search (issue #66).
-pub const OPPOSED_ALGORITHM_VERSION: u8 = 3;
+/// v4: detection levels carry the fixed [`DETECTION_SAFETY_MARGIN`] (issue #64).
+pub const OPPOSED_ALGORITHM_VERSION: u8 = 4;
 
 /// Version of the deterministic Clip operation used in backend/cache identities.
 /// Numerical contract changes must increment this value.
-pub const CLIP_ALGORITHM_VERSION: u8 = 1;
+/// v2: WB-aware ceilings carry the fixed [`DETECTION_SAFETY_MARGIN`] (issue #64).
+pub const CLIP_ALGORITHM_VERSION: u8 = 2;
 
 use rohditor_image::ImageError;
 use thiserror::Error;

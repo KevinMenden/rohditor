@@ -18,7 +18,12 @@ const MIN_RECONSTRUCTED_FRACTION: f64 = 0.95;
 /// input. Lower than the estimate share because sites within about a pixel
 /// of the clip boundary have a truth barely above the clip level, which an
 /// unbiased estimate lands on either side of.
-const MIN_RAISED_FRACTION: f64 = 0.85;
+/// 2026-11-17 (#64): detection now uses the fixed safety margin, so the
+/// mask additionally contains valid truth sites in `[margin, sat)` that
+/// are estimated but need not be raised; the measured share dropped from
+/// ~0.90 to 0.826 at sat 1.0. Floor lowered accordingly — the quality
+/// guarantee on truly clipped sites is carried by `MAX_MEDIAN_ERROR_EV`.
+const MIN_RAISED_FRACTION: f64 = 0.80;
 /// Median |error| in EV the issue asks for on partially clipped sites.
 const MAX_MEDIAN_ERROR_EV: f64 = 0.1;
 
