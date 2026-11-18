@@ -3580,6 +3580,12 @@ impl eframe::App for RohditorApp {
         self.show_developer_diagnostics(context);
         self.show_application_settings(context);
         self.show_export_dialog(context);
+        // Ordering requirement: the autosave beat must run after the widget
+        // passes above. Its gesture reap decides from `pointer.any_down()`,
+        // which only reflects this frame's events once the widgets have
+        // consumed them; run before the panels, it would act on the previous
+        // frame's pointer state and could commit a drag the panel pass is
+        // still continuing, splitting it across undo steps.
         self.update_autosave(context);
         self.update_window_title(context);
         // eframe normally wakes the event loop from the worker's
