@@ -68,8 +68,7 @@ fn blend(plane: u32, r: i32, c: i32, up: f32, down: f32, left: f32, right: f32, 
 // through `sample * forward * inverse`, as on the CPU).
 //
 // The pixel is written iff the CPU's `AmazeTileGeometry::write_window` contains
-// it (see `write_limit`): the core of this tile minus the image's 16 px bilinear
-// ring.
+// it (see `write_limit`): the core of this tile, clipped only to the image.
 @compute @workgroup_size(64)
 fn finish_scatter(@builtin(global_invocation_id) id: vec3<u32>) {
     let pos = begin_pixels(id);
@@ -79,7 +78,7 @@ fn finish_scatter(@builtin(global_invocation_id) id: vec3<u32>) {
     let origin = vec2<i32>(params.tiles[id.z].xy);
     let global = origin + vec2<i32>(c - 16, r - 16);
     let limit = write_limit(origin);
-    if global.x < 16 || global.y < 16 || global.x >= limit.x || global.y >= limit.y { return; }
+    if global.x >= limit.x || global.y >= limit.y { return; }
 
     let g = at(GREEN, r, c);
     var rgb: vec3<f32>;

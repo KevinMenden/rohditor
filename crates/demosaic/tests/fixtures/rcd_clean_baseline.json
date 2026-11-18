@@ -1,16 +1,16 @@
 {
   "common": {
     "algorithm": "rcd",
-    "algorithm_version": 3,
+    "algorithm_version": 4,
     "width": 96,
     "height": 80,
     "patterns": ["Rggb", "Bggr", "Grbg", "Gbrg"],
     "interior_border": 16,
     "balance": "identity",
     "metric": "PSNR in dB vs the analytic ground truth, pooled over the 4 patterns, camera-native RGB, interior only",
-    "provenance": "measured on x86-64 Linux, Rust 1.99, at f0a289527b227b47f949c3f7a93b35dfe88ce110, with the fixtures in rcd_clean_baseline.rs (same analytic definitions as demosaic_quality.rs); floors = measured minus margin for cross-platform f32/libm drift",
+    "provenance": "measured on x86-64 Linux, Rust 1.99, at f0a289527b227b47f949c3f7a93b35dfe88ce110, with the fixtures in rcd_clean_baseline.rs (same analytic definitions as demosaic_quality.rs); floors = measured minus margin for cross-platform f32/libm drift; #22 version-4 re-pin: interior bit-identical under mirrored-halo borders (measured to 10 px), measured values re-verified unchanged",
     "regenerate": "cargo test -p rohditor-demosaic --test rcd_clean_baseline -- --nocapture prints measured values; verify the algorithm change against crates/reference (level1_clean_fixtures), bump algorithm_version in lib.rs, then update measured_* and floors in this file",
-    "recorded": "2026-11-09"
+    "recorded": "2026-11-17"
   },
   "fixtures": [
     { "id": "slanted-edge",       "measured_rcd_psnr_db": 53.34, "measured_bilinear_psnr_db": 37.85, "min_rcd_psnr_db": 52.5, "min_improvement_over_bilinear_db": 14.7 },

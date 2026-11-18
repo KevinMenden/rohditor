@@ -69,9 +69,12 @@ fn amaze_matches_cpu_with_partial_tiles_border_ring_and_mosaic_seams() {
             // Entirely bilinear: not larger than twice the 16 px border.
             (24, 39),
             (32, 200),
-            // One partial tile; the 2x2 tile grids; and sizes where the last
-            // tile column or row lies inside the border ring (450 = 2 * 224 + 2).
+            // One partial tile, including an asymmetric sub-40 image whose
+            // mirrored halo reaches farther than the image itself; the 2x2
+            // tile grids; and sizes where the last tile column or row lies
+            // inside the border ring (450 = 2 * 224 + 2).
             (33, 33),
+            (33, 39),
             (97, 70),
             (241, 257),
             (450, 300),
@@ -252,8 +255,9 @@ fn amaze_batches_of_any_size_ignore_stale_scratch() {
                     .expect("GPU AMaZE batches");
                 let tiles = amaze_tiles(width, height).count();
                 assert_eq!(submissions, tiles.div_ceil(batch));
-                // The executor writes only the tiles' cores; the border ring is
-                // the bilinear base that `demosaic` lays down first.
+                // The executor writes the tile cores, i.e. every pixel of an
+                // eligible image; the bilinear base only survives for images
+                // too small to have tiles.
                 let actual = readback_planes(&gpu, &fixture.planes);
                 for tile in amaze_tiles(width, height) {
                     let window = tile.write_window(width, height);

@@ -22,7 +22,7 @@ struct Params {
     image: vec4<u32>, // width, height, mosaic tile width, mosaic tile height
     source: vec4<u32>, // mosaic columns, Bayer phase, unused, unused
     destination: vec4<u32>, // camera tile width, camera tile height, columns, unused
-    tile: vec4<u32>, // global origin x/y, local width/height
+    tile: vec4<u32>, // core origin x/y (global), full window width/height
     forward: vec4<f32>, // channel balance applied to the mosaic before reconstruction
     inverse: vec4<f32>, // undoes `forward` on the reconstructed planes
 };
@@ -76,6 +76,17 @@ fn ratio(sample_value: f32, low: f32, neighbor: f32) -> f32 {
     return sample_value * (2.0 * low) / denominator(EPS + low + neighbor);
 }
 fn position(id: u32) -> vec2<u32> { return vec2(id % EDGE, id / EDGE); }
+// Reflect about the first and last sample; preserves parity (the CPU mirror
+// in `mirror_coordinate`). The window origin is negative at image edges, so
+// sampling must reflect, not wrap.
+fn mirror(index: i32, length: i32) -> u32 {
+    let period = 2 * (length - 1);
+    let wrapped = ((index % period) + period) % period;
+    return u32(min(wrapped, period - wrapped));
+}
+// The window origin is the core origin minus the 10 px halo, in signed
+// arithmetic; the even halo keeps the window's Bayer phase at the core's.
+fn window_origin() -> vec2<i32> { return vec2<i32>(p.tile.xy) - vec2<i32>(10, 10); }
 fn interior(pos: vec2<u32>, border: u32) -> bool {
     return pos.x >= border && pos.y >= border &&
         pos.x + border < p.tile.z && pos.y + border < p.tile.w;
@@ -100,7 +111,15 @@ fn clear_populate(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let pos = position(i);
     if any(pos >= p.tile.zw) { return; }
-    let value = sample(p.tile.xy + pos) * p.forward[color(p.tile.xy + pos)];
+    // The window starts `BORDER` pixels before the core origin (i32, so edge
+    // tiles have a negative origin) and mirrors into the image, so edge tiles
+    // reconstruct right to the border like the CPU reference.
+    let source = vec2<u32>(
+        mirror(window_origin().x + i32(pos.x), i32(p.image.x)),
+        mirror(window_origin().y + i32(pos.y), i32(p.image.y)));
+    // Parity of the mirrored site equals parity of `p.tile.xy + pos` (the
+    // halo is even), so either coordinate yields the same Bayer colour here.
+    let value = sample(source) * p.forward[color(p.tile.xy + pos)];
     let first = color(p.tile.xy + vec2(0u, pos.y));
     let second = color(p.tile.xy + vec2(1u, pos.y));
     scratch[CFA + i] = value;
@@ -276,17 +295,20 @@ fn scatter_core(@builtin(global_invocation_id) id: vec3<u32>) {
     if id.x >= FULL { return; }
     let pos = position(id.x);
     if !interior(pos, 10u) { return; }
-    let global = p.tile.xy + pos;
-    let measured = color(global);
-    let original = sample(global);
+    // Core coordinates in i32; clip against the image before any u32 cast so
+    // a partial last core can never wrap into nonsense store sites.
+    let global = window_origin() + vec2<i32>(pos);
+    if global.x >= i32(p.image.x) || global.y >= i32(p.image.y) { return; }
+    let measured = color(vec2<u32>(global));
+    let original = sample(vec2<u32>(global));
     let i = i32(id.x);
     var values = vec3(read(RED,i), read(GREEN,i), read(BLUE,i)) * p.inverse.xyz;
     values[measured] = original;
     if any((bitcast<vec3<u32>>(values) & vec3(0x7f800000u)) == vec3(0x7f800000u)) {
         atomicOr(&invalid, 1u);
     }
-    let local = vec2<i32>(global % p.destination.xy);
-    let layer = i32((global.y / p.destination.y) * p.destination.z + global.x / p.destination.x);
+    let local = vec2<i32>(vec2<u32>(global) % p.destination.xy);
+    let layer = i32((u32(global.y) / p.destination.y) * p.destination.z + u32(global.x) / p.destination.x);
     textureStore(red,local,layer,vec4(values.r,0.0,0.0,1.0));
     textureStore(green,local,layer,vec4(values.g,0.0,0.0,1.0));
     textureStore(blue,local,layer,vec4(values.b,0.0,0.0,1.0));

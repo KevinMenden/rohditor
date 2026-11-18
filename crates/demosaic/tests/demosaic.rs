@@ -3,6 +3,7 @@ use std::error::Error;
 use rayon::ThreadPoolBuilder;
 use rohditor_demosaic::{
     AMAZE_HALO, DemosaicAlgorithm, DemosaicError, RCD_HALO, WhiteBalanceGains, demosaic,
+    mirror_coordinate,
 };
 use rohditor_image::{BayerPattern, CfaColor, ImageError, MosaicImage};
 
@@ -228,14 +229,41 @@ fn rcd_uses_bilinear_when_an_image_cannot_support_the_directional_halo()
     Ok(())
 }
 
+/// Pinned textured generator for the border-reconstruction fixtures: integer
+/// seed `(x·17 + y·31) mod 97` scaled to [0, 1]. A flat or ramp fixture could
+/// pass the border assertions vacuously; this one cannot.
+fn seeded_texture(x: usize, y: usize) -> [f32; 3] {
+    let seed = ((x * 17 + y * 31) % 97) as f32 / 96.0;
+    [0.1 + seed * 0.7, 0.2 + (1.0 - seed) * 0.5, 0.3 + seed * 0.4]
+}
+
+/// Counts outer-halo pixels (within `border` of an image edge) whose output
+/// is bit-identical to the bilinear pixel. Zero once borders reconstruct
+/// directionally.
+fn border_pixels_equal_to_bilinear(
+    image: &rohditor_image::LinearRgbImage<f32>,
+    bilinear: &rohditor_image::LinearRgbImage<f32>,
+    border: usize,
+) -> usize {
+    (0..image.height())
+        .flat_map(|y| (0..image.width()).map(move |x| (x, y)))
+        .filter(|(x, y)| {
+            *x < border
+                || *y < border
+                || *x >= image.width() - border
+                || *y >= image.height() - border
+        })
+        .filter(|&(x, y)| {
+            image.pixel(x, y).expect("in image") == bilinear.pixel(x, y).expect("in image")
+        })
+        .count()
+}
+
 #[test]
-fn rcd_runs_directional_stages_and_keeps_the_outer_halo_bilinear() -> Result<(), Box<dyn Error>> {
+fn rcd_reconstructs_the_outer_halo_directionally() -> Result<(), Box<dyn Error>> {
     let width = 41;
     let height = 37;
-    let mosaic = mosaic_from_rgb(width, height, BayerPattern::Rggb, |x, y| {
-        let seed = ((x * 17 + y * 31) % 97) as f32 / 96.0;
-        [0.1 + seed * 0.7, 0.2 + (1.0 - seed) * 0.5, 0.3 + seed * 0.4]
-    })?;
+    let mosaic = mosaic_from_rgb(width, height, BayerPattern::Rggb, seeded_texture)?;
     let bilinear = demosaic(
         &mosaic,
         WhiteBalanceGains::identity(),
@@ -252,33 +280,34 @@ fn rcd_runs_directional_stages_and_keeps_the_outer_halo_bilinear() -> Result<(),
         for x in 0..width {
             let actual = rcd.pixel(x, y).expect("RCD output pixel");
             assert!(actual.iter().all(|value| value.is_finite()));
-            let outer_halo = x < RCD_HALO.left
-                || y < RCD_HALO.top
-                || x >= width - RCD_HALO.right
-                || y >= height - RCD_HALO.bottom;
-            if outer_halo {
-                assert_eq!(Some(actual), bilinear.pixel(x, y));
-            } else if actual
-                .iter()
-                .zip(bilinear.pixel(x, y).expect("bilinear output pixel"))
-                .any(|(rcd, bilinear)| (rcd - bilinear).abs() > 1.0e-4)
+            let inner = RCD_HALO.left <= x
+                && x < width - RCD_HALO.right
+                && RCD_HALO.top <= y
+                && y < height - RCD_HALO.bottom;
+            if inner
+                && actual
+                    .iter()
+                    .zip(bilinear.pixel(x, y).expect("bilinear output pixel"))
+                    .any(|(rcd, bilinear)| (rcd - bilinear).abs() > 1.0e-4)
             {
                 directional_difference = true;
             }
         }
     }
+    assert_eq!(
+        border_pixels_equal_to_bilinear(&rcd, &bilinear, RCD_HALO.left),
+        0,
+        "RCD left bilinear pixels in the outer halo"
+    );
     assert!(directional_difference, "RCD interior was not reconstructed");
     Ok(())
 }
 
 #[test]
-fn amaze_runs_directional_stages_and_keeps_the_outer_halo_bilinear() -> Result<(), Box<dyn Error>> {
+fn amaze_reconstructs_the_outer_halo_directionally() -> Result<(), Box<dyn Error>> {
     let width = 41;
     let height = 37;
-    let mosaic = mosaic_from_rgb(width, height, BayerPattern::Rggb, |x, y| {
-        let seed = ((x * 17 + y * 31) % 97) as f32 / 96.0;
-        [0.1 + seed * 0.7, 0.2 + (1.0 - seed) * 0.5, 0.3 + seed * 0.4]
-    })?;
+    let mosaic = mosaic_from_rgb(width, height, BayerPattern::Rggb, seeded_texture)?;
     let bilinear = demosaic(
         &mosaic,
         WhiteBalanceGains::identity(),
@@ -295,25 +324,177 @@ fn amaze_runs_directional_stages_and_keeps_the_outer_halo_bilinear() -> Result<(
         for x in 0..width {
             let actual = amaze.pixel(x, y).expect("AMaZE output pixel");
             assert!(actual.iter().all(|value| value.is_finite()));
-            let outer_halo = x < AMAZE_HALO.left
-                || y < AMAZE_HALO.top
-                || x >= width - AMAZE_HALO.right
-                || y >= height - AMAZE_HALO.bottom;
-            if outer_halo {
-                assert_eq!(Some(actual), bilinear.pixel(x, y));
-            } else if actual
-                .iter()
-                .zip(bilinear.pixel(x, y).expect("bilinear output pixel"))
-                .any(|(amaze, bilinear)| (amaze - bilinear).abs() > 1.0e-4)
+            let inner = AMAZE_HALO.left <= x
+                && x < width - AMAZE_HALO.right
+                && AMAZE_HALO.top <= y
+                && y < height - AMAZE_HALO.bottom;
+            if inner
+                && actual
+                    .iter()
+                    .zip(bilinear.pixel(x, y).expect("bilinear output pixel"))
+                    .any(|(amaze, bilinear)| (amaze - bilinear).abs() > 1.0e-4)
             {
                 directional_difference = true;
             }
         }
     }
+    assert_eq!(
+        border_pixels_equal_to_bilinear(&amaze, &bilinear, AMAZE_HALO.left),
+        0,
+        "AMaZE left bilinear pixels in the outer halo"
+    );
     assert!(
         directional_difference,
         "AMaZE interior was not reconstructed"
     );
+    Ok(())
+}
+
+/// Images one pixel above the RCD gate must reconstruct their borders
+/// directionally too; the halo mirrors into the image for any eligible size.
+#[test]
+fn rcd_reconstructs_images_just_above_the_minimum() -> Result<(), Box<dyn Error>> {
+    for (width, height) in [(25, 25), (25, 40), (40, 25)] {
+        for pattern in PATTERNS {
+            let mosaic = mosaic_from_rgb(width, height, pattern, seeded_texture)?;
+            let bilinear = demosaic(
+                &mosaic,
+                WhiteBalanceGains::identity(),
+                DemosaicAlgorithm::Bilinear,
+            )?;
+            let rcd = demosaic(
+                &mosaic,
+                WhiteBalanceGains::identity(),
+                DemosaicAlgorithm::Rcd,
+            )?;
+            assert_eq!(
+                border_pixels_equal_to_bilinear(&rcd, &bilinear, RCD_HALO.left),
+                0,
+                "RCD {width}x{height} {pattern:?} kept bilinear border pixels"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The same just above the AMaZE gate (33 = 2·16 + 1).
+#[test]
+fn amaze_reconstructs_images_just_above_the_minimum() -> Result<(), Box<dyn Error>> {
+    for pattern in PATTERNS {
+        let mosaic = mosaic_from_rgb(33, 33, pattern, seeded_texture)?;
+        let bilinear = demosaic(
+            &mosaic,
+            WhiteBalanceGains::identity(),
+            DemosaicAlgorithm::Bilinear,
+        )?;
+        let amaze = demosaic(
+            &mosaic,
+            WhiteBalanceGains::identity(),
+            DemosaicAlgorithm::Amaze,
+        )?;
+        assert_eq!(
+            border_pixels_equal_to_bilinear(&amaze, &bilinear, AMAZE_HALO.left),
+            0,
+            "AMaZE 33x33 {pattern:?} kept bilinear border pixels"
+        );
+    }
+    Ok(())
+}
+
+/// A smooth asymmetric analytic ramp: per-channel slopes, quadratic terms and
+/// a cross term, so it has curvature (bilinear and directional values differ),
+/// is not separable under a transposition, and every ring sample reacts to a
+/// parity flip or a shifted sampling window.
+fn ring_ramp(x: usize, y: usize) -> [f32; 3] {
+    let (fx, fy) = (x as f32, y as f32);
+    [
+        0.42 + 0.0035 * fx + 0.0018 * fy - 0.00007 * fx * fx + 0.00005 * fx * fy,
+        0.50 - 0.0022 * fx + 0.0041 * fy + 0.00006 * fy * fy - 0.00004 * fx * fx,
+        0.34 + 0.0016 * fx + 0.0027 * fy + 0.00005 * fx * fy - 0.00006 * fy * fy,
+    ]
+}
+
+/// The mirrored-halo border policy is exactly this identity: place the image
+/// in a larger canvas whose samples are the image's mirror extension (the same
+/// `mirror_coordinate` reflection, extended past every edge) shifted by
+/// `halo`. A ring pixel of the small image then samples the same values at the
+/// same relative positions as the pixel at `(x + halo, y + halo)` of the
+/// canvas reconstruction does inside a larger image — at ring depth up to the
+/// full halo on all four sides, corners included. A parity-flipped,
+/// transposed or shifted mirror, and the old bilinear fallback on the curved
+/// ramp, all break the identity.
+fn assert_ring_matches_mirrored_canvas(
+    algorithm: DemosaicAlgorithm,
+    halo: usize,
+    (width, height): (usize, usize),
+    pattern: BayerPattern,
+) -> Result<(), Box<dyn Error>> {
+    let small = mosaic_from_rgb(width, height, pattern, ring_ramp)?;
+    let canvas = mosaic_from_rgb(width + 2 * halo, height + 2 * halo, pattern, |x, y| {
+        ring_ramp(
+            mirror_coordinate(x as isize - halo as isize, width),
+            mirror_coordinate(y as isize - halo as isize, height),
+        )
+    })?;
+    let small = demosaic(&small, WhiteBalanceGains::identity(), algorithm)?;
+    let canvas = demosaic(&canvas, WhiteBalanceGains::identity(), algorithm)?;
+    for y in 0..height {
+        for x in 0..width {
+            if x >= halo && y >= halo && x < width - halo && y < height - halo {
+                continue;
+            }
+            let ring = small.pixel(x, y).expect("ring pixel");
+            let inside = canvas
+                .pixel(x + halo, y + halo)
+                .expect("canvas pixel at the ring position");
+            for channel in 0..3 {
+                let delta = (ring[channel] - inside[channel]).abs();
+                assert!(
+                    // Measured maximum on x86-64: RCD matches bit for bit,
+                    // AMaZE drifts at most one f32 ULP (~3.0e-8).
+                    delta <= 1.0e-7,
+                    "{algorithm:?} {width}x{height} {pattern:?} ring ({x}, {y}) channel \
+                     {channel}: small {}, canvas {}",
+                    ring[channel],
+                    inside[channel],
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The mirrored-halo contract for RCD's full 10 px ring: every border pixel
+/// equals what the same algorithm reconstructs for the same content away from
+/// an edge inside a mirror-extended canvas.
+#[test]
+fn rcd_reconstructs_the_ring_like_a_larger_image() -> Result<(), Box<dyn Error>> {
+    for pattern in PATTERNS {
+        for size in [(25, 40), (41, 37)] {
+            assert_ring_matches_mirrored_canvas(
+                DemosaicAlgorithm::Rcd,
+                RCD_HALO.left,
+                size,
+                pattern,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// The same contract for AMaZE's full 16 px ring, just above its size gate.
+#[test]
+fn amaze_reconstructs_the_ring_like_a_larger_image() -> Result<(), Box<dyn Error>> {
+    for pattern in PATTERNS {
+        for size in [(33, 49), (41, 37)] {
+            assert_ring_matches_mirrored_canvas(
+                DemosaicAlgorithm::Amaze,
+                AMAZE_HALO.left,
+                size,
+                pattern,
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -357,10 +538,10 @@ fn amaze_reconstructs_across_tile_boundaries() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn rcd_covers_every_pixel_across_tiles_and_dropped_partial_tiles() -> Result<(), Box<dyn Error>> {
-    // 370 and 380 leave a final 22-pixel tile with no complete neighbourhood
-    // (dropped), 400 and 230 leave partial tiles that are processed. Every
-    // pixel must come from either a tile core or the bilinear base.
+fn rcd_covers_every_pixel_across_tiles_to_the_image_edges() -> Result<(), Box<dyn Error>> {
+    // Since #22 no partial tile is dropped. Sizes like 370,
+    // 380, 400 and 230 leave partial final cores whose windows mirror into
+    // the image, so constants must reconstruct everywhere from tile cores.
     for (width, height) in [(370, 380), (400, 230), (230, 370)] {
         let mosaic = mosaic_from_rgb(width, height, BayerPattern::Grbg, |_, _| [0.18, 0.36, 0.72])?;
         let image = demosaic(
@@ -487,6 +668,25 @@ fn amaze_is_identical_with_one_and_multiple_rayon_threads() -> Result<(), Box<dy
     let run = |threads| -> Result<_, Box<dyn Error>> {
         let pool = ThreadPoolBuilder::new().num_threads(threads).build()?;
         Ok(pool.install(|| demosaic(&mosaic, UNBALANCED, DemosaicAlgorithm::Amaze))?)
+    };
+    assert_eq!(run(1)?, run(4)?);
+    Ok(())
+}
+
+#[test]
+fn rcd_is_identical_with_one_and_multiple_rayon_threads() -> Result<(), Box<dyn Error>> {
+    // Several tile bands and columns, so bands run on different threads.
+    let mosaic = mosaic_from_rgb(400, 380, BayerPattern::Grbg, |x, y| {
+        let (xf, yf) = (x as f32, y as f32);
+        [
+            (xf * 0.071 + yf * 0.013).sin() * 0.3 + 0.4,
+            (xf * 0.029 - yf * 0.053).cos() * 0.3 + 0.45,
+            ((x * 17 + y * 31) % 101) as f32 / 150.0 + 0.1,
+        ]
+    })?;
+    let run = |threads| -> Result<_, Box<dyn Error>> {
+        let pool = ThreadPoolBuilder::new().num_threads(threads).build()?;
+        Ok(pool.install(|| demosaic(&mosaic, UNBALANCED, DemosaicAlgorithm::Rcd))?)
     };
     assert_eq!(run(1)?, run(4)?);
     Ok(())
