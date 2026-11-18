@@ -307,6 +307,45 @@ mod tests {
         }
     }
 
+    /// A key press with the auto-repeat flag set, as a held key delivers.
+    fn key_event(key: egui::Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: true,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    /// Hover, then press the mounted slider: the two frames that open a
+    /// pointer drag. The clock stands at the end of the press frame.
+    fn hover_and_press(
+        context: &egui::Context,
+        edits: &mut EditSession,
+        value: &mut f32,
+        saw_drag_stopped: &mut bool,
+    ) {
+        slider_frame(
+            context,
+            FRAME,
+            vec![egui::Event::PointerMoved(PRESS)],
+            true,
+            edits,
+            value,
+            saw_drag_stopped,
+        );
+        slider_frame(
+            context,
+            2.0 * FRAME,
+            vec![button_event(true, PRESS)],
+            true,
+            edits,
+            value,
+            saw_drag_stopped,
+        );
+    }
+
     /// Runs one egui frame over a bare exposure slider, mounted or not, and
     /// wires the response into the real `apply_adjustment_interaction` exactly
     /// as `record_slider` does in the adjustment panel.
@@ -394,27 +433,9 @@ mod tests {
         let base = Instant::now();
         let revision_before_drag = edits.revision();
 
-        // Frame 1: hover. Frame 2: press on the mounted slider. egui latches
-        // the drag on the press frame, so the interaction must be applied
-        // there too, not only on moves.
-        slider_frame(
-            &context,
-            FRAME,
-            vec![egui::Event::PointerMoved(PRESS)],
-            true,
-            &mut edits,
-            &mut value,
-            &mut saw_drag_stopped,
-        );
-        slider_frame(
-            &context,
-            2.0 * FRAME,
-            vec![button_event(true, PRESS)],
-            true,
-            &mut edits,
-            &mut value,
-            &mut saw_drag_stopped,
-        );
+        // Frames 1 and 2: egui latches the drag on the press frame, so the
+        // interaction must be applied there too, not only on moves.
+        hover_and_press(&context, &mut edits, &mut value, &mut saw_drag_stopped);
         assert!(edits.gesture_active());
         assert_eq!(edits.recipe().light.exposure_ev, value);
 
@@ -488,24 +509,7 @@ mod tests {
         let mut saw_drag_stopped = false;
         let base = Instant::now();
 
-        slider_frame(
-            &context,
-            FRAME,
-            vec![egui::Event::PointerMoved(PRESS)],
-            true,
-            &mut edits,
-            &mut value,
-            &mut saw_drag_stopped,
-        );
-        slider_frame(
-            &context,
-            2.0 * FRAME,
-            vec![button_event(true, PRESS)],
-            true,
-            &mut edits,
-            &mut value,
-            &mut saw_drag_stopped,
-        );
+        hover_and_press(&context, &mut edits, &mut value, &mut saw_drag_stopped);
         slider_frame(
             &context,
             3.0 * FRAME,
@@ -552,24 +556,7 @@ mod tests {
         let mut saw_drag_stopped = false;
         let base = Instant::now();
 
-        slider_frame(
-            &context,
-            FRAME,
-            vec![egui::Event::PointerMoved(PRESS)],
-            true,
-            &mut edits,
-            &mut value,
-            &mut saw_drag_stopped,
-        );
-        slider_frame(
-            &context,
-            2.0 * FRAME,
-            vec![button_event(true, PRESS)],
-            true,
-            &mut edits,
-            &mut value,
-            &mut saw_drag_stopped,
-        );
+        hover_and_press(&context, &mut edits, &mut value, &mut saw_drag_stopped);
 
         // 600 eventless frames with the button held: `any_down` is persistent
         // state, so the watchdog sees a real hold on every beat.
@@ -596,6 +583,130 @@ mod tests {
         // Still open: a long legitimate hold must never be reaped, and nothing
         // was committed to the undo stack mid-hold.
         assert!(edits.gesture_active());
+        assert!(!saw_drag_stopped);
+    }
+
+    /// A keyboard step on a focused slider reports only `changed` — egui sets
+    /// no drag flag without a pointer — so `apply_adjustment_interaction`
+    /// takes its `set_discrete` branch and never opens a gesture. The watchdog
+    /// therefore has nothing to commit: a held arrow key keeps producing one
+    /// discrete undo step per repeat, exactly as before the watchdog existed.
+    #[test]
+    fn held_arrow_keys_keep_discrete_undo_steps_under_the_watchdog() {
+        let context = egui::Context::default();
+        let mut edits = EditSession::default();
+        let mut save = Autosave::default();
+        let mut value = 0.0_f32;
+        let mut saw_drag_stopped = false;
+        let base = Instant::now();
+
+        // Tab focuses the slider; one settling frame installs its arrow-key
+        // focus filter. No pointer is ever pressed.
+        slider_frame(
+            &context,
+            FRAME,
+            vec![key_event(egui::Key::Tab)],
+            true,
+            &mut edits,
+            &mut value,
+            &mut saw_drag_stopped,
+        );
+        slider_frame(
+            &context,
+            2.0 * FRAME,
+            vec![],
+            true,
+            &mut edits,
+            &mut value,
+            &mut saw_drag_stopped,
+        );
+
+        // Two held-arrow repeats on consecutive frames, each followed by the
+        // watchdog beat exactly as `update` runs it: widgets first, then reap.
+        for frame in 3..=4 {
+            slider_frame(
+                &context,
+                frame as f64 * FRAME,
+                vec![key_event(egui::Key::ArrowRight)],
+                true,
+                &mut edits,
+                &mut value,
+                &mut saw_drag_stopped,
+            );
+            let pointer_down = context.input(|input| input.pointer.any_down());
+            assert!(!pointer_down);
+            assert!(
+                !edits.gesture_active(),
+                "a keyboard step must not open a gesture the reap could commit"
+            );
+            reap_and_observe(
+                &mut edits,
+                &mut save,
+                pointer_down,
+                base + Duration::from_secs_f64(frame as f64 * FRAME),
+            );
+        }
+        assert!(value > 0.0, "the arrow keys moved the focused slider");
+        assert_eq!(edits.recipe().light.exposure_ev, value);
+        assert!(!saw_drag_stopped);
+
+        // One undo step per key press — the upstream granularity, unchanged.
+        assert!(edits.undo());
+        assert!(edits.recipe().light.exposure_ev > EXPOSURE_EV_RANGE.neutral);
+        assert!(edits.undo());
+        assert_eq!(edits.recipe().light.exposure_ev, EXPOSURE_EV_RANGE.neutral);
+        assert!(!edits.undo());
+    }
+
+    /// The wheel half of the same concern: egui's sliders do not listen for
+    /// wheel events at all (0.33), and the only wheel consumer in the app is
+    /// viewport zoom, which edits no recipe. The wheel can thus open no
+    /// gesture and leave nothing for the reap to commit.
+    #[test]
+    fn wheel_events_over_a_slider_edit_nothing_the_watchdog_could_commit() {
+        let context = egui::Context::default();
+        let mut edits = EditSession::default();
+        let mut save = Autosave::default();
+        let mut value = 0.0_f32;
+        let mut saw_drag_stopped = false;
+        let base = Instant::now();
+
+        // Hover only: the wheel acts on the hovered slider, button up.
+        slider_frame(
+            &context,
+            FRAME,
+            vec![egui::Event::PointerMoved(PRESS)],
+            true,
+            &mut edits,
+            &mut value,
+            &mut saw_drag_stopped,
+        );
+        for frame in 2..=3 {
+            slider_frame(
+                &context,
+                frame as f64 * FRAME,
+                vec![egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, 24.0),
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                true,
+                &mut edits,
+                &mut value,
+                &mut saw_drag_stopped,
+            );
+            let pointer_down = context.input(|input| input.pointer.any_down());
+            assert!(!pointer_down);
+            reap_and_observe(
+                &mut edits,
+                &mut save,
+                pointer_down,
+                base + Duration::from_secs_f64(frame as f64 * FRAME),
+            );
+            assert!(!edits.gesture_active());
+        }
+        assert_eq!(value, 0.0, "the wheel must not move a slider value");
+        assert!(!edits.can_undo());
         assert!(!saw_drag_stopped);
     }
 }
