@@ -69,9 +69,12 @@ fn amaze_matches_cpu_with_partial_tiles_border_ring_and_mosaic_seams() {
             // Entirely bilinear: not larger than twice the 16 px border.
             (24, 39),
             (32, 200),
-            // One partial tile; the 2x2 tile grids; and sizes where the last
-            // tile column or row lies inside the border ring (450 = 2 * 224 + 2).
+            // One partial tile, including an asymmetric sub-40 image whose
+            // mirrored halo reaches farther than the image itself; the 2x2
+            // tile grids; and sizes where the last tile column or row lies
+            // inside the border ring (450 = 2 * 224 + 2).
             (33, 33),
+            (33, 39),
             (97, 70),
             (241, 257),
             (450, 300),

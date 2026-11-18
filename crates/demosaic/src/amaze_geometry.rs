@@ -162,4 +162,41 @@ mod tests {
         }
         assert_eq!(mirror_coordinate(5, 1), 0);
     }
+
+    /// Indices beyond one reflection period (`2 * (length - 1)`) bounce off
+    /// the far edge and back; these exact values pin multi-reflection depth.
+    /// Output reads reach at most one halo outside the image and the size
+    /// gates keep every directional image longer than the halo, so these
+    /// depths only occur in unused reaches of the scratch windows — where the
+    /// WGSL `mirror` copies this formula verbatim.
+    #[test]
+    fn mirroring_multi_reflects_beyond_one_period() {
+        assert_eq!(mirror_coordinate(-21, 10), 3);
+        assert_eq!(mirror_coordinate(35, 10), 1);
+        assert_eq!(mirror_coordinate(58, 10), 4);
+        assert_eq!(mirror_coordinate(-100, 37), 28);
+        // The far window corners the GPU RCD stage snapshot asserts on 29x31.
+        assert_eq!(mirror_coordinate(183, 29), 15);
+        assert_eq!(mirror_coordinate(183, 31), 3);
+        // Even reflection about each edge holds at any bounce depth, and the
+        // result always lands inside the image.
+        for length in [2_usize, 5, 12, 25, 33, 40] {
+            for bounce in 0..4 * length as isize {
+                assert_eq!(
+                    mirror_coordinate(-bounce, length),
+                    mirror_coordinate(bounce, length),
+                    "odd extension at length {length}, bounce {bounce}"
+                );
+                assert_eq!(
+                    mirror_coordinate(length as isize - 1 + bounce, length),
+                    mirror_coordinate(length as isize - 1 - bounce, length),
+                    "asymmetric extension at length {length}, bounce {bounce}"
+                );
+                assert!(
+                    mirror_coordinate(bounce, length) < length,
+                    "out-of-image index at length {length}, bounce {bounce}"
+                );
+            }
+        }
+    }
 }
