@@ -199,11 +199,6 @@ impl RadialMultipliers {
 /// Radius of the farthest mapped image corner in input (lens) units, matching
 /// the branch's own per-pixel narrowing points.
 fn corner_input_radius(execution: &OpticsExecution) -> Option<f32> {
-    let (norm_scale, norm_unscale) = execution.normalization();
-    let (center_x, center_y) = execution.center();
-    let scale = f64::from(execution.scale());
-    let center_px_x = center_x * norm_unscale;
-    let center_px_y = center_y * norm_unscale;
     let mut radius = 0.0_f32;
     for (x, y) in [
         (0usize, 0usize),
@@ -211,10 +206,8 @@ fn corner_input_radius(execution: &OpticsExecution) -> Option<f32> {
         (0, execution.height - 1),
         (execution.width - 1, execution.height - 1),
     ] {
-        let mapped_x = center_px_x + (x as f64 - center_px_x) / scale;
-        let mapped_y = center_px_y + (y as f64 - center_px_y) / scale;
-        let input_x = (mapped_x * norm_scale - center_x) as f32;
-        let input_y = (mapped_y * norm_scale - center_y) as f32;
+        let input_x = execution.input_coordinate_x(x) as f32;
+        let input_y = execution.input_coordinate_y(y) as f32;
         radius = radius.max(input_x.hypot(input_y));
     }
     (radius.is_finite() && radius > 0.0).then_some(radius)

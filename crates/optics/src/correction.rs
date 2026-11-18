@@ -120,11 +120,6 @@ impl crate::OpticsExecution {
                 }
             };
             if let Some(table) = radial {
-                let (norm_scale, norm_unscale) = self.normalization();
-                let (center_x, center_y) = self.center();
-                let scale = f64::from(self.scale());
-                let center_px_x = center_x * norm_unscale;
-                let center_px_y = center_y * norm_unscale;
                 output
                     .data_mut()
                     .par_chunks_mut(output_row_stride)
@@ -133,22 +128,19 @@ impl crate::OpticsExecution {
                         if cancellation.is_cancelled() {
                             return Err(OpticsError::Cancelled);
                         }
-                        let mapped_y = center_px_y + (y as f64 - center_px_y) / scale;
-                        let input_y = (mapped_y * norm_scale - center_y) as f32;
+                        let input_y = self.input_coordinate_y(y) as f32;
                         for x in 0..self.width {
-                            let mapped_x = center_px_x + (x as f64 - center_px_x) / scale;
-                            let input_x = (mapped_x * norm_scale - center_x) as f32;
+                            let input_x = self.input_coordinate_x(x) as f32;
                             let multipliers = table.lookup(input_x.hypot(input_y));
                             for channel in 0..3 {
-                                // The authority's exact post-multiply step:
+                                // The authority's exact post-multiply step
+                                // (shared with it via `source_coordinate`):
                                 // f32 multiply, widen, add center, unscale,
                                 // narrow once.
-                                let source_x =
-                                    ((f64::from(input_x * multipliers[channel]) + center_x)
-                                        * norm_unscale) as f32;
-                                let source_y =
-                                    ((f64::from(input_y * multipliers[channel]) + center_y)
-                                        * norm_unscale) as f32;
+                                let (source_x, source_y) = self.source_coordinate(
+                                    input_x * multipliers[channel],
+                                    input_y * multipliers[channel],
+                                );
                                 row[x * 3 + channel] = sample_cubic_hoisted(
                                     input,
                                     image.row_stride(),
