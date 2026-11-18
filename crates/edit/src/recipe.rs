@@ -1403,6 +1403,27 @@ mod tests {
     }
 
     #[test]
+    fn missing_local_ratios_block_falls_back_to_the_opposed_threshold() {
+        // The removed method's sidecar block is optional on read, so the
+        // migration silently keeps what the Opposed block records...
+        let recipe = parse_with_highlights(
+            18,
+            r#"{"method":"local_ratios","opposed":{"detection_threshold":0.75}}"#,
+        )
+        .expect("lr method without its block");
+        assert_eq!(recipe.raw.highlights.method, HighlightMethod::Opposed);
+        assert_eq!(recipe.raw.highlights.opposed.detection_threshold, 0.75);
+        // ...and when no Opposed threshold is stored either, its own default
+        // applies (the bare fixture above pins the same value).
+        let recipe = parse_with_highlights(18, r#"{"method":"local_ratios"}"#)
+            .expect("lr method without any threshold");
+        assert_eq!(
+            recipe.raw.highlights.opposed.detection_threshold,
+            HIGHLIGHT_THRESHOLD_RANGE.neutral
+        );
+    }
+
+    #[test]
     fn highlights_without_method_still_default_to_clip() {
         // The wire `method` keeps its serde default: a missing method loads
         // as Clip, like the typed default before the alias existed.
