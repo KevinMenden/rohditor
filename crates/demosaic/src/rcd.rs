@@ -140,7 +140,7 @@ fn tile_jobs<'a>(
 
         let mut columns: Vec<Vec<&mut [f32]>> = band.iter().map(|_| Vec::new()).collect();
         for row in rows.chunks_mut(row_stride) {
-            let mut row = &mut row[..];
+            let mut row = row;
             for (tile, column) in band.iter().zip(&mut columns) {
                 let (left, _, right, _) = tile.core(width, height);
                 let (head, tail) = row.split_at_mut((right - left) * 3);

@@ -3,6 +3,7 @@ use std::error::Error;
 use rayon::ThreadPoolBuilder;
 use rohditor_demosaic::{
     AMAZE_HALO, DemosaicAlgorithm, DemosaicError, RCD_HALO, WhiteBalanceGains, demosaic,
+    mirror_coordinate,
 };
 use rohditor_image::{BayerPattern, CfaColor, ImageError, MosaicImage};
 
@@ -400,6 +401,103 @@ fn amaze_reconstructs_images_just_above_the_minimum() -> Result<(), Box<dyn Erro
     Ok(())
 }
 
+/// A smooth asymmetric analytic ramp: per-channel slopes, quadratic terms and
+/// a cross term, so it has curvature (bilinear and directional values differ),
+/// is not separable under a transposition, and every ring sample reacts to a
+/// parity flip or a shifted sampling window.
+fn ring_ramp(x: usize, y: usize) -> [f32; 3] {
+    let (fx, fy) = (x as f32, y as f32);
+    [
+        0.42 + 0.0035 * fx + 0.0018 * fy - 0.00007 * fx * fx + 0.00005 * fx * fy,
+        0.50 - 0.0022 * fx + 0.0041 * fy + 0.00006 * fy * fy - 0.00004 * fx * fx,
+        0.34 + 0.0016 * fx + 0.0027 * fy + 0.00005 * fx * fy - 0.00006 * fy * fy,
+    ]
+}
+
+/// The mirrored-halo border policy is exactly this identity: place the image
+/// in a larger canvas whose samples are the image's mirror extension (the same
+/// `mirror_coordinate` reflection, extended past every edge) shifted by
+/// `halo`. A ring pixel of the small image then samples the same values at the
+/// same relative positions as the pixel at `(x + halo, y + halo)` of the
+/// canvas reconstruction does inside a larger image — at ring depth up to the
+/// full halo on all four sides, corners included. A parity-flipped,
+/// transposed or shifted mirror, and the old bilinear fallback on the curved
+/// ramp, all break the identity.
+fn assert_ring_matches_mirrored_canvas(
+    algorithm: DemosaicAlgorithm,
+    halo: usize,
+    (width, height): (usize, usize),
+    pattern: BayerPattern,
+) -> Result<(), Box<dyn Error>> {
+    let small = mosaic_from_rgb(width, height, pattern, ring_ramp)?;
+    let canvas = mosaic_from_rgb(width + 2 * halo, height + 2 * halo, pattern, |x, y| {
+        ring_ramp(
+            mirror_coordinate(x as isize - halo as isize, width),
+            mirror_coordinate(y as isize - halo as isize, height),
+        )
+    })?;
+    let small = demosaic(&small, WhiteBalanceGains::identity(), algorithm)?;
+    let canvas = demosaic(&canvas, WhiteBalanceGains::identity(), algorithm)?;
+    for y in 0..height {
+        for x in 0..width {
+            if x >= halo && y >= halo && x < width - halo && y < height - halo {
+                continue;
+            }
+            let ring = small.pixel(x, y).expect("ring pixel");
+            let inside = canvas
+                .pixel(x + halo, y + halo)
+                .expect("canvas pixel at the ring position");
+            for channel in 0..3 {
+                let delta = (ring[channel] - inside[channel]).abs();
+                assert!(
+                    // Measured maximum on x86-64: RCD matches bit for bit,
+                    // AMaZE drifts at most one f32 ULP (~3.0e-8).
+                    delta <= 1.0e-7,
+                    "{algorithm:?} {width}x{height} {pattern:?} ring ({x}, {y}) channel \
+                     {channel}: small {}, canvas {}",
+                    ring[channel],
+                    inside[channel],
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The mirrored-halo contract for RCD's full 10 px ring: every border pixel
+/// equals what the same algorithm reconstructs for the same content away from
+/// an edge inside a mirror-extended canvas.
+#[test]
+fn rcd_reconstructs_the_ring_like_a_larger_image() -> Result<(), Box<dyn Error>> {
+    for pattern in PATTERNS {
+        for size in [(25, 40), (41, 37)] {
+            assert_ring_matches_mirrored_canvas(
+                DemosaicAlgorithm::Rcd,
+                RCD_HALO.left,
+                size,
+                pattern,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// The same contract for AMaZE's full 16 px ring, just above its size gate.
+#[test]
+fn amaze_reconstructs_the_ring_like_a_larger_image() -> Result<(), Box<dyn Error>> {
+    for pattern in PATTERNS {
+        for size in [(33, 49), (41, 37)] {
+            assert_ring_matches_mirrored_canvas(
+                DemosaicAlgorithm::Amaze,
+                AMAZE_HALO.left,
+                size,
+                pattern,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn amaze_uses_bilinear_when_an_image_cannot_support_the_directional_halo()
 -> Result<(), Box<dyn Error>> {
@@ -440,8 +538,8 @@ fn amaze_reconstructs_across_tile_boundaries() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn rcd_covers_every_pixel_across_tiles_and_dropped_partial_tiles() -> Result<(), Box<dyn Error>> {
-    // Historical name: since #22 no partial tile is dropped. Sizes like 370,
+fn rcd_covers_every_pixel_across_tiles_to_the_image_edges() -> Result<(), Box<dyn Error>> {
+    // Since #22 no partial tile is dropped. Sizes like 370,
     // 380, 400 and 230 leave partial final cores whose windows mirror into
     // the image, so constants must reconstruct everywhere from tile cores.
     for (width, height) in [(370, 380), (400, 230), (230, 370)] {
