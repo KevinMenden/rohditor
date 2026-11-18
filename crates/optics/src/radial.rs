@@ -44,17 +44,36 @@
 //! untouched authority path (per-apply branch decision — a partially
 //! LUT-applied frame is structurally impossible).
 //!
+//! A pinned break whose *own radius* is bit-ambiguous also refuses the
+//! table. Poly3 truncates `rd / k1` to f32 inside its step-0 residual
+//! (`distortion.rs:42`), so the per-pixel break decision carries truncation
+//! noise of `ulp(rd / k1)` — around the break the bisection (which saw one
+//! noise realization on the 45 deg ray) can disagree with the per-pixel
+//! predicate inside a radius band. Pixels in that band land on the wrong
+//! side of the jump, and the resulting coordinate error scales with
+//! `norm_unscale` (measured 7.4414 px for the FE 100-400 @400 entry at the
+//! 6048x4024 production grid, far over its `B` of 1.5351 px).
+//! [`freeze_ambiguity_band`] bounds that band from kernel constants only
+//! (no per-image sampling) and the build refuses any table whose band
+//! exceeds [`AMBIGUOUS_FREEZE_BAND_ULPS`] ulps of the break radius. Exact
+//! f64-arithmetic kernels (Ptlens, Poly5, TCA-Poly3) band at pure input
+//! rounding and stay valid; every bundled Poly3-distortion freeze boundary
+//! measured so far exceeds the limit and falls back bit-exact.
+//!
 //! ## Parity bound (formula-bound, stated per profile and size)
 //!
 //! `B(profile, size) = max(0.15 px, 1.5 * NEWTON_EPS * norm_unscale)` with
 //! `norm_unscale = crop * diag_px * real_focal / hypot(36, 24)`. The plateau
 //! term is lens- and size-dependent: ~0.005 px at the ultra-wide end, ~0.09 px
-//! at the 35 mm full-size fixture, ~0.18 px at 400 mm test scale (~0.5 px
-//! class at production scale). There is no universal pixel bound. Comparison
-//! basis is LUT vs AUTHORITY (the shipped Newton kernels; the converged f64
-//! root is a research oracle — on the Poly3-tele freeze class
-//! the authority itself sits ~1.3 px off the converged root and the LUT
-//! matches the authority's own solution quality there, not worse).
+//! at the 35 mm full-size fixture, ~0.18 px at the 400 mm gate size. `B`
+//! scales with the image diagonal: the 400 mm entry measures
+//! `B = 1.5351 px` on the 6048x4024 production grid.
+//! There is no universal pixel bound. Comparison basis is LUT vs AUTHORITY
+//! (the shipped Newton kernels; the converged f64 root is a research
+//! oracle). On the Poly3-tele freeze class the authority itself sits ~1.3 px
+//! off the converged root — and that class is exactly what the
+//! freeze-ambiguity guard now refuses, so any table the guard accepts is
+//! gated against an authority that is itself close to the root.
 
 use lensfun::mod_coord::{undist_poly3, undist_poly5, undist_ptlens};
 use lensfun::mod_subpix::tca_poly3_reverse;
@@ -83,8 +102,23 @@ const JUMP_LIMIT: f32 = 1e-3;
 /// Deterministic bisection budget for locating a pinned break radius.
 const BISECTION_STEPS: usize = 30;
 
+/// Upper bound, in ulps of the kernel radius, on how far the same step-0
+/// predicate at the same nominal radius can disagree between the bisection
+/// ray and a pixel: each path builds `(x, y)` and `x * x + y * y` through
+/// its own f32 roundings (a few ulps combined, doubled for safety).
+const FREEZE_RADIUS_NOISE_ULPS: f32 = 8.0;
+
+/// A pinned freeze boundary whose per-pixel decision band (see
+/// [`freeze_ambiguity_band`]) exceeds this many ulps of the break radius is
+/// bit-ambiguous: no f32 break radius reproduces the per-pixel step-0
+/// decisions inside the band, so the whole table is refused rather than
+/// risking frame-inconsistent freeze sides. Exact-f64 kernels band at
+/// [`FREEZE_RADIUS_NOISE_ULPS`]; measured bundled Poly3 boundaries band at
+/// ~100–3,000 ulps (FE 100-400 @400: ~100; @100: ~2,900).
+const AMBIGUOUS_FREEZE_BAND_ULPS: f32 = 16.0;
+
 /// One radial kernel whose step-0 Newton break can flip across the grid.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BreakKernel {
     Distortion,
     TcaRed,
@@ -102,6 +136,25 @@ pub(crate) struct PinnedSegment {
     break_radius: f32,
 }
 
+/// Why a table build was refused. Every reason routes the whole apply to the
+/// untouched authority path; the remap never mixes table and authority
+/// inside one frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TableGuard {
+    /// A knot multiplier is non-finite (kernel NaN returns).
+    NonFinite,
+    /// The 0 deg / 45 deg radiality tripwire fired at some knot.
+    Tripwire,
+    /// Two kernel freeze flips landed in one knot segment, so the side
+    /// selection at lookup would be ambiguous.
+    BreakCollision,
+    /// A pinned break radius is bit-ambiguous beyond
+    /// [`AMBIGUOUS_FREEZE_BAND_ULPS`] ulps (see [`freeze_ambiguity_band`]).
+    FreezeAmbiguity,
+    /// An adjacent multiplier jump no kernel-state flip explains.
+    UnexplainedJump,
+}
+
 /// Per-channel radial multipliers over a uniform grid, validity-guarded at
 /// build time. Built sequentially (deterministic f64 knot evaluation, no
 /// order-dependent accumulation) once before the row loop.
@@ -113,9 +166,9 @@ pub(crate) struct RadialMultipliers {
     table: Vec<[f32; 3]>,
     /// Segments with a pinned freeze boundary, ascending by index.
     step_segments: Vec<PinnedSegment>,
-    /// False when any guard rule tripped; the remap then keeps the authority
-    /// path byte-for-byte.
-    pub(crate) valid: bool,
+    /// `Some` when a guard rule refused the table; the remap then keeps the
+    /// authority path byte-for-byte. `None` means the LUT may be used.
+    pub(crate) guard: Option<TableGuard>,
 }
 
 impl RadialMultipliers {
@@ -147,12 +200,15 @@ impl RadialMultipliers {
             }
             table.push(multipliers);
         }
-        let (step_segments, guard_ok) = assess(execution, &table, step);
+        let (step_segments, mut guard) = assess(execution, &table, step);
+        if guard.is_none() && !tripwire_ok {
+            guard = Some(TableGuard::Tripwire);
+        }
         Some(Self {
             step,
             table,
             step_segments,
-            valid: tripwire_ok && guard_ok,
+            guard,
         })
     }
 
@@ -340,17 +396,18 @@ fn bisect_break(predicate: &impl Fn(f64) -> bool, low: f64, high: f64) -> f64 {
 }
 
 /// Run the freeze-boundary and cliff guards over a built table: pin kernel
-/// state flips as extra knots, invalidate non-finite tables, and invalidate
-/// adjacent jumps that no flip explains.
+/// state flips as extra knots, refuse non-finite tables, ambiguous freeze
+/// boundaries, and adjacent jumps that no flip explains. The first violated
+/// rule names the refusal.
 fn assess(
     execution: &OpticsExecution,
     table: &[[f32; 3]],
     step: f32,
-) -> (Vec<PinnedSegment>, bool) {
-    let mut valid = true;
+) -> (Vec<PinnedSegment>, Option<TableGuard>) {
+    let mut guard: Option<TableGuard> = None;
     for multipliers in table {
         if !multipliers.iter().all(|value| value.is_finite()) {
-            valid = false;
+            guard.get_or_insert(TableGuard::NonFinite);
         }
     }
 
@@ -387,11 +444,27 @@ fn assess(
     let mut step_segments: Vec<PinnedSegment> = Vec::new();
     for (index, _kernel, break_radius) in &flips {
         match step_segments.last() {
-            Some(last) if last.index == *index => valid = false,
+            Some(last) if last.index == *index => {
+                guard.get_or_insert(TableGuard::BreakCollision);
+            }
             _ => step_segments.push(PinnedSegment {
                 index: *index,
                 break_radius: *break_radius,
             }),
+        }
+    }
+
+    // Freeze-ambiguity guard: a break whose per-pixel decision band is wide
+    // relative to its own f32 representation cannot be honoured by the
+    // side-selection lookup, whatever break radius the bisection reports.
+    if guard.is_none() {
+        for (_index, kernel, break_radius) in &flips {
+            let band = freeze_ambiguity_band(execution, *kernel, *break_radius);
+            let limit = AMBIGUOUS_FREEZE_BAND_ULPS * ulp32(*break_radius);
+            if band.is_nan() || band > limit {
+                guard = Some(TableGuard::FreezeAmbiguity);
+                break;
+            }
         }
     }
 
@@ -411,11 +484,125 @@ fn assess(
         };
         for (channel, (low, high)) in table[index].iter().zip(table[index + 1]).enumerate() {
             if (high - low).abs() > JUMP_LIMIT && !attributed(channel) {
-                valid = false;
+                guard.get_or_insert(TableGuard::UnexplainedJump);
             }
         }
     }
-    (step_segments, valid)
+    (step_segments, guard)
+}
+
+/// The ulp of a non-negative f32, taken from the wider side of a binade
+/// boundary so the bound stays conservative at powers of two.
+fn ulp32(value: f32) -> f32 {
+    (value - value.next_down()).abs()
+}
+
+/// Conservative band of per-pixel input radii around a pinned break radius
+/// inside which the kernel's own step-0 decision can differ from the
+/// decision the bisection saw on the 45 deg ray. Built from kernel
+/// constants only — never from sampling the image grid:
+///
+/// * Kernel-radius rounding: the pixel path and the ray path feed the
+///   predicate through different f32 roundings of `(x, y)`, `x * x + y * y`
+///   and the f64 `sqrt`, so the radius the residual sees differs by up to
+///   [`FREEZE_RADIUS_NOISE_ULPS`] ulps.
+/// * Poly3's truncated term: the kernel truncates `rd / k1` to f32
+///   (`distortion.rs:42`), so two evaluations of its step-0 residual differ
+///   by up to `ulp(rd / k1)` beyond radius rounding. Dividing by the smooth
+///   residual slope converts it to a radius band. Ptlens, Poly5 and
+///   TCA-Poly3 run their Newton arithmetic exactly in f64 from f32 inputs,
+///   so they carry no truncation term.
+///
+/// TCA channels see the post-distortion geometry radius; their band is
+/// mapped back to input radii through the local geometry-radius slope.
+/// Non-finite results (zero slope or zero scale — tangential or degenerate
+/// crossings) become NaN or infinity and the caller refuses the table.
+fn freeze_ambiguity_band(
+    execution: &OpticsExecution,
+    kernel: BreakKernel,
+    break_radius: f32,
+) -> f32 {
+    let direction = std::f32::consts::FRAC_1_SQRT_2;
+    match kernel {
+        BreakKernel::Distortion => {
+            let x = break_radius * direction;
+            let y = break_radius * direction;
+            let radius = ((x * x + y * y) as f64).sqrt();
+            let (slope, truncation) = match execution.distortion() {
+                Some(DistortionModel::Poly3 { k1 }) => (
+                    3.0 * radius * radius,
+                    f64::from(ulp32((radius * f64::from(1.0_f32 / k1)) as f32)),
+                ),
+                Some(DistortionModel::Poly5 { k1, k2 }) => (
+                    (3.0 * f64::from(k1) * radius * radius + 5.0 * f64::from(k2) * radius.powi(4))
+                        .abs(),
+                    0.0,
+                ),
+                Some(DistortionModel::Ptlens { a, b, c }) => (
+                    (4.0 * f64::from(a) * radius.powi(3)
+                        + 3.0 * f64::from(b) * radius * radius
+                        + 2.0 * f64::from(c) * radius)
+                        .abs(),
+                    0.0,
+                ),
+                // The predicate never flips for a `None` kernel, so this
+                // arm is unreachable; zero slope refuses if it ever runs.
+                None => (0.0, 0.0),
+            };
+            radius_band_to_f32(radius_band(radius, slope, truncation))
+        }
+        BreakKernel::TcaRed | BreakKernel::TcaBlue => {
+            let x = break_radius * direction;
+            let (geometry_x, geometry_y) = distortion_kernel(execution.distortion(), x, x);
+            let geometry_radius =
+                ((geometry_x * geometry_x + geometry_y * geometry_y) as f64).sqrt();
+            let Some(TcaModel::Poly3 { red, blue }) = execution.tca() else {
+                return f32::INFINITY;
+            };
+            let [v, c, b] = if kernel == BreakKernel::TcaRed {
+                red
+            } else {
+                blue
+            };
+            let slope = (3.0 * f64::from(b) * geometry_radius * geometry_radius
+                + 2.0 * f64::from(c) * geometry_radius
+                + f64::from(v)
+                - 1.0)
+                .abs();
+            // d(geometry radius) / d(input radius) around the break. The
+            // geometry map is continuous to within the freeze jump here
+            // (multiplier jumps are <= 3.4e-3), so a central difference over
+            // a fraction of the knot step tracks the local slope closely.
+            let h = f64::from(break_radius) * 1e-4;
+            let high = (f64::from(break_radius) + h) as f32 * direction;
+            let low = (f64::from(break_radius) - h) as f32 * direction;
+            let (high_x, high_y) = distortion_kernel(execution.distortion(), high, high);
+            let (low_x, low_y) = distortion_kernel(execution.distortion(), low, low);
+            let high_radius = ((high_x * high_x + high_y * high_y) as f64).sqrt();
+            let low_radius = ((low_x * low_x + low_y * low_y) as f64).sqrt();
+            let scale = ((high_radius - low_radius) / (2.0 * h)).abs();
+            radius_band_to_f32(radius_band(geometry_radius, slope, 0.0) / scale)
+        }
+    }
+}
+
+/// Radius-space band from the two noise sources at a kernel radius: input
+/// rounding (`FREEZE_RADIUS_NOISE_ULPS` ulps) plus a residual-space
+/// truncation noise divided by the smooth residual slope.
+fn radius_band(kernel_radius: f64, slope: f64, truncation: f64) -> f64 {
+    let rounding = f64::from(FREEZE_RADIUS_NOISE_ULPS) * f64::from(ulp32(kernel_radius as f32));
+    rounding + truncation / slope
+}
+
+/// Saturating narrowing for band values; anything past `f32` range maps to
+/// infinity, and NaN (from a degenerate slope/scale division) stays NaN —
+/// the caller refuses both.
+fn radius_band_to_f32(band: f64) -> f32 {
+    if band > f64::from(f32::MAX) {
+        f32::INFINITY
+    } else {
+        band as f32
+    }
 }
 
 #[cfg(test)]

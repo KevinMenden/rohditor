@@ -13,6 +13,10 @@ use crate::{
 const GRID_WIDTH: usize = 1_024;
 const GRID_HEIGHT: usize = 768;
 
+/// A6400-native production geometry.
+const FULL_SIZE_WIDTH: usize = 6_048;
+const FULL_SIZE_HEIGHT: usize = 4_024;
+
 struct MatrixProfile {
     name: &'static str,
     make: &'static str,
@@ -26,6 +30,9 @@ struct MatrixProfile {
     explicit: bool,
     /// Poly3-tele freeze class: also gate against the converged oracle.
     freeze_class: bool,
+    /// `false` when the freeze-ambiguity guard refuses the table and the
+    /// apply must run the authority path instead.
+    expects_lut: bool,
 }
 
 /// Sony ILCE-6400 body entry with the Tamron fixture lens at 35 mm.
@@ -40,6 +47,7 @@ fn base_profile(name: &'static str) -> MatrixProfile {
         focal: 35.0,
         explicit: false,
         freeze_class: false,
+        expects_lut: true,
     }
 }
 
@@ -61,6 +69,7 @@ fn matrix() -> Vec<MatrixProfile> {
             lens_make: "Sony",
             lens_model: "FE 100-400mm f/4.5-5.6 GM OSS",
             focal: 100.0,
+            expects_lut: false,
             ..base_profile("unused")
         },
         MatrixProfile {
@@ -87,6 +96,7 @@ fn matrix() -> Vec<MatrixProfile> {
             lens_model: "FE 100-400mm f/4.5-5.6 GM OSS",
             focal: 400.0,
             freeze_class: true,
+            expects_lut: false,
             ..base_profile("unused")
         },
         MatrixProfile {
@@ -148,6 +158,26 @@ fn coordinate_bound(execution: &OpticsExecution) -> f32 {
     (0.15_f64.max(1.5 * NEWTON_EPS * norm_unscale)) as f32
 }
 
+/// Fast-path entries must carry no guard reason; freeze-ambiguity entries
+/// must be refused by that guard and nothing else.
+fn assert_expected_path(profile: &MatrixProfile, table: &RadialMultipliers) {
+    if profile.expects_lut {
+        assert!(
+            table.guard.is_none(),
+            "{} must take the fast path, guard: {:?}",
+            profile.name,
+            table.guard
+        );
+    } else {
+        assert_eq!(
+            table.guard,
+            Some(TableGuard::FreezeAmbiguity),
+            "{} must be refused by the freeze-ambiguity guard",
+            profile.name
+        );
+    }
+}
+
 /// Per-pixel input radius exactly as the LUT branch computes it.
 fn branch_inputs(execution: &OpticsExecution, x: usize, y: usize) -> (f32, f32) {
     (
@@ -165,80 +195,33 @@ fn lut_source(
     execution.source_coordinate(input_x * multiplier, input_y * multiplier)
 }
 
-/// Converged f64 root for the research oracle (NOT the shipped authority):
-/// solves the same polynomials the Newton kernels invert, without their
-/// step-0 early break or truncation.
-fn oracle_root(mut low: f64, high: f64, value: impl Fn(f64) -> f64) -> Option<f64> {
-    // value(low) < 0 <= value(high) is expected; expand if needed.
-    let mut high = high;
-    while value(high) < 0.0 {
-        if high > 1.0e6 {
-            return None;
-        }
-        high *= 2.0;
-    }
-    for _ in 0..200 {
-        let middle = (low + high) * 0.5;
-        if value(middle) < 0.0 {
-            low = middle;
-        } else {
-            high = middle;
-        }
-    }
-    Some((low + high) * 0.5)
-}
-
-fn oracle_multipliers(execution: &OpticsExecution, x: f32, y: f32) -> Option<[f32; 3]> {
-    let input_radius = (f64::from(x) * f64::from(x) + f64::from(y) * f64::from(y)).sqrt();
-    if input_radius == 0.0 {
-        return Some([1.0, 1.0, 1.0]);
-    }
-    let distortion_scale = match execution.distortion() {
-        None => 1.0,
-        Some(DistortionModel::Poly3 { k1 }) => {
-            let k1 = f64::from(k1);
-            oracle_root(0.0, input_radius, |ru| {
-                k1 * ru * ru * ru + ru - input_radius
-            })? / input_radius
-        }
-        Some(DistortionModel::Poly5 { k1, k2 }) => {
-            let (k1, k2) = (f64::from(k1), f64::from(k2));
-            oracle_root(0.0, input_radius, |ru| {
-                ru * (1.0 + k1 * ru * ru + k2 * ru.powi(4)) - input_radius
-            })? / input_radius
-        }
-        Some(DistortionModel::Ptlens { a, b, c }) => {
-            let (a, b, c) = (f64::from(a), f64::from(b), f64::from(c));
-            oracle_root(0.0, input_radius, |ru| {
-                ru * (a * ru.powi(3) + b * ru * ru + c * ru + 1.0) - input_radius
-            })? / input_radius
-        }
-    };
-    let geometry_radius = distortion_scale * input_radius;
-    let tca = match execution.tca() {
-        None => [1.0, 1.0, 1.0],
-        Some(TcaModel::Linear { kr, kb }) => [f64::from(kr), 1.0, f64::from(kb)],
-        Some(TcaModel::Poly3 { red, blue }) => {
-            let channel = |coeffs: [f32; 3]| -> Option<f64> {
-                let [v, c, b] = [
-                    f64::from(coeffs[0]),
-                    f64::from(coeffs[1]),
-                    f64::from(coeffs[2]),
-                ];
-                Some(
-                    oracle_root(0.0, geometry_radius, |ru| {
-                        b * ru.powi(3) + c * ru * ru + v * ru - geometry_radius
-                    })? / geometry_radius,
-                )
-            };
-            [channel(red)?, 1.0, channel(blue)?]
-        }
-    };
-    Some([
-        (distortion_scale * tca[0]) as f32,
-        distortion_scale as f32,
-        (distortion_scale * tca[2]) as f32,
-    ])
+/// Max LUT-vs-authority coordinate deviation over the full per-pixel
+/// grid — coordinates only, no image allocation.
+fn max_coordinate_deviation(
+    execution: &OpticsExecution,
+    table: &RadialMultipliers,
+    width: usize,
+    height: usize,
+) -> f32 {
+    (0..height)
+        .into_par_iter()
+        .map(|y| {
+            let mut row_max = 0.0_f32;
+            for x in 0..width {
+                let (input_x, input_y) = branch_inputs(execution, x, y);
+                let multipliers = table.lookup(input_x.hypot(input_y));
+                let authority = execution.map_coordinates(x, y).expect("authority pixel");
+                for channel in 0..3 {
+                    let (source_x, source_y) =
+                        lut_source(execution, input_x, input_y, multipliers[channel]);
+                    row_max = row_max
+                        .max((source_x - authority[channel].0).abs())
+                        .max((source_y - authority[channel].1).abs());
+                }
+            }
+            row_max
+        })
+        .reduce(|| 0.0_f32, f32::max)
 }
 
 #[test]
@@ -248,88 +231,38 @@ fn radial_lut_parity() {
         let plan = resolve(&service, &profile, GRID_WIDTH, GRID_HEIGHT);
         let execution = plan.execution();
         let table = RadialMultipliers::build(&execution).expect("radial table");
-        assert!(table.valid, "{} must take the fast path", profile.name);
+        assert_expected_path(&profile, &table);
         let bound = coordinate_bound(&execution);
 
-        // Full per-pixel grid: LUT coordinates vs the authority.
-        let max_deviation = (0..GRID_HEIGHT)
-            .into_par_iter()
-            .map(|y| {
-                let mut row_max = 0.0_f32;
-                for x in 0..GRID_WIDTH {
-                    let (input_x, input_y) = branch_inputs(&execution, x, y);
-                    let multipliers = table.lookup(input_x.hypot(input_y));
-                    let authority = execution.map_coordinates(x, y).expect("authority pixel");
-                    for channel in 0..3 {
-                        let (source_x, source_y) =
-                            lut_source(&execution, input_x, input_y, multipliers[channel]);
-                        row_max = row_max
-                            .max((source_x - authority[channel].0).abs())
-                            .max((source_y - authority[channel].1).abs());
-                    }
-                }
-                row_max
-            })
-            .reduce(|| 0.0_f32, f32::max);
-        println!(
-            "{}: max |delta coord| {max_deviation:.4} px vs bound {bound:.4} px",
-            profile.name
-        );
-        assert!(
-            max_deviation <= bound,
-            "{}: coordinate deviation {max_deviation:.4} px over formula bound B = max(0.15, 1.5*eps*norm_unscale) = {bound:.4} px",
-            profile.name
-        );
-
-        if profile.freeze_class {
-            // Oracle clause: the LUT must not be worse than the authority
-            // against the converged root, beyond the eps plateau slack.
-            let slack = (1.5 * NEWTON_EPS * execution.normalization().1) as f32;
-            let (authority_vs_oracle, lut_vs_oracle) = (0..GRID_HEIGHT)
-                .into_par_iter()
-                .map(|y| {
-                    let (mut authority_row, mut lut_row) = (0.0_f32, 0.0_f32);
-                    for x in 0..GRID_WIDTH {
-                        let (input_x, input_y) = branch_inputs(&execution, x, y);
-                        let Some(oracle) = oracle_multipliers(&execution, input_x, input_y) else {
-                            continue;
-                        };
-                        let multipliers = table.lookup(input_x.hypot(input_y));
-                        let authority = execution.map_coordinates(x, y).expect("authority pixel");
-                        for channel in 0..3 {
-                            let (oracle_x, oracle_y) =
-                                lut_source(&execution, input_x, input_y, oracle[channel]);
-                            let (lut_x, lut_y) =
-                                lut_source(&execution, input_x, input_y, multipliers[channel]);
-                            authority_row = authority_row
-                                .max((authority[channel].0 - oracle_x).abs())
-                                .max((authority[channel].1 - oracle_y).abs());
-                            lut_row = lut_row
-                                .max((lut_x - oracle_x).abs())
-                                .max((lut_y - oracle_y).abs());
-                        }
-                    }
-                    (authority_row, lut_row)
-                })
-                .reduce(
-                    || (0.0_f32, 0.0_f32),
-                    |(authority_a, lut_a), (authority_b, lut_b)| {
-                        (authority_a.max(authority_b), lut_a.max(lut_b))
-                    },
-                );
+        if !profile.expects_lut {
+            // The guard-refused table is never used by the apply; its
+            // (potentially boundary-straddling) lookup deviation is not a
+            // shipped coordinate. Bit-exact fallback identity is gated in
+            // `radial_lut_fallback`; skip the LUT deviation asserts.
             println!(
-                "{}: authority vs oracle {authority_vs_oracle:.4} px, LUT vs oracle {lut_vs_oracle:.4} px, slack {slack:.4} px",
+                "{}: guard-refused table ({:?}), authority path, bound {:.4} px not applied",
+                profile.name,
+                table.guard.expect("refusal names its reason"),
+                bound
+            );
+        } else {
+            let max_deviation =
+                max_coordinate_deviation(&execution, &table, GRID_WIDTH, GRID_HEIGHT);
+            println!(
+                "{}: max |delta coord| {max_deviation:.4} px vs bound {bound:.4} px",
                 profile.name
             );
             assert!(
-                lut_vs_oracle <= authority_vs_oracle + slack,
-                "{}: LUT is worse than the authority against the converged oracle",
+                max_deviation <= bound,
+                "{}: coordinate deviation {max_deviation:.4} px over formula bound B = max(0.15, 1.5*eps*norm_unscale) = {bound:.4} px",
                 profile.name
             );
         }
 
         // Freeze-boundary knots are present and the pinned segment uses
-        // side selection (bit-exact knot values, never a blend).
+        // side selection (bit-exact knot values, never a blend) — the
+        // lookup mechanism stays sound even on a guard-refused table; the
+        // guard decides whether the apply is allowed to consult it.
         let (step, table_values, segments) = (table.step, &table.table, &table.step_segments);
         assert!(
             !segments.is_empty(),
@@ -362,6 +295,154 @@ fn radial_lut_parity() {
     }
 }
 
+/// Full-size geometry variant of `radial_lut_parity`: the fixture lens and
+/// the long-lens profile at the A6400-native 6048x4024 grid, where the
+/// plateau term of `B` is ~5.7x its value at the 1024x768 gate size.
+/// The fixture must keep its LUT table (its benchmarked performance claims
+/// stand); the Poly3-tele entry must be refused by the freeze-ambiguity
+/// guard and its apply must run the untouched authority path bit-for-bit.
+#[test]
+#[ignore = "walks the full-frame 6048x4024 coordinate grid for two profiles (~24.3M pixels each) and applies one 24 MP image through the fallback; run with --ignored to check the accepted deviation against B at production scale"]
+fn radial_lut_parity_full_size() {
+    const FULL_WIDTH: usize = FULL_SIZE_WIDTH;
+    const FULL_HEIGHT: usize = FULL_SIZE_HEIGHT;
+    let service = OpticsService::load_bundled().expect("bundled Lensfun data");
+    let fixtures = matrix()
+        .into_iter()
+        .filter(|profile| profile.focal == 35.0 || profile.freeze_class)
+        .collect::<Vec<_>>();
+    assert_eq!(fixtures.len(), 2, "fixture plus the 400 mm freeze class");
+    for profile in fixtures {
+        let plan = resolve(&service, &profile, FULL_WIDTH, FULL_HEIGHT);
+        let execution = plan.execution();
+        let table = RadialMultipliers::build(&execution).expect("full-size radial table");
+        println!(
+            "{} @ {FULL_WIDTH}x{FULL_HEIGHT}: guard {:?}, {} pinned segment(s)",
+            profile.name,
+            table.guard,
+            table.step_segments.len()
+        );
+        assert_expected_path(&profile, &table);
+        let bound = coordinate_bound(&execution);
+
+        if profile.expects_lut {
+            let max_deviation =
+                max_coordinate_deviation(&execution, &table, FULL_WIDTH, FULL_HEIGHT);
+            println!(
+                "{} @ {FULL_WIDTH}x{FULL_HEIGHT}: max |delta coord| {max_deviation:.4} px vs bound {bound:.4} px",
+                profile.name
+            );
+            assert!(
+                max_deviation <= bound,
+                "{}: full-size coordinate deviation {max_deviation:.4} px over formula bound B = max(0.15, 1.5*eps*norm_unscale) = {bound:.4} px",
+                profile.name
+            );
+            continue;
+        }
+
+        // Refused entry: the unbisected ambiguity must be demonstrably
+        // unsafe at this geometry — the table's lookup disagrees with the
+        // per-pixel authority on the freeze band and the worst deviation
+        // exceeds B — so the guard refusal, not a tolerated deviation, is
+        // what ships. (The disagreement count counts per-channel samples
+        // beyond 1e-3 px: interpolation slack below that stays invisible.)
+        let break_radius = table
+            .step_segments
+            .first()
+            .expect("one distortion freeze boundary")
+            .break_radius;
+        let (max_deviation, disagreements) = (0..FULL_HEIGHT)
+            .into_par_iter()
+            .map(|y| {
+                let input_y = execution.input_coordinate_y(y) as f32;
+                let (mut row_dev, mut row_disagree) = (0.0_f32, 0usize);
+                for x in 0..FULL_WIDTH {
+                    let input_x = execution.input_coordinate_x(x) as f32;
+                    let multipliers = table.lookup(input_x.hypot(input_y));
+                    let authority = execution.map_coordinates(x, y).expect("authority pixel");
+                    for channel in 0..3 {
+                        let (source_x, source_y) =
+                            lut_source(&execution, input_x, input_y, multipliers[channel]);
+                        let deviation = (source_x - authority[channel].0)
+                            .abs()
+                            .max((source_y - authority[channel].1).abs());
+                        row_disagree += usize::from(deviation > 1e-3);
+                        row_dev = row_dev.max(deviation);
+                    }
+                }
+                (row_dev, row_disagree)
+            })
+            .reduce(
+                || (0.0_f32, 0usize),
+                |(dev_a, dis_a), (dev_b, dis_b)| (dev_a.max(dev_b), dis_a + dis_b),
+            );
+        println!(
+            "{} @ {FULL_WIDTH}x{FULL_HEIGHT}: unguarded lookup max |delta coord| {max_deviation:.4} px vs bound {bound:.4} px, {} channel samples > 1e-3 px around break {:.6}",
+            profile.name, disagreements, break_radius
+        );
+        assert!(
+            disagreements > 0 && max_deviation > bound,
+            "{}: guard must refuse a table whose production-scale lookup deviates {max_deviation:.4} px over B = {bound:.4} px on {} band samples",
+            profile.name,
+            disagreements
+        );
+
+        // The apply with the guard-refused table is bit-identical to the
+        // untouched authority code on the worst region: every pixel within
+        // two knot steps of the break circle.
+        let image = LinearRgbImage::new(
+            FULL_WIDTH,
+            FULL_HEIGHT,
+            FULL_WIDTH * 3,
+            LinearRgbSpace::CameraNative,
+            (0..FULL_WIDTH * FULL_HEIGHT * 3)
+                .map(|index| 0.05 + (index % 977) as f32 * 0.001)
+                .collect::<Vec<_>>(),
+        )
+        .expect("full-size test image");
+        let applied = execution
+            .apply_cancellable(image.clone(), &NeverCancelled)
+            .expect("guard-refused apply runs the authority path");
+        let row_stride = image.row_stride();
+        let ring = table.step * 2.0;
+        let mut checked = 0usize;
+        for y in 0..FULL_HEIGHT {
+            let input_y = execution.input_coordinate_y(y) as f32;
+            for x in 0..FULL_WIDTH {
+                let input_x = execution.input_coordinate_x(x) as f32;
+                if (input_x.hypot(input_y) - break_radius).abs() > ring {
+                    continue;
+                }
+                let coordinates = execution.map_coordinates(x, y).expect("authority pixel");
+                for (channel, (coordinate_x, coordinate_y)) in coordinates.iter().enumerate() {
+                    let expected = cubic_sample(
+                        image.data(),
+                        row_stride,
+                        FULL_WIDTH,
+                        FULL_HEIGHT,
+                        channel,
+                        *coordinate_x,
+                        *coordinate_y,
+                    )
+                    .expect("authority sample");
+                    assert_eq!(
+                        applied.image.data()[y * FULL_WIDTH * 3 + x * 3 + channel],
+                        expected,
+                        "{}: fallback output at ({x}, {y}) channel {channel} must be bit-exact authority",
+                        profile.name
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        println!(
+            "{} @ {FULL_WIDTH}x{FULL_HEIGHT}: {} ring pixels around the break verified bit-exact against the authority",
+            profile.name, checked
+        );
+        assert!(checked > 0, "ring band must contain pixels");
+    }
+}
+
 #[test]
 fn radial_lut_freeze_knot_matches_newton_epsilon() {
     // Poly3 distortion freezes while |F(rd)| = rd^3 < NEWTON_EPS, so the
@@ -386,6 +467,43 @@ fn radial_lut_freeze_knot_matches_newton_epsilon() {
     );
 }
 
+/// The freeze-ambiguity guard: Poly3's f32-truncated `rd / k1` term makes
+/// the per-pixel step-0 decision differ from the bisected break inside a
+/// radius band far beyond `AMBIGUOUS_FREEZE_BAND_ULPS`, so every Poly3
+/// freeze boundary must refuse its table — at gate size and at production
+/// size alike (the band is a kernel constant, not a grid coincidence). The
+/// exact-f64 fixture (Ptlens + Poly3 TCA) must keep its table at both
+/// sizes, including the 6048x4024 geometry its benchmarked perf was taken
+/// on. Builds only — the grids are never walked.
+#[test]
+fn radial_lut_freeze_ambiguity_guard() {
+    let service = OpticsService::load_bundled().expect("bundled Lensfun data");
+    for profile in matrix() {
+        for (width, height) in [
+            (GRID_WIDTH, GRID_HEIGHT),
+            (FULL_SIZE_WIDTH, FULL_SIZE_HEIGHT),
+        ] {
+            let plan = resolve(&service, &profile, width, height);
+            let execution = plan.execution();
+            let table = RadialMultipliers::build(&execution).expect("radial table");
+            println!(
+                "{} @{}x{}: guard {:?}, segments {}",
+                profile.name,
+                width,
+                height,
+                table.guard,
+                table
+                    .step_segments
+                    .iter()
+                    .map(|segment| format!("{:.6}", segment.break_radius))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            assert_expected_path(&profile, &table);
+        }
+    }
+}
+
 #[test]
 fn radial_lut_tripwire() {
     let service = OpticsService::load_bundled().expect("bundled Lensfun data");
@@ -394,7 +512,7 @@ fn radial_lut_tripwire() {
         let plan = resolve(&service, &profile, GRID_WIDTH, GRID_HEIGHT);
         let execution = plan.execution();
         let table = RadialMultipliers::build(&execution).expect("radial table");
-        assert!(table.valid, "{}: guard tripped", profile.name);
+        assert_expected_path(&profile, &table);
         let mut worst_margin = 0.0_f32;
         for index in 0..table.table.len() {
             let radius = index as f32 * table.step;
@@ -423,12 +541,12 @@ fn crafted(execution: &OpticsExecution, mutate: impl Fn(&mut [[f32; 3]])) -> Rad
     let base = RadialMultipliers::build(execution).expect("base table");
     let mut table = base.table.clone();
     mutate(&mut table);
-    let (step_segments, valid) = assess(execution, &table, base.step);
+    let (step_segments, guard) = assess(execution, &table, base.step);
     RadialMultipliers {
         step: base.step,
         table,
         step_segments,
-        valid,
+        guard,
     }
 }
 
@@ -477,6 +595,7 @@ fn radial_lut_fallback() {
             lens_make: "Sony",
             lens_model: "FE 100-400mm f/4.5-5.6 GM OSS",
             focal: 400.0,
+            expects_lut: false,
             ..base_profile("unused")
         },
     ] {
@@ -499,7 +618,14 @@ fn radial_lut_fallback() {
         let nonfinite = crafted(&execution, |table| {
             table[600][1] = f32::NAN;
         });
-        assert!(!nonfinite.valid, "a NaN knot must invalidate the table");
+        assert!(
+            nonfinite.guard.is_some(),
+            "{}: a NaN knot must invalidate the table",
+            profile.name
+        );
+        if profile.expects_lut {
+            assert_eq!(nonfinite.guard, Some(TableGuard::NonFinite));
+        }
         let result = execution
             .apply_cancellable_forced(image.clone(), &NeverCancelled, &nonfinite)
             .expect("fallback apply");
@@ -515,10 +641,13 @@ fn radial_lut_fallback() {
             table[table.len() - 3][2] += 0.5;
         });
         assert!(
-            !jumped.valid,
+            jumped.guard.is_some(),
             "{}: an unexplained jump must invalidate the table",
             profile.name
         );
+        if profile.expects_lut {
+            assert_eq!(jumped.guard, Some(TableGuard::UnexplainedJump));
+        }
         let result = execution
             .apply_cancellable_forced(image.clone(), &NeverCancelled, &jumped)
             .expect("fallback apply");
@@ -529,16 +658,27 @@ fn radial_lut_fallback() {
             profile.name
         );
 
-        // The fast path must actually differ from the reference somewhere,
-        // or the bit-identity checks above would pass vacuously.
+        // The natural build decides per profile: a fast path that must
+        // actually differ from the reference (or the bit-identity checks
+        // above would pass vacuously), or — for guard-refused entries —
+        // bit-exact equality with the authority on the natural table.
         let fast = execution
             .apply_cancellable(image, &NeverCancelled)
-            .expect("fast-path apply");
-        assert!(
-            fast.image.data() != reference.as_slice(),
-            "{}: fast path must not be a no-op on this fixture",
-            profile.name
-        );
+            .expect("apply");
+        if profile.expects_lut {
+            assert!(
+                fast.image.data() != reference.as_slice(),
+                "{}: fast path must not be a no-op on this fixture",
+                profile.name
+            );
+        } else {
+            assert_eq!(
+                fast.image.data(),
+                reference.as_slice(),
+                "{}: naturally guard-refused table must run the authority path bit-for-bit",
+                profile.name
+            );
+        }
     }
 }
 
@@ -628,7 +768,7 @@ fn radial_lut_output_gate() {
         let fallback = crafted(&execution, |table| {
             table[table.len() - 3][2] += 0.5;
         });
-        assert!(!fallback.valid);
+        assert!(fallback.guard.is_some());
         let authority = execution
             .apply_cancellable_forced(image.clone(), &NeverCancelled, &fallback)
             .expect("authority apply");

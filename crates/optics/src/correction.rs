@@ -112,11 +112,11 @@ impl crate::OpticsExecution {
             // (or forced-invalid) table keeps the authority loop byte-for-byte.
             let built;
             let radial = match forced_radial {
-                Some(table) if table.valid => Some(table),
+                Some(table) if table.guard.is_none() => Some(table),
                 Some(_) => None,
                 None => {
                     built = RadialMultipliers::build(self);
-                    built.as_ref().filter(|table| table.valid)
+                    built.as_ref().filter(|table| table.guard.is_none())
                 }
             };
             if let Some(table) = radial {
