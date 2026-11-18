@@ -15,11 +15,10 @@ from PIL import Image
 
 from ..paths import ML_ROOT
 from . import bayer
-from .noise import NoiseParams, add_noise
+from .noise import add_noise, params_for
+from .noise.fit import NOISE_PARAMS
 
 SHARDS_DIR = ML_ROOT / "data" / "shards"
-NOISE_PARAMS = ML_ROOT / "data" / "noise_params.json"
-FALLBACK_NOISE = NoiseParams(k_min=1e-4, k_max=2e-3, sigma_log_slope=0.5, sigma_log_intercept=-2.4)
 CELL = 256
 
 
@@ -74,7 +73,7 @@ def contact_sheet(shards_dir: Path, manifest: dict, out: Path, count: int = 12, 
     """Random clean patches: [target | clean mosaic | mosaic with synthetic noise], two patches per row."""
     rng = np.random.default_rng(seed)
     entries = [e for e in manifest["shards"] if e["kind"] == "clean"]
-    params_doc = json.loads(NOISE_PARAMS.read_text()) if NOISE_PARAMS.exists() else {}
+    params_doc = json.loads(NOISE_PARAMS.read_text())
     cells: list[np.ndarray] = []
     for _ in range(count):
         entry = entries[rng.integers(len(entries))]
@@ -82,7 +81,7 @@ def contact_sheet(shards_dir: Path, manifest: dict, out: Path, count: int = 12, 
             i = int(rng.integers(len(shard["mosaic"])))
             mosaic, rgb, wb, file_index = shard["mosaic"][i], shard["rgb"][i], shard["wb"][i], int(shard["file_index"][i])
         record = manifest["files"][file_index]
-        params = _noise_for(record, params_doc)
+        params = params_for(record["noise_profile"], params_doc, rng)
         noisy = add_noise(mosaic, params, rng)
         exposure = float(np.clip(0.18 / max(np.median(rgb.mean(axis=0)), 1e-4), 1, 200))
         cells += [_view(rgb, wb, exposure), _mosaic_view(mosaic, wb, exposure), _mosaic_view(noisy, wb, exposure)]
@@ -90,12 +89,6 @@ def contact_sheet(shards_dir: Path, manifest: dict, out: Path, count: int = 12, 
     rows = [np.concatenate(cells[r * columns : (r + 1) * columns], axis=1) for r in range(len(cells) // columns)]
     out.parent.mkdir(parents=True, exist_ok=True)
     Image.fromarray(np.concatenate(rows, axis=0)).save(out)
-
-
-def _noise_for(record: dict, params_doc: dict) -> NoiseParams:
-    profile = record.get("noise_profile")
-    values = params_doc.get("cameras", {}).get(profile) or params_doc.get("pooled")
-    return NoiseParams.from_dict(values) if values else FALLBACK_NOISE
 
 
 def main() -> None:

@@ -8,22 +8,25 @@ Three kinds of samples:
 * real pairs (`kind="noisy"`): a real RawNIND noisy mosaic, with the aligned
   clean image (demosaiced, gain-matched) as target plus a validity mask.
 * noise measurements: every usable noisy/clean pair also yields a
-  (K, sigma^2) estimate for `noise.fit`.
+  (K, sigma^2) estimate for `noise.fit`, stored in its manifest record.
 """
 
 from __future__ import annotations
 
 import hashlib
+import multiprocessing
 from collections import defaultdict
+from dataclasses import asdict, dataclass
 from collections.abc import Callable
 
+import cv2
 import numpy as np
 
 from . import bayer, truth
 from .align import find_alignment, loss_mask
 from ..contract import PATCH_SIZE
 from .decode import Mosaic, UnsupportedRaw, decode_pixelshift, decode_raw
-from .noise.fit import PairEstimate, estimate_pair
+from .noise.fit import estimate_pair
 from .patches import cut, sample_origins
 from .prepare import Item
 from .shards import ShardWriter
@@ -39,11 +42,12 @@ def file_rng(seed: int, item: Item) -> np.random.Generator:
 
 
 class Processor:
-    def __init__(self, writer: ShardWriter, seed: int, log: Callable[[str], None] = print):
+    """Turns the items of one scene into patches; `writer` is anything with `ShardWriter.add`."""
+
+    def __init__(self, writer, seed: int, log: Callable[[str], None] = print):
         self.writer, self.seed, self.log = writer, seed, log
         self.records: list[dict] = []  # manifest file records, in file_index order
         self.skipped: list[dict] = []
-        self.noise_estimates: list[tuple[str, PairEstimate]] = []
 
     # -- bookkeeping ---------------------------------------------------------
 
@@ -115,16 +119,15 @@ class Processor:
             return self._skip(item, "no clean reference with matching geometry")
         alignment, reference, ref_item = min(scored, key=lambda s: s[0].score)
 
+        estimate = None
         if item.iso and ref_item.iso and item.iso >= MIN_ISO_RATIO * ref_item.iso:
-            rng = file_rng(self.seed, item)
-            estimate = estimate_pair(noisy.data, reference.data, item.iso, rng)
-            if estimate:
-                self.noise_estimates.append((item.camera, estimate))
+            estimate = estimate_pair(noisy.data, reference.data, item.iso, file_rng(self.seed, item))
 
         origins = sample_origins(noisy.data, PATCHES_PER_FILE["rawnind-noisy"], file_rng(self.seed + 1, item))
         index = self._record(item, "noisy", "edge_aware_demosaic", noisy.wb, noisy.data.shape,
                              paired_with=ref_item.name,
-                             alignment={"dy": alignment.dy, "dx": alignment.dx, "gain": alignment.gain})
+                             alignment={"dy": alignment.dy, "dx": alignment.dx, "gain": alignment.gain},
+                             noise_estimate=asdict(estimate) if estimate else None)
         kept = 0
         for y, x in origins:
             clean_rgb = truth.demosaic_window(reference.data, y + alignment.dy, x + alignment.dx, PATCH_SIZE)
@@ -137,20 +140,73 @@ class Processor:
             kept += 1
         self.records[index]["patches"] = kept
 
-    # -- driver --------------------------------------------------------------
+    def scene(self, scene_items: list[Item]) -> None:
+        source = scene_items[0].source
+        if source == "pixelshift200":
+            for item in scene_items:
+                self.pixelshift(item)
+        elif source == "pixls":
+            for item in scene_items:
+                self.clean_raw(item, PATCHES_PER_FILE["pixls"])
+        else:
+            self.rawnind_scene([i for i in scene_items if i.is_clean], [i for i in scene_items if not i.is_clean])
 
-    def run(self, items: list[Item]) -> None:
-        by_scene: dict[str, list[Item]] = defaultdict(list)
-        for item in items:
-            by_scene[item.scene_key].append(item)
-        for n, (scene_key, scene_items) in enumerate(sorted(by_scene.items()), 1):
-            self.log(f"[{n}/{len(by_scene)}] {scene_key} ({len(scene_items)} files)")
-            source = scene_items[0].source
-            if source == "pixelshift200":
-                for item in scene_items:
-                    self.pixelshift(item)
-            elif source == "pixls":
-                for item in scene_items:
-                    self.clean_raw(item, PATCHES_PER_FILE["pixls"])
-            else:
-                self.rawnind_scene([i for i in scene_items if i.is_clean], [i for i in scene_items if not i.is_clean])
+
+# -- driver: scenes in parallel, written in a fixed order ------------------------
+
+
+class _PatchBuffer:
+    """Collects one scene's `ShardWriter.add` calls so a worker process can return them."""
+
+    def __init__(self):
+        self.patches: list[tuple[str, str, dict]] = []
+
+    def add(self, split: str, kind: str, **arrays) -> None:
+        self.patches.append((split, kind, arrays))
+
+
+@dataclass
+class SceneResult:
+    records: list[dict]
+    skipped: list[dict]
+    patches: list[tuple[str, str, dict]]  # file_index refers to `records`
+    log: list[str]
+
+
+def _init_worker() -> None:
+    cv2.setNumThreads(1)  # the parallelism is across scenes; don't oversubscribe the cores
+
+
+def process_scene(job: tuple[list[Item], int]) -> SceneResult:
+    scene_items, seed = job
+    buffer, lines = _PatchBuffer(), []
+    processor = Processor(buffer, seed, log=lines.append)
+    processor.scene(scene_items)
+    return SceneResult(processor.records, processor.skipped, buffer.patches, lines)
+
+
+def run(items: list[Item], writer: ShardWriter, seed: int, workers: int,
+        log: Callable[[str], None] = print) -> tuple[list[dict], list[dict]]:
+    """Process every scene; returns the manifest's file records and skipped files.
+
+    Scenes run in `workers` processes, but their results are written in sorted
+    scene order, so shards and manifest are identical for any worker count.
+    """
+    by_scene: dict[str, list[Item]] = defaultdict(list)
+    for item in items:
+        by_scene[item.scene_key].append(item)
+    scenes = sorted(by_scene.items())
+    records: list[dict] = []
+    skipped: list[dict] = []
+    with multiprocessing.get_context("spawn").Pool(workers, initializer=_init_worker) as pool:
+        results = pool.imap(process_scene, [(scene_items, seed) for _, scene_items in scenes])
+        for n, ((scene_key, scene_items), result) in enumerate(zip(scenes, results, strict=True), 1):
+            log(f"[{n}/{len(scenes)}] {scene_key} ({len(scene_items)} files)")
+            for line in result.log:
+                log(line)
+            offset = len(records)
+            records.extend(result.records)
+            skipped.extend(result.skipped)
+            for split, kind, arrays in result.patches:
+                writer.add(split, kind, **{**arrays, "file_index": arrays["file_index"] + offset})
+    return records, skipped
