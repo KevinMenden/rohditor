@@ -1,0 +1,21 @@
+# About an hour on a small slice, to prove the training loop before the long runs.
+base: unet_v1_shippable.yaml
+variant: smoke
+data:
+  limit_patches: 1000
+train:
+  val_every: 2500
+  checkpoint_every: 2500
+  val_clean: 128
+  val_real: 64
+stages:
+  - name: synthetic
+    steps: 35000
+    lr: 3.0e-4
+    warmup: 500
+    real_fraction: 0.0
+  - name: real
+    steps: 5000
+    lr: 1.0e-4
+    warmup: 100
+    real_fraction: 0.3

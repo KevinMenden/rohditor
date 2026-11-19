@@ -1,0 +1,5 @@
+# Private: everything in the manifest, including CC BY-SA 4.0 (most of RawNIND).
+# Never published, attached to a release or shipped.
+base: unet_v1_base.yaml
+variant: full
+licenses: [CC0-1.0, CC-BY-4.0, CC-BY-SA-4.0]

@@ -14,8 +14,10 @@ target/
 # ml/data/ itself is not ignored wholesale: ml/data/noise_params.json is tracked.
 /ml/data/raw/
 /ml/data/shards/
+/ml/data/npy/
 /ml/runs/
 /ml/.venv/
+/ml/.venv-rocm/
 __pycache__/
 .pytest_cache/
 *.pyc

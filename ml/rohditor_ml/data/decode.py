@@ -47,8 +47,10 @@ def _normalised_gains(rgbg: list[float] | None) -> np.ndarray:
     return np.ones(3, np.float32)
 
 
-def decode_raw(path: Path) -> Mosaic:
-    assert_not_private(path)
+def decode_raw(path: Path, *, allow_private: bool = False) -> Mosaic:
+    """`allow_private` is only for visual-only evaluation crops; training data never sets it."""
+    if not allow_private:
+        assert_not_private(path)
     try:
         with rawpy.imread(str(path)) as raw:
             if (

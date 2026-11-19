@@ -21,7 +21,7 @@ use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_edit::{
     BLACKS_RANGE, CONTRAST_RANGE, CameraProfileSelection, EXPOSURE_EV_RANGE, EditRecipe,
     HIGHLIGHT_THRESHOLD_RANGE, HIGHLIGHTS_RANGE, HighlightMethod, LensProfileSelection,
-    OpticsAdjustments, RenderingProfileSelection, SATURATION_RANGE, SHADOWS_RANGE,
+    NoiseReduction, OpticsAdjustments, RenderingProfileSelection, SATURATION_RANGE, SHADOWS_RANGE,
     TEMPERATURE_RANGE, TINT_RANGE, TONE_CURVE_RANGE, VIBRANCE_RANGE, WHITES_RANGE, WhiteBalance,
 };
 use rohditor_gpu::{ExportBackend, ExportRender, FallbackExporter};
@@ -33,6 +33,7 @@ use rohditor_raw::{
 use serde::{Deserialize, Serialize};
 use tracing_subscriber::EnvFilter;
 
+use super::demosaic_npy::{DemosaicNpy, demosaic_npy};
 use super::detail_compare::{DetailStage, StageSettings, detail_compare};
 use super::detail_corpus::detail_corpus;
 use super::highlight_compare::highlight_compare;
@@ -443,6 +444,42 @@ enum Command {
         #[arg(long, default_value_t = 1.1)]
         max_rmse: f64,
     },
+
+    /// Demosaic contract-scaled `.npy` mosaics ([H, W] or [N, H, W]) with
+    /// optional noise reduction: the neural-demosaic evaluation baseline.
+    DemosaicNpy {
+        /// RGGB mosaic in the scaling of `ml/contract.json`, not white balanced.
+        #[arg(value_name = "MOSAIC_NPY")]
+        input: PathBuf,
+
+        /// As-shot white-balance gains, `[3]` or `[N, 3]` float32 `.npy`.
+        #[arg(long, value_name = "GAINS_NPY")]
+        wb: PathBuf,
+
+        /// Output `.npy`: balanced linear RGB, `[3, H, W]` or `[N, 3, H, W]`.
+        #[arg(long, short)]
+        output: PathBuf,
+
+        /// Demosaic algorithm.
+        #[arg(long, value_enum, default_value_t = CliDemosaic::Rcd)]
+        demosaic: CliDemosaic,
+
+        /// Chroma noise-reduction strength in [0, 1]; 0 is off.
+        #[arg(long, default_value_t = 0.0)]
+        chroma: f32,
+
+        /// Luminance noise-reduction strength in [0, 1]; 0 is off.
+        #[arg(long, default_value_t = 0.0)]
+        luminance: f32,
+
+        /// Texture preservation of luminance noise reduction in [0, 1].
+        #[arg(long, default_value_t = NoiseReduction::default().luminance_detail)]
+        luminance_detail: f32,
+
+        /// Replace an existing output file.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -827,6 +864,27 @@ pub(crate) fn run() -> Result<()> {
             max_error,
             max_rmse,
         } => verify_libraw(&file, &libraw_pgm, json, max_error, max_rmse),
+        Command::DemosaicNpy {
+            input,
+            wb,
+            output,
+            demosaic,
+            chroma,
+            luminance,
+            luminance_detail,
+            force,
+        } => demosaic_npy(&DemosaicNpy {
+            input: &input,
+            wb: &wb,
+            output: &output,
+            algorithm: demosaic.into(),
+            noise_reduction: NoiseReduction {
+                chroma,
+                luminance,
+                luminance_detail,
+            },
+            force,
+        }),
     }
 }
 

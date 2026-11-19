@@ -17,6 +17,29 @@ dependencies = [
 
 [dependency-groups]
 dev = ["pytest>=8"]
+# Training, export and evaluation. Install inside the `rocm` distrobox with its own
+# environment (the home directory is shared with the host):
+#   UV_PROJECT_ENVIRONMENT=.venv-rocm uv sync --group train
+# Known good: PyTorch 2.14.1+rocm7.2 (self-contained wheel) in a ROCm 10.0.0 container
+# on an RX 9070 XT (gfx1201).
+train = [
+    "torch>=2.14",
+    "triton-rocm>=3.8",  # listed so it resolves from the PyTorch index below
+    "onnx>=1.19",
+    "onnxruntime>=1.23",
+    "onnxscript>=0.5",
+    "pyyaml>=6",
+    "tensorboard>=2.20",
+]
+
+[tool.uv.sources]
+torch = { index = "pytorch-rocm" }
+triton-rocm = { index = "pytorch-rocm" }
+
+[[tool.uv.index]]
+name = "pytorch-rocm"
+url = "https://download.pytorch.org/whl/rocm7.2"
+explicit = true
 
 [build-system]
 requires = ["hatchling"]
