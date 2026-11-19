@@ -13,9 +13,9 @@ from rohditor_ml.train.dataset import SplitData, training_noise_doc  # noqa: E40
 from rohditor_ml.train.trainer import Trainer  # noqa: E402
 
 P = 64
-NOISE = {"cameras": {"cam a": {"k_min": 1e-4, "k_max": 1e-3, "log_k_points": [-9.0, -7.0],
+NOISE = {"cameras": {"cam a": {"log_k_points": [-9.0, -7.0],
                                "log_sigma_points": [-8.0, -6.5]},
-                     "held out": {"k_min": 1e-2, "k_max": 2e-2, "log_k_points": [-4.0, -3.0],
+                     "held out": {"log_k_points": [-4.0, -3.0],
                                   "log_sigma_points": [-3.0, -2.0]}}}
 
 

@@ -39,7 +39,7 @@ def test_row_noise_is_constant_along_rows_and_offsets_follow_the_cfa():
 
 
 def test_add_noise_is_reproducible_and_samples_within_range():
-    params = NoiseParams(1e-4, 1e-2, (np.log(1e-4), np.log(1e-2)), (np.log(3e-4), np.log(3e-2)), 0.05, 0.2)
+    params = NoiseParams((np.log(1e-4), np.log(1e-2)), (np.log(3e-4), np.log(3e-2)), 0.05, 0.2)
     mosaic = np.full((32, 32), 0.4, np.float32)
     np.testing.assert_array_equal(add_noise(mosaic, params, np.random.default_rng(5)),
                                   add_noise(mosaic, params, np.random.default_rng(5)))
@@ -72,7 +72,7 @@ def test_calibration_follows_a_dual_gain_read_noise_curve():
     # Both regimes are kept: a single power-law line would be off by ~2x at the ends.
     for k in ks:
         assert abs(np.exp(params.log_sigma(np.log(k))) / dual_gain_sigma(k) - 1) < 0.2
-    assert params.k_min < ks[0] and params.k_max > ks[-1]
+    assert np.allclose(np.exp([params.log_k_points[0], params.log_k_points[-1]]), [ks[0], ks[-1]], rtol=0.05)
     # Beyond the measured range the read noise in electrons stays constant.
     assert np.isclose(np.exp(params.log_sigma(np.log(ks[-1] * 2))) / (ks[-1] * 2),
                       np.exp(params.log_sigma(np.log(ks[-1]))) / ks[-1])

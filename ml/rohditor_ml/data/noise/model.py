@@ -9,10 +9,10 @@ noise. Across ISO, read noise follows a per-camera curve of `K`, interpolated
 between the measured ISO levels (so dual-gain sensors, whose read noise drops
 at one ISO, are followed rather than averaged). On top of that come optional
 per-row offsets (banding, scaled with the read noise) and a small random
-black-level offset per colour plane. `NoiseParams` are *ranges* per camera
+black-level offset per colour plane. `NoiseParams` are fitted per camera
 (saved in `ml/data/noise_params.json`); each call to `add_noise` draws one
 concrete `NoiseSample` from them, so every training patch gets its own ISO-like
-noise level.
+noise level, within the camera's measured ISO range.
 """
 
 from __future__ import annotations
@@ -24,9 +24,8 @@ import numpy as np
 
 @dataclass(frozen=True)
 class NoiseParams:
-    k_min: float
-    k_max: float
-    # Read noise against shot gain: log(sigma) at the measured log(K) points (ascending).
+    # Read noise against shot gain: log(sigma) at the measured log(K) points (ascending),
+    # one per measured ISO. Their ends are also the range K is drawn from.
     # Interpolated as read noise in electrons, log(sigma / K), which is also held
     # constant beyond the ends (electrons change far less across ISO than sigma does).
     log_k_points: tuple[float, ...]
@@ -59,8 +58,10 @@ class NoiseSample:
 
 
 def sample_noise(params: NoiseParams, rng: np.random.Generator) -> NoiseSample:
-    """Draw one noise level: K log-uniform, sigma from the camera's curve plus jitter."""
-    log_k = rng.uniform(np.log(params.k_min), np.log(params.k_max))
+    """Draw one noise level: K log-uniform between the lowest and highest measured ISO
+    (extrapolating beyond them trained on noise no real shot has, at the cost of fine
+    detail), sigma from the camera's curve plus jitter."""
+    log_k = rng.uniform(params.log_k_points[0], params.log_k_points[-1])
     log_sigma = params.log_sigma(log_k) + rng.normal(0.0, params.sigma_log_std)
     k, sigma = float(np.exp(log_k)), float(np.exp(log_sigma))
     row_sigma = float(rng.uniform(0.0, params.row_ratio_max)) * sigma

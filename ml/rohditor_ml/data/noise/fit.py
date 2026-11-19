@@ -123,7 +123,6 @@ def fit_camera(estimates: list[PairEstimate]) -> NoiseParams | None:
     """
     if len(estimates) < MIN_PAIRS_PER_CAMERA:
         return None
-    k = np.array([e.k for e in estimates])
     # Pairs whose read noise is below what the regression can resolve (sigma^2 <= 0)
     # still say something about K, but not about sigma.
     resolved = [e for e in estimates if e.sigma2 > 0]
@@ -139,8 +138,7 @@ def fit_camera(estimates: list[PairEstimate]) -> NoiseParams | None:
         for group in by_iso.values()
     )
     log_k_points, log_sigma_points = (tuple(v) for v in zip(*points, strict=True))
-    # A margin lets training cover levels between and a bit beyond the measured ISOs.
-    params = NoiseParams(float(k.min() * 0.8), float(k.max() * 1.25), log_k_points, log_sigma_points)
+    params = NoiseParams(log_k_points, log_sigma_points)
     log_sigma = 0.5 * np.log([e.sigma2 for e in resolved])
     curve = np.array([params.log_sigma(np.log(e.k)) for e in resolved])
     row_ratio = np.sqrt([e.row_var for e in resolved]) / np.exp(log_sigma)

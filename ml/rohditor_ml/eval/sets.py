@@ -68,9 +68,6 @@ def iso_noise(params: NoiseParams, k_by_iso: dict[float, float], isos) -> list[t
     """One fixed noise level per nominal ISO: K interpolated log-log between the measured
     ISOs, read noise from the fitted curve, row noise at half the fitted maximum and no
     black offset, so tiers differ only in level.
-
-    The tiers follow measured ISOs rather than the fit's `[k_min, k_max]`, whose ends
-    carry a margin and single outlier pairs (far beyond any real ISO).
     """
     measured = np.log(np.array(list(k_by_iso.items())))
     result = []

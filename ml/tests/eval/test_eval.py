@@ -6,7 +6,7 @@ from rohditor_ml.eval.metrics import scores
 from rohditor_ml.eval.report import BASELINE, add_best_baseline, aggregate, gate
 from rohditor_ml.eval.sets import charts, iso_noise, measured_k, slanted_edge, tier_key, zone_plate
 
-PARAMS = NoiseParams(1e-4, 1e-2, (-9.0, -5.0), (-8.0, -5.0), 0.0, 0.4)
+PARAMS = NoiseParams((-9.0, -5.0), (-8.0, -5.0), 0.0, 0.4)
 BASE_NOISE = NoiseSample(1e-4, 3e-4, 0.0, (0.0,) * 4)
 
 
