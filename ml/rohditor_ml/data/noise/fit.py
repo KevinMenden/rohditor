@@ -3,11 +3,15 @@
 Per noisy image we regress the residual variance against the signal on flat
 areas of the clean image: `Var(y - a*g) = K * (a*g) + sigma^2`, where `g` is the
 (smoothed) clean image and `a` the gain that matches its exposure to the noisy
-one. Per camera we then fit `log sigma` linearly against `log K` across ISO (a straight
-line in sigma^2 against K fits badly: sigma^2 spans orders of magnitude over the ISO
-range, so the high-ISO end dominates and the intercept goes negative). Flat
+one (a weighted line fit per image). Per camera, the per-ISO medians of
+`(log K, log sigma)` then form the read-noise curve (see `fit_camera`). Flat
 areas make the estimate insensitive to the small misalignment between the two
 shots.
+
+The per-pair estimates are stored in the manifest, so `refit` can redo the
+per-camera step in seconds without rebuilding the shards:
+
+    uv run python -m rohditor_ml.data.noise.fit
 
 Known approximations: the clean image's own noise is only reduced (3x3
 smoothing), not removed, so use noisy images well above the clean ISO; row
@@ -17,14 +21,24 @@ slightly high.
 
 from __future__ import annotations
 
+import argparse
+import json
+import sys
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from pathlib import Path
 
 import numpy as np
 from scipy.ndimage import uniform_filter
 
+from ...paths import ML_ROOT
 from ..bayer import pack
+from ..manifest import write_manifest
 from .model import NoiseParams
+from .profiles import profile_for
+
+NOISE_PARAMS = ML_ROOT / "data" / "noise_params.json"
+SHARDS_DIR = ML_ROOT / "data" / "shards"
 
 MIN_BIN_PIXELS = 2000
 BINS = 16
@@ -99,7 +113,14 @@ def _row_variance(resid: np.ndarray, mask: np.ndarray, pixel_var: float) -> floa
 
 
 def fit_camera(estimates: list[PairEstimate]) -> NoiseParams | None:
-    """Ranges and the log sigma-vs-log K line for one camera (needs a few ISO levels)."""
+    """Ranges and the read-noise curve for one camera (needs a few ISO levels).
+
+    The curve's points are the median log K and log sigma of each ISO level, so
+    a camera whose read noise drops at one ISO (dual conversion gain) keeps both
+    regimes instead of one line misfitting each. Banding is the 90th percentile of
+    row-noise std relative to read noise: robust to a few bad pairs, and it scales
+    with ISO the way the read noise does.
+    """
     if len(estimates) < MIN_PAIRS_PER_CAMERA:
         return None
     k = np.array([e.k for e in estimates])
@@ -108,28 +129,69 @@ def fit_camera(estimates: list[PairEstimate]) -> NoiseParams | None:
     resolved = [e for e in estimates if e.sigma2 > 0]
     if len(resolved) < MIN_PAIRS_PER_CAMERA:
         return None
-    log_k = np.log([e.k for e in resolved])
-    log_sigma = 0.5 * np.log([e.sigma2 for e in resolved])
-    slope, intercept = np.polyfit(log_k, log_sigma, 1)
-    log_std = float(np.std(log_sigma - (slope * log_k + intercept)))
-    row_sigma = float(np.sqrt(max(e.row_var for e in estimates)))
+    by_iso: dict[float, list[PairEstimate]] = defaultdict(list)
+    for e in resolved:
+        by_iso[e.iso].append(e)
+    if len(by_iso) < 2:
+        return None
+    points = sorted(
+        (float(np.median(np.log([e.k for e in group]))), float(np.median(0.5 * np.log([e.sigma2 for e in group]))))
+        for group in by_iso.values()
+    )
+    log_k_points, log_sigma_points = (tuple(v) for v in zip(*points, strict=True))
     # A margin lets training cover levels between and a bit beyond the measured ISOs.
-    return NoiseParams(float(k.min() * 0.8), float(k.max() * 1.25), float(slope), float(intercept), log_std, row_sigma)
+    params = NoiseParams(float(k.min() * 0.8), float(k.max() * 1.25), log_k_points, log_sigma_points)
+    log_sigma = 0.5 * np.log([e.sigma2 for e in resolved])
+    curve = np.array([params.log_sigma(np.log(e.k)) for e in resolved])
+    row_ratio = np.sqrt([e.row_var for e in resolved]) / np.exp(log_sigma)
+    return replace(params, sigma_log_std=float(np.std(log_sigma - curve)),
+                   row_ratio_max=float(np.percentile(row_ratio, 90)))
 
 
 def fit_all(estimates: dict[str, list[PairEstimate]]) -> dict:
-    """The JSON document: per-camera params plus pooled params for unseen cameras."""
+    """The JSON document: per-camera params, plus the pair counts behind them.
+
+    There is deliberately no pooled fit across cameras: files from a camera without
+    a fit get the profile `"pooled"`, which means a random fitted camera per sample
+    (see `profiles.params_for`). That keeps each draw a physically real sensor.
+    """
     cameras = {name: fit_camera(items) for name, items in estimates.items()}
-    pooled_input = [e for items in estimates.values() for e in items]
     return {
-        "cameras": {name: p.to_dict() for name, p in cameras.items() if p is not None},
-        "pooled": (p.to_dict() if (p := fit_camera(pooled_input)) else None),
-        "pair_counts": {name: len(items) for name, items in estimates.items()},
+        "cameras": {name: p.to_dict() for name, p in sorted(cameras.items()) if p is not None},
+        "pair_counts": {name: len(items) for name, items in sorted(estimates.items())},
     }
 
 
-def group_by_camera(items: list[tuple[str, PairEstimate]]) -> dict[str, list[PairEstimate]]:
-    grouped: dict[str, list[PairEstimate]] = defaultdict(list)
-    for camera, estimate in items:
-        grouped[camera].append(estimate)
-    return grouped
+def fit_manifest(manifest: dict) -> dict:
+    """Fit every camera from the per-pair estimates stored in the manifest, then point
+    each file record at its `noise_profile` (its camera's fit, else pooled)."""
+    estimates: dict[str, list[PairEstimate]] = defaultdict(list)
+    for record in manifest["files"]:
+        if record.get("noise_estimate"):
+            estimates[record["camera"]].append(PairEstimate(**record["noise_estimate"]))
+    doc = fit_all(estimates)
+    for record in manifest["files"]:
+        record["noise_profile"] = profile_for(record["camera"], doc)
+    return doc
+
+
+def write_params(doc: dict, path: Path = NOISE_PARAMS) -> None:
+    path.write_text(json.dumps(doc, indent=1) + "\n", encoding="utf-8")
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Refit the noise parameters from a built manifest (no shard rebuild needed)."""
+    parser = argparse.ArgumentParser(prog="python -m rohditor_ml.data.noise.fit", description=main.__doc__)
+    parser.add_argument("--manifest", type=Path, default=SHARDS_DIR / "manifest.json")
+    args = parser.parse_args(argv)
+    manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
+    doc = fit_manifest(manifest)
+    doc.update({"subset": manifest["subset"], "seed": manifest["seed"]})
+    write_params(doc)
+    write_manifest(manifest, args.manifest)
+    print(f"fitted {len(doc['cameras'])} cameras -> {NOISE_PARAMS}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

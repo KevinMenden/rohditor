@@ -28,3 +28,26 @@ def test_crw_make_and_model_come_from_the_ciff_heap(tmp_path):
     path = tmp_path / "shot.crw"
     path.write_bytes(b"II\x1a\x00\x00\x00HEAPCCDR" + b"\xff" * 100 + b"Canon\x00Canon EOS D60\x00" + b"\x00" * 50)
     assert exif_camera(path) == "canon eos d60"
+
+
+def tiff(order: str, make: bytes, model: bytes, ifd_at_end: bool) -> bytes:
+    """A minimal TIFF with Make and Model in IFD0, as raw writers lay it out."""
+    import struct
+
+    strings = make + b"\0" + model + b"\0"
+    ifd_size = 2 + 2 * 12 + 4
+    strings_at, ifd_at = (8, 8 + len(strings)) if ifd_at_end else (8 + ifd_size, 8)
+    header = (b"II" if order == "<" else b"MM") + struct.pack(order + "HI", 42, ifd_at)
+    ifd = struct.pack(order + "H", 2)
+    ifd += struct.pack(order + "HHII", 271, 2, len(make) + 1, strings_at)
+    ifd += struct.pack(order + "HHII", 272, 2, len(model) + 1, strings_at + len(make) + 1)
+    ifd += struct.pack(order + "I", 0)
+    return header + (strings + ifd if ifd_at_end else ifd + strings)
+
+
+@pytest.mark.parametrize("order", ["<", ">"])
+@pytest.mark.parametrize("ifd_at_end", [False, True])
+def test_tiff_make_model_in_either_byte_order_and_position(tmp_path, order, ifd_at_end):
+    path = tmp_path / "shot.arw"
+    path.write_bytes(tiff(order, b"SONY", b"ILCE-7C", ifd_at_end))
+    assert exif_camera(path) == "sony ilce-7c"
