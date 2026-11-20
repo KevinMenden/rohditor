@@ -78,7 +78,7 @@ def test_a_few_training_steps_on_cpu(store, tmp_path):
         "variant": "smoke-test", "licenses": ["CC0-1.0", "CC-BY-4.0"],
         "model": {"channels": [8, 16, 32, 64]},
         "data": {"npy_dir": str(store / "npy"), "noise_params": str(store / "noise.json"), "crop": 48,
-                 "exposure_min": 0.25, "pixelshift_fraction": 0.5, "limit_patches": None, "workers": 0},
+                 "exposure_min": 0.25, "pixelshift_fraction": 0.5, "procedural_fraction": 0.3, "limit_patches": None, "workers": 0},
         "train": {"seed": 0, "batch_size": 2, "weight_decay": 1e-4, "bf16": True, "grad_clip": 1.0,
                   "log_every": 2, "val_every": 3, "checkpoint_every": 3, "val_clean": 2, "val_real": 2},
         "stages": [{"name": "synthetic", "steps": 3, "lr": 1e-3, "warmup": 1, "real_fraction": 0.0},

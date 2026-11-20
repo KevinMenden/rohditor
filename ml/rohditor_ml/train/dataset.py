@@ -6,6 +6,7 @@ has an allowed license.
 
 `SampleStream` is an endless, worker-safe stream of augmented samples; the mix
 of clean (synthetic noise) and real-pair samples is set per training stage.
+Validation uses photos only, so its scores stay comparable across mixes.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ import numpy as np
 import torch
 from torch.utils.data import IterableDataset, get_worker_info
 
-from .samples import Sample, clean_sample, real_sample
+from .samples import Sample, clean_sample, procedural_sample, real_sample
 from .store import PatchArrays
 
 
@@ -86,6 +87,7 @@ class Mix:
 
     real_fraction: float  # share of real pairs
     pixelshift_fraction: float  # share of pixel-shift patches among the clean ones
+    procedural_fraction: float  # share of procedural images (hard edges, gratings) among the clean ones
     crop: int
     exposure_min: float
 
@@ -93,6 +95,8 @@ class Mix:
 def draw(data: SplitData, mix: Mix, noise_doc: dict, rng: np.random.Generator) -> Sample:
     if len(data.real_indices) and rng.random() < mix.real_fraction:
         return data.real_sample(int(rng.choice(data.real_indices)), mix.crop, rng)
+    if rng.random() < mix.procedural_fraction:
+        return procedural_sample(noise_doc, mix.crop, mix.exposure_min, rng)
     use_pixelshift = len(data.pixelshift) and (not len(data.binned) or rng.random() < mix.pixelshift_fraction)
     pool = data.pixelshift if use_pixelshift else data.binned
     return data.clean_sample(int(rng.choice(pool)), noise_doc, mix.crop, mix.exposure_min, rng)

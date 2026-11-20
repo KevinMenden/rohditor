@@ -77,7 +77,7 @@ class Trainer:
 
     def _mix(self, stage: Stage) -> Mix:
         d = self.config["data"]
-        return Mix(stage.real_fraction, d["pixelshift_fraction"], d["crop"], d["exposure_min"])
+        return Mix(stage.real_fraction, d["pixelshift_fraction"], d["procedural_fraction"], d["crop"], d["exposure_min"])
 
     def checkpoint(self, name: str) -> None:
         save_checkpoint(

@@ -11,6 +11,7 @@ data:
   crop: 240                       # from the 256 patches; a multiple of 16, see the contract
   exposure_min: 0.25              # downward-only exposure scale, log-uniform in [min, 1]
   pixelshift_fraction: 0.4        # share of full-resolution pixel-shift truth among clean samples
+  procedural_fraction: 0.1        # share of procedural hard edges and gratings among clean samples (train/procedural.py)
   limit_patches: null             # cap per index list (pixel-shift, binned, real), for smoke runs
   warm_cache: true                # read the train arrays once up front (random reads from a cold cache starve the GPU)
   workers: 10
@@ -37,6 +38,6 @@ stages:
     real_fraction: 0.0
   - name: real                    # stage 2: fine-tune with real RawNIND pairs mixed in
     steps: 50000
-    lr: 1.0e-4
+    lr: 3.0e-5                    # gentle: 1e-4 cost the shippable run 0.2 dB of clean PSNR right after the restart
     warmup: 500
     real_fraction: 0.3
