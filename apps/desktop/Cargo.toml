@@ -31,4 +31,5 @@ wgpu.workspace = true
 winit.workspace = true
 
 [dev-dependencies]
+egui_kittest.workspace = true
 pollster.workspace = true
