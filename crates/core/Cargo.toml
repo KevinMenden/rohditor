@@ -18,6 +18,8 @@ rohditor-highlight = { path = "../highlight" }
 rohditor-image = { path = "../image" }
 rohditor-look = { path = "../look" }
 rohditor-mask = { path = "../mask" }
+# Only the executor types: frontends that load models enable `onnx-runtime`.
+rohditor-neural = { path = "../neural", default-features = false }
 rohditor-optics = { path = "../optics" }
 rohditor-raw = { path = "../raw" }
 serde.workspace = true
@@ -26,6 +28,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+rohditor-neural = { path = "../neural" }
 serde_json.workspace = true
 
 [[bench]]

@@ -23,7 +23,7 @@
     "inverse": "divide the output by the gains",
     "training_range": {"red": [1.0, 4.0], "blue": [1.0, 4.5]}
   },
-  "tiling": {"tile": 512, "halo": 32},
+  "tiling": {"tile": 1024, "halo": 128},
   "patches": {
     "size": 256,
     "origin": "even pixel offsets, so every patch starts on an R photosite (RGGB phase)",

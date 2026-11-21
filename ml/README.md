@@ -13,7 +13,8 @@ training and export #117.
   *before* the network.
 - **Output:** white-balanced linear camera RGB, `[1, 3, H, W]`.
 - **Sizes and tiling:** H and W are multiples of 16. Full images are processed in
-  512 px tiles with a 32 px halo.
+  1024 px tiles with a 128 px halo. The halo covers the receptive field (about
+  100 px), so stitched tiles equal one pass; a 32 px halo left seams of up to 1e-2.
 
 ## Data (#116)
 
@@ -213,8 +214,8 @@ These come from `runs/eval-full/report.md` and are linear PSNR in dB.
   the perfect step, which RCD doesn't show. It is smaller in full. Retraining
   shippable with the current config is the next step. If the fringe remains, raise
   `procedural_fraction`.
-- **Inference time** for a 24 MP image (network only, 96 tiles of 512 px with a 32 px
-  halo):
+- **Inference time** for a 24 MP image (network only, measured with 96 tiles of
+  512 px and a 32 px halo; the current 1024/128 tiling costs about 30% more):
   - GPU, PyTorch fp32: 0.2 s (bf16 is slower on this card). The whole image in one
     pass needs 10.6 GB.
   - CPU, onnxruntime on a Ryzen 5 2600X: about 16 s.

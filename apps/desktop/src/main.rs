@@ -49,6 +49,9 @@ enum DemosaicPreference {
     Rcd,
     #[value(name = "amaze")]
     Amaze,
+    /// Needs the installed model (`rohditor-cli model install <FILE>`).
+    #[value(name = "neural")]
+    Neural,
 }
 
 impl From<DemosaicPreference> for DemosaicAlgorithm {
@@ -58,6 +61,7 @@ impl From<DemosaicPreference> for DemosaicAlgorithm {
             DemosaicPreference::MalvarHeCutler => Self::MalvarHeCutler,
             DemosaicPreference::Rcd => Self::Rcd,
             DemosaicPreference::Amaze => Self::Amaze,
+            DemosaicPreference::Neural => Self::Neural,
         }
     }
 }
@@ -217,7 +221,7 @@ fn launch(
                 settings,
                 settings_warning.clone(),
                 show_diagnostics,
-                config::config_directory(),
+                config::AppDirectories::resolve(),
             )?;
             Ok(Box::new(match screenshot.clone() {
                 Some((path, delay)) => application.with_screenshot(path, delay),

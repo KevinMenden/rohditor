@@ -38,6 +38,8 @@ use super::detail_compare::{DetailStage, StageSettings, detail_compare};
 use super::detail_corpus::detail_corpus;
 use super::highlight_compare::highlight_compare;
 use super::look_report::{fit_recipe_camera_tone, look_report};
+use super::model::{ModelCommand, NeuralArgs, model};
+use super::neural_input::neural_input_npy;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -243,6 +245,9 @@ enum Command {
         /// CPU demosaic algorithm.
         #[arg(long, value_enum, default_value_t = CliDemosaic::Amaze)]
         demosaic: CliDemosaic,
+
+        #[command(flatten)]
+        neural: NeuralArgs,
 
         /// Lensfun profile selection: off, auto, or a stable profile ID.
         #[arg(long, default_value = "off")]
@@ -460,9 +465,13 @@ enum Command {
         #[arg(long, short)]
         output: PathBuf,
 
-        /// Demosaic algorithm.
+        /// Demosaic algorithm. `neural` runs the network alone (contract
+        /// tiling, no highlight fallback), as the evaluation compares it.
         #[arg(long, value_enum, default_value_t = CliDemosaic::Rcd)]
         demosaic: CliDemosaic,
+
+        #[command(flatten)]
+        neural: NeuralArgs,
 
         /// Chroma noise-reduction strength in [0, 1]; 0 is off.
         #[arg(long, default_value_t = 0.0)]
@@ -479,6 +488,26 @@ enum Command {
         /// Replace an existing output file.
         #[arg(long)]
         force: bool,
+    },
+
+    /// Write the neural demosaic's packed, balanced input for a RAW file
+    /// (`[1, 4, H/2, W/2]` `.npy`), for the Python parity test.
+    NeuralInputNpy {
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+
+        #[arg(long, short)]
+        output: PathBuf,
+
+        /// Replace an existing output file.
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Install or check the neural demosaic model.
+    Model {
+        #[command(subcommand)]
+        command: ModelCommand,
     },
 }
 
@@ -506,6 +535,10 @@ enum CliDemosaic {
     Rcd,
     #[value(name = "amaze")]
     Amaze,
+    /// Joint demosaic + denoise network; needs the installed model
+    /// (`rohditor-cli model install <FILE>`) or `--neural-model`.
+    #[value(name = "neural")]
+    Neural,
 }
 
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
@@ -571,6 +604,7 @@ impl CliDemosaic {
             Self::MalvarHeCutler => "mhc",
             Self::Rcd => "rcd",
             Self::Amaze => "amaze",
+            Self::Neural => "neural",
         }
     }
 }
@@ -582,6 +616,7 @@ impl From<CliDemosaic> for DemosaicAlgorithm {
             CliDemosaic::MalvarHeCutler => Self::MalvarHeCutler,
             CliDemosaic::Rcd => Self::Rcd,
             CliDemosaic::Amaze => Self::Amaze,
+            CliDemosaic::Neural => Self::Neural,
         }
     }
 }
@@ -738,6 +773,7 @@ pub(crate) fn run() -> Result<()> {
             tint,
             crop,
             demosaic,
+            neural,
             lens_profile,
             no_lens_distortion,
             no_lens_vignetting,
@@ -791,6 +827,7 @@ pub(crate) fn run() -> Result<()> {
                 tint,
                 crop,
                 demosaic,
+                neural,
                 lens_profile,
                 no_lens_distortion,
                 no_lens_vignetting,
@@ -869,6 +906,7 @@ pub(crate) fn run() -> Result<()> {
             wb,
             output,
             demosaic,
+            neural,
             chroma,
             luminance,
             luminance_detail,
@@ -878,6 +916,10 @@ pub(crate) fn run() -> Result<()> {
             wb: &wb,
             output: &output,
             algorithm: demosaic.into(),
+            neural: match demosaic {
+                CliDemosaic::Neural => Some(neural.load()?),
+                _ => None,
+            },
             noise_reduction: NoiseReduction {
                 chroma,
                 luminance,
@@ -885,6 +927,12 @@ pub(crate) fn run() -> Result<()> {
             },
             force,
         }),
+        Command::NeuralInputNpy {
+            file,
+            output,
+            force,
+        } => neural_input_npy(&file, &output, force),
+        Command::Model { command } => model(&command),
     }
 }
 
@@ -1071,6 +1119,7 @@ struct DevelopArguments {
     tint: f32,
     crop: CliCropPolicy,
     demosaic: CliDemosaic,
+    neural: NeuralArgs,
     lens_profile: String,
     no_lens_distortion: bool,
     no_lens_vignetting: bool,
@@ -1307,6 +1356,10 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
                 .context("could not load the bundled Lensfun profile database")?;
             CpuPipeline::new(Arc::new(service))
         }
+    };
+    let pipeline = match arguments.demosaic {
+        CliDemosaic::Neural => pipeline.with_neural(arguments.neural.load()?),
+        _ => pipeline,
     };
     let decode_started = Instant::now();
     let frame = decoder
@@ -2340,11 +2393,12 @@ mod tests {
 
     use super::{
         Cli, CliCropPolicy, CliDemosaic, CliHighlightMethod, CliMetadata, CliOutputGamut,
-        CliRenderingProfile, Command, DemosaicAlgorithm, DevelopArguments, OutputMedium,
-        OutputSharpening, OutputSharpeningStrength, QualityCropSpec, RgbMultipliers, WhiteBalance,
-        crop_display_image, develop_export_settings, extract_preview, format_photometric,
-        nearest_neighbor_2x, parse_lens_profile, parse_libraw_pgm, parse_output_sharpening,
-        validate_highlight_options, validate_preview_extension, white_balance_from_arguments,
+        CliRenderingProfile, Command, DemosaicAlgorithm, DevelopArguments, NeuralArgs,
+        OutputMedium, OutputSharpening, OutputSharpeningStrength, QualityCropSpec, RgbMultipliers,
+        WhiteBalance, crop_display_image, develop_export_settings, extract_preview,
+        format_photometric, nearest_neighbor_2x, parse_lens_profile, parse_libraw_pgm,
+        parse_output_sharpening, validate_highlight_options, validate_preview_extension,
+        white_balance_from_arguments,
     };
 
     #[test]
@@ -2411,6 +2465,7 @@ mod tests {
             tint: 0.0,
             crop: CliCropPolicy::Recommended,
             demosaic: CliDemosaic::Bilinear,
+            neural: NeuralArgs::default(),
             lens_profile: "off".to_owned(),
             no_lens_distortion: false,
             no_lens_vignetting: false,

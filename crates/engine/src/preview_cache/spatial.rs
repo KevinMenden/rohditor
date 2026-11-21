@@ -7,6 +7,7 @@ use rohditor_gpu::{
     GpuCapturedSource, GpuPreviewError, GpuPreviewFrame, GpuPreviewProcessor, GpuSpatialFullSource,
     GpuSpatialPreview, GpuSpatialProcessor, SpatialMetrics,
 };
+use rohditor_neural::ModelId;
 
 const CACHE_BUDGET: usize = 768 * 1024 * 1024;
 
@@ -15,9 +16,44 @@ struct PreCaptureKey {
     decoded: DecodedRawKey,
     crop: RawCropPolicy,
     demosaic: DemosaicAlgorithm,
+    neural_model: Option<ModelId>,
     highlight: HighlightKey,
     profile: CameraProfileKey,
     version: u8,
+}
+
+impl PreCaptureKey {
+    fn new(keys: &PreviewCacheKeys, options: PreviewOptions, recipe: &EditRecipe) -> Self {
+        Self {
+            decoded: keys.decoded.clone(),
+            crop: options.render.raw_crop_policy,
+            demosaic: options.render.demosaic,
+            neural_model: keys.reconstructed.neural_model,
+            highlight: keys.reconstructed.highlight.clone(),
+            profile: camera_profile_key(&recipe.color.camera_profile),
+            version: keys.reconstructed.reconstruction_version,
+        }
+    }
+}
+
+/// Identity of a neural camera source: everything up to and including the
+/// demosaic (decoded frame, crop, highlights, profile, model). Edits after
+/// the demosaic keep it, so they reuse one neural pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NeuralKey(PreCaptureKey);
+
+impl NeuralKey {
+    pub fn new(keys: &PreviewCacheKeys, options: PreviewOptions, recipe: &EditRecipe) -> Self {
+        Self(PreCaptureKey::new(keys, options, recipe))
+    }
+}
+
+/// The neural demosaic result for one camera-source key. Kept apart from the
+/// general `source` slot: it costs seconds of inference, so it survives
+/// stand-in previews (which replace `source`) and the general retention budget.
+struct NeuralSource {
+    key: PreCaptureKey,
+    source: DemosaicedCameraSource,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +69,7 @@ pub(super) struct SpatialCache {
     pub recovery: Option<String>,
     source: Option<(PreCaptureKey, DemosaicedCameraSource)>,
     captured: Option<(CaptureKey, CapturedCameraSource)>,
+    neural: Option<NeuralSource>,
     gpu_captured: Option<(CaptureKey, GpuCapturedSource)>,
     sensor_source: Option<(CaptureKey, rohditor_gpu::GpuDevelopedSource)>,
     sensor: Option<rohditor_gpu::GpuSensorProcessor>,
@@ -68,6 +105,7 @@ impl SpatialCache {
 
     pub fn clear_images(&mut self) {
         self.source = None;
+        self.neural = None;
         self.captured = None;
         self.gpu_captured = None;
         self.sensor_source = None;
@@ -82,6 +120,32 @@ impl SpatialCache {
     pub fn resident_bytes(&self) -> usize {
         self.source.as_ref().map_or(0, |(_, s)| s.buffer_bytes())
             + self.captured.as_ref().map_or(0, |(_, s)| s.buffer_bytes())
+            + self.neural.as_ref().map_or(0, |n| n.source.buffer_bytes())
+    }
+
+    /// Whether the neural camera source for `key` is ready.
+    pub fn has_neural(&self, key: &NeuralKey) -> bool {
+        self.neural
+            .as_ref()
+            .is_some_and(|neural| neural.key == key.0)
+    }
+
+    /// Keep a finished neural camera source.
+    pub fn install_neural(&mut self, key: NeuralKey, source: DemosaicedCameraSource) {
+        self.neural = Some(NeuralSource { key: key.0, source });
+    }
+
+    /// The retained neural source for `key`, relabelled for `recipe`.
+    fn neural_for(
+        &self,
+        key: &PreCaptureKey,
+        recipe: &EditRecipe,
+        options: PreviewOptions,
+    ) -> Option<Result<DemosaicedCameraSource, PipelineError>> {
+        self.neural
+            .as_ref()
+            .filter(|neural| neural.key == *key)
+            .map(|neural| neural.source.clone().with_recipe(recipe, options))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -102,14 +166,7 @@ impl SpatialCache {
         self.gpu_captured = None;
         self.gpu = None;
         self.sensor_source = None;
-        let key = PreCaptureKey {
-            decoded: keys.decoded.clone(),
-            crop: options.render.raw_crop_policy,
-            demosaic: options.render.demosaic,
-            highlight: keys.reconstructed.highlight.clone(),
-            profile: camera_profile_key(&recipe.color.camera_profile),
-            version: keys.reconstructed.reconstruction_version,
-        };
+        let key = PreCaptureKey::new(keys, options, recipe);
         if self.source.as_ref().is_some_and(|(k, _)| k != &key) {
             self.source = None;
             self.captured = None;
@@ -117,6 +174,8 @@ impl SpatialCache {
         }
         let source = if let Some((_, source)) = &self.source {
             source.clone().with_recipe(recipe, options)?
+        } else if let Some(neural) = self.neural_for(&key, recipe, options) {
+            neural?
         } else {
             cpu.prepare_camera_source(frame, recipe, options, cancellation)?
         };
@@ -173,19 +232,15 @@ impl SpatialCache {
         keys: &PreviewCacheKeys,
         cancellation: &CancellationToken,
     ) -> Result<ReconstructedPreview, PipelineError> {
-        let key = PreCaptureKey {
-            decoded: keys.decoded.clone(),
-            crop: options.render.raw_crop_policy,
-            demosaic: options.render.demosaic,
-            highlight: keys.reconstructed.highlight.clone(),
-            profile: camera_profile_key(&variant.color.camera_profile),
-            version: keys.reconstructed.reconstruction_version,
-        };
+        let key = PreCaptureKey::new(keys, options, variant);
         let source = match &self.source {
             Some((stored, source)) if *stored == key => {
                 source.clone().with_recipe(variant, options)?
             }
-            _ => cpu.prepare_camera_source(frame, variant, options, cancellation)?,
+            _ => match self.neural_for(&key, variant, options) {
+                Some(neural) => neural?,
+                None => cpu.prepare_camera_source(frame, variant, options, cancellation)?,
+            },
         };
         cpu.complete_camera_source(source.capture_cpu(cancellation)?, cancellation)
     }
@@ -277,14 +332,7 @@ impl SpatialCache {
         if cancellation.is_cancelled() {
             return Err(GpuPreviewError::Cancelled);
         }
-        let key = PreCaptureKey {
-            decoded: keys.decoded.clone(),
-            crop: options.render.raw_crop_policy,
-            demosaic: options.render.demosaic,
-            highlight: keys.reconstructed.highlight.clone(),
-            profile: camera_profile_key(&recipe.color.camera_profile),
-            version: keys.reconstructed.reconstruction_version,
-        };
+        let key = PreCaptureKey::new(keys, options, recipe);
         let sensor_result = self.prepare_sensor(
             cpu,
             frame,
@@ -332,8 +380,12 @@ impl SpatialCache {
             // Without the retained immutable camera source, the newly prepared
             // description has a new identity and cannot relabel an old upload.
             self.gpu_captured = None;
-            cpu.prepare_camera_source(frame, recipe, options, cancellation)
-                .map_err(gpu_error)?
+            match self.neural_for(&key, recipe, options) {
+                Some(neural) => neural.map_err(gpu_error)?,
+                None => cpu
+                    .prepare_camera_source(frame, recipe, options, cancellation)
+                    .map_err(gpu_error)?,
+            }
         };
         let contract = source.detail_contract().map_err(gpu_error)?;
         let capture_key = CaptureKey {

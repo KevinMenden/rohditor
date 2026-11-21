@@ -45,7 +45,7 @@ impl CpuPipeline {
         crate::rendering::validate_headroom(headroom)?;
         let total_started = Instant::now();
         let cancellation = CancellationToken::new();
-        let mut base = prepare_base(self.optics.as_deref(), frame, recipe, options)?;
+        let mut base = prepare_base(self, frame, recipe, options)?;
         let mut geometry = output_geometry(&base.image, base.source_orientation, recipe)?;
         let (output_width, output_height) = geometry.output_dimensions();
         let target = size.resolve(output_width, output_height);

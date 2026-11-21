@@ -17,10 +17,12 @@ use rohditor_edit::{
     MAX_LOCAL_DETAIL_VARIANTS, MaskLayer, RenderingProfileSelection, WhiteBalance,
 };
 use rohditor_image::{DisplayRgbImage, Orientation};
+use rohditor_neural::ModelId;
 use rohditor_raw::{RawFrame, SourceIdentity};
 
 #[path = "spatial.rs"]
 mod spatial;
+pub use spatial::NeuralKey;
 
 /// Explicit keys for the four preview cache levels defined in the roadmap.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,7 +41,7 @@ impl PreviewCacheKeys {
         recipe: &EditRecipe,
         options: PreviewOptions,
     ) -> Self {
-        Self::new_with_optics(document_id, frame, recipe, options, None, None)
+        Self::new_with_optics(document_id, frame, recipe, options, None, None, None)
     }
 
     pub fn new_for_pipeline(
@@ -58,6 +60,9 @@ impl PreviewCacheKeys {
             })
             .flatten();
         let provenance = pipeline.optics_cache_provenance(frame, recipe, options.render);
+        let neural_model = pipeline
+            .neural_model_id()
+            .filter(|_| options.render.demosaic == DemosaicAlgorithm::Neural);
         Self::new_with_optics(
             document_id,
             frame,
@@ -65,9 +70,11 @@ impl PreviewCacheKeys {
             options,
             database_fingerprint,
             provenance.as_ref(),
+            neural_model,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn new_with_optics(
         document_id: u64,
         frame: &RawFrame,
@@ -75,6 +82,7 @@ impl PreviewCacheKeys {
         options: PreviewOptions,
         database_fingerprint: Option<u64>,
         provenance: Option<&OpticsProvenance>,
+        neural_model: Option<ModelId>,
     ) -> Self {
         let decoded = DecodedRawKey {
             document_id,
@@ -89,6 +97,7 @@ impl PreviewCacheKeys {
             raw_crop_policy: options.render.raw_crop_policy,
             max_long_edge: options.max_long_edge,
             algorithm: options.render.demosaic,
+            neural_model,
             highlight: HighlightKey::from_recipe(recipe),
             optics: OpticsKey::from_frame_recipe(frame, recipe, database_fingerprint, provenance),
             // Bump when the retained source representation changes. The GPU
@@ -200,6 +209,8 @@ struct ReconstructedCameraRgbKey {
     raw_crop_policy: RawCropPolicy,
     max_long_edge: usize,
     algorithm: DemosaicAlgorithm,
+    /// The model behind [`DemosaicAlgorithm::Neural`]; `None` for classic ones.
+    neural_model: Option<ModelId>,
     highlight: HighlightKey,
     optics: OpticsKey,
     reconstruction_version: u8,
@@ -667,6 +678,30 @@ impl PreviewCache {
             demosaiced,
             adjusted,
         }
+    }
+
+    /// Whether a finished neural camera source matches `key`.
+    pub fn has_neural(&self, key: &NeuralKey) -> bool {
+        self.spatial.has_neural(key)
+    }
+
+    /// Keep a neural camera source finished in the background. It is dropped
+    /// (returning `false`) when the cache has moved on to another decoded
+    /// frame meanwhile.
+    pub fn install_neural(
+        &mut self,
+        keys: &PreviewCacheKeys,
+        key: NeuralKey,
+        source: rohditor_core::DemosaicedCameraSource,
+    ) -> bool {
+        let current = self
+            .decoded
+            .as_ref()
+            .is_some_and(|entry| entry.key == keys.decoded);
+        if current {
+            self.spatial.install_neural(key, source);
+        }
+        current
     }
 
     pub fn reconstructed(&self, keys: &PreviewCacheKeys) -> Option<&ReconstructedPreview> {

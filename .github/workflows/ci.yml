@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install Rust 1.88
-        run: rustup toolchain install 1.88.0 --profile minimal
+      - name: Install Rust 1.92
+        run: rustup toolchain install 1.92.0 --profile minimal
       - name: Check the declared minimum Rust version
-        run: cargo +1.88.0 check --workspace --all-targets --locked
+        run: cargo +1.92.0 check --workspace --all-targets --locked

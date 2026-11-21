@@ -17,6 +17,8 @@ pub(crate) struct SettingsWindowModel<'a> {
     pub active_auto_noise_reduction: bool,
     pub draft_auto_noise_reduction: bool,
     pub warning: Option<&'a str>,
+    /// Why "Neural" cannot be selected; `None` when its model is loaded.
+    pub neural_unavailable: Option<&'a str>,
 }
 
 impl SettingsWindowModel<'_> {
@@ -64,6 +66,26 @@ pub(crate) fn show(
             );
             ui.radio_value(&mut selected, DemosaicAlgorithm::Rcd, "RCD");
             ui.radio_value(&mut selected, DemosaicAlgorithm::Amaze, "AMaZE (default)");
+            ui.add_enabled_ui(model.neural_unavailable.is_none(), |ui| {
+                ui.radio_value(
+                    &mut selected,
+                    DemosaicAlgorithm::Neural,
+                    "Neural (demosaic + denoise)",
+                );
+            });
+            match model.neural_unavailable {
+                Some(reason) => ui.label(
+                    egui::RichText::new(format!("Neural is unavailable: {reason}"))
+                        .color(colors::TEXT_MUTED),
+                ),
+                None => ui.label(
+                    egui::RichText::new(
+                        "Neural runs on the CPU in the background; the preview shows AMaZE until \
+                         it is ready.",
+                    )
+                    .color(colors::TEXT_MUTED),
+                ),
+            };
             if model.draft_demosaic == DemosaicAlgorithm::Bilinear {
                 ui.label(
                     egui::RichText::new("Bilinear is active for this command-line override.")
@@ -164,6 +186,7 @@ mod tests {
             DemosaicAlgorithm::MalvarHeCutler,
             DemosaicAlgorithm::Rcd,
             DemosaicAlgorithm::Amaze,
+            DemosaicAlgorithm::Neural,
         ];
         assert!(!choices.contains(&DemosaicAlgorithm::Bilinear));
     }

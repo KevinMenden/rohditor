@@ -11,6 +11,7 @@ mod color;
 mod cpu;
 mod cpu_only;
 mod demosaic;
+pub use demosaic::NEURAL_FALLBACK_DEMOSAIC;
 mod editing;
 mod error;
 mod export;

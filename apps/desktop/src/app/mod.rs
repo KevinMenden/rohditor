@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
+use rohditor_core::NEURAL_FALLBACK_DEMOSAIC;
 use rohditor_core::{
     CameraCalibration, DatabaseProvenance, DitherMode, ExportFormat, ExportMetadataPolicy,
     ExportSettings, HighlightDiagnostics, Histogram, JPEG_QUALITY_DEFAULT, MemoryEstimate,
@@ -87,6 +88,7 @@ mod info;
 #[path = "lifecycle.rs"]
 mod lifecycle;
 mod masks;
+mod neural_model;
 mod noise_reduction;
 mod screenshot;
 mod tools;
@@ -184,6 +186,9 @@ struct Document {
     pending_gpu_histogram: Option<PendingGpuHistogram>,
     gpu_histogram_due: Option<(PreviewTicket, Instant)>,
     source_scale_requested: bool,
+    /// The background neural demosaic for this photo has finished, so a
+    /// classic stand-in base no longer counts as current.
+    neural_ready: bool,
     preview_sequence: u64,
     preview_intent: PreviewIntent,
     gpu_preview: Option<GpuDocumentPreview>,
@@ -232,6 +237,7 @@ impl Document {
             pending_gpu_histogram: None,
             gpu_histogram_due: None,
             source_scale_requested: false,
+            neural_ready: false,
             preview_sequence: 0,
             preview_intent: PreviewIntent::CommittedFit,
             gpu_preview: None,
@@ -343,6 +349,8 @@ pub(crate) struct RohditorApp {
     export_dialog_open: bool,
     settings: AppSettings,
     settings_warning: Option<String>,
+    /// Why the neural demosaic cannot be selected; `None` when its model is loaded.
+    neural_unavailable: Option<String>,
     recipe_save_status: Option<RecipeSaveStatus>,
     recipe_save_error: Option<String>,
     queued_recipe_snapshots: HashMap<PathBuf, (u64, EditRecipe)>,
@@ -429,8 +437,12 @@ impl RohditorApp {
         settings: AppSettings,
         settings_warning: Option<String>,
         show_diagnostics: bool,
-        config_dir: Option<PathBuf>,
+        directories: crate::config::AppDirectories,
     ) -> std::io::Result<Self> {
+        let crate::config::AppDirectories {
+            config: config_dir,
+            data: data_dir,
+        } = directories;
         theme::apply(&context.egui_ctx);
         let ui_renderer = if context.wgpu_render_state.is_some() {
             "wgpu"
@@ -454,8 +466,27 @@ impl RohditorApp {
             processor_preference = ?processor_preference,
             "desktop application started"
         );
-        let coordinator =
-            RenderCoordinator::new(wake_from(&context.egui_ctx)).map_err(std::io::Error::other)?;
+        let neural = neural_model::load(
+            data_dir.as_deref(),
+            processor_preference == ProcessorPreference::Cpu,
+        );
+        let neural_unavailable = neural.as_ref().err().cloned();
+        let (settings, settings_warning) = match &neural_unavailable {
+            Some(reason) if settings.demosaic() == DemosaicAlgorithm::Neural => {
+                let mut settings = settings;
+                settings.set_demosaic(NEURAL_FALLBACK_DEMOSAIC);
+                (
+                    settings,
+                    Some(format!(
+                        "The neural demosaic is unavailable ({reason}); using {} instead.",
+                        NEURAL_FALLBACK_DEMOSAIC.stable_name()
+                    )),
+                )
+            }
+            _ => (settings, settings_warning),
+        };
+        let coordinator = RenderCoordinator::with_neural(wake_from(&context.egui_ctx), neural.ok())
+            .map_err(std::io::Error::other)?;
         if let Some(runtime) = &gpu {
             coordinator
                 .configure_capture_device(
@@ -489,6 +520,7 @@ impl RohditorApp {
             export_dialog_open: false,
             settings,
             settings_warning,
+            neural_unavailable,
             recipe_save_status: None,
             recipe_save_error: None,
             queued_recipe_snapshots: HashMap::new(),
@@ -714,10 +746,13 @@ impl RohditorApp {
             let gpu_base_is_current = self
                 .document
                 .as_ref()
-                .and_then(|document| document.gpu_preview.as_ref())
-                .is_some_and(|preview| {
-                    gpu_base_algorithm_matches(preview.algorithm, options.render.demosaic)
-                        && preview.source.matches_recipe(&recipe)
+                .and_then(|document| Some((document.gpu_preview.as_ref()?, document.neural_ready)))
+                .is_some_and(|(preview, neural_ready)| {
+                    gpu_base_algorithm_matches(
+                        preview.algorithm,
+                        options.render.demosaic,
+                        neural_ready,
+                    ) && preview.source.matches_recipe(&recipe)
                         && preview.source.optics_matches_recipe(&recipe.optics)
                 });
             if gpu_base_is_current {
@@ -828,6 +863,7 @@ impl RohditorApp {
             active_auto_noise_reduction: self.settings.auto_noise_reduction(),
             draft_auto_noise_reduction: dialog.draft.auto_noise_reduction(),
             warning: self.settings_warning.as_deref(),
+            neural_unavailable: self.neural_unavailable.as_deref(),
         };
         let mut open = true;
         let output = settings_ui::show(context, &mut open, &model);
@@ -2630,6 +2666,7 @@ impl RohditorApp {
                             DemosaicAlgorithm::MalvarHeCutler => "high-quality",
                             DemosaicAlgorithm::Rcd => "high-quality",
                             DemosaicAlgorithm::Amaze => "high-quality",
+                            DemosaicAlgorithm::Neural => "neural",
                         },
                     }
                     .to_owned(),
@@ -2831,8 +2868,18 @@ fn source_scale_selected(document: Option<&Document>) -> bool {
     document.is_some_and(|document| document.source_scale_requested)
 }
 
-fn gpu_base_algorithm_matches(resident: DemosaicAlgorithm, requested: DemosaicAlgorithm) -> bool {
+/// Whether a resident GPU base can serve `requested`. While the background
+/// neural pass runs, its classic stand-in base keeps serving neural requests;
+/// once it is ready, the next request goes to the worker for the neural source.
+fn gpu_base_algorithm_matches(
+    resident: DemosaicAlgorithm,
+    requested: DemosaicAlgorithm,
+    neural_ready: bool,
+) -> bool {
     resident == requested
+        || (requested == DemosaicAlgorithm::Neural
+            && resident == NEURAL_FALLBACK_DEMOSAIC
+            && !neural_ready)
 }
 
 /// Keyboard navigation steps in the library grid.
@@ -3654,11 +3701,24 @@ mod tests {
     fn resident_gpu_bases_are_algorithm_specific() {
         assert!(gpu_base_algorithm_matches(
             DemosaicAlgorithm::Rcd,
-            DemosaicAlgorithm::Rcd
+            DemosaicAlgorithm::Rcd,
+            false
         ));
         assert!(!gpu_base_algorithm_matches(
             DemosaicAlgorithm::Rcd,
-            DemosaicAlgorithm::Amaze
+            DemosaicAlgorithm::Amaze,
+            false
+        ));
+        // The stand-in serves neural requests only until the neural pass is ready.
+        assert!(gpu_base_algorithm_matches(
+            NEURAL_FALLBACK_DEMOSAIC,
+            DemosaicAlgorithm::Neural,
+            false
+        ));
+        assert!(!gpu_base_algorithm_matches(
+            NEURAL_FALLBACK_DEMOSAIC,
+            DemosaicAlgorithm::Neural,
+            true
         ));
     }
 

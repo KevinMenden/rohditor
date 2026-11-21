@@ -1,0 +1,5 @@
+# ONNX Runtime's WebGPU provider (crates/neural) needs `libwebgpu_dawn.so`,
+# which the `ort` build copies next to the binaries (`target/<profile>` and
+# `deps/` for tests). Look for it there.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-Wl,-rpath,$ORIGIN:$ORIGIN/.."]

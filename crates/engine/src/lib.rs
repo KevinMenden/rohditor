@@ -13,6 +13,7 @@ pub mod camera_profiles;
 pub mod catalog;
 pub mod coordinator;
 pub mod document;
+pub mod models;
 pub mod persistence;
 pub mod preview_cache;
 pub mod session;

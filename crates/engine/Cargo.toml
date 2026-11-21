@@ -17,6 +17,7 @@ rohditor-demosaic = { path = "../demosaic" }
 rohditor-edit = { path = "../edit" }
 rohditor-gpu = { path = "../gpu" }
 rohditor-image = { path = "../image" }
+rohditor-neural = { path = "../neural" }
 rohditor-raw = { path = "../raw" }
 serde.workspace = true
 serde_json.workspace = true

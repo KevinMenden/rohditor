@@ -213,7 +213,7 @@ impl CpuPipeline {
         options: PreviewOptions,
         cancellation: &CancellationToken,
     ) -> Result<DemosaicedCameraSource, PipelineError> {
-        prepare_camera_source(frame, recipe, options, cancellation)
+        prepare_camera_source(self, frame, recipe, options, cancellation)
     }
 
     pub fn complete_camera_source(
@@ -295,6 +295,7 @@ fn describe_spatial_completion(
 }
 
 pub(super) fn prepare_camera_source(
+    pipeline: &CpuPipeline,
     frame: &RawFrame,
     recipe: &EditRecipe,
     options: PreviewOptions,
@@ -351,6 +352,7 @@ pub(super) fn prepare_camera_source(
 
     let demosaic_started = Instant::now();
     let full_linear = demosaic_cancellable(
+        pipeline.neural(),
         &mosaic,
         sensor.demosaic_balance(),
         sensor.demosaic().algorithm(),
@@ -385,14 +387,14 @@ pub(super) fn prepare_camera_source(
 }
 
 pub(super) fn prepare_full_capture_base(
-    optics: Option<&OpticsService>,
+    pipeline: &CpuPipeline,
     frame: &RawFrame,
     recipe: &EditRecipe,
     options: RenderOptions,
     cancellation: &CancellationToken,
 ) -> Result<DemosaicedBase, PipelineError> {
     let source = prepare_reconstructed_preview(
-        optics,
+        pipeline,
         frame,
         recipe,
         PreviewOptions {
@@ -411,15 +413,19 @@ pub(super) fn prepare_full_capture_base(
 }
 
 pub(super) fn prepare_reconstructed_preview(
-    optics: Option<&OpticsService>,
+    pipeline: &CpuPipeline,
     frame: &RawFrame,
     recipe: &EditRecipe,
     options: PreviewOptions,
     cancellation: &CancellationToken,
 ) -> Result<ReconstructedPreview, PipelineError> {
     super::super::detail::validate_working_set(frame, recipe)?;
-    let source = prepare_camera_source(frame, recipe, options, cancellation)?;
-    complete_camera_source(optics, source.capture_cpu(cancellation)?, cancellation)
+    let source = prepare_camera_source(pipeline, frame, recipe, options, cancellation)?;
+    complete_camera_source(
+        pipeline.optics_service().map(AsRef::as_ref),
+        source.capture_cpu(cancellation)?,
+        cancellation,
+    )
 }
 
 pub(super) fn complete_camera_source(

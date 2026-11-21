@@ -377,3 +377,74 @@ fn default_noise_reduction_follows_each_private_files_noise() -> Result<(), Box<
     }
     Ok(())
 }
+
+/// The neural model (`ROHDITOR_NEURAL_MODEL`, else the local
+/// `ml/runs/shippable` export) on the GPU if available, or `None` to skip.
+fn neural_model() -> Option<std::sync::Arc<rohditor_neural::NeuralDemosaicer>> {
+    let path = std::env::var_os("ROHDITOR_NEURAL_MODEL").map_or_else(
+        || Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ml/runs/shippable/export/model.onnx"),
+        PathBuf::from,
+    );
+    if !path.exists() {
+        eprintln!("no neural model at {}; skipping", path.display());
+        return None;
+    }
+    let model = rohditor_neural::NeuralDemosaicer::load(&path, rohditor_neural::Backend::Gpu)
+        .expect("the model loads");
+    Some(std::sync::Arc::new(model))
+}
+
+/// Neural development of real photos is deterministic and keeps AMaZE's
+/// overall brightness. Per-pixel differences are only reported: at high ISO
+/// they are mostly the noise the network removes.
+#[test]
+#[ignore = "requires the ignored Sony ARW corpus in testdata/private and the neural model"]
+fn neural_demosaic_develops_private_samples_deterministically() -> Result<(), Box<dyn Error>> {
+    let Some(model) = neural_model() else {
+        return Ok(());
+    };
+    let decoder = RawlerDecoder::default();
+    let pipeline = CpuPipeline::default().with_neural(model);
+    let mut recipe = EditRecipe::default();
+    recipe.rendering.profile = RenderingProfileSelection::NEUTRAL;
+    let neural = RenderOptions {
+        demosaic: DemosaicAlgorithm::Neural,
+        ..RenderOptions::default()
+    };
+    let amaze = RenderOptions {
+        demosaic: DemosaicAlgorithm::Amaze,
+        ..RenderOptions::default()
+    };
+    for name in &SAMPLES[..2] {
+        let frame = decoder.decode(&private_corpus_directory().join(name))?;
+        let first = pipeline.render(&frame, &recipe, neural)?;
+        let second = pipeline.render(&frame, &recipe, neural)?;
+        assert_eq!(
+            first.image.data(),
+            second.image.data(),
+            "{name} is deterministic"
+        );
+        let classic = pipeline.render(&frame, &recipe, amaze)?;
+        let mean =
+            |data: &[u8]| data.iter().map(|&v| f64::from(v)).sum::<f64>() / data.len() as f64;
+        let mean_difference = first
+            .image
+            .data()
+            .iter()
+            .zip(classic.image.data())
+            .map(|(&a, &b)| (f64::from(a) - f64::from(b)).abs())
+            .sum::<f64>()
+            / first.image.data().len() as f64;
+        eprintln!(
+            "{name}: neural mean {:.2}, AMaZE mean {:.2}, mean |difference| {mean_difference:.2} (8-bit), demosaic {:?}",
+            mean(first.image.data()),
+            mean(classic.image.data()),
+            first.timings.demosaic
+        );
+        assert!(
+            (mean(first.image.data()) - mean(classic.image.data())).abs() < 1.0,
+            "{name}"
+        );
+    }
+    Ok(())
+}

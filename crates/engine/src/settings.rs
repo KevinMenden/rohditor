@@ -179,6 +179,7 @@ fn decode(bytes: &[u8]) -> Result<AppSettings, String> {
         "mhc" => DemosaicAlgorithm::MalvarHeCutler,
         "rcd" => DemosaicAlgorithm::Rcd,
         "amaze" => DemosaicAlgorithm::Amaze,
+        "neural" => DemosaicAlgorithm::Neural,
         value => return Err(format!("unknown demosaic algorithm {value:?}")),
     };
     let output_policy = match stored.output_policy.as_deref().unwrap_or("clip_to_srgb") {
@@ -267,6 +268,7 @@ mod tests {
             (DemosaicAlgorithm::MalvarHeCutler, "mhc"),
             (DemosaicAlgorithm::Rcd, "rcd"),
             (DemosaicAlgorithm::Amaze, "amaze"),
+            (DemosaicAlgorithm::Neural, "neural"),
         ] {
             let directory = TestDirectory::new();
             let path = directory.path().join("settings.json");

@@ -547,6 +547,14 @@ pub(crate) fn icon_button(
         colors::TEXT_DISABLED
     };
     icons::paint(ui.painter(), rect, icon, color);
+    // Icon-only: the tooltip doubles as the accessible label.
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Button,
+            enabled && ui.is_enabled(),
+            tooltip,
+        )
+    });
     response.on_hover_text(tooltip)
 }
 

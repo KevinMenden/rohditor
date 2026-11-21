@@ -24,6 +24,7 @@ rohditor-edit = { path = "../../crates/edit" }
 rohditor-engine = { path = "../../crates/engine" }
 rohditor-gpu = { path = "../../crates/gpu" }
 rohditor-image = { path = "../../crates/image" }
+rohditor-neural = { path = "../../crates/neural" }
 rohditor-raw = { path = "../../crates/raw" }
 tracing.workspace = true
 tracing-subscriber.workspace = true
