@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use rohditor_edit::{DetailSettings, EditRecipe, MaskLayer};
 use rohditor_image::LinearRgbImage;
-use rohditor_optics::OpticsService;
+
 use rohditor_raw::RawFrame;
 
 use super::camera_source::{complete_camera_source, prepare_camera_source};
@@ -23,7 +23,7 @@ use super::{
     validate_working_set,
 };
 use crate::cpu::preview_dimensions;
-use crate::{CancellationToken, DetailProvenance, PipelineError};
+use crate::{CancellationToken, CpuPipeline, DetailProvenance, PipelineError};
 
 /// One copy of the image developed with other detail settings, at the size and in the colour
 /// space of the [`DemosaicedBase`] it belongs to.
@@ -106,7 +106,7 @@ pub(super) fn images_bytes(images: &[LocalDetailImage]) -> usize {
 /// Develops the base of `recipe` together with one copy per entry of `variants`, sharing one
 /// demosaic. The copies are made first, so the base can consume the camera source in place.
 pub(super) fn prepare_base(
-    optics: Option<&OpticsService>,
+    pipeline: &CpuPipeline,
     frame: &RawFrame,
     recipe: &EditRecipe,
     options: PreviewOptions,
@@ -114,7 +114,8 @@ pub(super) fn prepare_base(
     cancellation: &CancellationToken,
 ) -> Result<DemosaicedBase, PipelineError> {
     let peak = validate_peak(frame, recipe, options, variants)?;
-    let source = prepare_camera_source(frame, recipe, options, cancellation)?;
+    let source = prepare_camera_source(pipeline, frame, recipe, options, cancellation)?;
+    let optics = pipeline.optics_service().map(AsRef::as_ref);
 
     let copies_started = Instant::now();
     let mut images = Vec::with_capacity(variants.len());

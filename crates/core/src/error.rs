@@ -4,6 +4,7 @@ use rohditor_demosaic::DemosaicError;
 use rohditor_edit::EditError;
 use rohditor_highlight::HighlightError;
 use rohditor_image::ImageError;
+use rohditor_neural::NeuralError;
 
 /// Errors from validation or execution of Rohditor's CPU image pipeline.
 #[derive(Debug, Error)]
@@ -61,6 +62,12 @@ pub enum PipelineError {
 
     #[error("output headroom {headroom} must be finite and at least 1.0 (diffuse white)")]
     InvalidHeadroom { headroom: f32 },
+
+    #[error("the neural demosaic is unavailable: {reason}")]
+    NeuralUnavailable { reason: String },
+
+    #[error("neural demosaicing failed: {reason}")]
+    Neural { reason: String },
 }
 
 impl From<ImageError> for PipelineError {
@@ -131,7 +138,26 @@ impl From<DemosaicError> for PipelineError {
             DemosaicError::NonFiniteImageData { stage, x, y } => {
                 Self::NonFiniteImageData { stage, x, y }
             }
+            DemosaicError::RequiresExecutor { algorithm } => Self::NeuralUnavailable {
+                reason: format!("{algorithm} needs the pipeline's model executor"),
+            },
             DemosaicError::Image(error) => error.into(),
+        }
+    }
+}
+
+impl From<NeuralError> for PipelineError {
+    fn from(error: NeuralError) -> Self {
+        match error {
+            NeuralError::Cancelled => Self::Cancelled,
+            NeuralError::Image(error) => error.into(),
+            error @ (NeuralError::ModelMissing { .. }
+            | NeuralError::ModelUnreadable { .. }) => Self::NeuralUnavailable {
+                reason: error.to_string(),
+            },
+            error => Self::Neural {
+                reason: error.to_string(),
+            },
         }
     }
 }

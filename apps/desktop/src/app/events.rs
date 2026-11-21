@@ -353,6 +353,12 @@ impl RohditorApp {
                 camera_profile,
                 result,
             } => self.camera_look_ready(context, document_id, &camera_profile, result),
+            WorkerEvent::NeuralDemosaicReady { document_id } => {
+                if let Some(document) = self.document.as_mut().filter(|doc| doc.id == document_id) {
+                    document.neural_ready = true;
+                    self.refresh_current_presentation(context);
+                }
+            }
             WorkerEvent::Warning {
                 document_id,
                 message,

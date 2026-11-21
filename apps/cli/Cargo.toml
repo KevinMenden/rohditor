@@ -14,8 +14,10 @@ rohditor-gpu = { path = "../../crates/gpu" }
 rohditor-demosaic = { path = "../../crates/demosaic" }
 rohditor-detail = { path = "../../crates/detail" }
 rohditor-edit = { path = "../../crates/edit" }
+rohditor-engine = { path = "../../crates/engine" }
 rohditor-image = { path = "../../crates/image" }
 rohditor-look = { path = "../../crates/look" }
+rohditor-neural = { path = "../../crates/neural" }
 rohditor-raw = { path = "../../crates/raw" }
 rohditor-reference = { path = "../../crates/reference" }
 serde.workspace = true

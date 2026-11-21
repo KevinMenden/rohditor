@@ -71,6 +71,8 @@ impl PreviewSource {
             (DemosaicAlgorithm::Rcd, true) => Self::HighQualityGpu,
             (DemosaicAlgorithm::Amaze, false) => Self::HighQualityCpu,
             (DemosaicAlgorithm::Amaze, true) => Self::HighQualityGpu,
+            (DemosaicAlgorithm::Neural, false) => Self::HighQualityCpu,
+            (DemosaicAlgorithm::Neural, true) => Self::HighQualityGpu,
         }
     }
 

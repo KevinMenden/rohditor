@@ -16,6 +16,7 @@ members = [
     "crates/image",
     "crates/look",
     "crates/mask",
+    "crates/neural",
     "crates/optics",
     "crates/raw",
     "crates/reference",
@@ -39,12 +40,16 @@ egui_kittest = { version = "=0.33.3", default-features = false, features = ["efr
 half = "=2.7.1"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 lensfun = "=0.7.0"
+# ONNX Runtime for the neural demosaic. `download-binaries` fetches a prebuilt
+# runtime at build time and `copy-dylibs` places it next to the binaries.
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "download-binaries", "copy-dylibs", "tls-rustls", "api-31", "webgpu"] }
 pollster = "=0.4.0"
 rayon = "1.11"
 rawler = "=0.7.2"
 rfd = { version = "=0.17.2", default-features = false, features = ["xdg-portal"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sha2 = "0.10"
 thiserror = "2.0"
 tiff = { version = "0.11", default-features = false, features = ["deflate"] }
 tracing = "0.1"

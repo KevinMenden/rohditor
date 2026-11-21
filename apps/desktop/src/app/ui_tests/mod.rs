@@ -38,7 +38,10 @@ fn app_harness(
                 AppSettings::default(),
                 None,
                 false,
-                Some(scratch_config),
+                crate::config::AppDirectories {
+                    config: Some(scratch_config.clone()),
+                    data: Some(scratch_config),
+                },
             )
             .expect("the app should start under the test harness")
         })

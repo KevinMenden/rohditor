@@ -53,6 +53,9 @@ pub enum DemosaicError {
         y: usize,
     },
 
+    #[error("{algorithm} demosaicing runs in its own executor, not in rohditor-demosaic")]
+    RequiresExecutor { algorithm: &'static str },
+
     #[error(transparent)]
     Image(#[from] ImageError),
 }
@@ -103,7 +106,16 @@ pub const AMAZE_HALO: Halo = Halo {
     bottom: AMAZE_BORDER,
 };
 
-/// Selectable CPU Bayer reconstruction algorithms.
+/// Tile halo of the neural demosaic in full-resolution pixels
+/// (`ml/contract.json`, `tiling.halo`).
+pub const NEURAL_HALO: Halo = Halo {
+    left: 128,
+    right: 128,
+    top: 128,
+    bottom: 128,
+};
+
+/// Selectable Bayer reconstruction algorithms.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum DemosaicAlgorithm {
     /// Fast reference interpolation using nearest same-color neighbors.
@@ -115,6 +127,9 @@ pub enum DemosaicAlgorithm {
     /// Aliasing Minimization and Zipper Elimination interpolation.
     #[default]
     Amaze,
+    /// Joint demosaic + denoise U-Net (`rohditor-neural`). Only its contract
+    /// lives here; the pipeline runs it with a loaded model.
+    Neural,
 }
 
 impl DemosaicAlgorithm {
@@ -125,6 +140,7 @@ impl DemosaicAlgorithm {
             Self::MalvarHeCutler => "mhc",
             Self::Rcd => "rcd",
             Self::Amaze => "amaze",
+            Self::Neural => "neural",
         }
     }
 
@@ -166,6 +182,7 @@ impl DemosaicContract {
             DemosaicAlgorithm::MalvarHeCutler => MALVAR_HE_CUTLER_HALO,
             DemosaicAlgorithm::Rcd => RCD_HALO,
             DemosaicAlgorithm::Amaze => AMAZE_HALO,
+            DemosaicAlgorithm::Neural => NEURAL_HALO,
         };
         // RCD and AMaZE version 2 reconstruct on a channel-balanced mosaic.
         // RCD version 3 also matches the reference tools' low-pass neighbours.
@@ -175,10 +192,14 @@ impl DemosaicContract {
         // or less).
         let algorithm_version = match algorithm {
             DemosaicAlgorithm::Rcd | DemosaicAlgorithm::Amaze => 4,
-            DemosaicAlgorithm::Bilinear | DemosaicAlgorithm::MalvarHeCutler => 1,
+            DemosaicAlgorithm::Bilinear
+            | DemosaicAlgorithm::MalvarHeCutler
+            | DemosaicAlgorithm::Neural => 1,
         };
+        // The neural demosaic mirrors its tile halo into the image, like the
+        // reflect padding it was trained with, so borders are denoised too.
         let border_policy = match algorithm {
-            DemosaicAlgorithm::Rcd | DemosaicAlgorithm::Amaze => {
+            DemosaicAlgorithm::Rcd | DemosaicAlgorithm::Amaze | DemosaicAlgorithm::Neural => {
                 DemosaicBorderPolicy::MirrorHaloReconstruction
             }
             DemosaicAlgorithm::Bilinear | DemosaicAlgorithm::MalvarHeCutler => {
@@ -284,6 +305,11 @@ pub fn demosaic_cancellable(
     algorithm: DemosaicAlgorithm,
     cancellation: &dyn CancellationCheck,
 ) -> Result<LinearRgbImage<f32>, DemosaicError> {
+    if algorithm == DemosaicAlgorithm::Neural {
+        return Err(DemosaicError::RequiresExecutor {
+            algorithm: algorithm.stable_name(),
+        });
+    }
     checkpoint(cancellation)?;
     balance.validate()?;
     validate_mosaic(mosaic, cancellation)?;
@@ -335,6 +361,7 @@ pub fn demosaic_cancellable(
             row_stride,
             &mut output,
         )?,
+        DemosaicAlgorithm::Neural => unreachable!("rejected before reconstruction"),
     }
     checkpoint(cancellation)?;
     LinearRgbImage::new(
@@ -421,6 +448,11 @@ mod contract_tests {
                 16,
                 DemosaicBorderPolicy::MirrorHaloReconstruction,
             ),
+            (
+                DemosaicAlgorithm::Neural,
+                128,
+                DemosaicBorderPolicy::MirrorHaloReconstruction,
+            ),
         ] {
             let contract = algorithm.contract();
             assert_eq!(contract.algorithm(), algorithm);
@@ -479,5 +511,18 @@ mod tests {
         )
         .expect_err("cancelled reconstruction must stop");
         assert!(matches!(error, DemosaicError::Cancelled));
+    }
+
+    #[test]
+    fn neural_is_only_described_here() {
+        let mosaic =
+            MosaicImage::new(8, 8, 8, BayerPattern::Rggb, vec![0.5; 64]).expect("valid mosaic");
+        let error = demosaic(
+            &mosaic,
+            WhiteBalanceGains::identity(),
+            DemosaicAlgorithm::Neural,
+        )
+        .expect_err("needs the neural executor");
+        assert!(matches!(error, DemosaicError::RequiresExecutor { .. }));
     }
 }

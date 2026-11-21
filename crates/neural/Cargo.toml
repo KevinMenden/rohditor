@@ -1,0 +1,29 @@
+[package]
+name = "rohditor-neural"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+default = ["onnx-runtime"]
+# Inference through ONNX Runtime (WebGPU, falling back to the CPU). Without it
+# the crate still packs, tiles and blends, and any `TileRunner` can be plugged in.
+onnx-runtime = ["dep:ort"]
+
+[dependencies]
+ort = { workspace = true, optional = true }
+rohditor-image = { path = "../image" }
+sha2.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "neural"
+harness = false
+
+[lints]
+workspace = true

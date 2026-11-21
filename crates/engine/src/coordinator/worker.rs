@@ -36,12 +36,15 @@ mod camera_look_worker;
 mod export_worker;
 #[path = "local_detail.rs"]
 mod local_detail;
+#[path = "neural_worker.rs"]
+mod neural_worker;
 #[path = "noise_worker.rs"]
 mod noise_worker;
 #[path = "range_jobs.rs"]
 mod range_jobs;
 
 pub use camera_look_worker::CameraLookJob;
+pub use neural_worker::NeuralResult;
 pub use noise_worker::NoiseProfileJob;
 pub use range_jobs::{ColorSampleJob, MaskOverlayJob};
 
@@ -295,6 +298,11 @@ pub enum WorkerEvent {
         report: ExportReport,
         elapsed: Duration,
     },
+    /// The background neural demosaic of a document finished; previews
+    /// requested from now on use it instead of the stand-in.
+    NeuralDemosaicReady {
+        document_id: u64,
+    },
     Warning {
         document_id: u64,
         message: String,
@@ -362,6 +370,8 @@ pub enum WorkerRequest {
     FitCameraLook(Box<CameraLookJob>),
     EstimateNoise(Box<NoiseProfileJob>),
     Export(Box<ExportJob>),
+    /// Sent by the neural worker thread, not by frontends.
+    NeuralFinished(Box<NeuralResult>),
     AbandonDocument(u64),
     Shutdown,
 }
@@ -390,11 +400,26 @@ impl RenderCoordinator {
         })
     }
     pub fn new(wake: WakeFn) -> Result<Self, String> {
-        Self::new_with_decoder(wake, Arc::new(RawlerDecoder::default()))
+        Self::with_neural(wake, None)
     }
 
-    fn new_with_decoder(wake: WakeFn, decoder: Arc<dyn RawDecoder>) -> Result<Self, String> {
+    /// Like [`Self::new`], with a loaded model for [`DemosaicAlgorithm::Neural`].
+    /// Previews show the classic stand-in until the background neural pass
+    /// finishes ([`WorkerEvent::NeuralDemosaicReady`]); exports use it directly.
+    pub fn with_neural(
+        wake: WakeFn,
+        neural: Option<Arc<rohditor_neural::NeuralDemosaicer>>,
+    ) -> Result<Self, String> {
+        Self::new_with_decoder(wake, Arc::new(RawlerDecoder::default()), neural)
+    }
+
+    fn new_with_decoder(
+        wake: WakeFn,
+        decoder: Arc<dyn RawDecoder>,
+        neural: Option<Arc<rohditor_neural::NeuralDemosaicer>>,
+    ) -> Result<Self, String> {
         let (request_sender, request_receiver) = mpsc::channel();
+        let worker_requests = request_sender.clone();
         let (event_sender, event_receiver) = mpsc::channel();
         let previews = Arc::new(PreviewMailbox::default());
         let worker_previews = Arc::clone(&previews);
@@ -406,10 +431,12 @@ impl RenderCoordinator {
                 let result = catch_unwind(AssertUnwindSafe(|| {
                     worker_loop(
                         request_receiver,
+                        worker_requests,
                         event_sender,
                         wake,
                         decoder,
                         worker_previews,
+                        neural,
                     );
                 }));
                 if let Err(payload) = result {
@@ -694,20 +721,26 @@ impl Drop for RenderCoordinator {
 
 fn worker_loop(
     receiver: mpsc::Receiver<WorkerRequest>,
+    requests: mpsc::Sender<WorkerRequest>,
     sender: mpsc::Sender<WorkerEvent>,
     wake: WakeFn,
     decoder: Arc<dyn RawDecoder>,
     previews: Arc<PreviewMailbox>,
+    neural_model: Option<Arc<rohditor_neural::NeuralDemosaicer>>,
 ) {
     let mut abandoned = HashSet::new();
     let mut preview_cache = PreviewCache::default();
-    let pipeline = match OpticsService::load_bundled() {
+    let mut pipeline = match OpticsService::load_bundled() {
         Ok(service) => CpuPipeline::new(Arc::new(service)),
         Err(error) => {
             tracing::warn!(%error, "Lensfun database unavailable; optics profiles are disabled");
             CpuPipeline::default()
         }
     };
+    if let Some(model) = neural_model {
+        pipeline = pipeline.with_neural(model);
+    }
+    let mut neural = neural_worker::NeuralStage::start(&pipeline, requests);
     let noise_profiles = noise_worker::start(pipeline.clone(), sender.clone(), wake.clone());
     let exports = export_worker::start(pipeline.clone(), sender.clone(), wake.clone());
     let camera_looks = camera_look_worker::start(
@@ -741,10 +774,18 @@ fn worker_loop(
                 );
             }
             WorkerRequest::PreviewAvailable => {
-                let Some(scheduled) = previews.take() else {
+                let Some(mut scheduled) = previews.take() else {
                     continue;
                 };
                 let ticket = scheduled.job.ticket;
+                scheduled.job.options = neural.route(
+                    ticket.document_id,
+                    &scheduled.job.frame,
+                    &scheduled.job.recipe,
+                    scheduled.job.options,
+                    &preview_cache,
+                    !abandoned.contains(&ticket.document_id),
+                );
                 if scheduled.job.backend == PreviewBackend::Cpu {
                     preview_cache.select_cpu();
                 }
@@ -791,7 +832,15 @@ fn worker_loop(
                 };
                 previews.finish(ticket, completion);
             }
-            WorkerRequest::SampleWhiteBalance(job) => {
+            WorkerRequest::SampleWhiteBalance(mut job) => {
+                job.options = neural.route(
+                    job.ticket.document_id,
+                    &job.frame,
+                    &job.recipe,
+                    job.options,
+                    &preview_cache,
+                    false,
+                );
                 if !abandoned.contains(&job.ticket.document_id) {
                     process_white_balance_sample(
                         *job,
@@ -802,7 +851,15 @@ fn worker_loop(
                     );
                 }
             }
-            WorkerRequest::SampleColorRange(job) => {
+            WorkerRequest::SampleColorRange(mut job) => {
+                job.options = neural.route(
+                    job.ticket.document_id,
+                    &job.frame,
+                    &job.recipe,
+                    job.options,
+                    &preview_cache,
+                    false,
+                );
                 if !abandoned.contains(&job.ticket.document_id) {
                     range_jobs::process_color_sample(
                         *job,
@@ -813,7 +870,15 @@ fn worker_loop(
                     );
                 }
             }
-            WorkerRequest::RenderMaskOverlay(job) => {
+            WorkerRequest::RenderMaskOverlay(mut job) => {
+                job.options = neural.route(
+                    job.ticket.document_id,
+                    &job.frame,
+                    &job.recipe,
+                    job.options,
+                    &preview_cache,
+                    false,
+                );
                 if !abandoned.contains(&job.ticket.document_id) {
                     range_jobs::process_mask_overlay(
                         *job,
@@ -872,7 +937,11 @@ fn worker_loop(
                     );
                 }
             }
+            WorkerRequest::NeuralFinished(result) => {
+                neural.finish(*result, &mut preview_cache, &sender, &wake);
+            }
             WorkerRequest::AbandonDocument(document_id) => {
+                neural.abandon(document_id);
                 abandoned.clear();
                 abandoned.insert(document_id);
                 preview_cache.clear_document(document_id);
@@ -903,6 +972,7 @@ impl WorkerRequest {
             Self::SampleWhiteBalance(job) => Some(job.ticket.document_id),
             Self::SampleColorRange(job) => Some(job.ticket.document_id),
             Self::RenderMaskOverlay(job) => Some(job.ticket.document_id),
+            Self::NeuralFinished(result) => Some(result.document_id()),
             Self::PreviewAvailable | Self::Shutdown | Self::CaptureDevice { .. } => None,
         }
     }
@@ -2772,7 +2842,7 @@ mod tests {
             frame: fake_frame(),
         };
         let coordinator =
-            RenderCoordinator::new_with_decoder(crate::wake::noop(), Arc::new(decoder))
+            RenderCoordinator::new_with_decoder(crate::wake::noop(), Arc::new(decoder), None)
                 .expect("worker starts");
         coordinator
             .fit_camera_look(

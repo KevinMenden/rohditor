@@ -13,6 +13,7 @@
 //! highlight ceilings), and finally the white balance.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use rohditor_core::write_output_bytes;
@@ -23,6 +24,7 @@ use rohditor_detail::{
 };
 use rohditor_edit::{EditRecipe, NoiseReduction};
 use rohditor_image::{BayerPattern, LinearRgbImage, MosaicImage};
+use rohditor_neural::NeuralDemosaicer;
 
 use super::npy::{encode_f32, read_f32};
 
@@ -31,6 +33,8 @@ pub(super) struct DemosaicNpy<'a> {
     pub wb: &'a Path,
     pub output: &'a Path,
     pub algorithm: DemosaicAlgorithm,
+    /// Loaded model, required for [`DemosaicAlgorithm::Neural`].
+    pub neural: Option<Arc<NeuralDemosaicer>>,
     pub noise_reduction: NoiseReduction,
     pub force: bool,
 }
@@ -68,8 +72,14 @@ pub(super) fn demosaic_npy(args: &DemosaicNpy<'_>) -> Result<()> {
         };
         let samples = mosaic.data[index * pixels..(index + 1) * pixels].to_vec();
         let image = MosaicImage::new(width, height, width, BayerPattern::Rggb, samples)?;
-        let rgb = reconstruct(&image, gains, args.algorithm, args.noise_reduction)
-            .with_context(|| format!("image {index}"))?;
+        let rgb = reconstruct(
+            &image,
+            gains,
+            args.algorithm,
+            args.neural.as_deref(),
+            args.noise_reduction,
+        )
+        .with_context(|| format!("image {index}"))?;
         append_planar_balanced(&rgb, gains, &mut output);
     }
     let shape = if mosaic.shape.len() == 2 {
@@ -86,9 +96,16 @@ fn reconstruct(
     mosaic: &MosaicImage<f32>,
     gains: WhiteBalanceGains,
     algorithm: DemosaicAlgorithm,
+    neural: Option<&NeuralDemosaicer>,
     settings: NoiseReduction,
 ) -> Result<LinearRgbImage<f32>> {
-    let mut rgb = demosaic(mosaic, gains, algorithm)?;
+    let mut rgb = match (algorithm, neural) {
+        (DemosaicAlgorithm::Neural, Some(neural)) => {
+            neural.reconstruct(mosaic, [gains.red, gains.green, gains.blue], &|| false)?
+        }
+        (DemosaicAlgorithm::Neural, None) => bail!("the neural demosaic needs a loaded model"),
+        _ => demosaic(mosaic, gains, algorithm)?,
+    };
     if !settings.is_active() {
         return Ok(rgb);
     }
@@ -184,6 +201,7 @@ mod tests {
             wb: &wb,
             output: &output,
             algorithm,
+            neural: None,
             noise_reduction: NoiseReduction::default(),
             force: true,
         })

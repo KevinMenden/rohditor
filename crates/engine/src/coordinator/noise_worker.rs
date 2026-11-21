@@ -61,13 +61,17 @@ fn newest<T>(first: T, receiver: &mpsc::Receiver<T>) -> T {
 
 /// `Ok(None)`: the frame is too small to profile.
 fn estimate(job: &NoiseProfileJob, pipeline: &CpuPipeline) -> Result<Option<NoiseProfile>, String> {
-    estimate_noise_profile(
-        pipeline,
-        &job.frame,
-        &EditRecipe::default(),
-        job.render_options,
-    )
-    .map_err(|error| error.to_string())
+    // The profile describes the sensor noise the classic filters see; it
+    // never needs (and must not wait for) a neural pass.
+    let render_options = RenderOptions {
+        demosaic: match job.render_options.demosaic {
+            DemosaicAlgorithm::Neural => rohditor_core::NEURAL_FALLBACK_DEMOSAIC,
+            demosaic => demosaic,
+        },
+        ..job.render_options
+    };
+    estimate_noise_profile(pipeline, &job.frame, &EditRecipe::default(), render_options)
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

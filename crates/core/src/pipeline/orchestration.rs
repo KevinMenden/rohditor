@@ -9,6 +9,7 @@ use rohditor_edit::{
     CameraProfileSelection, EditRecipe, HighlightAdjustments, HighlightMethod, WhiteBalance,
 };
 use rohditor_image::{DisplayRgbImage, LinearRgbImage, Orientation};
+use rohditor_neural::{ModelId, NeuralDemosaicer};
 use rohditor_optics::{OpticsExecution, OpticsProvenance, OpticsService};
 use rohditor_raw::RawFrame;
 
@@ -727,6 +728,9 @@ impl CpuPreviewWorkspace {
 #[derive(Debug, Clone)]
 pub struct CpuPipeline {
     optics: Option<Arc<OpticsService>>,
+    /// Loaded model for [`DemosaicAlgorithm::Neural`]; without one, that
+    /// algorithm fails with [`PipelineError::NeuralUnavailable`].
+    neural: Option<Arc<NeuralDemosaicer>>,
 }
 
 pub(super) mod render {
@@ -744,13 +748,36 @@ pub(super) mod render {
         pub fn new(optics: Arc<OpticsService>) -> Self {
             Self {
                 optics: Some(optics),
+                neural: None,
             }
         }
 
         /// Construct a pipeline for recipes whose optics profile is off.
         #[must_use]
         pub const fn without_optics() -> Self {
-            Self { optics: None }
+            Self {
+                optics: None,
+                neural: None,
+            }
+        }
+
+        /// Enable [`DemosaicAlgorithm::Neural`] with a loaded model.
+        #[must_use]
+        pub fn with_neural(mut self, neural: Arc<NeuralDemosaicer>) -> Self {
+            self.neural = Some(neural);
+            self
+        }
+
+        /// The neural demosaic model, when one is loaded.
+        #[must_use]
+        pub fn neural(&self) -> Option<&NeuralDemosaicer> {
+            self.neural.as_deref()
+        }
+
+        /// Identity of the loaded neural model, for cache keys over its results.
+        #[must_use]
+        pub fn neural_model_id(&self) -> Option<ModelId> {
+            self.neural.as_ref().map(|neural| neural.model_id())
         }
 
         /// The shared optics service, when this processor has one.
@@ -778,7 +805,7 @@ pub(super) mod render {
             options: RenderOptions,
         ) -> Result<RenderResult, PipelineError> {
             let total_started = Instant::now();
-            let base = prepare_base(self.optics.as_deref(), frame, recipe, options)?;
+            let base = prepare_base(self, frame, recipe, options)?;
             let mut result = render_base(base, recipe, options)?;
             result.timings.total = total_started.elapsed();
             Ok(result)
@@ -814,7 +841,7 @@ pub(super) mod render {
             let variants = local_detail_variants(recipe);
             if !variants.is_empty() {
                 return local_detail::prepare_base(
-                    self.optics.as_deref(),
+                    self,
                     frame,
                     recipe,
                     options,
@@ -874,13 +901,7 @@ pub(super) mod render {
             options: PreviewOptions,
             cancellation: &CancellationToken,
         ) -> Result<ReconstructedPreview, PipelineError> {
-            prepare_reconstructed_preview(
-                self.optics.as_deref(),
-                frame,
-                recipe,
-                options,
-                cancellation,
-            )
+            prepare_reconstructed_preview(self, frame, recipe, options, cancellation)
         }
 
         /// Apply white balance and camera color conversion to a retained
@@ -1050,13 +1071,7 @@ pub(super) mod render {
             cancellation: &CancellationToken,
         ) -> Result<RenderResult, PipelineError> {
             let total_started = Instant::now();
-            let mut base = prepare_base_cancellable(
-                self.optics.as_deref(),
-                frame,
-                recipe,
-                options,
-                cancellation,
-            )?;
+            let mut base = prepare_base_cancellable(self, frame, recipe, options, cancellation)?;
             let geometry = output_geometry(&base.image, base.source_orientation, recipe)?;
             let local = LocalWork::prepare(&base, recipe)?;
             let memory = memory_estimate(
@@ -1133,7 +1148,7 @@ pub(super) mod render {
             sharpening: Option<OutputSharpening>,
         ) -> Result<ExportRenderResult, PipelineError> {
             let total_started = Instant::now();
-            let mut base = prepare_base(self.optics.as_deref(), frame, recipe, options)?;
+            let mut base = prepare_base(self, frame, recipe, options)?;
             let mut geometry = output_geometry(&base.image, base.source_orientation, recipe)?;
             let (output_width, output_height) = geometry.output_dimensions();
             let target = size.resolve(output_width, output_height);
@@ -1333,16 +1348,16 @@ fn prepare_demosaiced_preview_owned(
 }
 
 fn prepare_base(
-    optics: Option<&OpticsService>,
+    pipeline: &CpuPipeline,
     frame: &RawFrame,
     recipe: &EditRecipe,
     options: RenderOptions,
 ) -> Result<DemosaicedBase, PipelineError> {
-    prepare_base_cancellable(optics, frame, recipe, options, &CancellationToken::new())
+    prepare_base_cancellable(pipeline, frame, recipe, options, &CancellationToken::new())
 }
 
 fn prepare_base_cancellable(
-    optics: Option<&OpticsService>,
+    pipeline: &CpuPipeline,
     frame: &RawFrame,
     recipe: &EditRecipe,
     options: RenderOptions,
@@ -1351,7 +1366,7 @@ fn prepare_base_cancellable(
     let variants = local_detail_variants(recipe);
     if !variants.is_empty() {
         return local_detail::prepare_base(
-            optics,
+            pipeline,
             frame,
             recipe,
             PreviewOptions {
@@ -1365,7 +1380,7 @@ fn prepare_base_cancellable(
     // Defringe sits in the spatial stage of the camera-source path.
     if super::detail::detail_is_active(recipe) || recipe.defringe.is_active() {
         return camera_source::prepare_full_capture_base(
-            optics,
+            pipeline,
             frame,
             recipe,
             options,
@@ -1416,6 +1431,7 @@ fn prepare_base_cancellable(
 
     let demosaic_started = Instant::now();
     let mut linear = demosaic_cancellable(
+        pipeline.neural(),
         &normalized,
         sensor.demosaic_balance(),
         sensor.demosaic().algorithm(),
@@ -1433,7 +1449,7 @@ fn prepare_base_cancellable(
 
     let optics_started = Instant::now();
     let optics_result = crate::optics::apply_cancellable(
-        optics,
+        pipeline.optics_service().map(AsRef::as_ref),
         &frame.info,
         &recipe.optics,
         linear,

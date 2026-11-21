@@ -30,3 +30,22 @@ fn library_view_opens_from_the_top_bar() {
     harness.run_steps(SETTLE_FRAMES);
     harness.snapshot("library_view_opens_from_the_top_bar");
 }
+
+/// Without an installed model (the scratch data directory has none), "Neural"
+/// is listed but disabled, with the reason and how to install it.
+#[test]
+#[ignore = "needs a wgpu adapter; run with --ignored"]
+fn settings_offer_neural_only_with_its_model() {
+    let mut harness = app_harness(None, scratch_config_dir("settings-neural"));
+    harness.run_steps(SETTLE_FRAMES);
+    harness.get_by_label("Application menu").click();
+    harness.run_steps(SETTLE_FRAMES);
+    harness.get_by_label("Settings…").click();
+    harness.run_steps(SETTLE_FRAMES);
+    assert!(
+        harness
+            .query_by_label_contains("Neural is unavailable")
+            .is_some()
+    );
+    harness.snapshot("settings_offer_neural_only_with_its_model");
+}

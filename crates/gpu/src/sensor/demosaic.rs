@@ -89,6 +89,12 @@ impl GpuSensorProcessor {
             DemosaicAlgorithm::MalvarHeCutler => 1,
             DemosaicAlgorithm::Rcd => RCD,
             DemosaicAlgorithm::Amaze => AMAZE,
+            // `GpuSensorProcessor::supports` sends neural development to the CPU.
+            DemosaicAlgorithm::Neural => {
+                return Err(GpuPreviewError::UnsupportedEdits {
+                    reason: "the neural demosaic runs on the CPU".into(),
+                });
+            }
         };
         capture
             .capture()
