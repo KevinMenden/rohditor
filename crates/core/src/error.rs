@@ -151,10 +151,11 @@ impl From<NeuralError> for PipelineError {
         match error {
             NeuralError::Cancelled => Self::Cancelled,
             NeuralError::Image(error) => error.into(),
-            error @ (NeuralError::ModelMissing { .. }
-            | NeuralError::ModelUnreadable { .. }) => Self::NeuralUnavailable {
-                reason: error.to_string(),
-            },
+            error @ (NeuralError::ModelMissing { .. } | NeuralError::ModelUnreadable { .. }) => {
+                Self::NeuralUnavailable {
+                    reason: error.to_string(),
+                }
+            }
             error => Self::Neural {
                 reason: error.to_string(),
             },

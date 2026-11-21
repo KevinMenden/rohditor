@@ -27,7 +27,10 @@ impl ModelId {
     /// Lowercase hex of [`Self::sha256`].
     #[must_use]
     pub fn sha256_hex(&self) -> String {
-        self.sha256.iter().map(|byte| format!("{byte:02x}")).collect()
+        self.sha256
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
     }
 }
 

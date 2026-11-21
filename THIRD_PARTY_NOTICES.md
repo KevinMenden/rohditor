@@ -22,6 +22,11 @@ Microsoft Corporation; `ort` is licensed under MIT OR Apache-2.0. Sources and
 license texts are available at <https://github.com/microsoft/onnxruntime> and
 <https://github.com/pykeio/ort>.
 
+GPU inference uses ONNX Runtime's WebGPU provider, built on Google's Dawn,
+which is distributed next to the binaries as `libwebgpu_dawn.so`. Dawn is
+licensed under the BSD 3-Clause License, Copyright 2017-2023 The Dawn & Tint
+Authors; see <https://dawn.googlesource.com/dawn>.
+
 The neural demosaic model itself is not part of the binaries. It is installed
-separately (`rohditor-cli model install`); its weights license and the
+separately (`rohditor-cli model install <FILE>`); its weights license and the
 attribution of its training data are recorded in the model's `model.json`.

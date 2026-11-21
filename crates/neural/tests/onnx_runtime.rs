@@ -75,7 +75,10 @@ fn matches_pytorch_on_the_fixture(backend: Backend) {
         .map(|(a, b)| (a - b).abs())
         .fold(0.0_f32, f32::max);
     eprintln!("{backend} vs PyTorch: max |diff| {worst:.2e}");
-    assert!(worst < 1e-4, "ONNX Runtime ({backend}) differs from PyTorch by {worst}");
+    assert!(
+        worst < 1e-4,
+        "ONNX Runtime ({backend}) differs from PyTorch by {worst}"
+    );
 }
 
 /// A smooth asymmetric scene with deterministic noise.

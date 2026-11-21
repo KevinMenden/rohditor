@@ -2393,11 +2393,12 @@ mod tests {
 
     use super::{
         Cli, CliCropPolicy, CliDemosaic, CliHighlightMethod, CliMetadata, CliOutputGamut,
-        CliRenderingProfile, Command, DemosaicAlgorithm, DevelopArguments, OutputMedium,
-        OutputSharpening, OutputSharpeningStrength, QualityCropSpec, RgbMultipliers, WhiteBalance,
-        crop_display_image, develop_export_settings, extract_preview, format_photometric,
-        nearest_neighbor_2x, parse_lens_profile, parse_libraw_pgm, parse_output_sharpening,
-        validate_highlight_options, validate_preview_extension, white_balance_from_arguments,
+        CliRenderingProfile, Command, DemosaicAlgorithm, DevelopArguments, NeuralArgs,
+        OutputMedium, OutputSharpening, OutputSharpeningStrength, QualityCropSpec, RgbMultipliers,
+        WhiteBalance, crop_display_image, develop_export_settings, extract_preview,
+        format_photometric, nearest_neighbor_2x, parse_lens_profile, parse_libraw_pgm,
+        parse_output_sharpening, validate_highlight_options, validate_preview_extension,
+        white_balance_from_arguments,
     };
 
     #[test]

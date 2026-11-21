@@ -466,7 +466,10 @@ impl RohditorApp {
             processor_preference = ?processor_preference,
             "desktop application started"
         );
-        let neural = neural_model::load(data_dir.as_deref());
+        let neural = neural_model::load(
+            data_dir.as_deref(),
+            processor_preference == ProcessorPreference::Cpu,
+        );
         let neural_unavailable = neural.as_ref().err().cloned();
         let (settings, settings_warning) = match &neural_unavailable {
             Some(reason) if settings.demosaic() == DemosaicAlgorithm::Neural => {

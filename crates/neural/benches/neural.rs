@@ -38,7 +38,10 @@ fn bench(c: &mut Criterion) {
     let mosaic = mosaic();
     let mut group = c.benchmark_group("neural");
     group.sample_size(10);
-    for (name, backend) in [("gpu_ort_24mp", Backend::Gpu), ("cpu_ort_24mp", Backend::Cpu)] {
+    for (name, backend) in [
+        ("gpu_ort_24mp", Backend::Gpu),
+        ("cpu_ort_24mp", Backend::Cpu),
+    ] {
         // `Gpu` falls back to the CPU; the log says which one ran.
         let demosaicer = NeuralDemosaicer::load(path.as_ref(), backend).expect("load the model");
         group.bench_function(name, |b| {

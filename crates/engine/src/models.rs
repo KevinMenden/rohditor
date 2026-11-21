@@ -48,7 +48,10 @@ impl ModelStore {
     pub fn status(&self) -> ModelStatus {
         let path = self.path();
         match ModelFile::read(&path) {
-            Ok(model) => ModelStatus::Installed { path, id: model.id() },
+            Ok(model) => ModelStatus::Installed {
+                path,
+                id: model.id(),
+            },
             Err(NeuralError::ModelMissing { .. }) => ModelStatus::Missing(path),
             Err(error) => ModelStatus::Unreadable {
                 path,
