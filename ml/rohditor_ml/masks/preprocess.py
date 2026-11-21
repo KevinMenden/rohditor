@@ -19,5 +19,6 @@ def to_probability(output: np.ndarray, model: MaskModel) -> np.ndarray:
     """The raw mask output as a probability in [0, 1], same shape."""
     output = output.astype(np.float32)
     if model.output_kind == "logits":
-        return 1.0 / (1.0 + np.exp(-output))
+        # Stable sigmoid: no overflow in exp() for very negative logits.
+        return 0.5 * (1.0 + np.tanh(0.5 * output))
     return np.clip(output, 0.0, 1.0)

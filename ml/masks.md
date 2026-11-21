@@ -99,7 +99,7 @@ arena on and off.
   first opset with `DeformConv`. The graph has 1,888 nodes, against 16,400 for the
   community export, which decomposes `DeformConv` into Gather/ScatterND at
   opset 17.
-  - Max error against PyTorch after the sigmoid: 1e-7.
+  - Max error against PyTorch after the sigmoid: 1e-7 on noise, 3.8e-5 on the sample photo.
   - Needs **onnxruntime ≥ 1.25** for the `DeformConv` kernel. 1.20–1.24 refuse
     the model. The `ort` crate's bundled 1.31 is fine.
   - The input is a fixed 1024², as upstream: photos are squashed to a square and

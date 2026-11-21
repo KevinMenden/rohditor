@@ -35,6 +35,8 @@ class MaskModel:
     # "logits" needs a sigmoid; "probability" is already in [0, 1].
     output_kind: str
     weights: HubFile
+    # Model code executed by `trust_remote_code`, from the same pinned revision.
+    code: tuple[HubFile, ...]
     license: dict
     training_data: list[str]
     # A CC0 photo (no people) for the sample input/output pair.
@@ -57,6 +59,12 @@ SUBJECT = MaskModel(
     output_kind="logits",
     weights=HubFile("ZhengPeng7/BiRefNet_lite", "aa62cd87eafb9cc43056d08ef3615a14628b831d", "model.safetensors",
                     "4417d89795250e698c3cb0ae8df15743810065f646f48a694fdfa7ca052d0815"),
+    code=(
+        HubFile("ZhengPeng7/BiRefNet_lite", "aa62cd87eafb9cc43056d08ef3615a14628b831d", "birefnet.py",
+                "af8568b5be406bf4d2a68a7ed6d72e40f73b37a1fb6fc9ebd71b5b3cbcd069c9"),
+        HubFile("ZhengPeng7/BiRefNet_lite", "aa62cd87eafb9cc43056d08ef3615a14628b831d", "BiRefNet_config.py",
+                "e7b8c2a74f6cea6a59553d517f71d47f2c1d90e670a13416af17c25fe2f3dc52"),
+    ),
     license={"code": "MIT", "weights": "MIT", "use": "local only: training data includes non-commercial sets"},
     training_data=["DIS5K (non-commercial research only)", "DUTS", "HRSOD", "UHRSD", "HRS10K",
                    "P3M-10k", "schirrmacher/humans (Apache-2.0, synthetic)"],
@@ -72,6 +80,7 @@ SKY = MaskModel(
     output_kind="probability",
     weights=HubFile("JianyuanWang/skyseg", "3ba8c6df1d9ba9ff26f637c7ba9568ac11a9aa7f", "skyseg.onnx",
                     "ab9c34c64c3d821220a2886a4a06da4642ffa14d5b30e8d5339056a089aa1d39"),
+    code=(),
     license={"code": "MIT", "weights": "MIT (re-hosted from xiongzhu666/Sky-Segmentation-and-Post-processing)",
              "use": "local only: training data not documented"},
     training_data=["not documented"],

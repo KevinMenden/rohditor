@@ -9,10 +9,11 @@ CC0 photo, preprocessed, and the probability map onnxruntime gives for it).
 
 - `birefnet-lite` (subject) is exported from PyTorch at opset 19, the first
   opset with `DeformConv`, so it needs onnxruntime >= 1.25. It is checked
-  against PyTorch before anything is written.
+  against PyTorch (on noise and on the sample photo) before anything is written.
 - `skyseg` (sky) is only published as ONNX; the pinned file is used as is.
 
-Everything is downloaded at a pinned revision and checked against a SHA-256.
+Everything is downloaded at a pinned revision and checked against a SHA-256,
+including the model code that `trust_remote_code` runs.
 The weights stay local: never commit, attach or ship them.
 """
 
@@ -56,13 +57,17 @@ def fetch(file: HubFile) -> Path:
     return path
 
 
-def export_subject(model: MaskModel, path: Path) -> float:
-    """Export BiRefNet from PyTorch; return the largest difference to PyTorch."""
+def export_subject(model: MaskModel, path: Path, sample: np.ndarray) -> float:
+    """Export BiRefNet from PyTorch; return the largest difference to PyTorch.
+
+    The comparison runs on random noise and on the real sample photo.
+    """
     import torch
     from transformers import AutoModelForImageSegmentation
 
-    fetch(model.weights)  # checks the weights that from_pretrained loads below
-    # The model code comes from the same pinned revision as the weights.
+    # Checks the weights and the model code that from_pretrained loads and runs below.
+    for file in (model.weights, *model.code):
+        fetch(file)
     net = AutoModelForImageSegmentation.from_pretrained(
         model.weights.repo, revision=model.weights.revision, trust_remote_code=True).eval()
     example = torch.zeros(1, 3, model.size, model.size)
@@ -70,12 +75,15 @@ def export_subject(model: MaskModel, path: Path) -> float:
                                 input_names=["image"], output_names=["logits"])
     program.save(str(path))
 
-    probe = np.random.default_rng(0).standard_normal((1, 3, model.size, model.size)).astype(np.float32)
-    with torch.no_grad():
-        expected = net(torch.from_numpy(probe))
-    expected = expected[-1] if isinstance(expected, (list, tuple)) else expected
-    actual = run_onnx(path, probe, model)
-    return float(np.abs(actual - to_probability(expected.numpy(), model)).max())
+    noise = np.random.default_rng(0).standard_normal((1, 3, model.size, model.size)).astype(np.float32)
+    worst = 0.0
+    for probe in (noise, sample):
+        with torch.no_grad():
+            expected = net(torch.from_numpy(probe))
+        expected = expected[-1] if isinstance(expected, (list, tuple)) else expected
+        actual = run_onnx(path, probe, model)
+        worst = max(worst, float(np.abs(actual - to_probability(expected.numpy(), model)).max()))
+    return worst
 
 
 def run_onnx(path: Path, x: np.ndarray, model: MaskModel) -> np.ndarray:
@@ -116,8 +124,9 @@ def model_card(model: MaskModel, onnx_path: Path, max_error: float | None) -> di
 def export(model: MaskModel, out: Path) -> None:
     out.mkdir(parents=True, exist_ok=True)
     part = out / "model.onnx.part"
+    sample = to_input(Image.open(fetch(model.sample_photo)), model.size)
     if model.task == "subject":
-        max_error = export_subject(model, part)
+        max_error = export_subject(model, part, sample)
         if max_error > TOLERANCE:
             raise AssertionError(f"{model.id}: onnxruntime differs from PyTorch by {max_error:.2e} (> {TOLERANCE})")
     else:
@@ -126,7 +135,6 @@ def export(model: MaskModel, out: Path) -> None:
     onnx_path = out / "model.onnx"
     part.replace(onnx_path)
 
-    sample = to_input(Image.open(fetch(model.sample_photo)), model.size)
     np.save(out / "sample_input.npy", sample)
     np.save(out / "sample_output.npy", run_onnx(onnx_path, sample, model))
     card = model_card(model, onnx_path, max_error)
