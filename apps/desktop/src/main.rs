@@ -6,6 +6,7 @@ use clap::{Parser, ValueEnum};
 use eframe::egui;
 use rohditor_demosaic::DemosaicAlgorithm;
 use std::path::PathBuf;
+use std::time::Duration;
 use tracing::warn;
 use tracing_subscriber::EnvFilter;
 
@@ -93,6 +94,19 @@ struct Arguments {
     /// Open the developer diagnostics window at startup.
     #[arg(long)]
     diagnostics: bool,
+
+    /// Save a screenshot of the window to this PNG path, then exit.
+    #[arg(long, value_name = "PATH")]
+    screenshot: Option<PathBuf>,
+
+    /// Seconds to wait before the `--screenshot` capture, so the preview can settle.
+    #[arg(
+        long,
+        value_name = "SECONDS",
+        default_value_t = 5.0,
+        requires = "screenshot"
+    )]
+    screenshot_delay: f32,
 }
 
 fn main() -> eframe::Result {
@@ -103,6 +117,12 @@ fn main() -> eframe::Result {
         warning: settings_warning,
     } = settings::load(config::config_directory().as_deref());
     let processor = resolve_processor(persisted_settings, arguments.processor);
+    let screenshot = arguments.screenshot.clone().map(|path| {
+        (
+            path,
+            Duration::from_secs_f32(arguments.screenshot_delay.max(0.0)),
+        )
+    });
     let effective_settings = resolve_startup_settings(
         persisted_settings,
         arguments.demosaic.map(DemosaicAlgorithm::from),
@@ -115,6 +135,7 @@ fn main() -> eframe::Result {
             effective_settings,
             settings_warning.clone(),
             arguments.diagnostics,
+            screenshot.clone(),
         ) {
             Ok(()) => Ok(()),
             Err(error) => {
@@ -127,6 +148,7 @@ fn main() -> eframe::Result {
                     effective_settings,
                     settings_warning,
                     arguments.diagnostics,
+                    screenshot,
                 )
             }
         },
@@ -137,6 +159,7 @@ fn main() -> eframe::Result {
             effective_settings,
             settings_warning,
             arguments.diagnostics,
+            screenshot.clone(),
         ),
         RendererPreference::Glow => launch(
             eframe::Renderer::Glow,
@@ -145,6 +168,7 @@ fn main() -> eframe::Result {
             effective_settings,
             settings_warning,
             arguments.diagnostics,
+            screenshot.clone(),
         ),
     }
 }
@@ -169,6 +193,7 @@ fn launch(
     settings: AppSettings,
     settings_warning: Option<String>,
     show_diagnostics: bool,
+    screenshot: Option<(PathBuf, Duration)>,
 ) -> eframe::Result {
     let mut options = eframe::NativeOptions {
         renderer,
@@ -185,14 +210,19 @@ fn launch(
         "rohditor",
         options,
         Box::new(move |context| {
-            Ok(Box::new(RohditorApp::new(
+            let application = RohditorApp::new(
                 context,
                 initial_path.clone(),
                 processor,
                 settings,
                 settings_warning.clone(),
                 show_diagnostics,
-            )?))
+                config::config_directory(),
+            )?;
+            Ok(Box::new(match screenshot.clone() {
+                Some((path, delay)) => application.with_screenshot(path, delay),
+                None => application,
+            }))
         }),
     )
 }
