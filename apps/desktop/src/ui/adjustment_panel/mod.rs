@@ -12,7 +12,7 @@ use eframe::egui;
 use rohditor_core::{HSL_CHANNEL_CENTERS, WhiteBalanceMode};
 use rohditor_edit::{
     CameraProfileSelection, HighlightAdjustments, HighlightMethod, LensProfileSelection,
-    OpticsAction, RenderingProfileSelection,
+    OpticsAction, RecipeSection, RenderingProfileSelection,
 };
 use rohditor_engine::tools::Picker;
 
@@ -245,6 +245,28 @@ pub(crate) enum PanelSection {
     FalseColor,
     Defringe,
     Optics,
+}
+
+impl PanelSection {
+    /// The recipe fields this panel section edits.
+    pub(crate) const fn recipe_section(self) -> RecipeSection {
+        match self {
+            Self::Tone => RecipeSection::Tone,
+            Self::Presence => RecipeSection::Presence,
+            Self::WhiteBalance => RecipeSection::WhiteBalance,
+            Self::Saturation => RecipeSection::Saturation,
+            Self::ToneCurve => RecipeSection::ToneCurve,
+            Self::HighlightReconstruction => RecipeSection::HighlightReconstruction,
+            Self::ColorProfile => RecipeSection::ColorProfile,
+            Self::ColorMixer => RecipeSection::ColorMixer,
+            Self::ColorGrading => RecipeSection::ColorGrading,
+            Self::NoiseReduction => RecipeSection::NoiseReduction,
+            Self::CaptureSharpening => RecipeSection::CaptureSharpening,
+            Self::FalseColor => RecipeSection::FalseColor,
+            Self::Defringe => RecipeSection::Defringe,
+            Self::Optics => RecipeSection::Optics,
+        }
+    }
 }
 
 impl AdjustmentPanelOutput {
