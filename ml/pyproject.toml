@@ -31,10 +31,23 @@ train = [
     "pyyaml>=6",
     "tensorboard>=2.20",
 ]
+# AI-mask model export (#170): `uv run --group masks python -m rohditor_ml.masks.export`.
+# BiRefNet's ONNX graph uses DeformConv (opset 19), which needs onnxruntime >= 1.25.
+masks = [
+    { include-group = "train" },
+    "einops>=0.8",
+    "huggingface-hub>=1.0",
+    "kornia>=0.8",
+    "onnxruntime>=1.25",
+    "timm>=1.0",
+    "torchvision>=0.29",
+    "transformers>=5.0",
+]
 
 [tool.uv.sources]
 torch = { index = "pytorch-rocm" }
 triton-rocm = { index = "pytorch-rocm" }
+torchvision = { index = "pytorch-rocm" }
 
 [[tool.uv.index]]
 name = "pytorch-rocm"
