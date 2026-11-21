@@ -29,15 +29,17 @@ train:
   val_real: 128
 
 # Stages run in order; each has its own warmup + cosine learning-rate schedule.
-# On the RX 9070 XT a step of batch 32 takes ~87 ms (0.9 GB peak), so stage 1 is ~7 h.
+# On the RX 9070 XT a step of batch 32 takes ~100-140 ms (0.9 GB peak; the CPU-side loader is
+# the limit, so other load slows it), so stage 1 is ~9-12 h. Interrupt freely: `--resume`
+# continues from `checkpoints/last.pt`, written every `checkpoint_every` steps.
 stages:
   - name: synthetic               # stage 1: on-the-fly synthetic noise on clean mosaics
-    steps: 500000
+    steps: 300000
     lr: 3.0e-4
     warmup: 2000
     real_fraction: 0.0
   - name: real                    # stage 2: fine-tune with real RawNIND pairs mixed in
-    steps: 50000
+    steps: 30000
     lr: 3.0e-5                    # gentle: 1e-4 cost the shippable run 0.2 dB of clean PSNR right after the restart
     warmup: 500
     real_fraction: 0.3

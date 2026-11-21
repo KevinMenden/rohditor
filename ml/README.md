@@ -68,74 +68,158 @@ with a validity mask.
 **Optimisation:** AdamW, bf16, gradient clipping at 1.0, batch 32. Each stage has its
 own linear warmup and cosine decay.
 
-| variant | licenses | stage 1 (synthetic noise) | stage 2 (20–30% real pairs) | status |
+| variant | licenses | stage 1 (synthetic noise) | stage 2 (real pairs mixed in) | status |
 |---|---|---|---|---|
-| `shippable` | CC0, CC BY | 300k steps, lr 3e-4 | 10k steps, lr 3e-5* | GPL-3.0 weights, published as a release asset (not in git) |
-| `full` | + CC BY-SA | 500k steps, lr 3e-4 | 50k steps, lr 3e-5 | **private, never published or shipped** |
+| `shippable` | CC0, CC BY | 300k steps, lr 3e-4 | 10k steps, 20% real, lr 3e-5 | GPL-3.0 weights, published as a release asset (not in git) |
+| `full` | + CC BY-SA | 300k steps, lr 3e-4 | 30k steps, 30% real, lr 3e-5 | **private, never published or shipped** |
 
-\* The trained shippable model used lr 1e-4 in stage 2.
+The current `shippable` model predates two config changes. It was trained without the
+procedural images and with lr 1e-4 in stage 2. `full` has both changes.
 
-### Commands
+## Setup
 
-These run from `ml/`, in the rocm distrobox.
+Training runs in the `rocm` distrobox on an RX 9070 XT. The home directory is shared
+with the host, so the container has its own environment, `.venv-rocm`. Run everything
+from `ml/`:
 
 ```sh
-UV_PROJECT_ENVIRONMENT=.venv-rocm uv sync --group train   # never a plain `uv sync` here: it removes torch
-uv run python -m rohditor_ml.data.build --subset full     # download -> shards (host .venv is fine)
-UV_PROJECT_ENVIRONMENT=.venv-rocm uv run --group train python -m rohditor_ml.train.store   # shards -> memmapped npy (~54 GB)
-
-export UV_PROJECT_ENVIRONMENT=.venv-rocm PYTHONUNBUFFERED=1
-nohup uv run --group train python -m rohditor_ml.train --config configs/unet_v1_full.yaml --resume > runs/full.log 2>&1 &
-pkill -f rohditor_ml.train                                # stop: last.pt is saved every 2,500 steps
-nohup runs/full/train.sh >> runs/full.log 2>&1 &          # resume
-.venv-rocm/bin/tensorboard --logdir runs                  # losses, learning rate, validation previews
-
-uv run --group train python -m rohditor_ml.train.export --run-dir runs/full   # model.onnx + model.json
-uv run --group train python -m rohditor_ml.eval --run-dirs runs/shippable runs/full --out-dir runs/eval
+UV_PROJECT_ENVIRONMENT=.venv-rocm uv sync --group train   # torch, onnx, tensorboard
 ```
 
-`configs/unet_v1_smoke.yaml` is a 40k-step run on 1,000 patches per set, for checking
-the pipeline end to end. Each run folder holds `config.yaml`, `train.sh` (the exact
-command), `log.csv`, `tb/` and `checkpoints/`.
+Never run a plain `uv sync` with `UV_PROJECT_ENVIRONMENT=.venv-rocm`: it removes torch.
+The data tests and the CPU smoke test also run in the host `.venv`, without torch.
 
-**Export:** ONNX opset 18 with dynamic H and W, checked against PyTorch with
-onnxruntime (max error < 1e-4; shippable: 3.3e-6). `model.json` records the contract,
-the license, dataset attribution and the training commit.
+Data, once:
+
+```sh
+uv run python -m rohditor_ml.data.build --subset full     # download -> data/shards, manifest, noise fit
+UV_PROJECT_ENVIRONMENT=.venv-rocm uv run --group train python -m rohditor_ml.train.store
+# -> data/npy: memmapped arrays (~54 GB); unchanged shard groups are skipped on a rerun
+```
+
+## Training
+
+```sh
+export UV_PROJECT_ENVIRONMENT=.venv-rocm PYTHONUNBUFFERED=1
+
+# start (in the background; output goes to runs/<variant>.log)
+nohup uv run --group train python -m rohditor_ml.train --config configs/unet_v1_shippable.yaml --resume \
+    > runs/shippable.log 2>&1 &
+
+tail -f runs/shippable.log                     # progress
+.venv-rocm/bin/tensorboard --logdir runs       # losses, lr, validation PSNR and preview images
+pkill -f rohditor_ml.train                     # stop at any time
+nohup runs/shippable/train.sh >> runs/shippable.log 2>&1 &   # resume
+```
+
+- **Run folders:** a run writes to `runs/<variant>/` (or `--run-dir`). The folder
+  holds `config.yaml`, `train.sh` (the exact command and commit), `log.csv`, `tb/`,
+  `checkpoints/` and, at the end, `model.pt`.
+- **Checkpoints and resume:** `checkpoints/last.pt` is written atomically every
+  2,500 steps, and `stage<i>-<name>.pt` at the end of each stage. `--resume` restores
+  the model, optimizer, stage and step. It re-reads the schedule from the config file,
+  so don't edit a config while its run is unfinished.
+- **Starting over:** without `--resume` the trainer refuses to overwrite a run.
+  Delete or rename the folder to start fresh.
+- **GPU crashes:** a crash (seen once: `HSA_STATUS_ERROR_ILLEGAL_INSTRUCTION`) stops
+  the run. Resume it as above.
+- **Speed:** about 250–310 samples/s, which puts shippable at 9–10 h and full at
+  11–13 h. The data loader runs on the CPU, so compiles and other load slow training.
+  The full variant reads the whole 42 GB of patches, which should stay in the page
+  cache, so close large applications if RAM is tight.
+- **Smoke run:** `configs/unet_v1_smoke.yaml` is 40k steps on 1,000 patches per set,
+  for checking the pipeline end to end in about an hour.
+
+## Export
+
+```sh
+uv run --group train python -m rohditor_ml.train.export --run-dir runs/shippable   # -> runs/shippable/export/
+```
+
+- **Format:** ONNX opset 18 with dynamic H and W (multiples of 16). Export and the
+  check run on the CPU, comparing onnxruntime with PyTorch at three sizes (it fails
+  above 1e-4; shippable 3.3e-6, full 3.8e-6).
+- **`model.json`:** records the contract, tiling, parameters and MACs, the ONNX
+  `sha256`, the weights license, the training commit, licenses and stages, and every
+  dataset source with its license and attribution.
 
 ## Evaluation
 
-The **baselines** are MHC, RCD and AMaZE run through `rohditor-cli demosaic-npy`, plus
+```sh
+cargo build --release -p rohditor-cli          # the baselines (also built automatically if missing)
+uv run --group train python -m rohditor_ml.eval --run-dirs runs/shippable runs/full --out-dir runs/eval
+```
+
+**Options:**
+- `--crops N`: crops per set and tier (default 2).
+- `--private-limit N`: how many raws from `testdata/private` to crop (0 for none).
+- `--sweep-camera`: the camera whose noise drives the PixelShift sweep (default: Sony A7C).
+- `--device`
+
+Two models take about 10 min. It writes `report.md` (gate and tables), `scores.csv`
+(per case), `summary.json` and `crops/` (labelled side-by-side 100% crops).
+
+**Baselines:** MHC, RCD and AMaZE, run through `rohditor-cli demosaic-npy`, plus
 `rcd+nr(best)`: RCD followed by Rohditor's noise reduction, at the best of five
-strengths per ISO tier.
+strengths per set and ISO tier.
 
-Scores are PSNR and SSIM, linear and sRGB, with an 8 px margin, on these sets:
+**Sets:** inputs are seeded, so every method and run sees the same cases.
+- **PixelShift sweep:** 96 test patches with synthetic noise at ISO 100–51200 of the
+  sweep camera, using its measured K per ISO.
+- **Real pairs:** 384 held-out RawNIND patches, tiered by ISO and scored 2×2-binned
+  with a mask.
+- **Unseen camera (Nikon D40):** its real pairs, plus clean patches with synthetic
+  noise at its own measured ISOs.
+- **Charts:** a zone plate and a slanted edge, clean and at base-ISO noise. They have
+  no numeric gate; check them in `crops/charts_*.png`.
+- **Private corpus:** visual crops only, never published.
 
-- **PixelShift sweep:** synthetic noise at ISO 100 to 51200 of a Sony A7C.
-- **Real pairs:** held-out RawNIND scenes, scored 2×2-binned.
-- **Unseen camera:** the Nikon D40.
-- **Charts:** a zone plate and a slanted edge.
+**Metrics:** PSNR and SSIM, linear and sRGB, with an 8 px margin.
 
-**Gate:** at least +1 dB linear PSNR over `rcd+nr(best)` at the top ISO tier, and at
-least −0.3 dB at base ISO.
+**Gate (shippable):** at least +1 dB linear PSNR over `rcd+nr(best)` at the top ISO
+tier, at least −0.3 dB at base ISO, and no visible artifacts on the charts.
 
 ## Results
 
-These are for `shippable` (`runs/eval-shippable/report.md`), as gain in linear PSNR
-over `rcd+nr(best)`:
+These come from `runs/eval-full/report.md` and are linear PSNR in dB.
 
-| set | base ISO | top ISO |
-|---|---|---|
-| PixelShift sweep | +0.92 dB (ISO 100) | +12.71 dB (ISO 51200) |
-| real pairs | +1.44 dB (ISO ≤800) | +8.11 dB (ISO 6400+) |
-| unseen camera, real | +1.44 dB (ISO ≤800) | +2.20 dB (ISO 1600–3200) |
+**Gate:** gain over `rcd+nr(best)`. Both variants pass.
 
-- **Gate:** passed.
-- **High ISO:** at ISO 51200 the model keeps 50.7 dB against 38.0 for the baseline,
-  and SSIM 0.97 against 0.64.
-- **Zone plate:** 21.6 dB, the same as RCD (AMaZE: 27.8).
-- **Slanted edge:** 43.9 dB against RCD's 64.0. There is a colour fringe one pixel
-  wide on the perfect step. The procedural patches are aimed at this; they are not in
-  the shippable model yet.
+| set | tier | shippable | full |
+|---|---|---|---|
+| PixelShift sweep | ISO 51200 | +12.71 | +12.67 |
+| PixelShift sweep | ISO 100 | +0.92 | +0.91 |
+| real pairs | ISO 6400+ | +8.11 | +8.85 |
+| real pairs | ISO 0–800 | +1.44 | +2.05 |
+
+**Absolute scores:**
+
+| set | tier | rcd+nr(best) | shippable | full |
+|---|---|---|---|---|
+| PixelShift sweep | ISO 100 / 3200 / 51200 | 53.97 / 49.77 / 38.03 | 54.89 / 53.70 / 50.73 | 54.88 / 53.64 / 50.69 |
+| real pairs | ISO 0–800 / 1600–3200 / 6400+ | 58.03 / 54.37 / 45.72 | 59.46 / 57.00 / 53.83 | 60.07 / 57.79 / 54.57 |
+| unseen camera, real | ISO 0–800 / 1600–3200 | 49.56 / 45.21 | 51.00 / 47.41 | 51.35 / 47.47 |
+| unseen camera, synthetic | ISO 400 / 3200 | 44.39 / 36.48 | 45.40 / 42.86 | 45.34 / 42.72 |
+| zone plate (clean) | | RCD 21.6, AMaZE 27.8 | 21.6 | 24.2 |
+| slanted edge (clean) | | RCD 64.0, AMaZE 74.1 | 43.9 | 45.7 |
+
+- **High ISO:** at ISO 51200 the network keeps about 50.7 dB and SSIM 0.97, against
+  38.0 dB and 0.64 for the baseline. At base ISO it is still about 1 dB better.
+- **Full vs shippable:** full gains 0.6–0.8 dB on real pairs, and both are equal on
+  synthetic noise. Part of full's lead, especially on the charts, comes from the
+  procedural images and the lower stage-2 lr rather than the extra data, because
+  shippable predates both.
+- **Open: slanted edge.** Both models leave a colour fringe about one pixel wide on
+  the perfect step, which RCD doesn't show. It is smaller in full. Retraining
+  shippable with the current config is the next step. If the fringe remains, raise
+  `procedural_fraction`.
+- **Inference time** for a 24 MP image (network only, 96 tiles of 512 px with a 32 px
+  halo):
+  - GPU, PyTorch fp32: 0.2 s (bf16 is slower on this card). The whole image in one
+    pass needs 10.6 GB.
+  - CPU, onnxruntime on a Ryzen 5 2600X: about 16 s.
+  - For comparison, classic RCD takes 0.75 s and RCD + noise reduction 2.2 s on
+    the CPU.
 
 ## Problems and fixes
 
@@ -148,8 +232,13 @@ over `rcd+nr(best)`:
   samples/s. The npz shards are now converted to memmapped `.npy` files and read
   sequentially once at start-up (about 46 s for 42 GB), which gives over 1,000
   samples/s.
-- **Speed:** the GPU is the limit at about 360 samples/s whatever the batch size, so
-  batch 32 (0.9 GB of VRAM) is kept. Training runs at about 9.6 steps/s.
+- **Speed:** the GPU alone manages about 360 samples/s whatever the batch size
+  (32 to 256), so batch 32 is kept (0.9 GB of VRAM). Training reaches 250–310
+  samples/s, limited by the CPU-side loader. A `rustc` build running alongside
+  halved it.
+- **RAM for `full`:** it reads all 42 GB of patches (shippable only touches a third).
+  With about 20 GB of applications open, that no longer fits in 62 GB, and patches
+  are read from disk again. Closing large applications helps.
 - **Zone plate washed out to grey (smoke run):** K was drawn up to the fit's
   extrapolated `k_max` (about ISO 160k for the A7C), so the model learned to smooth
   hard. Limiting K to the measured ISO range fixed it (18.6 → 21.6 dB). The old run
@@ -158,6 +247,7 @@ over `rcd+nr(best)`:
   gains (+15 dB). Tiers now come from the measured K per ISO.
 - **Loss and learning-rate jump at stage 2:** this is by design. Each stage restarts
   its warmup, and real pairs have a higher loss. Real-pair validation PSNR rose
-  (+0.26 dB), but lr 1e-4 cost 0.07 dB on clean, hence 3e-5 from now on.
+  (+0.26 dB), but lr 1e-4 cost 0.07 dB on clean. With 3e-5 (full): +0.6 dB on real
+  pairs and −0.04 dB on clean.
 - **Crop size 240, not 248:** 248/2 = 124 does not survive three 2× poolings.
 - **Flips:** a flip shifts the RGGB phase, so flipped crops start at an odd offset.

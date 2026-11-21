@@ -89,7 +89,6 @@ mod lifecycle;
 mod masks;
 mod noise_reduction;
 mod screenshot;
-mod section_reset;
 mod tools;
 #[cfg(test)]
 mod ui_tests;
@@ -1868,8 +1867,11 @@ impl RohditorApp {
             }
             if let Some(section) = output.reset_section {
                 let defaults = default_recipe_for_document(document);
-                let next =
-                    section_reset::reset_section(document.edits.recipe(), &defaults, section);
+                let next = rohditor_edit::copy_sections(
+                    document.edits.recipe(),
+                    &defaults,
+                    &[section.recipe_section()],
+                );
                 changed |= document.edits.set_discrete(next);
                 if section == PanelSection::WhiteBalance {
                     // Same reason as reset-all: forget the hidden manual choice.

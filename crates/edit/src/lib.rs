@@ -14,6 +14,7 @@ mod presence;
 mod profile;
 mod raw;
 mod recipe;
+mod section;
 mod sharpening;
 mod validation;
 
@@ -36,5 +37,6 @@ pub use recipe::{
     ROHDITOR_MATCHED_PROCESS_VERSION, ROHDITOR_STANDARD_PROCESS_VERSION, RenderingAdjustments,
     RenderingProfileSelection,
 };
+pub use section::{RecipeSection, blend_sections, copy_sections};
 pub use sharpening::*;
 pub use validation::*;
