@@ -56,6 +56,10 @@ never depends on `rohditor-desktop`).
   GPU suites when changing decoder, full-resolution, or GPU behavior:
   `cargo test --release --workspace --tests -- --ignored --nocapture` and
   `cargo test --release -p rohditor-gpu -- --ignored --nocapture`.
+- When changing the desktop UI, verify it visually with the `rohditor-ui-testing` skill
+  (`.agents/skills/`): headless `egui_kittest` scenarios with PNG snapshots, and a
+  `--screenshot` flag for the real window. They are ignored by default (need a wgpu adapter):
+  `cargo test -p rohditor-desktop ui_tests -- --ignored`.
 - Benchmark image-processing changes on representative dimensions and add
   small asymmetric correctness tests. Keep UI rendering performance separate
   from image-processing performance.

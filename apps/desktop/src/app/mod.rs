@@ -31,7 +31,6 @@ use tracing::{info, warn};
 use rohditor_edit::HighlightAdjustments;
 
 use crate::ProcessorPreference;
-use crate::config;
 use crate::ui::ViewMode;
 use crate::ui::adjustment_panel::{
     self, AdjustmentInteraction, AdjustmentRange, AdjustmentRanges, AdjustmentTarget,
@@ -89,7 +88,10 @@ mod info;
 mod lifecycle;
 mod masks;
 mod noise_reduction;
+mod screenshot;
 mod tools;
+#[cfg(test)]
+mod ui_tests;
 
 use camera_look::CameraLookState;
 use gpu::{
@@ -346,6 +348,11 @@ pub(crate) struct RohditorApp {
     queued_recipe_snapshots: HashMap<PathBuf, (u64, EditRecipe)>,
     camera_profiles: CameraProfileRegistry,
     settings_dialog: Option<SettingsDialog>,
+    /// Where settings, session and camera profiles persist. Injected so tests
+    /// can use a scratch directory instead of the user's real one.
+    config_dir: Option<PathBuf>,
+    /// Set by `--screenshot`: save one frame and quit.
+    screenshot: Option<screenshot::ScreenshotRequest>,
     ui_renderer: &'static str,
     processor_preference: ProcessorPreference,
     gpu: Option<GpuRuntime>,
@@ -409,6 +416,12 @@ fn white_balance_preview_request(
 }
 
 impl RohditorApp {
+    /// Arm the `--screenshot` capture: after `delay`, save a frame and exit.
+    pub(crate) fn with_screenshot(mut self, path: PathBuf, delay: Duration) -> Self {
+        self.screenshot = Some(screenshot::ScreenshotRequest::new(path, delay));
+        self
+    }
+
     pub(crate) fn new(
         context: &eframe::CreationContext<'_>,
         initial_path: Option<PathBuf>,
@@ -416,6 +429,7 @@ impl RohditorApp {
         settings: AppSettings,
         settings_warning: Option<String>,
         show_diagnostics: bool,
+        config_dir: Option<PathBuf>,
     ) -> std::io::Result<Self> {
         theme::apply(&context.egui_ctx);
         let ui_renderer = if context.wgpu_render_state.is_some() {
@@ -457,8 +471,8 @@ impl RohditorApp {
         // Restore the last browsed folder when the app was not given a file.
         let mut view_mode = ViewMode::default();
         if initial_path.is_none()
-            && let Some(directory) = config::config_directory()
-            && let Some(folder) = session::load_last_folder(&directory)
+            && let Some(directory) = &config_dir
+            && let Some(folder) = session::load_last_folder(directory)
             && catalog_coordinator.scan_folder(folder).is_ok()
         {
             view_mode = ViewMode::Library;
@@ -478,8 +492,10 @@ impl RohditorApp {
             recipe_save_status: None,
             recipe_save_error: None,
             queued_recipe_snapshots: HashMap::new(),
-            camera_profiles: CameraProfileRegistry::load(config::config_directory().as_deref()),
+            camera_profiles: CameraProfileRegistry::load(config_dir.as_deref()),
             settings_dialog: None,
+            config_dir,
+            screenshot: None,
             ui_renderer,
             processor_preference,
             gpu,
@@ -575,8 +591,8 @@ impl RohditorApp {
             warn!(%error, "could not start the catalog scan");
             return;
         }
-        if let Some(directory) = config::config_directory() {
-            session::store_last_folder(&directory, &folder);
+        if let Some(directory) = &self.config_dir {
+            session::store_last_folder(directory, &folder);
         }
         self.view_mode = ViewMode::Library;
     }
@@ -861,7 +877,7 @@ impl RohditorApp {
             self.pending_white_balance_pick = None;
             self.refresh_current_presentation(context);
         }
-        match settings::save(config::config_directory().as_deref(), next) {
+        match settings::save(self.config_dir.as_deref(), next) {
             Ok(()) => {
                 self.settings_warning = None;
                 self.settings_dialog = None;
@@ -3563,6 +3579,7 @@ impl eframe::App for RohditorApp {
         // still continuing, splitting it across undo steps.
         self.update_autosave(context);
         self.update_window_title(context);
+        self.update_screenshot(context);
         // eframe normally wakes the event loop from the worker's
         // `request_repaint` callback. Keep a short polling repaint while work
         // is visible as a fallback for compositor/renderer combinations where
