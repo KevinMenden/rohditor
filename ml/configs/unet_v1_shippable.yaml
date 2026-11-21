@@ -6,7 +6,7 @@ licenses: [CC0-1.0, CC-BY-4.0]
 
 # Stage 1 is identical to `full`. Stage 2 only has the CC0 RawNIND pairs (~1.7k
 # train patches against ~10.7k for `full`), so it is shorter and mixes in fewer
-# of them; the base schedule would show each of them ~280 times.
+# of them; the base schedule would show each of them ~170 times.
 stages:
   - name: synthetic
     steps: 300000
