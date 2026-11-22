@@ -2,66 +2,10 @@
 
 use eframe::egui;
 use rohditor_core::{OutputMedium, OutputSharpening, OutputSharpeningStrength};
+use rohditor_engine::export_options::{ExportKind, ExportOptions, PngDepth, SizeMode};
 
 use super::theme::colors;
 use super::widgets;
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum ExportKind {
-    #[default]
-    Jpeg,
-    Png,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum PngDepth {
-    #[default]
-    Eight,
-    Sixteen,
-}
-
-/// Which size control the export dialog shows.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum SizeMode {
-    #[default]
-    Original,
-    LongEdge,
-    Fit,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct ExportUiSettings {
-    pub kind: ExportKind,
-    pub jpeg_quality: u8,
-    pub png_depth: PngDepth,
-    pub size_mode: SizeMode,
-    pub long_edge: u32,
-    pub fit_width: u32,
-    pub fit_height: u32,
-    /// Export-only; `None` is off.
-    pub sharpening: Option<OutputSharpening>,
-    pub dither: bool,
-    pub safe_metadata: bool,
-    pub overwrite: bool,
-}
-
-impl ExportUiSettings {
-    pub(crate) const fn with_jpeg_quality(jpeg_quality: u8) -> Self {
-        Self {
-            kind: ExportKind::Jpeg,
-            jpeg_quality,
-            png_depth: PngDepth::Eight,
-            size_mode: SizeMode::Original,
-            long_edge: 2048,
-            fit_width: 2048,
-            fit_height: 2048,
-            sharpening: None,
-            dither: false,
-            safe_metadata: true,
-            overwrite: false,
-        }
-    }
-}
 
 /// What the dialog needs to know about the open photo.
 #[derive(Debug, Clone, Copy)]
@@ -78,7 +22,7 @@ pub(crate) fn show(
     context: &egui::Context,
     open: &mut bool,
     model: &ExportDialogModel,
-    settings: &mut ExportUiSettings,
+    settings: &mut ExportOptions,
 ) -> bool {
     let mut export_requested = false;
     egui::Window::new("Export")
@@ -110,7 +54,7 @@ pub(crate) fn show(
     export_requested
 }
 
-fn show_export_settings(ui: &mut egui::Ui, settings: &mut ExportUiSettings) {
+fn show_export_settings(ui: &mut egui::Ui, settings: &mut ExportOptions) {
     let mut kind = settings.kind;
     widgets::dropdown(
         ui,
@@ -175,7 +119,7 @@ fn pixel_field(value: &mut u32) -> egui::DragValue<'_> {
 }
 
 /// Output size: original, long edge, or bounding box. Never upscales.
-fn show_size_controls(ui: &mut egui::Ui, settings: &mut ExportUiSettings) {
+fn show_size_controls(ui: &mut egui::Ui, settings: &mut ExportOptions) {
     let mut mode = settings.size_mode;
     widgets::dropdown(
         ui,
@@ -269,7 +213,7 @@ mod tests {
 
     #[test]
     fn export_ui_defaults_are_stable_and_non_destructive() {
-        let settings = ExportUiSettings::with_jpeg_quality(87);
+        let settings = ExportOptions::with_jpeg_quality(87);
         assert_eq!(settings.kind, ExportKind::Jpeg);
         assert_eq!(settings.jpeg_quality, 87);
         assert_eq!(settings.png_depth, PngDepth::Eight);
@@ -278,7 +222,7 @@ mod tests {
     }
 
     /// Runs one frame of the dialog and reports `(still open, export asked)`.
-    fn frame(model: ExportDialogModel, settings: &mut ExportUiSettings) -> (bool, bool) {
+    fn frame(model: ExportDialogModel, settings: &mut ExportOptions) -> (bool, bool) {
         let context = egui::Context::default();
         let mut open = true;
         let mut requested = false;
@@ -297,7 +241,7 @@ mod tests {
 
     #[test]
     fn dialog_stays_open_and_does_not_export_until_asked() {
-        let mut settings = ExportUiSettings::with_jpeg_quality(90);
+        let mut settings = ExportOptions::with_jpeg_quality(90);
         for (ready, in_progress) in [(true, false), (false, false), (true, true)] {
             let model = ExportDialogModel { ready, in_progress };
             assert_eq!(frame(model, &mut settings), (true, false));

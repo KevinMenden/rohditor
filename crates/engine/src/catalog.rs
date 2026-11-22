@@ -20,6 +20,8 @@ use tracing::{info, warn};
 
 use crate::wake::WakeFn;
 
+#[path = "catalog/library.rs"]
+pub mod library;
 #[path = "catalog/state.rs"]
 mod state;
 
