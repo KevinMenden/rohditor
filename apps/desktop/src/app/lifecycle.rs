@@ -288,8 +288,8 @@ mod tests {
 
     use super::{is_gesture_orphaned, reap_orphaned_gesture};
     use crate::app::apply_adjustment_interaction;
-    use crate::app::autosave::Autosave;
     use crate::ui::adjustment_panel::{AdjustmentInteraction, AdjustmentTarget};
+    use rohditor_engine::autosave::Autosave;
 
     const FRAME: f64 = 1.0 / 60.0;
     /// A point on the mounted slider's track, and a modest drag along it. The

@@ -1,17 +1,19 @@
-//! Observe recipe revisions without coupling persistence to preview rendering.
+//! Debounce for recipe sidecar saves: observe recipe revisions without
+//! coupling persistence to preview rendering. A frontend feeds it the current
+//! revision and drag state once per frame and saves when it reports due.
 use std::time::{Duration, Instant};
 
 const SAVE_DELAY: Duration = Duration::from_secs(1);
 
-#[derive(Default)]
-pub(super) struct Autosave {
+#[derive(Debug, Default)]
+pub struct Autosave {
     revision: u64,
     due: Option<Instant>,
     dragging: bool,
 }
 
 impl Autosave {
-    pub(super) fn observe(&mut self, revision: u64, dragging: bool, now: Instant) -> bool {
+    pub fn observe(&mut self, revision: u64, dragging: bool, now: Instant) -> bool {
         let changed = revision != self.revision || (self.dragging && !dragging);
         if changed {
             self.revision = revision;
@@ -21,7 +23,7 @@ impl Autosave {
         changed
     }
 
-    pub(super) fn take_due(&mut self, now: Instant) -> bool {
+    pub fn take_due(&mut self, now: Instant) -> bool {
         if !self.dragging && self.due.is_some_and(|due| now >= due) {
             self.due = None;
             return true;
@@ -29,7 +31,7 @@ impl Autosave {
         false
     }
 
-    pub(super) fn delay(&self, now: Instant) -> Option<Duration> {
+    pub fn delay(&self, now: Instant) -> Option<Duration> {
         (!self.dragging)
             .then_some(self.due)
             .flatten()

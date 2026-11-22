@@ -6,6 +6,7 @@
 //! can decode textures lazily.
 
 use eframe::egui;
+use rohditor_engine::catalog::library::LibrarySort;
 use std::ops::Range;
 
 use super::icons::{self, Icon};
@@ -31,22 +32,11 @@ pub(crate) enum LibraryEntryState {
     Failed,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum LibrarySort {
-    #[default]
-    Filename,
-    CaptureDate,
-}
-
-impl LibrarySort {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Filename => "Filename",
-            Self::CaptureDate => "Capture date",
-        }
+fn sort_label(sort: LibrarySort) -> &'static str {
+    match sort {
+        LibrarySort::Filename => "Filename",
+        LibrarySort::CaptureDate => "Capture date",
     }
-
-    const ALL: [Self; 2] = [Self::Filename, Self::CaptureDate];
 }
 
 #[derive(Clone)]
@@ -165,9 +155,9 @@ fn show_header(ui: &mut egui::Ui, model: &LibraryModel, output: &mut LibraryOutp
 
 fn show_sort_selector(ui: &mut egui::Ui, current: LibrarySort) -> Option<LibrarySort> {
     let mut selected = current;
-    widgets::dropdown(ui, "library_sort", "Sort", current.label(), |ui| {
+    widgets::dropdown(ui, "library_sort", "Sort", sort_label(current), |ui| {
         for option in LibrarySort::ALL {
-            ui.selectable_value(&mut selected, option, option.label());
+            ui.selectable_value(&mut selected, option, sort_label(option));
         }
     });
     (selected != current).then_some(selected)
