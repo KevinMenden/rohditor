@@ -20,6 +20,8 @@ pub(crate) struct ToolbarModel {
     pub source_scale_selected: bool,
     pub zoom_label: String,
     pub diagnostics_open: bool,
+    /// The viewport's clipping overlay is on.
+    pub clipping_selected: bool,
     pub dirty: bool,
     pub export_ready: bool,
 }
@@ -36,6 +38,7 @@ pub(crate) struct ToolbarOutput {
     pub actual_size: bool,
     pub settings: bool,
     pub toggle_diagnostics: bool,
+    pub toggle_clipping: bool,
     pub save: bool,
     pub export: bool,
     pub view_mode: Option<ViewMode>,
@@ -53,6 +56,7 @@ impl ToolbarOutput {
         self.actual_size |= other.actual_size;
         self.settings |= other.settings;
         self.toggle_diagnostics |= other.toggle_diagnostics;
+        self.toggle_clipping |= other.toggle_clipping;
         self.save |= other.save;
         self.export |= other.export;
         self.view_mode = other.view_mode.or(self.view_mode);
@@ -168,6 +172,12 @@ pub(crate) fn show_top(context: &egui::Context, model: &ToolbarModel) -> Toolbar
                             false,
                         );
                         let _ = before_after;
+                        output.toggle_clipping =
+                            widgets::toolbar_button(ui, "Clipping", model.clipping_selected, true)
+                                .on_hover_text(
+                                    "Tint clipped highlights red and clipped shadows blue (J)",
+                                )
+                                .clicked();
                         output.actual_size = widgets::toolbar_button(
                             ui,
                             if narrow { "1:1" } else { "Source 1:1" },

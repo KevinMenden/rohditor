@@ -1,5 +1,7 @@
 use rohditor_image::DisplayRgbImage;
 
+use super::clipping::{is_highlight_clipped, is_shadow_clipped};
+
 const HISTOGRAM_BINS: usize = 256;
 
 /// Display-referred RGB and luminance distribution for one rendered image.
@@ -75,10 +77,10 @@ impl Histogram {
                 .clamp(0.0, 255.0) as usize;
         self.luminance[luminance] += 1;
         for (index, value) in [red, green, blue].into_iter().enumerate() {
-            if value == 0 {
+            if is_shadow_clipped(value) {
                 self.shadow_clipped[index] += 1;
             }
-            if value == u8::MAX {
+            if is_highlight_clipped(value) {
                 self.highlight_clipped[index] += 1;
             }
         }

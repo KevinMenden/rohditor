@@ -233,6 +233,8 @@ pub(crate) struct ViewportModel<'a> {
     pub has_document: bool,
     pub preparing: bool,
     pub texture: Option<&'a PreviewTexture>,
+    /// Clipped-pixel tint over the whole preview; `None` when the overlay is off.
+    pub clipping: Option<&'a egui::TextureHandle>,
     pub source: Option<PreviewSource>,
     pub picker_mode: Option<Picker>,
     pub crop: Option<CropOverlayModel>,
@@ -324,6 +326,11 @@ pub(crate) fn show(
                 egui::Color32::from_black_alpha(85),
             );
             texture.paint(ui, image_rect);
+            if let Some(clipping) = model.clipping {
+                egui::Image::new(clipping)
+                    .fit_to_exact_size(image_rect.size())
+                    .paint_at(ui, image_rect);
+            }
             ui.painter().rect_stroke(
                 image_rect,
                 0.0,

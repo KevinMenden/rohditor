@@ -80,6 +80,7 @@ const LIBRARY_VISIBLE_MARGIN: usize = 24;
 
 mod autosave;
 mod camera_look;
+mod clipping;
 #[path = "events.rs"]
 mod events;
 #[path = "gpu.rs"]
@@ -183,6 +184,7 @@ struct Document {
     preview_source: Option<PreviewSource>,
     histogram: Option<Histogram>,
     histogram_revision: Option<u64>,
+    clipping: clipping::ClippingState,
     pending_gpu_histogram: Option<PendingGpuHistogram>,
     gpu_histogram_due: Option<(PreviewTicket, Instant)>,
     source_scale_requested: bool,
@@ -234,6 +236,7 @@ impl Document {
             preview_source: None,
             histogram: None,
             histogram_revision: None,
+            clipping: clipping::ClippingState::default(),
             pending_gpu_histogram: None,
             gpu_histogram_due: None,
             source_scale_requested: false,
@@ -367,6 +370,8 @@ pub(crate) struct RohditorApp {
     processor_note: Option<String>,
     startup_error: Option<String>,
     show_diagnostics: bool,
+    /// The viewport's clipping overlay (`J`). A view aid: not persisted.
+    show_clipping: bool,
     /// The active tool and its transient state (pickers, crop draft).
     tool: ActiveTool,
     color_mixer_channel: usize,
@@ -534,6 +539,7 @@ impl RohditorApp {
             processor_note,
             startup_error,
             show_diagnostics,
+            show_clipping: false,
             tool: ActiveTool::default(),
             color_mixer_channel: 0,
             pending_white_balance_pick: None,
@@ -1028,7 +1034,8 @@ impl RohditorApp {
                         frame,
                         texture_id,
                     });
-                    document.gpu_histogram_due = (diagnostics.resolution == PreviewResolution::Fit)
+                    document.gpu_histogram_due = (diagnostics.resolution == PreviewResolution::Fit
+                        || self.show_clipping)
                         .then_some((ticket, Instant::now() + GPU_HISTOGRAM_DEBOUNCE));
                     document.texture = Some(PreviewTexture::Gpu {
                         id: texture_id,
@@ -1251,7 +1258,8 @@ impl RohditorApp {
                         frame,
                         texture_id,
                     });
-                    document.gpu_histogram_due = (preview.resolution == PreviewResolution::Fit)
+                    document.gpu_histogram_due = (preview.resolution == PreviewResolution::Fit
+                        || self.show_clipping)
                         .then_some((current_ticket, Instant::now() + GPU_HISTOGRAM_DEBOUNCE));
                     document.texture = Some(PreviewTexture::Gpu {
                         id: texture_id,
@@ -1398,16 +1406,14 @@ impl RohditorApp {
             let readback_latency = pending.started.elapsed();
             match pending.readback.try_finish() {
                 Ok(Some(readback)) => {
-                    let histogram = usize::try_from(readback.width)
-                        .ok()
-                        .and_then(|width| {
-                            usize::try_from(readback.height)
-                                .ok()
-                                .map(|height| (width, height))
-                        })
-                        .and_then(|(width, height)| {
-                            Histogram::from_rgba8(width, height, &readback.rgba)
-                        });
+                    let size = usize::try_from(readback.width).ok().and_then(|width| {
+                        usize::try_from(readback.height)
+                            .ok()
+                            .map(|height| (width, height))
+                    });
+                    let histogram = size.and_then(|(width, height)| {
+                        Histogram::from_rgba8(width, height, &readback.rgba)
+                    });
                     if let Some(document) = self.document.as_mut().filter(|document| {
                         document.ticket() == pending.ticket
                             && document
@@ -1418,6 +1424,17 @@ impl RohditorApp {
                     {
                         document.histogram = Some(histogram);
                         document.histogram_revision = Some(pending.ticket.revision);
+                        if self.show_clipping
+                            && let Some((width, height)) = size
+                        {
+                            clipping::install_gpu_readback(
+                                context,
+                                document,
+                                width,
+                                height,
+                                &readback.rgba,
+                            );
+                        }
                         if let Some(diagnostics) = document.preview_diagnostics.as_mut() {
                             diagnostics.gpu_histogram_readback = Some(readback_latency);
                         }
@@ -1656,6 +1673,7 @@ impl RohditorApp {
                 .as_ref()
                 .map_or_else(|| "FIT".to_owned(), |document| document.view.zoom_label()),
             diagnostics_open: self.show_diagnostics,
+            clipping_selected: self.show_clipping,
             dirty: self.document.as_ref().is_some_and(Document::is_dirty),
             export_ready: self.view_mode == ViewMode::Develop
                 && self.document.as_ref().is_some_and(|document| {
@@ -1680,6 +1698,9 @@ impl RohditorApp {
         }
         if actions.toggle_diagnostics {
             self.show_diagnostics = !self.show_diagnostics;
+        }
+        if actions.toggle_clipping {
+            self.toggle_clipping_overlay();
         }
         if actions.settings {
             self.open_settings();
@@ -1950,6 +1971,7 @@ impl RohditorApp {
     }
 
     fn show_viewport(&mut self, context: &egui::Context) {
+        self.refresh_clipping_overlay(context);
         let crop_overlay = self
             .tool
             .crop()
@@ -1990,6 +2012,10 @@ impl RohditorApp {
                     has_document: true,
                     preparing,
                     texture: document.texture.as_ref(),
+                    clipping: document
+                        .clipping
+                        .texture_for(document.texture.as_ref())
+                        .filter(|_| self.show_clipping),
                     source: document.preview_source,
                     picker_mode: self.tool.picker(),
                     crop: crop_overlay,
@@ -2005,6 +2031,7 @@ impl RohditorApp {
                     has_document: false,
                     preparing: false,
                     texture: None,
+                    clipping: None,
                     source: None,
                     picker_mode: None,
                     crop: None,
@@ -3660,6 +3687,7 @@ fn install_texture(
         height,
         rgb: pixels,
     });
+    document.clipping.mark_stale();
     let texture_name = format!("document-{}-preview", document.id);
     match document.texture.as_mut() {
         Some(PreviewTexture::Cpu(texture)) => {
