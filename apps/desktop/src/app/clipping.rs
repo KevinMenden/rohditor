@@ -17,8 +17,6 @@
 //! The overlay is a transient view aid: it is not persisted, never reaches
 //! an export, and never touches the recipe.
 
-use std::time::Instant;
-
 use eframe::egui;
 use rohditor_core::ClippingMask;
 
@@ -128,9 +126,7 @@ impl RohditorApp {
             // Rebuild from the current frame: from the CPU pixels on the next
             // `refresh_clipping_overlay`, or from a fresh GPU readback.
             document.clipping.mark_stale();
-            if let Some(preview) = document.gpu_preview.as_ref() {
-                document.gpu_histogram_due = Some((preview.ticket, Instant::now()));
-            }
+            document.preview.request_histogram_now();
         } else {
             document.clipping = ClippingState::default();
         }
@@ -151,7 +147,8 @@ impl RohditorApp {
         // The embedded preview is the camera's JPEG, not the render being
         // judged, so it gets no overlay.
         if !document
-            .preview_source
+            .preview
+            .source
             .is_some_and(rohditor_engine::preview::PreviewSource::is_developed)
         {
             return;

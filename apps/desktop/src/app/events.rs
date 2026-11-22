@@ -41,7 +41,7 @@ impl RohditorApp {
                             || (preview_ticket.is_none()
                                 && revision == Some(document.edits.revision()))
                         {
-                            document.preview_status = Some((document.edits.revision(), detail));
+                            document.preview.status = Some((document.edits.revision(), detail));
                         }
                     }
                     JobKind::Export => {
@@ -82,7 +82,7 @@ impl RohditorApp {
             WorkerEvent::PlaceholderReady { document_id, image } => {
                 if let Some(document) = self.document.as_mut().filter(|doc| doc.id == document_id)
                     && !matches!(
-                        document.preview_source,
+                        document.preview.source,
                         Some(source) if source.is_developed()
                     )
                 {
@@ -127,17 +127,20 @@ impl RohditorApp {
                     document.accepts_preview(ticket, intent)
                         && match resolution {
                             PreviewResolution::Fit => {
-                                !document.source_scale_requested && self.tool.crop().is_none()
+                                !document.preview.source_scale_requested
+                                    && self.tool.crop().is_none()
                             }
                             PreviewResolution::CropToolFullFrame => self.tool.crop().is_some(),
-                            PreviewResolution::SourceScale => document.source_scale_requested,
+                            PreviewResolution::SourceScale => {
+                                document.preview.source_scale_requested
+                            }
                         }
                         && (matches!(
                             resolution,
                             PreviewResolution::SourceScale | PreviewResolution::CropToolFullFrame
                         ) || document
-                            .gpu_preview
-                            .as_ref()
+                            .preview
+                            .gpu()
                             .is_none_or(|preview| preview.ticket != ticket))
                 });
                 if should_install {
@@ -153,7 +156,7 @@ impl RohditorApp {
                     let Some(document) = self.document.as_mut() else {
                         return;
                     };
-                    let previous_source = document.preview_source;
+                    let previous_source = document.preview.source;
                     let source = if resolution == PreviewResolution::SourceScale {
                         PreviewSource::OneToOneCpu
                     } else {
@@ -161,18 +164,18 @@ impl RohditorApp {
                     };
                     install_texture(context, document, image, source);
                     if resolution != PreviewResolution::CropToolFullFrame {
-                        document.histogram = Some(*histogram);
-                        document.histogram_revision = Some(ticket.revision);
+                        document.preview.histogram = Some(*histogram);
+                        document.preview.histogram_revision = Some(ticket.revision);
                     }
                     if resolution == PreviewResolution::SourceScale {
-                        document.view.source_scale_frame_ready(
+                        document.preview.view.source_scale_frame_ready(
                             previous_source,
                             context.input(|input| input.time),
                         );
                     }
-                    document.preview_status = None;
-                    document.last_preview_time = Some(diagnostics.timings.total);
-                    document.preview_diagnostics =
+                    document.preview.status = None;
+                    document.preview.last_time = Some(diagnostics.timings.total);
+                    document.preview.diagnostics =
                         Some(DocumentPreviewDiagnostics::cpu(diagnostics));
                     document.error = None;
                     if resolution == PreviewResolution::CropToolFullFrame
@@ -223,18 +226,19 @@ impl RohditorApp {
                 if current_document.ticket() != ticket {
                     self.pending_white_balance_pick = None;
                     if current_document
-                        .preview_status
+                        .preview
+                        .status
                         .as_ref()
                         .is_some_and(|(revision, _)| *revision == ticket.revision)
                     {
-                        current_document.preview_status = None;
+                        current_document.preview.status = None;
                     }
                     return;
                 }
                 let mut queue_preview = false;
                 self.pending_white_balance_pick = None;
                 let document = current_document;
-                document.preview_status = None;
+                document.preview.status = None;
                 let Some(resolved) = document_as_shot_colour(document) else {
                     document.error = Some(
                         "The RAW file did not provide a usable camera colour calibration"
@@ -305,16 +309,17 @@ impl RohditorApp {
                 if document.ticket() != ticket {
                     self.pending_white_balance_pick = None;
                     if document
-                        .preview_status
+                        .preview
+                        .status
                         .as_ref()
                         .is_some_and(|(revision, _)| *revision == ticket.revision)
                     {
-                        document.preview_status = None;
+                        document.preview.status = None;
                     }
                     return;
                 }
                 self.pending_white_balance_pick = None;
-                document.preview_status = None;
+                document.preview.status = None;
                 document.error = Some(message);
             }
             WorkerEvent::ExportReady {
@@ -352,7 +357,7 @@ impl RohditorApp {
             } => self.camera_look_ready(context, document_id, &camera_profile, result),
             WorkerEvent::NeuralDemosaicReady { document_id } => {
                 if let Some(document) = self.document.as_mut().filter(|doc| doc.id == document_id) {
-                    document.neural_ready = true;
+                    document.preview.neural_ready = true;
                     self.refresh_current_presentation(context);
                 }
             }
@@ -383,7 +388,7 @@ impl RohditorApp {
                     JobKind::Preview => {
                         let current = revision == Some(document.edits.revision());
                         if current {
-                            document.preview_status = None;
+                            document.preview.status = None;
                         }
                         current
                     }
@@ -403,7 +408,7 @@ impl RohditorApp {
             WorkerEvent::WorkerStopped { message } => {
                 if let Some(document) = self.document.as_mut() {
                     document.open_status = None;
-                    document.preview_status = None;
+                    document.preview.status = None;
                     document.export_status = None;
                     document.error = Some(message);
                 }

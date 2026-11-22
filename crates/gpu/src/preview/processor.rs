@@ -433,8 +433,9 @@ impl std::fmt::Debug for GpuPreviewFrame {
 }
 
 impl GpuPreviewFrame {
-    /// The egui-compatible display texture view. Register this view with
-    /// `egui_wgpu::Renderer`; it is never read back for normal display.
+    /// The oriented display texture view, ready to sample on the shared device.
+    /// A frontend registers this view with its own toolkit's renderer; it is
+    /// never read back for normal display.
     #[must_use]
     pub const fn display_view(&self) -> &wgpu::TextureView {
         &self.display_view
@@ -563,8 +564,8 @@ impl GpuDisplayReadbackPending {
     }
 }
 
-/// Downstream GPU preview processor using the device and queue created by
-/// eframe. It intentionally never creates a second adapter or device.
+/// Downstream GPU preview processor using the device and queue created by the
+/// frontend. It intentionally never creates a second adapter or device.
 pub struct GpuPreviewProcessor {
     _memory: crate::memory::Reservation,
     device: wgpu::Device,
@@ -585,10 +586,10 @@ pub struct GpuPreviewProcessor {
 }
 
 impl GpuPreviewProcessor {
-    /// Create a processor from eframe's shared render state.
+    /// Create a processor on the frontend's shared wgpu device.
     ///
     /// `adapter`, `device`, and `queue` must all originate from the same
-    /// eframe `wgpu_render_state`; no device is created here.
+    /// device the frontend displays with; no device is created here.
     pub fn new(
         adapter: &wgpu::Adapter,
         device: &wgpu::Device,
@@ -1004,8 +1005,8 @@ impl GpuPreviewProcessor {
         })
     }
 
-    /// Apply downstream edits to an uploaded base and write an egui-compatible
-    /// oriented display texture. Passing the prior frame reuses its GPU textures
+    /// Apply downstream edits to an uploaded base and write an oriented
+    /// display texture. Passing the prior frame reuses its GPU textures
     /// whenever dimensions are unchanged.
     /// Render with an explicit target-gamut policy shared with CPU preview and export.
     pub fn render(

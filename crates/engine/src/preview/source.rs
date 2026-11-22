@@ -33,6 +33,14 @@ impl PreviewSource {
         !matches!(self, Self::Embedded)
     }
 
+    /// Whether the frame lives in a GPU texture rather than CPU pixels.
+    pub const fn is_gpu(self) -> bool {
+        matches!(
+            self,
+            Self::FastGpu | Self::HighQualityGpu | Self::OneToOneGpu
+        )
+    }
+
     pub const fn is_source_scale(self) -> bool {
         matches!(self, Self::OneToOneCpu | Self::OneToOneGpu)
     }
