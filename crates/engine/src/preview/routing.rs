@@ -77,6 +77,9 @@ mod tests {
             PreviewIntent::CommittedFit,
             PreviewResolution::SourceScale
         ));
+        // The crop tool's frame is always a CPU presentation installed by the
+        // worker-event handoff, never a resident GPU frame, so it is
+        // deliberately not an intent a GPU render may answer.
         assert!(!preview_intent_matches_resolution(
             PreviewIntent::CropToolFullFrame,
             PreviewResolution::CropToolFullFrame

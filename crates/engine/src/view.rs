@@ -326,6 +326,51 @@ mod tests {
     }
 
     #[test]
+    fn wheel_zoom_from_fit_mode_starts_at_the_fit_scale() {
+        let mut view = ViewState::default();
+        assert!(view.is_fit());
+
+        view.zoom_by(0.25, [800.0, 600.0], [2_000.0, 1_000.0], None, 120.0, 1.0);
+
+        assert!(!view.is_fit());
+        assert_eq!(view.zoom, (0.25 * (120.0_f32 * ZOOM_PER_SCROLL).exp()));
+        assert_close([0.0, 0.0], view.pan);
+    }
+
+    #[test]
+    fn a_pointer_exactly_on_the_image_edge_still_anchors_the_zoom() {
+        // The image spans x in [-100, 100] around the viewport center.
+        let mut on_edge = state(false, 1.0, [0.0, 0.0]);
+        on_edge.zoom_by(
+            1.0,
+            [900.0, 500.0],
+            [200.0, 100.0],
+            Some([100.0, 0.0]),
+            120.0,
+            1.0,
+        );
+        assert!(
+            on_edge.pan[0] < 0.0,
+            "the edge point stays under the pointer"
+        );
+
+        let mut outside = state(false, 1.0, [0.0, 0.0]);
+        outside.zoom_by(
+            1.0,
+            [900.0, 500.0],
+            [200.0, 100.0],
+            Some([100.5, 0.0]),
+            120.0,
+            1.0,
+        );
+        assert_eq!(
+            outside.pan,
+            [0.0, 0.0],
+            "outside the image the center anchors"
+        );
+    }
+
+    #[test]
     fn pan_bounds_keep_half_of_the_smaller_extent_overlapping_the_viewport() {
         let viewport = [900.0, 500.0];
 
