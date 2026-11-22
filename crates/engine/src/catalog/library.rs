@@ -193,7 +193,7 @@ impl<T> LibraryState<T> {
             return;
         }
         let start = start.saturating_sub(VISIBLE_MARGIN).min(count);
-        let end = (end + VISIBLE_MARGIN).min(count);
+        let end = end.saturating_add(VISIBLE_MARGIN).min(count);
         let mut budget = DECODE_BUDGET;
         for grid_index in start..end {
             let Some(catalog_index) = self.order.get(grid_index).copied() else {
@@ -223,6 +223,8 @@ impl<T> LibraryState<T> {
                         .insert(path.to_path_buf(), (texture, self.frame));
                     budget -= 1;
                 }
+                // A failed decode spends no budget: it is remembered, so each
+                // corrupt thumbnail costs one attempt in total, not one per frame.
                 Err(error) => {
                     warn!(
                         %error,
