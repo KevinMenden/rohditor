@@ -142,6 +142,19 @@ impl<T> LibraryState<T> {
         self.order.iter().position(|&index| index == catalog_index)
     }
 
+    /// The grid position of the photo shown before or after the one at
+    /// `active_catalog_index`, stepping in display order (which differs from
+    /// catalog order when sorted by capture date). `None` at the ends or when
+    /// nothing is active.
+    pub fn adjacent_grid_index(
+        &self,
+        active_catalog_index: Option<usize>,
+        forward: bool,
+    ) -> Option<usize> {
+        let active = self.grid_index(active_catalog_index?);
+        adjacent_index(active, self.order.len(), forward)
+    }
+
     /// Move the selection by a keyboard step and scroll it into view.
     pub fn navigate(&mut self, entry_count: usize, key: LibraryNavigation) {
         if entry_count == 0 {
@@ -270,7 +283,7 @@ pub fn moved_selection(
     }
 }
 
-/// Step to the previous or next catalog entry in display order. Returns
+/// Step to the previous or next position in a list of `count`. Returns
 /// `None` at the ends or when nothing is active.
 pub fn adjacent_index(current: Option<usize>, count: usize, forward: bool) -> Option<usize> {
     let current = current?;
@@ -373,6 +386,20 @@ mod tests {
         assert_eq!(adjacent_index(Some(9), 10, true), None);
         assert_eq!(adjacent_index(Some(9), 10, false), Some(8));
         assert_eq!(adjacent_index(Some(0), 0, true), None);
+    }
+
+    #[test]
+    fn filmstrip_steps_follow_display_order_not_catalog_order() {
+        let library = LibraryState::<()> {
+            order: vec![2, 0, 3, 1],
+            ..LibraryState::default()
+        };
+        // Entry 0 is shown second; the next photo shown is entry 3 (position 2).
+        assert_eq!(library.adjacent_grid_index(Some(0), true), Some(2));
+        assert_eq!(library.adjacent_grid_index(Some(0), false), Some(0));
+        assert_eq!(library.adjacent_grid_index(Some(2), false), None);
+        assert_eq!(library.adjacent_grid_index(Some(1), true), None);
+        assert_eq!(library.adjacent_grid_index(None, true), None);
     }
 
     #[test]

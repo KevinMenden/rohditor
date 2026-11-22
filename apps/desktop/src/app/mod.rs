@@ -52,7 +52,7 @@ use crate::ui::toolbar::{self, FilePanelModel, StatusBarModel, ToolbarModel};
 use crate::ui::viewport::{self, PreviewTexture, ViewportModel};
 use rohditor_engine::autosave::Autosave;
 use rohditor_engine::camera_profiles::CameraProfileRegistry;
-use rohditor_engine::catalog::library::{LibraryNavigation, LibraryState, adjacent_index};
+use rohditor_engine::catalog::library::{LibraryNavigation, LibraryState};
 use rohditor_engine::catalog::{CatalogCoordinator, CatalogState, ThumbnailSlot};
 use rohditor_engine::coordinator::{
     PreparedGpuSource, PreviewBackend, PreviewResolution, RenderCoordinator, WorkerImage,
@@ -1751,7 +1751,8 @@ impl RohditorApp {
         }
     }
 
-    /// PageUp/PageDown move to the previous/next photo in display order.
+    /// PageUp/PageDown move to the previous/next photo in display order; the
+    /// result is a grid position.
     fn navigate_filmstrip(
         &mut self,
         context: &egui::Context,
@@ -1766,9 +1767,8 @@ impl RohditorApp {
                 None
             }
         })?;
-        let target = adjacent_index(active_catalog_index, self.catalog.entry_count(), forward)?;
-        // Convert the catalog index into the display-order grid index.
-        self.library.grid_index(target)
+        self.library
+            .adjacent_grid_index(active_catalog_index, forward)
     }
 
     fn background_work_is_active(&self) -> bool {
