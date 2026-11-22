@@ -53,7 +53,7 @@ use crate::ui::settings as settings_ui;
 use crate::ui::theme;
 use crate::ui::tool_panel;
 use crate::ui::toolbar::{self, FilePanelModel, StatusBarModel, ToolbarModel};
-use crate::ui::viewport::{self, PreviewSource, PreviewTexture, ViewState, ViewportModel};
+use crate::ui::viewport::{self, PreviewTexture, ViewportModel};
 use rohditor_engine::camera_profiles::CameraProfileRegistry;
 use rohditor_engine::catalog::{CatalogCoordinator, CatalogState, ThumbnailSlot};
 use rohditor_engine::coordinator::{
@@ -61,10 +61,15 @@ use rohditor_engine::coordinator::{
     WorkerPreviewDiagnostics,
 };
 use rohditor_engine::document::{EditSession, PreviewIntent, PreviewTicket};
+use rohditor_engine::preview::{
+    DocumentPreviewDiagnostics, PreviewSource, gpu_base_algorithm_matches, gpu_supports_recipe,
+    preview_intent_matches_resolution,
+};
 use rohditor_engine::preview_cache::PreviewCacheHits;
 use rohditor_engine::session;
 use rohditor_engine::settings::{self, AppSettings};
 use rohditor_engine::tools::{ActiveTool, Picker, ToolKind};
+use rohditor_engine::view::ViewState;
 use rohditor_engine::wake::WakeFn;
 
 const GPU_HISTOGRAM_DEBOUNCE: Duration = Duration::from_millis(75);
@@ -102,31 +107,6 @@ use gpu::{
     initialize_gpu_runtime, register_or_update_gpu_texture,
 };
 use noise_reduction::NoiseState;
-
-#[derive(Debug, Clone, Copy)]
-struct DocumentPreviewDiagnostics {
-    worker: WorkerPreviewDiagnostics,
-    gpu_upload_preparation: Option<Duration>,
-    gpu_submission: Option<Duration>,
-    gpu_queue_completion: Option<Duration>,
-    gpu_histogram_readback: Option<Duration>,
-    gpu_textures_reused: Option<bool>,
-    gpu_resident_bytes: usize,
-}
-
-impl DocumentPreviewDiagnostics {
-    const fn cpu(worker: WorkerPreviewDiagnostics) -> Self {
-        Self {
-            worker,
-            gpu_upload_preparation: None,
-            gpu_submission: None,
-            gpu_queue_completion: None,
-            gpu_histogram_readback: None,
-            gpu_textures_reused: None,
-            gpu_resident_bytes: 0,
-        }
-    }
-}
 
 #[derive(Debug)]
 struct ExportActivity {
@@ -2895,20 +2875,6 @@ fn source_scale_selected(document: Option<&Document>) -> bool {
     document.is_some_and(|document| document.source_scale_requested)
 }
 
-/// Whether a resident GPU base can serve `requested`. While the background
-/// neural pass runs, its classic stand-in base keeps serving neural requests;
-/// once it is ready, the next request goes to the worker for the neural source.
-fn gpu_base_algorithm_matches(
-    resident: DemosaicAlgorithm,
-    requested: DemosaicAlgorithm,
-    neural_ready: bool,
-) -> bool {
-    resident == requested
-        || (requested == DemosaicAlgorithm::Neural
-            && resident == NEURAL_FALLBACK_DEMOSAIC
-            && !neural_ready)
-}
-
 /// Keyboard navigation steps in the library grid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LibraryNavigation {
@@ -3395,10 +3361,6 @@ fn set_highlight_method(edits: &mut EditSession, method: HighlightMethod) -> boo
     edits.set_discrete(next)
 }
 
-fn gpu_supports_recipe(recipe: &EditRecipe) -> bool {
-    rohditor_gpu::GpuPreviewProcessor::supports_recipe(recipe)
-}
-
 #[cfg(test)]
 fn gpu_base_highlights_match(
     retained: HighlightAdjustments,
@@ -3431,17 +3393,6 @@ fn gpu_upload_matches_document(document: &Document, ticket: PreviewTicket) -> bo
             },
         )
         && gpu_supports_recipe(document.edits.recipe())
-}
-
-const fn preview_intent_matches_resolution(
-    intent: PreviewIntent,
-    resolution: PreviewResolution,
-) -> bool {
-    matches!(
-        (intent, resolution),
-        (PreviewIntent::CommittedFit, PreviewResolution::Fit)
-            | (PreviewIntent::SourceScale, PreviewResolution::SourceScale)
-    )
 }
 
 fn apply_adjustment_interaction(
@@ -3724,31 +3675,6 @@ mod tests {
     use image::{Rgb, RgbImage};
 
     use super::*;
-
-    #[test]
-    fn resident_gpu_bases_are_algorithm_specific() {
-        assert!(gpu_base_algorithm_matches(
-            DemosaicAlgorithm::Rcd,
-            DemosaicAlgorithm::Rcd,
-            false
-        ));
-        assert!(!gpu_base_algorithm_matches(
-            DemosaicAlgorithm::Rcd,
-            DemosaicAlgorithm::Amaze,
-            false
-        ));
-        // The stand-in serves neural requests only until the neural pass is ready.
-        assert!(gpu_base_algorithm_matches(
-            NEURAL_FALLBACK_DEMOSAIC,
-            DemosaicAlgorithm::Neural,
-            false
-        ));
-        assert!(!gpu_base_algorithm_matches(
-            NEURAL_FALLBACK_DEMOSAIC,
-            DemosaicAlgorithm::Neural,
-            true
-        ));
-    }
 
     #[test]
     fn library_selection_moves_by_grid_steps_and_clamps() {

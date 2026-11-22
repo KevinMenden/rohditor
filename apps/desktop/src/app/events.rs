@@ -7,13 +7,10 @@ use eframe::egui;
 
 use rohditor_core::white_balance_from_camera_sample;
 
-use crate::ui::viewport::PreviewSource;
 use rohditor_engine::coordinator::{JobKind, PreviewResolution, WorkerEvent};
+use rohditor_engine::preview::{DocumentPreviewDiagnostics, PreviewSource};
 
-use super::{
-    DocumentPreviewDiagnostics, RohditorApp, default_recipe_for_document, document_as_shot_colour,
-    install_texture,
-};
+use super::{RohditorApp, default_recipe_for_document, document_as_shot_colour, install_texture};
 
 impl RohditorApp {
     pub(super) fn process_worker_events(&mut self, context: &egui::Context) {

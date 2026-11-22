@@ -152,7 +152,7 @@ impl RohditorApp {
         // judged, so it gets no overlay.
         if !document
             .preview_source
-            .is_some_and(crate::ui::viewport::PreviewSource::is_developed)
+            .is_some_and(rohditor_engine::preview::PreviewSource::is_developed)
         {
             return;
         }
