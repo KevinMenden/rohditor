@@ -9,6 +9,7 @@
 
 mod diagnostics;
 mod gpu;
+mod histogram;
 mod routing;
 mod runtime;
 mod source;
@@ -16,12 +17,12 @@ mod state;
 
 pub use diagnostics::DocumentPreviewDiagnostics;
 pub use gpu::{GpuDocumentPreview, GpuDocumentSource, GpuRuntime, WgpuContext};
+pub use histogram::{DisplayPixels, HistogramPoll};
 pub use routing::{
     gpu_base_algorithm_matches, gpu_supports_recipe, preview_intent_matches_resolution,
 };
 pub use runtime::{
-    DisplayPixels, GpuUpload, HistogramPoll, MessageUpdate, PreviewOutcome, PreviewRequest,
-    PreviewRuntime, ProcessorPreference,
+    GpuUpload, MessageUpdate, PreviewOutcome, PreviewRequest, PreviewRuntime, ProcessorPreference,
 };
 pub use source::PreviewSource;
 pub use state::{DocumentPreview, GpuDisplay};

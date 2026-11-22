@@ -8,20 +8,17 @@
 //! through a [`PreviewOutcome`] instead of touching UI state.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use rohditor_core::{
-    HighlightDiagnostics, Histogram, MemoryEstimate, PreviewOptions, StageTimings,
-    cpu_only_stage_reason,
+    HighlightDiagnostics, MemoryEstimate, PreviewOptions, StageTimings, cpu_only_stage_reason,
 };
 use rohditor_edit::EditRecipe;
 use rohditor_gpu::GpuDisplayReadback;
 use rohditor_raw::RawFrame;
 use tracing::{info, warn};
 
-use super::gpu::{
-    GpuDocumentPreview, GpuDocumentSource, GpuRuntime, PendingGpuHistogram, WgpuContext,
-};
+use super::gpu::{GpuDocumentPreview, GpuDocumentSource, GpuRuntime, WgpuContext};
 use super::routing::{
     gpu_base_algorithm_matches, gpu_supports_recipe, preview_intent_matches_resolution,
 };
@@ -138,24 +135,6 @@ pub struct GpuUpload {
     pub upload_preparation: Duration,
 }
 
-/// Pixels of a finished display readback, for overlays derived from them.
-pub struct DisplayPixels {
-    pub width: usize,
-    pub height: usize,
-    /// Packed RGBA8, row-major.
-    pub rgba: Vec<u8>,
-}
-
-/// Progress of the histogram readback.
-#[derive(Default)]
-pub struct HistogramPoll {
-    pub repaint: bool,
-    /// Call again after this long.
-    pub repaint_after: Option<Duration>,
-    /// The finished readback, when the caller asked for pixels.
-    pub pixels: Option<DisplayPixels>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ResidentRender {
     Exact,
@@ -164,7 +143,7 @@ enum ResidentRender {
 
 /// Processor choice and the GPU runtime shared by all documents.
 pub struct PreviewRuntime {
-    gpu: Option<GpuRuntime>,
+    pub(super) gpu: Option<GpuRuntime>,
     preference: ProcessorPreference,
     note: Option<String>,
     startup_error: Option<String>,
@@ -707,128 +686,6 @@ impl PreviewRuntime {
             .then_some(GPU_POLL_INTERVAL)
     }
 
-    /// Advance the debounced histogram readback of the displayed GPU frame.
-    /// `want_pixels` returns the finished readback's pixels too.
-    pub fn poll_histogram(
-        &self,
-        preview: &mut DocumentPreview,
-        revision: u64,
-        want_pixels: bool,
-    ) -> HistogramPoll {
-        if let Some(pending) = preview.pending_histogram.take() {
-            return self.finish_histogram(preview, revision, pending, want_pixels);
-        }
-        let Some((ticket, due)) = preview.histogram_due else {
-            return HistogramPoll::default();
-        };
-        let now = Instant::now();
-        if due > now {
-            return HistogramPoll {
-                repaint_after: Some(due.duration_since(now)),
-                ..HistogramPoll::default()
-            };
-        }
-
-        let current = preview.ticket(revision) == ticket
-            && preview
-                .gpu
-                .as_ref()
-                .is_some_and(|resident| resident.ticket == ticket);
-        let readback = preview
-            .gpu
-            .as_ref()
-            .filter(|_| current)
-            .and_then(|resident| {
-                self.gpu
-                    .as_ref()
-                    .map(|runtime| runtime.processor().begin_display_readback(&resident.frame))
-            });
-        preview.histogram_due = None;
-        match readback {
-            Some(Ok(readback)) => {
-                preview.pending_histogram = Some(PendingGpuHistogram {
-                    ticket,
-                    readback,
-                    started: Instant::now(),
-                });
-                HistogramPoll {
-                    repaint_after: Some(GPU_POLL_INTERVAL),
-                    ..HistogramPoll::default()
-                }
-            }
-            Some(Err(error)) => {
-                warn!(?ticket, %error, "could not start GPU histogram readback");
-                HistogramPoll::default()
-            }
-            None => HistogramPoll::default(),
-        }
-    }
-
-    fn finish_histogram(
-        &self,
-        preview: &mut DocumentPreview,
-        revision: u64,
-        mut pending: PendingGpuHistogram,
-        want_pixels: bool,
-    ) -> HistogramPoll {
-        let latency = pending.started.elapsed();
-        let still_current = |preview: &DocumentPreview| {
-            preview.ticket(revision) == pending.ticket
-                && preview
-                    .gpu
-                    .as_ref()
-                    .is_some_and(|resident| resident.ticket == pending.ticket)
-        };
-        match pending.readback.try_finish() {
-            Ok(Some(readback)) => {
-                let size = usize::try_from(readback.width).ok().and_then(|width| {
-                    usize::try_from(readback.height)
-                        .ok()
-                        .map(|height| (width, height))
-                });
-                let histogram = size.and_then(|(width, height)| {
-                    Histogram::from_rgba8(width, height, &readback.rgba)
-                });
-                let mut poll = HistogramPoll {
-                    repaint: true,
-                    ..HistogramPoll::default()
-                };
-                if still_current(preview)
-                    && let Some(histogram) = histogram
-                {
-                    preview.histogram = Some(histogram);
-                    preview.histogram_revision = Some(pending.ticket.revision);
-                    if want_pixels && let Some((width, height)) = size {
-                        poll.pixels = Some(DisplayPixels {
-                            width,
-                            height,
-                            rgba: readback.rgba,
-                        });
-                    }
-                    if let Some(diagnostics) = preview.diagnostics.as_mut() {
-                        diagnostics.gpu_histogram_readback = Some(latency);
-                    }
-                }
-                poll
-            }
-            Ok(None) => {
-                if still_current(preview) {
-                    preview.pending_histogram = Some(pending);
-                    HistogramPoll {
-                        repaint_after: Some(GPU_POLL_INTERVAL),
-                        ..HistogramPoll::default()
-                    }
-                } else {
-                    HistogramPoll::default()
-                }
-            }
-            Err(error) => {
-                warn!(ticket = ?pending.ticket, %error, "GPU histogram readback failed");
-                HistogramPoll::default()
-            }
-        }
-    }
-
     /// Read the displayed GPU frame back (a blocking diagnostics/picker path).
     pub fn readback_display(&self, preview: &DocumentPreview) -> Option<GpuDisplayReadback> {
         let resident = preview.gpu.as_ref()?;
@@ -859,5 +716,122 @@ fn draft_worker(algorithm: rohditor_demosaic::DemosaicAlgorithm) -> WorkerPrevie
         optics_applied: None,
         optics_used_infinity_distance_fallback: false,
         optics_scale: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn coordinator() -> RenderCoordinator {
+        RenderCoordinator::new(crate::wake::noop()).expect("worker starts")
+    }
+
+    #[test]
+    fn message_updates_apply_to_a_slot() {
+        let mut slot = Some("old".to_owned());
+        MessageUpdate::Unchanged.apply(&mut slot);
+        assert_eq!(slot.as_deref(), Some("old"));
+        MessageUpdate::Set("new".to_owned()).apply(&mut slot);
+        assert_eq!(slot.as_deref(), Some("new"));
+        MessageUpdate::Clear.apply(&mut slot);
+        assert_eq!(slot, None);
+    }
+
+    #[test]
+    fn a_follow_up_outcome_overrides_only_the_messages_it_sets() {
+        let first = PreviewOutcome {
+            error: MessageUpdate::Set("first".to_owned()),
+            warning: MessageUpdate::Set("fallback".to_owned()),
+            repaint: false,
+        };
+        let later = PreviewOutcome {
+            error: MessageUpdate::Clear,
+            warning: MessageUpdate::Unchanged,
+            repaint: true,
+        };
+        let merged = first.then(later);
+        assert_eq!(merged.error, MessageUpdate::Clear);
+        assert_eq!(merged.warning, MessageUpdate::Set("fallback".to_owned()));
+        assert!(merged.repaint);
+    }
+
+    #[test]
+    fn auto_falls_back_to_the_cpu_when_the_gpu_fails() {
+        let mut runtime = PreviewRuntime::new(ProcessorPreference::Auto, None);
+        let mut preview = DocumentPreview::new(1);
+        preview.status = Some((3, "Applying edits".to_owned()));
+        let request = request_without_frame();
+
+        let outcome = runtime.handle_gpu_failure(
+            &coordinator(),
+            &mut preview,
+            &request,
+            "device lost".to_owned(),
+        );
+
+        assert_eq!(preview.status, None);
+        assert!(runtime.gpu().is_none());
+        assert_eq!(runtime.note(), Some("GPU fallback: device lost"));
+        assert!(matches!(outcome.warning, MessageUpdate::Set(ref message)
+            if message.contains("device lost") && message.contains("CPU")));
+        assert!(outcome.repaint);
+    }
+
+    #[test]
+    fn a_required_gpu_reports_the_failure_instead_of_falling_back() {
+        let mut runtime = PreviewRuntime::new(ProcessorPreference::Gpu, None);
+        let mut preview = DocumentPreview::new(1);
+        let request = request_without_frame();
+
+        let outcome = runtime.handle_gpu_failure(
+            &coordinator(),
+            &mut preview,
+            &request,
+            "device lost".to_owned(),
+        );
+
+        assert_eq!(
+            outcome.error,
+            MessageUpdate::Set("GPU preview failed: device lost".to_owned())
+        );
+        assert_eq!(outcome.warning, MessageUpdate::Unchanged);
+        assert!(runtime.gpu_required_but_unavailable());
+    }
+
+    #[test]
+    fn queueing_without_the_required_gpu_reports_the_startup_error() {
+        let mut runtime = PreviewRuntime::new(ProcessorPreference::Gpu, None);
+        let mut preview = DocumentPreview::new(1);
+        preview.status = Some((1, "Queued".to_owned()));
+
+        let outcome = runtime.queue_preview(&coordinator(), &mut preview, &request_without_frame());
+
+        assert_eq!(preview.status, None);
+        assert!(matches!(outcome.error, MessageUpdate::Set(ref message)
+            if message.starts_with("GPU preview is required but unavailable")));
+    }
+
+    #[test]
+    fn auto_without_a_wgpu_device_starts_on_the_cpu_with_a_note() {
+        let runtime = PreviewRuntime::new(ProcessorPreference::Auto, None);
+        assert!(runtime.gpu().is_none());
+        assert!(runtime.startup_error().is_none());
+        assert!(
+            runtime
+                .note()
+                .is_some_and(|note| note.starts_with("GPU unavailable"))
+        );
+    }
+
+    fn request_without_frame() -> PreviewRequest {
+        PreviewRequest {
+            frame: None,
+            recipe: EditRecipe::default(),
+            revision: 0,
+            options: PreviewOptions::default(),
+            histogram_always: false,
+            now: 0.0,
+        }
     }
 }
