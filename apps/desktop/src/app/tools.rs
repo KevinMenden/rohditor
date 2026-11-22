@@ -48,6 +48,7 @@ impl RohditorApp {
 
     pub(super) fn show_tool_panel(&mut self, context: &egui::Context) {
         self.handle_tool_shortcuts(context);
+        self.handle_clipping_shortcut(context);
         match self.tool.kind() {
             ToolKind::Edit => self.show_adjustment_panel(context),
             ToolKind::Crop => self.show_crop_controls(context),

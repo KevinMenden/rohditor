@@ -28,7 +28,7 @@ mod white_balance;
 
 pub use rohditor_camera_profile::{CAMERA_PROFILE_EVALUATOR_VERSION, MAX_TABLE_ENTRIES};
 
-pub use analysis::Histogram;
+pub use analysis::{ClipFlags, ClippingMask, Histogram};
 pub use camera_look::{CameraLook, CameraLookError, decode_camera_preview, match_camera_look};
 pub use cancel::CancellationToken;
 pub use color::{
