@@ -53,7 +53,7 @@ pub enum GpuPreviewError {
     #[error("GPU processing was cancelled")]
     Cancelled,
 
-    /// The eframe-created device cannot perform the required texture operations.
+    /// The frontend's shared device cannot perform the required texture operations.
     #[error("the selected wgpu device cannot support GPU processing: {reason}")]
     Unsupported { reason: String },
 

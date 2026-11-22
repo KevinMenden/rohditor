@@ -10,12 +10,11 @@ use eframe::egui;
 use rohditor_core::NEURAL_FALLBACK_DEMOSAIC;
 use rohditor_core::{
     CameraCalibration, DatabaseProvenance, DitherMode, ExportFormat, ExportMetadataPolicy,
-    ExportSettings, HighlightDiagnostics, Histogram, JPEG_QUALITY_DEFAULT, MemoryEstimate,
-    OutputPolicy, OutputSize, PngBitDepth, PreviewOptions, ProfileMatch, StageTimings,
-    WhiteBalanceCoordinates, WhiteBalanceMode, WhiteBalanceModeMemory, auto_tone,
-    camera_color_transform, default_recipe, hsl_channel_weights_from_display_rgb,
-    paths_refer_to_same_file, resolve_camera_colour, sample_rgb_patch,
-    with_default_noise_reduction,
+    ExportSettings, HighlightDiagnostics, JPEG_QUALITY_DEFAULT, OutputPolicy, OutputSize,
+    PngBitDepth, PreviewOptions, ProfileMatch, WhiteBalanceCoordinates, WhiteBalanceMode,
+    WhiteBalanceModeMemory, auto_tone, camera_color_transform, default_recipe,
+    hsl_channel_weights_from_display_rgb, paths_refer_to_same_file, resolve_camera_colour,
+    sample_rgb_patch, with_default_noise_reduction,
 };
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_edit::{
@@ -53,7 +52,7 @@ use crate::ui::settings as settings_ui;
 use crate::ui::theme;
 use crate::ui::tool_panel;
 use crate::ui::toolbar::{self, FilePanelModel, StatusBarModel, ToolbarModel};
-use crate::ui::viewport::{self, PreviewSource, PreviewTexture, ViewState, ViewportModel};
+use crate::ui::viewport::{self, PreviewTexture, ViewportModel};
 use rohditor_engine::camera_profiles::CameraProfileRegistry;
 use rohditor_engine::catalog::{CatalogCoordinator, CatalogState, ThumbnailSlot};
 use rohditor_engine::coordinator::{
@@ -61,13 +60,15 @@ use rohditor_engine::coordinator::{
     WorkerPreviewDiagnostics,
 };
 use rohditor_engine::document::{EditSession, PreviewIntent, PreviewTicket};
-use rohditor_engine::preview_cache::PreviewCacheHits;
+use rohditor_engine::preview::{
+    DocumentPreview, GpuUpload, PreviewOutcome, PreviewRequest, PreviewRuntime, PreviewSource,
+};
 use rohditor_engine::session;
 use rohditor_engine::settings::{self, AppSettings};
 use rohditor_engine::tools::{ActiveTool, Picker, ToolKind};
+use rohditor_engine::view::ViewState;
 use rohditor_engine::wake::WakeFn;
 
-const GPU_HISTOGRAM_DEBOUNCE: Duration = Duration::from_millis(75);
 const RECIPE_SAVE_NOTICE_DURATION: Duration = Duration::from_secs(3);
 /// Longest grid texture edge; thumbnails decode down to this size.
 const LIBRARY_TEXTURE_LONG_EDGE: u32 = 256;
@@ -97,36 +98,7 @@ mod tools;
 mod ui_tests;
 
 use camera_look::CameraLookState;
-use gpu::{
-    GpuDocumentPreview, GpuDocumentSource, GpuRuntime, PendingGpuHistogram, gpu_output_size,
-    initialize_gpu_runtime, register_or_update_gpu_texture,
-};
 use noise_reduction::NoiseState;
-
-#[derive(Debug, Clone, Copy)]
-struct DocumentPreviewDiagnostics {
-    worker: WorkerPreviewDiagnostics,
-    gpu_upload_preparation: Option<Duration>,
-    gpu_submission: Option<Duration>,
-    gpu_queue_completion: Option<Duration>,
-    gpu_histogram_readback: Option<Duration>,
-    gpu_textures_reused: Option<bool>,
-    gpu_resident_bytes: usize,
-}
-
-impl DocumentPreviewDiagnostics {
-    const fn cpu(worker: WorkerPreviewDiagnostics) -> Self {
-        Self {
-            worker,
-            gpu_upload_preparation: None,
-            gpu_submission: None,
-            gpu_queue_completion: None,
-            gpu_histogram_readback: None,
-            gpu_textures_reused: None,
-            gpu_resident_bytes: 0,
-        }
-    }
-}
 
 #[derive(Debug)]
 struct ExportActivity {
@@ -181,25 +153,16 @@ struct Document {
     /// after a failure, so a failing request is not repeated every frame.
     range_overlay_requested: Option<(u64, u32)>,
     preview_pixels: Option<DisplayPreviewPixels>,
-    preview_source: Option<PreviewSource>,
-    histogram: Option<Histogram>,
-    histogram_revision: Option<u64>,
+    /// Toolkit-free preview state: request tickets, resident GPU frame,
+    /// histogram, view and diagnostics.
+    preview: DocumentPreview,
+    /// egui's id for the engine's GPU display texture.
+    gpu_texture_id: Option<egui::TextureId>,
+    /// The `preview` display generation `texture` was last synced to.
+    synced_display_generation: u64,
     clipping: clipping::ClippingState,
-    pending_gpu_histogram: Option<PendingGpuHistogram>,
-    gpu_histogram_due: Option<(PreviewTicket, Instant)>,
-    source_scale_requested: bool,
-    /// The background neural demosaic for this photo has finished, so a
-    /// classic stand-in base no longer counts as current.
-    neural_ready: bool,
-    preview_sequence: u64,
-    preview_intent: PreviewIntent,
-    gpu_preview: Option<GpuDocumentPreview>,
-    view: ViewState,
     open_status: Option<String>,
-    preview_status: Option<(u64, String)>,
     export_status: Option<ExportActivity>,
-    last_preview_time: Option<Duration>,
-    preview_diagnostics: Option<DocumentPreviewDiagnostics>,
     optics_match: Option<ProfileMatch>,
     optics_candidates: Vec<rohditor_core::LensProfileSummary>,
     optics_profile_filter: String,
@@ -233,23 +196,12 @@ impl Document {
             mask_overlay: None,
             range_overlay_requested: None,
             preview_pixels: None,
-            preview_source: None,
-            histogram: None,
-            histogram_revision: None,
+            preview: DocumentPreview::new(id),
+            gpu_texture_id: None,
+            synced_display_generation: 0,
             clipping: clipping::ClippingState::default(),
-            pending_gpu_histogram: None,
-            gpu_histogram_due: None,
-            source_scale_requested: false,
-            neural_ready: false,
-            preview_sequence: 0,
-            preview_intent: PreviewIntent::CommittedFit,
-            gpu_preview: None,
-            view: ViewState::default(),
             open_status: Some("Opening RAW file".to_owned()),
-            preview_status: None,
             export_status: None,
-            last_preview_time: None,
-            preview_diagnostics: None,
             optics_match: None,
             optics_candidates: Vec::new(),
             optics_profile_filter: String::new(),
@@ -273,22 +225,15 @@ impl Document {
     }
 
     fn ticket(&self) -> PreviewTicket {
-        PreviewTicket {
-            document_id: self.id,
-            revision: self.edits.revision(),
-            sequence: self.preview_sequence,
-        }
+        self.preview.ticket(self.edits.revision())
     }
 
     fn begin_preview_request(&mut self, intent: PreviewIntent) -> PreviewTicket {
-        self.preview_sequence = self.preview_sequence.saturating_add(1);
-        self.preview_intent = intent;
-        self.ticket()
+        self.preview.begin_request(self.edits.revision(), intent)
     }
 
     fn accepts_preview(&self, ticket: PreviewTicket, intent: PreviewIntent) -> bool {
-        ticket.is_current(self.id, self.edits.revision(), self.preview_sequence)
-            && self.preview_intent == intent
+        self.preview.accepts(self.edits.revision(), ticket, intent)
     }
 }
 
@@ -365,9 +310,10 @@ pub(crate) struct RohditorApp {
     /// Set by `--screenshot`: save one frame and quit.
     screenshot: Option<screenshot::ScreenshotRequest>,
     ui_renderer: &'static str,
-    processor_preference: ProcessorPreference,
-    gpu: Option<GpuRuntime>,
-    processor_note: Option<String>,
+    /// Processor choice and the engine's GPU preview runtime.
+    preview_runtime: PreviewRuntime,
+    /// egui's wgpu renderer, when the UI renders with wgpu.
+    egui_gpu: Option<gpu::EguiGpu>,
     startup_error: Option<String>,
     show_diagnostics: bool,
     /// The viewport's clipping overlay (`J`). A view aid: not persisted.
@@ -400,12 +346,6 @@ pub(crate) struct RohditorApp {
     library_scroll_to_selection: bool,
     filmstrip_visible: (usize, usize),
     filmstrip_active: Option<usize>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ResidentGpuRender {
-    Exact,
-    WhiteBalanceDraft,
 }
 
 fn white_balance_preview_request(
@@ -456,18 +396,15 @@ impl RohditorApp {
         } else {
             "unknown"
         };
-        let (gpu, processor_note, startup_error) =
-            match initialize_gpu_runtime(context, processor_preference) {
-                Ok((gpu, processor_note)) => (gpu, processor_note, None),
-                Err(error) => (
-                    None,
-                    None,
-                    Some(format!("GPU preview is required but unavailable: {error}")),
-                ),
-            };
+        let egui_gpu = gpu::EguiGpu::new(context);
+        let preview_runtime = PreviewRuntime::new(
+            processor_preference,
+            egui_gpu.as_ref().map(gpu::EguiGpu::wgpu_context),
+        );
+        let startup_error = preview_runtime.startup_error().map(str::to_owned);
         info!(
             ui_renderer,
-            processor = if gpu.is_some() { "GPU" } else { "CPU" },
+            processor = if preview_runtime.gpu().is_some() { "GPU" } else { "CPU" },
             processor_preference = ?processor_preference,
             "desktop application started"
         );
@@ -492,13 +429,14 @@ impl RohditorApp {
         };
         let coordinator = RenderCoordinator::with_neural(wake_from(&context.egui_ctx), neural.ok())
             .map_err(std::io::Error::other)?;
-        if let Some(runtime) = &gpu {
+        if let Some(runtime) = preview_runtime.gpu() {
+            let wgpu = runtime.context();
             coordinator
                 .configure_capture_device(
-                    runtime.render_state.adapter.clone(),
-                    runtime.render_state.device.clone(),
-                    runtime.render_state.queue.clone(),
-                    runtime.render_state.target_format,
+                    wgpu.adapter.clone(),
+                    wgpu.device.clone(),
+                    wgpu.queue.clone(),
+                    wgpu.target_format,
                 )
                 .map_err(std::io::Error::other)?;
         }
@@ -534,9 +472,8 @@ impl RohditorApp {
             config_dir,
             screenshot: None,
             ui_renderer,
-            processor_preference,
-            gpu,
-            processor_note,
+            preview_runtime,
+            egui_gpu,
             startup_error,
             show_diagnostics,
             show_clipping: false,
@@ -648,7 +585,7 @@ impl RohditorApp {
     fn document_work_in_flight(&self) -> bool {
         self.document.as_ref().is_some_and(|document| {
             document.open_status.is_some()
-                || document.preview_status.is_some()
+                || document.preview.status.is_some()
                 || document.export_status.is_some()
         }) || self.pending_white_balance_pick.is_some()
     }
@@ -660,152 +597,64 @@ impl RohditorApp {
         }
     }
 
-    /// Show why the CPU renders this recipe although the GPU is available.
-    /// This is a routing choice, not a GPU failure: the GPU stays enabled.
-    fn note_cpu_only_stage(&mut self, recipe: &EditRecipe) {
-        const PREFIX: &str = "CPU-only stage: ";
-        match rohditor_core::cpu_only_stage_reason(recipe) {
-            Some(reason) if self.gpu.is_some() => {
-                self.processor_note = Some(format!("{PREFIX}{reason}"));
-            }
-            None if self
-                .processor_note
-                .as_deref()
-                .is_some_and(|note| note.starts_with(PREFIX)) =>
-            {
-                self.processor_note = None;
-            }
-            _ => {}
+    /// The document inputs of a preview operation, owned so the engine can
+    /// borrow the document's preview state mutably at the same time.
+    fn preview_request(&self, context: &egui::Context, document: &Document) -> PreviewRequest {
+        PreviewRequest {
+            frame: document.frame.clone(),
+            recipe: document.edits.recipe().clone(),
+            revision: document.edits.revision(),
+            options: self.preview_options(),
+            histogram_always: self.show_clipping,
+            now: context.input(|input| input.time),
         }
     }
 
-    fn queue_preview(&mut self, context: &egui::Context, document_id: u64) {
-        if self.gpu_required_but_unavailable() {
-            if let Some(document) = self.document.as_mut().filter(|doc| doc.id == document_id) {
-                document.preview_status = None;
-                document.error = self.startup_error.clone();
-            }
-            return;
-        }
-        let options = self.preview_options();
-        let request = self
-            .document
-            .as_mut()
-            .filter(|document| document.id == document_id)
-            .and_then(|document| {
-                let frame = document.frame.as_ref().map(Arc::clone)?;
-                let source_scale_requested = document.source_scale_requested;
-                let intent = if source_scale_requested {
-                    PreviewIntent::SourceScale
-                } else {
-                    PreviewIntent::CommittedFit
-                };
-                Some((
-                    document.begin_preview_request(intent),
-                    frame,
-                    document.edits.recipe().clone(),
-                    source_scale_requested,
-                ))
-            });
-        let Some((ticket, frame, recipe, source_scale_requested)) = request else {
-            return;
-        };
-        if let Some(document) = self
-            .document
-            .as_mut()
-            .filter(|document| document.id == document_id)
-        {
-            // A histogram is only a valid Auto Tone input for the recipe that
-            // produced it. Keep the old graph visible, but never apply it to
-            // a newer revision.
-            document.histogram_revision = None;
-            // Do not describe the previous backend as active while the new
-            // recipe is still being rendered. The status bar can therefore
-            // distinguish an old visible frame from the current work.
-            document.preview_diagnostics = None;
-        }
-        if source_scale_requested {
-            // Keep the last complete Source 1:1 frame visible while the
-            // worker prepares its replacement. The shared reservation budget
-            // accounts for both frames and forces a safe CPU recovery first.
-            if let Some(document) = self.document.as_mut() {
-                document.preview_status = Some((
-                    ticket.revision,
-                    "Queued full-resolution 1:1 inspection".to_owned(),
-                ));
-            }
-            if let Err(error) = self.coordinator.source_scale_preview(
-                ticket,
-                frame,
-                recipe,
-                options,
-                self.gpu.is_some(),
-            ) && let Some(document) = self.document.as_mut()
-            {
-                document.preview_status = None;
-                document.error = Some(error);
-            }
-            return;
-        }
-        self.note_cpu_only_stage(&recipe);
-        if self.gpu.is_some() && gpu_supports_recipe(&recipe) {
-            let gpu_base_is_current = self
-                .document
+    /// Run an engine preview operation on the document `document_id` (when it
+    /// is the open one) and apply its outcome to the UI state.
+    fn with_document_preview<R>(
+        &mut self,
+        context: &egui::Context,
+        document_id: u64,
+        operation: impl FnOnce(
+            &mut PreviewRuntime,
+            &RenderCoordinator,
+            &mut DocumentPreview,
+            &PreviewRequest,
+        ) -> (R, PreviewOutcome),
+    ) -> Option<R> {
+        let request = self.preview_request(
+            context,
+            self.document
                 .as_ref()
-                .and_then(|document| Some((document.gpu_preview.as_ref()?, document.neural_ready)))
-                .is_some_and(|(preview, neural_ready)| {
-                    gpu_base_algorithm_matches(
-                        preview.algorithm,
-                        options.render.demosaic,
-                        neural_ready,
-                    ) && preview.source.matches_recipe(&recipe)
-                        && preview.source.optics_matches_recipe(&recipe.optics)
-                });
-            if gpu_base_is_current {
-                self.coordinator.cancel_preview(document_id);
-                self.render_gpu_preview(context, document_id);
-                return;
-            }
-            if let Some(document) = self.document.as_mut() {
-                document.preview_status = Some((
-                    ticket.revision,
-                    "Preparing linear base for GPU preview".to_owned(),
-                ));
-            }
-            if let Err(error) = self
-                .coordinator
-                .prepare_gpu_base(ticket, frame, recipe, options)
-                && let Some(document) = self.document.as_mut()
-            {
-                document.preview_status = None;
-                document.error = Some(error);
-            }
-            return;
+                .filter(|document| document.id == document_id)?,
+        );
+        let document = self.document.as_mut()?;
+        let (result, outcome) = operation(
+            &mut self.preview_runtime,
+            &self.coordinator,
+            &mut document.preview,
+            &request,
+        );
+        outcome.error.apply(&mut document.error);
+        outcome.warning.apply(&mut document.warning);
+        if let Some(gpu) = &self.egui_gpu {
+            gpu.sync_display(document);
         }
-        // Keep the last GPU frame installed while a CPU fallback
-        // preview is rendered. Releasing it here leaves the viewport without
-        // a texture for one or more frames and produces a visible black flash.
-        // The worker-event handoff releases it immediately before installing
-        // the completed CPU texture in the same UI update.
-        if let Some(document) = self.document.as_mut() {
-            document.preview_status = Some((ticket.revision, "Queued CPU preview".to_owned()));
+        if outcome.repaint {
+            context.request_repaint();
         }
-        match self.coordinator.preview(ticket, frame, recipe, options) {
-            Ok(()) => {
-                info!(
-                    document_id,
-                    revision = ticket.revision,
-                    processor_preference = ?self.processor_preference,
-                    "CPU preview queued"
-                );
-            }
-            Err(error) => {
-                if let Some(document) = self.document.as_mut() {
-                    document.preview_status = None;
-                    document.error = Some(error);
-                }
-            }
-        }
+        Some(result)
+    }
+
+    fn queue_preview(&mut self, context: &egui::Context, document_id: u64) {
+        self.with_document_preview(
+            context,
+            document_id,
+            |runtime, coordinator, preview, request| {
+                ((), runtime.queue_preview(coordinator, preview, request))
+            },
+        );
     }
 
     /// Rebuild the presentation currently requested by the viewport. A
@@ -825,9 +674,9 @@ impl RohditorApp {
             let frame = document.frame.as_ref().map(Arc::clone)?;
             let ticket = document.begin_preview_request(PreviewIntent::CropToolFullFrame);
             let recipe = document.edits.recipe().clone();
-            document.histogram_revision = None;
-            document.preview_diagnostics = None;
-            document.preview_status = Some((
+            document.preview.histogram_revision = None;
+            document.preview.diagnostics = None;
+            document.preview.status = Some((
                 ticket.revision,
                 "Rebuilding full image for crop with the selected demosaic algorithm".to_owned(),
             ));
@@ -842,7 +691,7 @@ impl RohditorApp {
             .crop_tool_preview(ticket, frame, recipe, options)
             && let Some(document) = self.document.as_mut()
         {
-            document.preview_status = None;
+            document.preview.status = None;
             document.error = Some(error);
         }
     }
@@ -945,393 +794,57 @@ impl RohditorApp {
         diagnostics: WorkerPreviewDiagnostics,
         upload_preparation: Duration,
     ) {
-        let Some(document) = self
-            .document
-            .as_ref()
-            .filter(|document| gpu_upload_matches_document(document, ticket))
-        else {
-            return;
-        };
-        let recipe = document.edits.recipe().clone();
-        let previous = self.document.as_mut().and_then(|document| {
-            document.pending_gpu_histogram = None;
-            document.gpu_histogram_due = None;
-            document.gpu_preview.take()
-        });
-        let previous_texture_id = previous.as_ref().map(|preview| preview.texture_id);
-        let reusable_frame = previous.map(|preview| preview.frame);
-
-        let result = self
-            .gpu
-            .as_ref()
-            .ok_or_else(|| {
-                "the GPU processor is no longer active while its preview base was prepared"
-                    .to_owned()
-            })
-            .and_then(|runtime| {
-                let output_policy = self.settings.render_options().output_policy;
-                let (source, frame) = match prepared {
-                    PreparedGpuSource::Reduced(prepared) => {
-                        let source = runtime
-                            .processor
-                            .adopt_spatial_preview(prepared, &recipe)
-                            .map_err(|error| error.to_string())?;
-                        let frame = runtime
-                            .processor
-                            .render(&source, &recipe, output_policy, reusable_frame)
-                            .map_err(|error| error.to_string())?;
-                        (GpuDocumentSource::Reduced(Box::new(source)), frame)
-                    }
-                    PreparedGpuSource::Full { source, frame } => {
-                        // Source 1:1 development completed on the worker in
-                        // cancellable row bands; the UI only adopts its result.
-                        let _ = output_policy;
-                        let _ = reusable_frame;
-                        (GpuDocumentSource::Full(Box::new(source)), *frame)
-                    }
+        self.with_document_preview(
+            context,
+            ticket.document_id,
+            |runtime, coordinator, preview, request| {
+                let upload = GpuUpload {
+                    ticket,
+                    prepared,
+                    diagnostics,
+                    upload_preparation,
                 };
-                let texture_id =
-                    register_or_update_gpu_texture(runtime, previous_texture_id, &frame);
-                Ok::<_, String>((source, frame, texture_id))
-            });
-
-        match result {
-            Ok((source, frame, texture_id)) => {
-                let output_size = gpu_output_size(frame.output_dimensions());
-                let elapsed =
-                    diagnostics.timings.total + upload_preparation + frame.submission_time();
-                let gpu_resident_bytes = source
-                    .estimated_bytes()
-                    .saturating_add(frame.estimated_bytes());
-                let preview_diagnostics = DocumentPreviewDiagnostics {
-                    worker: diagnostics,
-                    gpu_upload_preparation: Some(upload_preparation),
-                    gpu_submission: Some(frame.submission_time()),
-                    gpu_queue_completion: frame.queue_completion_time(),
-                    gpu_histogram_readback: None,
-                    gpu_textures_reused: Some(frame.textures_reused()),
-                    gpu_resident_bytes,
-                };
-                info!(
-                    document_id = ticket.document_id,
-                    revision = ticket.revision,
-                    width = frame.output_dimensions().0,
-                    height = frame.output_dimensions().1,
-                    base_ms = diagnostics.timings.total.as_millis(),
-                    upload_prepare_ms = upload_preparation.as_millis(),
-                    submission_us = frame.submission_time().as_micros(),
-                    "GPU preview complete"
-                );
-                if let Some(document) = self.document.as_mut().filter(|document| {
-                    document.id == ticket.document_id && document.ticket() == ticket
-                }) {
-                    let previous_source = document.preview_source;
-                    document.gpu_preview = Some(GpuDocumentPreview {
-                        ticket,
-                        algorithm: diagnostics.algorithm,
-                        resolution: diagnostics.resolution,
-                        source,
-                        frame,
-                        texture_id,
-                    });
-                    document.gpu_histogram_due = (diagnostics.resolution == PreviewResolution::Fit
-                        || self.show_clipping)
-                        .then_some((ticket, Instant::now() + GPU_HISTOGRAM_DEBOUNCE));
-                    document.texture = Some(PreviewTexture::Gpu {
-                        id: texture_id,
-                        size: output_size,
-                    });
-                    document.preview_pixels = None;
-                    document.preview_source = Some(
-                        if diagnostics.resolution == PreviewResolution::SourceScale {
-                            PreviewSource::OneToOneGpu
-                        } else {
-                            PreviewSource::developed(diagnostics.algorithm, true)
-                        },
-                    );
-                    if diagnostics.resolution == PreviewResolution::SourceScale {
-                        document.view.source_scale_frame_ready(
-                            previous_source,
-                            context.input(|input| input.time),
-                        );
-                    }
-                    document.preview_status = None;
-                    document.last_preview_time = Some(elapsed);
-                    document.preview_diagnostics = Some(preview_diagnostics);
-                    document.error = None;
-                    document.warning = None;
-                }
-                context.request_repaint();
-            }
-            Err(error) => {
-                if let Some(texture_id) = previous_texture_id {
-                    self.clear_orphaned_gpu_display(ticket.document_id, texture_id);
-                }
-                self.handle_gpu_failure(context, ticket.document_id, error);
-            }
-        }
+                let outcome = runtime.install_gpu_upload(coordinator, preview, request, upload);
+                ((), outcome)
+            },
+        );
     }
 
-    fn render_gpu_preview(&mut self, context: &egui::Context, document_id: u64) {
-        let source_scale = self.document.as_ref().is_some_and(|document| {
-            document.id == document_id
-                && document
-                    .gpu_preview
-                    .as_ref()
-                    .is_some_and(|preview| matches!(preview.source, GpuDocumentSource::Full(_)))
-        });
-        if source_scale {
-            // Source 1:1 must remain worker-owned even for a downstream-only
-            // edit. Keep the current display installed until that ticket
-            // returns; never make the UI thread submit a full image dispatch.
-            self.queue_preview(context, document_id);
-            return;
-        }
-        let _ = self.render_resident_gpu_preview(context, document_id, ResidentGpuRender::Exact);
-    }
-
+    /// Apply a white-balance edit to the resident GPU frame at once. `false`
+    /// means the caller must queue an exact preview instead.
     fn render_gpu_white_balance_draft(
         &mut self,
         context: &egui::Context,
         document_id: u64,
     ) -> bool {
-        let supported = self.document.as_ref().is_some_and(|document| {
-            document.id == document_id
-                && document.gpu_preview.as_ref().is_some_and(|preview| {
-                    gpu_supports_recipe(document.edits.recipe())
-                        && preview
-                            .source
-                            .supports_white_balance_draft(document.edits.recipe())
-                        && preview
-                            .source
-                            .optics_matches_recipe(&document.edits.recipe().optics)
-                })
-        });
-        if !supported {
-            return false;
-        }
-        self.coordinator.cancel_preview(document_id);
-        self.render_resident_gpu_preview(context, document_id, ResidentGpuRender::WhiteBalanceDraft)
-    }
-
-    fn render_resident_gpu_preview(
-        &mut self,
-        context: &egui::Context,
-        document_id: u64,
-        render: ResidentGpuRender,
-    ) -> bool {
-        let Some(document) = self
-            .document
-            .as_mut()
-            .filter(|document| document.id == document_id)
-        else {
-            return false;
-        };
-        let Some(preview) = document.gpu_preview.take() else {
-            return false;
-        };
-        document.pending_gpu_histogram = None;
-        document.gpu_histogram_due = None;
-        document.histogram_revision = None;
-        let texture_id = preview.texture_id;
-        let recipe = document.edits.recipe().clone();
-        let revision = document.edits.revision();
-        let current_ticket = document.ticket();
-        let previous_worker_diagnostics = document
-            .preview_diagnostics
-            .map(|diagnostics| diagnostics.worker);
-        document.preview_status = Some((
-            revision,
-            match render {
-                ResidentGpuRender::Exact => "Applying edits to resident GPU preview",
-                ResidentGpuRender::WhiteBalanceDraft => {
-                    "Applying interactive white balance on the GPU"
-                }
-            }
-            .to_owned(),
-        ));
-
-        let result = self
-            .gpu
-            .as_ref()
-            .ok_or_else(|| "the GPU processor is no longer active while applying edits".to_owned())
-            .and_then(|runtime| {
-                let output_policy = self.settings.render_options().output_policy;
-                let frame = match (&preview.source, render) {
-                    (GpuDocumentSource::Reduced(source), ResidentGpuRender::Exact) => runtime
-                        .processor
-                        .render(source, &recipe, output_policy, Some(preview.frame)),
-                    (GpuDocumentSource::Reduced(source), ResidentGpuRender::WhiteBalanceDraft) => {
-                        runtime.processor.render_white_balance_draft(
-                            source,
-                            &recipe,
-                            output_policy,
-                            Some(preview.frame),
-                        )
-                    }
-                    (GpuDocumentSource::Full(_), ResidentGpuRender::Exact) => {
-                        return Err(
-                            "full-resolution GPU inspection must be rebuilt by the worker"
-                                .to_owned(),
-                        );
-                    }
-                    (GpuDocumentSource::Full(_), ResidentGpuRender::WhiteBalanceDraft) => {
-                        return Err(
-                            "full-resolution GPU inspection requires an exact white-balance rebuild"
-                                .to_owned(),
-                        );
-                    }
-                }
-                .map_err(|error| error.to_string())?;
-                register_or_update_gpu_texture(runtime, Some(texture_id), &frame);
-                Ok::<_, String>(frame)
-            });
-
-        match result {
-            Ok(frame) => {
-                let output_size = gpu_output_size(frame.output_dimensions());
-                let submission = frame.submission_time();
-                let mut worker = previous_worker_diagnostics.unwrap_or(WorkerPreviewDiagnostics {
-                    sensor_gpu: false,
-                    backend: PreviewBackend::GpuBase,
-                    resolution: PreviewResolution::Fit,
-                    algorithm: preview.algorithm,
-                    cache_hits: PreviewCacheHits::default(),
-                    timings: StageTimings::default(),
-                    highlight_diagnostics: HighlightDiagnostics::Off,
-                    capture_cpu_recovery: false,
-                    detail: None,
-                    output_gamut_diagnostics: None,
-                    memory: MemoryEstimate::default(),
-                    cache_resident_bytes: 0,
-                    workspace_reused: false,
-                    optics_applied: None,
-                    optics_used_infinity_distance_fallback: false,
-                    optics_scale: None,
-                });
-                worker.backend = PreviewBackend::GpuBase;
-                worker.cache_hits = PreviewCacheHits {
-                    decoded: true,
-                    reconstructed: true,
-                    demosaiced: false,
-                    adjusted: false,
-                };
-                worker.timings = StageTimings {
-                    adjustments: submission,
-                    total: submission,
-                    ..StageTimings::default()
-                };
-                worker.workspace_reused = false;
-                let preview_diagnostics = DocumentPreviewDiagnostics {
-                    worker,
-                    gpu_upload_preparation: None,
-                    gpu_submission: Some(submission),
-                    gpu_queue_completion: frame.queue_completion_time(),
-                    gpu_histogram_readback: None,
-                    gpu_textures_reused: Some(frame.textures_reused()),
-                    gpu_resident_bytes: preview
-                        .source
-                        .estimated_bytes()
-                        .saturating_add(frame.estimated_bytes()),
-                };
-                info!(
-                    document_id,
-                    revision,
-                    width = frame.output_dimensions().0,
-                    height = frame.output_dimensions().1,
-                    submission_us = frame.submission_time().as_micros(),
-                    white_balance_draft = render == ResidentGpuRender::WhiteBalanceDraft,
-                    "GPU preview adjustment complete"
-                );
-                if let Some(document) = self.document.as_mut().filter(|document| {
-                    document.ticket() == current_ticket
-                        && preview_intent_matches_resolution(
-                            document.preview_intent,
-                            preview.resolution,
-                        )
-                }) {
-                    document.gpu_preview = Some(GpuDocumentPreview {
-                        ticket: current_ticket,
-                        algorithm: preview.algorithm,
-                        resolution: preview.resolution,
-                        source: preview.source,
-                        frame,
-                        texture_id,
-                    });
-                    document.gpu_histogram_due = (preview.resolution == PreviewResolution::Fit
-                        || self.show_clipping)
-                        .then_some((current_ticket, Instant::now() + GPU_HISTOGRAM_DEBOUNCE));
-                    document.texture = Some(PreviewTexture::Gpu {
-                        id: texture_id,
-                        size: output_size,
-                    });
-                    document.preview_pixels = None;
-                    document.preview_source =
-                        Some(if preview.resolution == PreviewResolution::SourceScale {
-                            PreviewSource::OneToOneGpu
-                        } else {
-                            PreviewSource::developed(worker.algorithm, true)
-                        });
-                    document.preview_status = None;
-                    document.last_preview_time = Some(submission);
-                    document.preview_diagnostics = Some(preview_diagnostics);
-                    document.error = None;
-                }
-                context.request_repaint();
-                true
-            }
-            Err(error) => {
-                self.clear_orphaned_gpu_display(document_id, texture_id);
-                self.handle_gpu_failure(context, document_id, error);
-                false
-            }
-        }
+        self.with_document_preview(
+            context,
+            document_id,
+            |runtime, coordinator, preview, request| {
+                runtime.render_white_balance_draft(coordinator, preview, request)
+            },
+        )
+        .unwrap_or(false)
     }
 
     fn handle_gpu_failure(&mut self, context: &egui::Context, document_id: u64, error: String) {
-        warn!(
+        self.with_document_preview(
+            context,
             document_id,
-            processor_preference = ?self.processor_preference,
-            %error,
-            "GPU preview failed"
+            |runtime, coordinator, preview, request| {
+                (
+                    (),
+                    runtime.handle_gpu_failure(coordinator, preview, request, error),
+                )
+            },
         );
-        if self.processor_preference == ProcessorPreference::Auto {
-            if let Some(mut document) = self.document.take() {
-                if document.id == document_id {
-                    self.release_gpu_preview(&mut document);
-                    document.warning = Some(format!(
-                        "GPU preview failed ({error}); continuing with the CPU processor."
-                    ));
-                    document.preview_status = None;
-                }
-                self.document = Some(document);
-            }
-            self.gpu = None;
-            self.processor_note = Some(format!("GPU fallback: {error}"));
-            self.queue_preview(context, document_id);
-        } else if let Some(document) = self
-            .document
-            .as_mut()
-            .filter(|document| document.id == document_id)
-        {
-            document.preview_status = None;
-            document.error = Some(format!("GPU preview failed: {error}"));
-        }
     }
 
-    fn release_gpu_preview(&mut self, document: &mut Document) {
-        document.pending_gpu_histogram = None;
-        document.gpu_histogram_due = None;
-        let texture_id = document
-            .gpu_preview
-            .take()
-            .map(|preview| preview.texture_id);
-        if let Some(texture_id) = texture_id {
-            self.free_gpu_texture(texture_id);
-        }
-        if matches!(document.texture, Some(PreviewTexture::Gpu { .. })) {
-            document.texture = None;
-            document.preview_source = None;
+    /// Drop the document's resident GPU frame and free its egui texture.
+    fn release_gpu_preview(&self, document: &mut Document) {
+        document.preview.release_gpu();
+        if let Some(gpu) = &self.egui_gpu {
+            gpu.sync_display(document);
         }
     }
 
@@ -1345,189 +858,50 @@ impl RohditorApp {
         self.document = Some(document);
     }
 
-    fn clear_orphaned_gpu_display(&mut self, document_id: u64, texture_id: egui::TextureId) {
-        self.free_gpu_texture(texture_id);
-        if let Some(document) = self
-            .document
-            .as_mut()
-            .filter(|document| document.id == document_id)
-            && matches!(
-                document.texture,
-                Some(PreviewTexture::Gpu { id, .. }) if id == texture_id
-            )
-        {
-            document.texture = None;
-            document.preview_source = None;
-        }
-    }
-
-    fn free_gpu_texture(&self, texture_id: egui::TextureId) {
-        if let Some(runtime) = self.gpu.as_ref() {
-            runtime
-                .render_state
-                .renderer
-                .write()
-                .free_texture(&texture_id);
-        }
-    }
-
     fn refresh_gpu_queue_completion(&mut self, context: &egui::Context) {
-        if let Some(runtime) = self.gpu.as_ref()
-            && let Err(error) = runtime.processor.poll()
-        {
-            warn!(%error, "GPU polling failed while refreshing preview diagnostics");
-        }
         let Some(document) = self.document.as_mut() else {
+            self.preview_runtime.poll_device();
             return;
         };
-        let Some(preview) = document.gpu_preview.as_ref() else {
-            return;
-        };
-        let Some(diagnostics) = document.preview_diagnostics.as_mut() else {
-            return;
-        };
-        if diagnostics.gpu_queue_completion.is_some() {
-            return;
-        }
-        if let Some(completion) = preview.frame.queue_completion_time() {
-            diagnostics.gpu_queue_completion = Some(completion);
-            document.last_preview_time = Some(completion);
-        } else {
-            context.request_repaint_after(Duration::from_millis(16));
+        if let Some(after) = self.preview_runtime.poll_completion(&mut document.preview) {
+            context.request_repaint_after(after);
         }
     }
 
     fn refresh_gpu_histogram(&mut self, context: &egui::Context) {
-        if let Some(mut pending) = self
-            .document
-            .as_mut()
-            .and_then(|document| document.pending_gpu_histogram.take())
-        {
-            let readback_latency = pending.started.elapsed();
-            match pending.readback.try_finish() {
-                Ok(Some(readback)) => {
-                    let size = usize::try_from(readback.width).ok().and_then(|width| {
-                        usize::try_from(readback.height)
-                            .ok()
-                            .map(|height| (width, height))
-                    });
-                    let histogram = size.and_then(|(width, height)| {
-                        Histogram::from_rgba8(width, height, &readback.rgba)
-                    });
-                    if let Some(document) = self.document.as_mut().filter(|document| {
-                        document.ticket() == pending.ticket
-                            && document
-                                .gpu_preview
-                                .as_ref()
-                                .is_some_and(|preview| preview.ticket == pending.ticket)
-                    }) && let Some(histogram) = histogram
-                    {
-                        document.histogram = Some(histogram);
-                        document.histogram_revision = Some(pending.ticket.revision);
-                        if self.show_clipping
-                            && let Some((width, height)) = size
-                        {
-                            clipping::install_gpu_readback(
-                                context,
-                                document,
-                                width,
-                                height,
-                                &readback.rgba,
-                            );
-                        }
-                        if let Some(diagnostics) = document.preview_diagnostics.as_mut() {
-                            diagnostics.gpu_histogram_readback = Some(readback_latency);
-                        }
-                    }
-                    context.request_repaint();
-                }
-                Ok(None) => {
-                    if let Some(document) = self.document.as_mut().filter(|document| {
-                        document.ticket() == pending.ticket
-                            && document
-                                .gpu_preview
-                                .as_ref()
-                                .is_some_and(|preview| preview.ticket == pending.ticket)
-                    }) {
-                        document.pending_gpu_histogram = Some(pending);
-                        context.request_repaint_after(Duration::from_millis(16));
-                    }
-                }
-                Err(error) => {
-                    warn!(ticket = ?pending.ticket, %error, "GPU histogram readback failed");
-                }
-            }
-            return;
-        }
-
-        let now = Instant::now();
-        let Some((ticket, due)) = self
-            .document
-            .as_ref()
-            .and_then(|document| document.gpu_histogram_due)
-        else {
+        let Some(document) = self.document.as_mut() else {
             return;
         };
-        if due > now {
-            context.request_repaint_after(due.duration_since(now));
-            return;
+        let poll = self.preview_runtime.poll_histogram(
+            &mut document.preview,
+            document.edits.revision(),
+            self.show_clipping,
+        );
+        if poll.repaint {
+            context.request_repaint();
         }
-
-        let readback = self
-            .document
-            .as_ref()
-            .filter(|document| {
-                document.ticket() == ticket
-                    && document
-                        .gpu_preview
-                        .as_ref()
-                        .is_some_and(|preview| preview.ticket == ticket)
-            })
-            .and_then(|document| document.gpu_preview.as_ref())
-            .and_then(|preview| {
-                self.gpu
-                    .as_ref()
-                    .map(|runtime| runtime.processor.begin_display_readback(&preview.frame))
-            });
-        if let Some(document) = self.document.as_mut()
-            && document
-                .gpu_histogram_due
-                .is_some_and(|(due_ticket, _)| due_ticket == ticket)
-        {
-            document.gpu_histogram_due = None;
+        if let Some(after) = poll.repaint_after {
+            context.request_repaint_after(after);
         }
-        match readback {
-            Some(Ok(readback)) => {
-                if let Some(document) = self.document.as_mut().filter(|document| {
-                    document.ticket() == ticket
-                        && document
-                            .gpu_preview
-                            .as_ref()
-                            .is_some_and(|preview| preview.ticket == ticket)
-                }) {
-                    document.pending_gpu_histogram = Some(PendingGpuHistogram {
-                        ticket,
-                        readback,
-                        started: Instant::now(),
-                    });
-                    context.request_repaint_after(Duration::from_millis(16));
-                }
-            }
-            Some(Err(error)) => {
-                warn!(?ticket, %error, "could not start GPU histogram readback");
-            }
-            None => {}
+        if let Some(pixels) = poll.pixels {
+            clipping::install_gpu_readback(
+                context,
+                document,
+                pixels.width,
+                pixels.height,
+                &pixels.rgba,
+            );
         }
     }
 
     fn processor_description(&self) -> String {
-        if let Some(runtime) = &self.gpu {
-            let capabilities = runtime.processor.capabilities();
+        if let Some(runtime) = self.preview_runtime.gpu() {
+            let capabilities = runtime.processor().capabilities();
             let hardware = format!("{} · {}", capabilities.adapter_name, capabilities.backend);
             if self
                 .document
                 .as_ref()
-                .and_then(|document| document.preview_diagnostics)
+                .and_then(|document| document.preview.diagnostics)
                 .is_some_and(|diagnostics| diagnostics.worker.capture_cpu_recovery)
             {
                 return format!("CPU sensor recovery · GPU spatial/color · {hardware}");
@@ -1535,7 +909,7 @@ impl RohditorApp {
             match self
                 .document
                 .as_ref()
-                .and_then(|document| document.preview_diagnostics)
+                .and_then(|document| document.preview.diagnostics)
                 .map(|diagnostics| diagnostics.worker.backend)
             {
                 Some(PreviewBackend::Cpu) => format!("CPU fallback · GPU available · {hardware}"),
@@ -1543,7 +917,7 @@ impl RohditorApp {
                     let sensor_gpu = self
                         .document
                         .as_ref()
-                        .and_then(|d| d.preview_diagnostics)
+                        .and_then(|d| d.preview.diagnostics)
                         .is_some_and(|d| d.worker.sensor_gpu);
                     if sensor_gpu {
                         format!("GPU sensor/spatial/color · {hardware}")
@@ -1554,12 +928,12 @@ impl RohditorApp {
                 None => format!("GPU available · {hardware}"),
             }
         } else {
-            format!("CPU ({})", self.processor_preference.label())
+            format!("CPU ({})", self.preview_runtime.preference().label())
         }
     }
 
     fn gpu_required_but_unavailable(&self) -> bool {
-        self.processor_preference == ProcessorPreference::Gpu && self.gpu.is_none()
+        self.preview_runtime.gpu_required_but_unavailable()
     }
 
     fn request_export(&mut self) {
@@ -1643,7 +1017,7 @@ impl RohditorApp {
             recipe,
             settings,
             self.settings.render_options(),
-            self.processor_preference != ProcessorPreference::Cpu,
+            self.preview_runtime.preference() != ProcessorPreference::Cpu,
         ) && let Some(document) = self.document.as_mut()
         {
             document.export_status = None;
@@ -1666,12 +1040,12 @@ impl RohditorApp {
             fit_selected: self
                 .document
                 .as_ref()
-                .is_none_or(|document| document.view.is_fit()),
+                .is_none_or(|document| document.preview.view.is_fit()),
             source_scale_selected: source_scale_selected(self.document.as_ref()),
-            zoom_label: self
-                .document
-                .as_ref()
-                .map_or_else(|| "FIT".to_owned(), |document| document.view.zoom_label()),
+            zoom_label: self.document.as_ref().map_or_else(
+                || "FIT".to_owned(),
+                |document| document.preview.view.zoom_label(),
+            ),
             diagnostics_open: self.show_diagnostics,
             clipping_selected: self.show_clipping,
             dirty: self.document.as_ref().is_some_and(Document::is_dirty),
@@ -1741,21 +1115,22 @@ impl RohditorApp {
                 changed_document = Some(document.id);
             }
             if actions.fit {
-                let changed_mode = document.source_scale_requested;
-                document.source_scale_requested = false;
-                document.view.fit(now);
+                let changed_mode = document.preview.source_scale_requested;
+                document.preview.source_scale_requested = false;
+                document.preview.view.fit(now);
                 if changed_mode {
                     view_changed_document = Some(document.id);
                 }
             }
             if actions.actual_size && self.tool.crop().is_none() {
-                let changed_mode = !document.source_scale_requested;
-                document.source_scale_requested = true;
+                let changed_mode = !document.preview.source_scale_requested;
+                document.preview.source_scale_requested = true;
                 let preview_is_source_scale = document
-                    .preview_source
+                    .preview
+                    .source
                     .is_some_and(PreviewSource::is_source_scale);
                 if preview_is_source_scale {
-                    document.view.actual_size(now);
+                    document.preview.view.actual_size(now);
                 }
                 if changed_mode {
                     view_changed_document = Some(document.id);
@@ -1816,7 +1191,7 @@ impl RohditorApp {
             source_state: self
                 .document
                 .as_ref()
-                .and_then(|document| document.preview_source)
+                .and_then(|document| document.preview.source)
                 .map(|source| source.short_label().to_owned()),
         };
         let output = toolbar::show_file_panel(context, &model);
@@ -1890,8 +1265,8 @@ impl RohditorApp {
                 document.optics_profile_filter = filter;
             }
             if output.auto_tone
-                && document.histogram_revision == Some(document.edits.revision())
-                && let Some(histogram) = document.histogram.as_ref()
+                && document.preview.histogram_revision == Some(document.edits.revision())
+                && let Some(histogram) = document.preview.histogram.as_ref()
             {
                 let auto_changed = auto_tone(document.edits.recipe(), histogram)
                     .is_some_and(|next| document.edits.set_discrete(next));
@@ -1981,7 +1356,7 @@ impl RohditorApp {
                 active_handle: session.active_handle(),
             });
         let output = if let Some(document) = self.document.as_mut() {
-            let preparing = document.open_status.is_some() || document.preview_status.is_some();
+            let preparing = document.open_status.is_some() || document.preview.status.is_some();
             let crop_policy = self.settings.render_options().raw_crop_policy;
             if let Some(session) = self.tool.masks() {
                 let options = PreviewOptions {
@@ -2016,12 +1391,12 @@ impl RohditorApp {
                         .clipping
                         .texture_for(document.texture.as_ref())
                         .filter(|_| self.show_clipping),
-                    source: document.preview_source,
+                    source: document.preview.source,
                     picker_mode: self.tool.picker(),
                     crop: crop_overlay,
                     masks,
                 },
-                &mut document.view,
+                &mut document.preview.view,
             )
         } else {
             let mut empty_view = ViewState::default();
@@ -2071,7 +1446,7 @@ impl RohditorApp {
         }
         let Some((ticket, frame, recipe)) = self.document.as_ref().and_then(|document| {
             let source_ready = matches!(
-                document.preview_source,
+                document.preview.source,
                 Some(
                     PreviewSource::FastCpu
                         | PreviewSource::FastGpu
@@ -2079,7 +1454,7 @@ impl RohditorApp {
                         | PreviewSource::HighQualityGpu
                 )
             );
-            if !source_ready || document.source_scale_requested {
+            if !source_ready || document.preview.source_scale_requested {
                 return None;
             }
             document.frame.as_ref().map(|frame| {
@@ -2112,7 +1487,7 @@ impl RohditorApp {
                     .as_mut()
                     .filter(|document| document.ticket() == ticket)
                 {
-                    document.preview_status = Some((
+                    document.preview.status = Some((
                         ticket.revision,
                         "Sampling a camera-native white-balance patch".to_owned(),
                     ));
@@ -2169,7 +1544,8 @@ impl RohditorApp {
         }
         let document = self.document.as_ref()?;
         if !document
-            .preview_source
+            .preview
+            .source
             .is_some_and(PreviewSource::is_developed)
         {
             return None;
@@ -2183,12 +1559,7 @@ impl RohditorApp {
                 [normalized.x, normalized.y],
             );
         }
-        let gpu_preview = document.gpu_preview.as_ref()?;
-        let runtime = self.gpu.as_ref()?;
-        let readback = runtime
-            .processor
-            .readback_display(&gpu_preview.frame)
-            .ok()?;
+        let readback = self.preview_runtime.readback_display(&document.preview)?;
         sample_rgb_patch(
             usize::try_from(readback.width).ok()?,
             usize::try_from(readback.height).ok()?,
@@ -2218,8 +1589,8 @@ impl RohditorApp {
         self.refresh_recipe_save_status(context);
         let mut activities = Vec::new();
         let mut busy = false;
-        if let Some(note) = &self.processor_note {
-            activities.push(note.clone());
+        if let Some(note) = self.preview_runtime.note() {
+            activities.push(note.to_owned());
         }
         if let Some(document) = &self.document {
             if let Some(error) = &document.error {
@@ -2234,7 +1605,7 @@ impl RohditorApp {
             if let Some(status) = &document.open_status {
                 activities.push(status.clone());
                 busy = true;
-            } else if let Some((revision, status)) = &document.preview_status {
+            } else if let Some((revision, status)) = &document.preview.status {
                 activities.push(format!("{status} · revision {revision}"));
                 busy = true;
             }
@@ -2281,7 +1652,7 @@ impl RohditorApp {
                 preview_milliseconds: self
                     .document
                     .as_ref()
-                    .and_then(|document| document.last_preview_time)
+                    .and_then(|document| document.preview.last_time)
                     .map(|duration| duration.as_secs_f64() * 1_000.0),
                 startup_error: self.startup_error.clone(),
             },
@@ -2584,9 +1955,9 @@ impl RohditorApp {
     fn background_work_is_active(&self) -> bool {
         self.document.as_ref().is_some_and(|document| {
             document.open_status.is_some()
-                || document.preview_status.is_some()
+                || document.preview.status.is_some()
                 || document.export_status.is_some()
-                || document.pending_gpu_histogram.is_some()
+                || document.preview.has_pending_histogram()
         }) || self.pending_white_balance_pick.is_some()
             || self.catalog.scanning()
             || self.catalog.pending_count() > 0
@@ -2609,8 +1980,8 @@ impl RohditorApp {
 
     fn diagnostics_model(&self) -> DiagnosticsModel {
         let queue = self.coordinator.preview_queue_stats();
-        let gpu_device = self.gpu.as_ref().map(|runtime| {
-            let capabilities = runtime.processor.capabilities();
+        let gpu_device = self.preview_runtime.gpu().map(|runtime| {
+            let capabilities = runtime.processor().capabilities();
             format!(
                 "{} · {} · timestamp queries: {}",
                 capabilities.adapter_name, capabilities.backend, capabilities.timestamp_queries
@@ -2619,7 +1990,7 @@ impl RohditorApp {
         let preview = self
             .document
             .as_ref()
-            .and_then(|document| document.preview_diagnostics)
+            .and_then(|document| document.preview.diagnostics)
             .and_then(|preview| {
                 let document = self.document.as_ref()?;
                 Some(PreviewModel {
@@ -2779,7 +2150,7 @@ impl RohditorApp {
             catalog,
             preview,
             messages: DiagnosticsMessages {
-                processor_note: self.processor_note.clone(),
+                processor_note: self.preview_runtime.note().map(str::to_owned),
                 startup_error: self.startup_error.clone(),
                 warning: self
                     .document
@@ -2892,21 +2263,7 @@ fn output_gamut_statistics(diagnostics: rohditor_core::GamutMappingDiagnostics) 
 }
 
 fn source_scale_selected(document: Option<&Document>) -> bool {
-    document.is_some_and(|document| document.source_scale_requested)
-}
-
-/// Whether a resident GPU base can serve `requested`. While the background
-/// neural pass runs, its classic stand-in base keeps serving neural requests;
-/// once it is ready, the next request goes to the worker for the neural source.
-fn gpu_base_algorithm_matches(
-    resident: DemosaicAlgorithm,
-    requested: DemosaicAlgorithm,
-    neural_ready: bool,
-) -> bool {
-    resident == requested
-        || (requested == DemosaicAlgorithm::Neural
-            && resident == NEURAL_FALLBACK_DEMOSAIC
-            && !neural_ready)
+    document.is_some_and(|document| document.preview.source_scale_requested)
 }
 
 /// Keyboard navigation steps in the library grid.
@@ -3253,7 +2610,7 @@ fn document_panel_model(
                 neutral: COLOR_GRADING_RANGE.neutral,
             },
         },
-        auto_tone_available: document.histogram_revision == Some(document.edits.revision()),
+        auto_tone_available: document.preview.histogram_revision == Some(document.edits.revision()),
         picker_mode,
         color_mixer_channel,
         optics: optics_panel_model(document),
@@ -3289,7 +2646,8 @@ fn optics_panel_model(document: &Document) -> OpticsPanelModel {
             });
     let (applied, used_infinity_distance_fallback, scale) =
         document
-            .preview_diagnostics
+            .preview
+            .diagnostics
             .map_or((None, false, None), |diagnostics| {
                 (
                     diagnostics.worker.optics_applied,
@@ -3395,10 +2753,6 @@ fn set_highlight_method(edits: &mut EditSession, method: HighlightMethod) -> boo
     edits.set_discrete(next)
 }
 
-fn gpu_supports_recipe(recipe: &EditRecipe) -> bool {
-    rohditor_gpu::GpuPreviewProcessor::supports_recipe(recipe)
-}
-
 #[cfg(test)]
 fn gpu_base_highlights_match(
     retained: HighlightAdjustments,
@@ -3417,31 +2771,6 @@ fn gpu_base_highlights_match(
                 == requested.opposed.detection_threshold.to_bits()
         }
     }
-}
-
-fn gpu_upload_matches_document(document: &Document, ticket: PreviewTicket) -> bool {
-    document.id == ticket.document_id
-        && document.ticket() == ticket
-        && preview_intent_matches_resolution(
-            document.preview_intent,
-            if document.source_scale_requested {
-                PreviewResolution::SourceScale
-            } else {
-                PreviewResolution::Fit
-            },
-        )
-        && gpu_supports_recipe(document.edits.recipe())
-}
-
-const fn preview_intent_matches_resolution(
-    intent: PreviewIntent,
-    resolution: PreviewResolution,
-) -> bool {
-    matches!(
-        (intent, resolution),
-        (PreviewIntent::CommittedFit, PreviewResolution::Fit)
-            | (PreviewIntent::SourceScale, PreviewResolution::SourceScale)
-    )
 }
 
 fn apply_adjustment_interaction(
@@ -3701,7 +3030,7 @@ fn install_texture(
             )));
         }
     }
-    document.preview_source = Some(source);
+    document.preview.source = Some(source);
 }
 
 fn source_stem(path: &Path) -> String {
@@ -3722,33 +3051,9 @@ fn display_file_name(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use image::{Rgb, RgbImage};
+    use rohditor_engine::preview::gpu_supports_recipe;
 
     use super::*;
-
-    #[test]
-    fn resident_gpu_bases_are_algorithm_specific() {
-        assert!(gpu_base_algorithm_matches(
-            DemosaicAlgorithm::Rcd,
-            DemosaicAlgorithm::Rcd,
-            false
-        ));
-        assert!(!gpu_base_algorithm_matches(
-            DemosaicAlgorithm::Rcd,
-            DemosaicAlgorithm::Amaze,
-            false
-        ));
-        // The stand-in serves neural requests only until the neural pass is ready.
-        assert!(gpu_base_algorithm_matches(
-            NEURAL_FALLBACK_DEMOSAIC,
-            DemosaicAlgorithm::Neural,
-            false
-        ));
-        assert!(!gpu_base_algorithm_matches(
-            NEURAL_FALLBACK_DEMOSAIC,
-            DemosaicAlgorithm::Neural,
-            true
-        ));
-    }
 
     #[test]
     fn library_selection_moves_by_grid_steps_and_clamps() {
@@ -4096,7 +3401,7 @@ mod tests {
         let context = egui::Context::default();
         let mut document =
             Document::opening(7, PathBuf::from("fixture.arw"), EditRecipe::default(), None);
-        document.view.actual_size(0.0);
+        document.preview.view.actual_size(0.0);
         let pixels = vec![255, 0, 0, 0, 255, 0];
 
         install_texture(
@@ -4110,8 +3415,8 @@ mod tests {
             PreviewSource::FastCpu,
         );
 
-        assert!(!document.view.is_fit());
-        assert_eq!(document.view.zoom_label(), "SOURCE 100%");
+        assert!(!document.preview.view.is_fit());
+        assert_eq!(document.preview.view.zoom_label(), "SOURCE 100%");
     }
 
     #[test]
@@ -4133,27 +3438,6 @@ mod tests {
         recipe.light.exposure_ev = 0.5;
         assert!(document.edits.set_discrete(recipe));
         assert!(has_user_adjustments(&document));
-    }
-
-    #[test]
-    fn gpu_upload_guard_requires_the_current_revision_and_supported_recipe() {
-        let mut document =
-            Document::opening(7, PathBuf::from("fixture.arw"), EditRecipe::default(), None);
-        let ticket = document.ticket();
-        assert!(gpu_upload_matches_document(&document, ticket));
-
-        let mut recipe = document.edits.recipe().clone();
-        recipe.color.hsl.channels[0].saturation = 0.2;
-        assert!(document.edits.set_discrete(recipe));
-        assert!(!gpu_upload_matches_document(&document, ticket));
-        assert!(gpu_upload_matches_document(&document, document.ticket()));
-
-        let current = document.ticket();
-        let mut recipe = document.edits.recipe().clone();
-        recipe.color.hsl = Default::default();
-        assert!(document.edits.set_discrete(recipe));
-        assert!(gpu_upload_matches_document(&document, document.ticket()));
-        assert!(!gpu_upload_matches_document(&document, current));
     }
 
     #[test]
@@ -4187,12 +3471,12 @@ mod tests {
     fn source_scale_toolbar_selection_tracks_resolution_request() {
         let mut document =
             Document::opening(7, PathBuf::from("fixture.arw"), EditRecipe::default(), None);
-        document.source_scale_requested = true;
-        document.view.fit(0.0);
+        document.preview.source_scale_requested = true;
+        document.preview.view.fit(0.0);
 
         assert!(source_scale_selected(Some(&document)));
 
-        document.source_scale_requested = false;
+        document.preview.source_scale_requested = false;
         assert!(!source_scale_selected(Some(&document)));
     }
 }

@@ -1,9 +1,9 @@
 use std::time::Duration;
 
 use eframe::egui;
-use rohditor_demosaic::DemosaicAlgorithm;
-
+use rohditor_engine::preview::PreviewSource;
 use rohditor_engine::tools::Picker;
+use rohditor_engine::view::{ViewState, fit_scale};
 
 use super::crop::{CropOverlayModel, CropOverlayOutput, interact_and_paint};
 use super::mask_overlay::{self, MaskOverlayModel, MaskOverlayOutput};
@@ -49,186 +49,6 @@ impl PreviewTexture {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PreviewSource {
-    Embedded,
-    FastCpu,
-    FastGpu,
-    HighQualityCpu,
-    HighQualityGpu,
-    OneToOneCpu,
-    OneToOneGpu,
-}
-
-impl PreviewSource {
-    pub(crate) const fn developed(algorithm: DemosaicAlgorithm, gpu: bool) -> Self {
-        match (algorithm, gpu) {
-            (DemosaicAlgorithm::Bilinear, false) => Self::FastCpu,
-            (DemosaicAlgorithm::Bilinear, true) => Self::FastGpu,
-            (DemosaicAlgorithm::MalvarHeCutler, false) => Self::HighQualityCpu,
-            (DemosaicAlgorithm::MalvarHeCutler, true) => Self::HighQualityGpu,
-            (DemosaicAlgorithm::Rcd, false) => Self::HighQualityCpu,
-            (DemosaicAlgorithm::Rcd, true) => Self::HighQualityGpu,
-            (DemosaicAlgorithm::Amaze, false) => Self::HighQualityCpu,
-            (DemosaicAlgorithm::Amaze, true) => Self::HighQualityGpu,
-            (DemosaicAlgorithm::Neural, false) => Self::HighQualityCpu,
-            (DemosaicAlgorithm::Neural, true) => Self::HighQualityGpu,
-        }
-    }
-
-    pub(crate) const fn is_developed(self) -> bool {
-        !matches!(self, Self::Embedded)
-    }
-
-    pub(crate) const fn is_source_scale(self) -> bool {
-        matches!(self, Self::OneToOneCpu | Self::OneToOneGpu)
-    }
-
-    pub(crate) const fn label(self) -> &'static str {
-        match self {
-            Self::Embedded => "EMBEDDED PREVIEW · DEVELOPING RAW",
-            Self::FastCpu => "FAST ANTIALIASED PREVIEW · CPU",
-            Self::FastGpu => "FAST ANTIALIASED PREVIEW · GPU",
-            Self::HighQualityCpu => "HIGH-QUALITY ANTIALIASED PREVIEW · CPU",
-            Self::HighQualityGpu => "HIGH-QUALITY ANTIALIASED PREVIEW · GPU",
-            Self::OneToOneCpu => "1:1 SOURCE-SCALE DEVELOPED · CPU",
-            Self::OneToOneGpu => "1:1 SOURCE-SCALE DEVELOPED · GPU",
-        }
-    }
-
-    pub(crate) const fn short_label(self) -> &'static str {
-        match self {
-            Self::Embedded => "Embedded preview",
-            Self::FastCpu => "Fast preview · CPU",
-            Self::FastGpu => "Fast preview · GPU",
-            Self::HighQualityCpu => "High-quality preview · CPU",
-            Self::HighQualityGpu => "High-quality preview · GPU",
-            Self::OneToOneCpu => "1:1 source-scale · CPU",
-            Self::OneToOneGpu => "1:1 source-scale · GPU",
-        }
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct ViewState {
-    fit: bool,
-    zoom: f32,
-    pan: egui::Vec2,
-    zoom_feedback_until: f64,
-}
-
-impl Default for ViewState {
-    fn default() -> Self {
-        Self {
-            fit: true,
-            zoom: 1.0,
-            pan: egui::Vec2::ZERO,
-            zoom_feedback_until: 0.0,
-        }
-    }
-}
-
-impl ViewState {
-    pub(crate) fn fit(&mut self, now: f64) {
-        self.fit = true;
-        self.pan = egui::Vec2::ZERO;
-        self.show_zoom_feedback(now);
-    }
-
-    pub(crate) fn actual_size(&mut self, now: f64) {
-        self.fit = false;
-        self.zoom = 1.0;
-        self.pan = egui::Vec2::ZERO;
-        self.show_zoom_feedback(now);
-    }
-
-    pub(crate) fn source_scale_frame_ready(
-        &mut self,
-        previous_source: Option<PreviewSource>,
-        now: f64,
-    ) {
-        if !previous_source.is_some_and(PreviewSource::is_source_scale) {
-            self.actual_size(now);
-        }
-    }
-
-    pub(crate) const fn is_fit(&self) -> bool {
-        self.fit
-    }
-
-    pub(crate) fn is_actual_size(&self) -> bool {
-        !self.fit && (self.zoom - 1.0).abs() <= f32::EPSILON * 4.0
-    }
-
-    pub(crate) fn zoom_label(&self) -> String {
-        if self.fit {
-            "FIT".to_owned()
-        } else if self.is_actual_size() {
-            "SOURCE 100%".to_owned()
-        } else {
-            format!("{:.0}%", self.zoom * 100.0)
-        }
-    }
-
-    fn show_zoom_feedback(&mut self, now: f64) {
-        self.zoom_feedback_until = now + 0.8;
-    }
-
-    fn pan_by(
-        &mut self,
-        fit_scale: f32,
-        viewport: egui::Rect,
-        image_size: egui::Vec2,
-        delta: egui::Vec2,
-    ) {
-        if self.fit {
-            self.fit = false;
-            self.zoom = fit_scale;
-        }
-        self.pan += delta;
-        self.clamp_pan(viewport, image_size);
-    }
-
-    fn zoom_by(
-        &mut self,
-        fit_scale: f32,
-        viewport: egui::Rect,
-        image_size: egui::Vec2,
-        pointer: Option<egui::Pos2>,
-        scroll_delta: f32,
-        now: f64,
-    ) {
-        let old_scale = if self.fit { fit_scale } else { self.zoom };
-        let old_image_center = viewport.center() + self.pan;
-        let old_image_rect = egui::Rect::from_center_size(old_image_center, image_size * old_scale);
-        let anchor = pointer
-            .filter(|pointer| old_image_rect.contains(*pointer))
-            .unwrap_or(old_image_center);
-        self.fit = false;
-        self.zoom = (old_scale * (scroll_delta * 0.002).exp()).clamp(0.03, 16.0);
-
-        // Keep the same image-space point below the pointer as the scale changes.
-        // `pan` moves the displayed image center relative to the viewport center.
-        let scale_ratio = self.zoom / old_scale;
-        self.pan += (anchor - old_image_center) * (1.0 - scale_ratio);
-        self.clamp_pan(viewport, image_size);
-        self.show_zoom_feedback(now);
-    }
-
-    fn clamp_pan(&mut self, viewport: egui::Rect, image_size: egui::Vec2) {
-        let displayed_size = image_size * self.zoom;
-        let viewport_size = viewport.size();
-        // Keep at least half of the smaller extent overlapping on each axis. These
-        // limits remain continuous when an image dimension crosses the viewport.
-        let pan_limit = egui::vec2(
-            displayed_size.x.max(viewport_size.x) * 0.5,
-            displayed_size.y.max(viewport_size.y) * 0.5,
-        );
-        self.pan.x = self.pan.x.clamp(-pan_limit.x, pan_limit.x);
-        self.pan.y = self.pan.y.clamp(-pan_limit.y, pan_limit.y);
-    }
-}
-
 pub(crate) struct ViewportModel<'a> {
     pub has_document: bool,
     pub preparing: bool,
@@ -266,13 +86,14 @@ pub(crate) fn show(
 
             let padded = viewport.shrink(18.0);
             let image_size = texture.size_vec2();
-            let fit_scale = fit_scale(padded.size(), image_size);
+            let fit_scale = fit_scale(to_pair(padded.size()), to_pair(image_size));
             let now = context.input(|input| input.time);
             // A mask gesture owns the drag it starts on a handle; any other drag pans. The grab
             // is judged against the image as it is on screen before this frame's pan.
             let masks_capture = model.masks.as_ref().is_some_and(|masks| {
-                let size = image_size * if view.fit { fit_scale } else { view.zoom };
-                let rect = egui::Rect::from_center_size(viewport.center() + view.pan, size);
+                let size = image_size * view.scale(fit_scale);
+                let rect =
+                    egui::Rect::from_center_size(viewport.center() + from_pair(view.pan()), size);
                 mask_overlay::captures_drag(ui, &response, rect, masks)
             });
             if model.picker_mode.is_none()
@@ -280,16 +101,23 @@ pub(crate) fn show(
                 && !masks_capture
                 && response.dragged_by(egui::PointerButton::Primary)
             {
-                view.pan_by(fit_scale, viewport, image_size, response.drag_delta());
+                view.pan_by(
+                    fit_scale,
+                    to_pair(viewport.size()),
+                    to_pair(image_size),
+                    to_pair(response.drag_delta()),
+                );
             }
             if response.hovered() {
                 let scroll = context.input(|input| input.smooth_scroll_delta.y);
                 if scroll.abs() > f32::EPSILON {
                     view.zoom_by(
                         fit_scale,
-                        viewport,
-                        image_size,
-                        response.hover_pos(),
+                        to_pair(viewport.size()),
+                        to_pair(image_size),
+                        response
+                            .hover_pos()
+                            .map(|pointer| to_pair(pointer - viewport.center())),
                         scroll,
                         now,
                     );
@@ -297,9 +125,10 @@ pub(crate) fn show(
                 }
             }
 
-            let scale = if view.fit { fit_scale } else { view.zoom };
+            let scale = view.scale(fit_scale);
             let size = image_size * scale;
-            let image_rect = egui::Rect::from_center_size(viewport.center() + view.pan, size);
+            let image_rect =
+                egui::Rect::from_center_size(viewport.center() + from_pair(view.pan()), size);
             if let Some(picker_mode) = model.picker_mode {
                 if response
                     .hover_pos()
@@ -363,7 +192,7 @@ pub(crate) fn show(
                 );
             }
 
-            if now < view.zoom_feedback_until {
+            if view.zoom_feedback_active(now) {
                 paint_pill(
                     ui,
                     viewport.right_bottom() - egui::vec2(16.0, 16.0),
@@ -431,229 +260,11 @@ fn paint_pill(
         .galley(rect.center() - galley.size() * 0.5, galley, text_color);
 }
 
-fn fit_scale(viewport: egui::Vec2, image: egui::Vec2) -> f32 {
-    if image.x <= 0.0 || image.y <= 0.0 {
-        return 1.0;
-    }
-    (viewport.x / image.x).min(viewport.y / image.y).max(0.01)
+/// The engine's view math is toolkit-neutral; these convert egui geometry to and from it.
+fn to_pair(vector: egui::Vec2) -> [f32; 2] {
+    [vector.x, vector.y]
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fit_scale_respects_both_axes_and_never_reaches_zero() {
-        assert_eq!(
-            fit_scale(egui::vec2(800.0, 600.0), egui::vec2(1600.0, 900.0)),
-            0.5
-        );
-        assert_eq!(
-            fit_scale(egui::vec2(600.0, 800.0), egui::vec2(900.0, 1600.0)),
-            0.5
-        );
-        assert_eq!(fit_scale(egui::Vec2::ZERO, egui::vec2(100.0, 100.0)), 0.01);
-    }
-
-    #[test]
-    fn view_commands_reset_pan_and_report_their_mode() {
-        let mut state = ViewState {
-            fit: false,
-            zoom: 2.0,
-            pan: egui::vec2(40.0, -12.0),
-            zoom_feedback_until: 0.0,
-        };
-        state.fit(3.0);
-        assert!(state.is_fit());
-        assert_eq!(state.pan, egui::Vec2::ZERO);
-        assert_eq!(state.zoom_label(), "FIT");
-        state.actual_size(4.0);
-        assert!(!state.is_fit());
-        assert_eq!(state.zoom_label(), "SOURCE 100%");
-    }
-
-    #[test]
-    fn source_scale_frame_resets_zoom_on_entry_and_preserves_it_on_refresh() {
-        let mut state = ViewState {
-            fit: false,
-            zoom: 0.4,
-            pan: egui::vec2(28.0, -16.0),
-            zoom_feedback_until: 0.0,
-        };
-
-        state.source_scale_frame_ready(Some(PreviewSource::HighQualityCpu), 1.0);
-        assert_eq!(state.zoom, 1.0);
-        assert_eq!(state.pan, egui::Vec2::ZERO);
-
-        state.zoom = 0.35;
-        state.pan = egui::vec2(-42.0, 19.0);
-        state.source_scale_frame_ready(Some(PreviewSource::OneToOneGpu), 2.0);
-        assert_eq!(state.zoom, 0.35);
-        assert_eq!(state.pan, egui::vec2(-42.0, 19.0));
-    }
-
-    #[test]
-    fn pan_and_wheel_zoom_leave_fit_mode_and_anchor_to_the_pointer() {
-        let mut state = ViewState::default();
-        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
-        let image_size = egui::vec2(1_000.0, 1_000.0);
-        state.pan_by(0.5, viewport, image_size, egui::vec2(12.0, -8.0));
-        assert!(!state.is_fit());
-        assert_eq!(state.zoom, 0.5);
-        assert_eq!(state.pan, egui::vec2(12.0, -8.0));
-
-        state.zoom_by(
-            0.5,
-            viewport,
-            image_size,
-            Some(viewport.center()),
-            120.0,
-            5.0,
-        );
-        assert!(state.zoom > 0.5);
-        assert_vec2_close(egui::vec2(12.0, -8.0) * (state.zoom / 0.5), state.pan);
-        assert_eq!(state.zoom_feedback_until, 5.8);
-    }
-
-    #[test]
-    fn wheel_zoom_keeps_corner_image_points_under_the_pointer() {
-        let viewport = egui::Rect::from_min_size(egui::pos2(100.0, 40.0), egui::vec2(900.0, 500.0));
-        let image_size = egui::vec2(2_400.0, 1_600.0);
-        let corners = [
-            viewport.left_top() + egui::vec2(12.0, 12.0),
-            viewport.right_top() + egui::vec2(-12.0, 12.0),
-            viewport.left_bottom() + egui::vec2(12.0, -12.0),
-            viewport.right_bottom() + egui::vec2(-12.0, -12.0),
-        ];
-
-        for pointer in corners {
-            let mut state = ViewState {
-                fit: false,
-                zoom: 0.8,
-                pan: egui::vec2(20.0, -15.0),
-                zoom_feedback_until: 0.0,
-            };
-            let before = image_space_offset(&state, viewport, pointer);
-
-            state.zoom_by(0.4, viewport, image_size, Some(pointer), 160.0, 1.0);
-
-            let after = image_space_offset(&state, viewport, pointer);
-            assert_vec2_close(before, after);
-        }
-    }
-
-    #[test]
-    fn repeated_zoom_in_and_out_restores_scale_and_pan() {
-        let viewport = egui::Rect::from_min_size(egui::pos2(100.0, 40.0), egui::vec2(900.0, 500.0));
-        let image_size = egui::vec2(2_400.0, 1_600.0);
-        let pointer = egui::pos2(140.0, 100.0);
-        let mut state = ViewState {
-            fit: false,
-            zoom: 0.9,
-            pan: egui::vec2(50.0, -30.0),
-            zoom_feedback_until: 0.0,
-        };
-        let original_zoom = state.zoom;
-        let original_pan = state.pan;
-
-        for _ in 0..8 {
-            state.zoom_by(0.4, viewport, image_size, Some(pointer), 120.0, 1.0);
-            state.zoom_by(0.4, viewport, image_size, Some(pointer), -120.0, 1.0);
-        }
-
-        assert!((state.zoom - original_zoom).abs() < 0.0001);
-        assert_vec2_close(original_pan, state.pan);
-    }
-
-    #[test]
-    fn zoom_across_viewport_dimensions_keeps_the_pointer_anchor_stable() {
-        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 500.0));
-        let image_size = egui::vec2(1_600.0, 900.0);
-        let pointer = egui::pos2(250.0, 180.0);
-        let mut state = ViewState {
-            fit: false,
-            zoom: 0.45,
-            pan: egui::Vec2::ZERO,
-            zoom_feedback_until: 0.0,
-        };
-        let original_offset = image_space_offset(&state, viewport, pointer);
-
-        assert!(image_size.x * state.zoom < viewport.width());
-        assert!(image_size.y * state.zoom < viewport.height());
-        for _ in 0..4 {
-            state.zoom_by(0.45, viewport, image_size, Some(pointer), 60.0, 1.0);
-            assert_vec2_close(
-                original_offset,
-                image_space_offset(&state, viewport, pointer),
-            );
-        }
-        assert!(image_size.x * state.zoom > viewport.width());
-        assert!(image_size.y * state.zoom > viewport.height());
-
-        for _ in 0..4 {
-            state.zoom_by(0.45, viewport, image_size, Some(pointer), -60.0, 1.0);
-            assert_vec2_close(
-                original_offset,
-                image_space_offset(&state, viewport, pointer),
-            );
-        }
-        assert!((state.zoom - 0.45).abs() < 0.0001);
-        assert_vec2_close(egui::Vec2::ZERO, state.pan);
-    }
-
-    #[test]
-    fn wheel_over_empty_canvas_keeps_the_image_center_stable() {
-        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 500.0));
-        let image_size = egui::vec2(400.0, 200.0);
-        let pointer = egui::pos2(50.0, 50.0);
-        let mut state = ViewState {
-            fit: false,
-            zoom: 1.0,
-            pan: egui::vec2(40.0, -20.0),
-            zoom_feedback_until: 0.0,
-        };
-        let original_pan = state.pan;
-
-        state.zoom_by(1.0, viewport, image_size, Some(pointer), 120.0, 1.0);
-
-        assert_vec2_close(original_pan, state.pan);
-    }
-
-    #[test]
-    fn pan_bounds_keep_half_of_the_smaller_extent_overlapping_the_viewport() {
-        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 500.0));
-
-        let mut small_image = ViewState::default();
-        small_image.pan_by(
-            1.0,
-            viewport,
-            egui::vec2(100.0, 200.0),
-            egui::vec2(1_000.0, -1_000.0),
-        );
-        assert_eq!(small_image.pan, egui::vec2(450.0, -250.0));
-
-        let mut large_image = ViewState::default();
-        large_image.pan_by(
-            1.0,
-            viewport,
-            egui::vec2(1_800.0, 1_200.0),
-            egui::vec2(1_000.0, -1_000.0),
-        );
-        assert_eq!(large_image.pan, egui::vec2(900.0, -600.0));
-    }
-
-    fn image_space_offset(
-        state: &ViewState,
-        viewport: egui::Rect,
-        pointer: egui::Pos2,
-    ) -> egui::Vec2 {
-        (pointer - (viewport.center() + state.pan)) / state.zoom
-    }
-
-    fn assert_vec2_close(expected: egui::Vec2, actual: egui::Vec2) {
-        assert!(
-            (expected - actual).length() < 0.0001,
-            "{expected:?} != {actual:?}"
-        );
-    }
+fn from_pair(pair: [f32; 2]) -> egui::Vec2 {
+    egui::vec2(pair[0], pair[1])
 }

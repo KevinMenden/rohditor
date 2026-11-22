@@ -26,7 +26,7 @@ pub(super) fn tool_panel_model(document: Option<&Document>, tool: ToolKind) -> T
         title,
         subtitle,
         has_document: document.is_some(),
-        histogram: document.and_then(|document| document.histogram.as_ref()),
+        histogram: document.and_then(|document| document.preview.histogram.as_ref()),
     }
 }
 
@@ -107,8 +107,8 @@ impl RohditorApp {
         }
         let request = self.document.as_mut().and_then(|document| {
             let frame = document.frame.as_ref().map(Arc::clone)?;
-            document.source_scale_requested = false;
-            document.view.fit(context.input(|input| input.time));
+            document.preview.source_scale_requested = false;
+            document.preview.view.fit(context.input(|input| input.time));
             let (width, height) = document
                 .texture
                 .as_ref()
@@ -118,7 +118,7 @@ impl RohditorApp {
                 CropToolSession::new(document.edits.recipe().geometry.crop, width, height);
             let ticket = document.begin_preview_request(PreviewIntent::CropToolFullFrame);
             let recipe = document.edits.recipe().clone();
-            document.preview_status =
+            document.preview.status =
                 Some((ticket.revision, "Preparing full image for crop".to_owned()));
             Some((document.id, ticket, frame, recipe, session))
         });
@@ -139,7 +139,7 @@ impl RohditorApp {
                 .as_mut()
                 .filter(|document| document.id == document_id)
             {
-                document.preview_status = None;
+                document.preview.status = None;
                 document.error = Some(error);
             }
         }

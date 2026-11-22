@@ -15,11 +15,13 @@ pub mod coordinator;
 pub mod document;
 pub mod models;
 pub mod persistence;
+pub mod preview;
 pub mod preview_cache;
 pub mod session;
 pub mod settings;
 pub mod storage;
 pub mod tools;
+pub mod view;
 pub mod wake;
 
 pub use wake::WakeFn;

@@ -11,6 +11,7 @@ use tracing::warn;
 use tracing_subscriber::EnvFilter;
 
 use crate::app::RohditorApp;
+pub(crate) use rohditor_engine::preview::ProcessorPreference;
 use rohditor_engine::settings::{self, AppSettings, SettingsLoad, resolve_startup_settings};
 
 /// Stable Freedesktop/Wayland identity. Keep this equal to the installed
@@ -28,15 +29,25 @@ enum RendererPreference {
     Glow,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
-pub(crate) enum ProcessorPreference {
+/// Command-line spelling of [`ProcessorPreference`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ProcessorChoice {
     /// Prefer GPU previews and export color processing with CPU fallback.
-    #[default]
     Auto,
     /// Require GPU previews; prefer GPU export with recovery to CPU if needed.
     Gpu,
     /// Use the CPU reference for previews and exports.
     Cpu,
+}
+
+impl From<ProcessorChoice> for ProcessorPreference {
+    fn from(choice: ProcessorChoice) -> Self {
+        match choice {
+            ProcessorChoice::Auto => Self::Auto,
+            ProcessorChoice::Gpu => Self::Gpu,
+            ProcessorChoice::Cpu => Self::Cpu,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
@@ -66,16 +77,6 @@ impl From<DemosaicPreference> for DemosaicAlgorithm {
     }
 }
 
-impl ProcessorPreference {
-    pub(crate) const fn label(self) -> &'static str {
-        match self {
-            Self::Auto => "Auto",
-            Self::Gpu => "GPU",
-            Self::Cpu => "CPU",
-        }
-    }
-}
-
 #[derive(Debug, Parser)]
 #[command(version, about = "Linux-first Sony RAW photo editor")]
 struct Arguments {
@@ -86,7 +87,7 @@ struct Arguments {
     /// Image processor for this run, overriding the persisted "CPU only"
     /// setting. Without it, the setting decides between `auto` and `cpu`.
     #[arg(long, value_enum)]
-    processor: Option<ProcessorPreference>,
+    processor: Option<ProcessorChoice>,
 
     /// Preview and export demosaic algorithm for development comparisons.
     #[arg(long, value_enum)]
@@ -120,7 +121,7 @@ fn main() -> eframe::Result {
         settings: persisted_settings,
         warning: settings_warning,
     } = settings::load(config::config_directory().as_deref());
-    let processor = resolve_processor(persisted_settings, arguments.processor);
+    let processor = resolve_processor(persisted_settings, arguments.processor.map(Into::into));
     let screenshot = arguments.screenshot.clone().map(|path| {
         (
             path,
@@ -273,7 +274,7 @@ mod tests {
 
     use super::{
         APPLICATION_ID, AppSettings, Arguments, DemosaicAlgorithm, DemosaicPreference,
-        ProcessorPreference, RendererPreference, resolve_processor,
+        ProcessorChoice, ProcessorPreference, RendererPreference, resolve_processor,
     };
 
     #[test]
@@ -290,7 +291,7 @@ mod tests {
         ])
         .expect("valid desktop preferences should parse");
         assert_eq!(arguments.renderer, RendererPreference::Glow);
-        assert_eq!(arguments.processor, Some(ProcessorPreference::Cpu));
+        assert_eq!(arguments.processor, Some(ProcessorChoice::Cpu));
         assert_eq!(arguments.demosaic, Some(DemosaicPreference::MalvarHeCutler));
 
         let defaults = Arguments::try_parse_from(["rohditor-desktop"])

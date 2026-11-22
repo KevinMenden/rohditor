@@ -23,7 +23,9 @@ A frontend can enter the stack at any level; each level only depends on the ones
    GPU-with-CPU-fallback export (`FallbackExporter`).
 3. **App runtime** (`crates/engine`, `rohditor-engine`): what an interactive frontend needs on top
    of 1 and 2: render/export workers with preview scheduling (`coordinator/`), preview caches
-   (`preview_cache/`), undo-aware edit sessions (`document.rs`), recipe sidecars
+   (`preview_cache/`), undo-aware edit sessions (`document.rs`), the per-document preview
+   runtime with resident GPU frames and CPU fallback (`preview/`), toolkit-neutral zoom/pan
+   (`view.rs`), recipe sidecars
    (`persistence.rs`), settings, session and camera-profile storage, and the catalog thumbnail
    worker. It is toolkit-free: frontends are woken through a plain callback (`WakeFn`), receive
    plain pixel buffers, inject their own wgpu device/adapter, and pass configuration directories
