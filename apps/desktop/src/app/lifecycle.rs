@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use eframe::egui;
 use rohditor_core::default_recipe;
 
-use super::noise_reduction::NoiseState;
 use super::{Document, RohditorApp};
 use rohditor_engine::document::EditSession;
 use rohditor_engine::persistence::{self, SaveJob, SaveResult};
@@ -38,19 +37,19 @@ impl RohditorApp {
         // this same beat.
         let pointer_down = context.input(|input| input.pointer.any_down());
         if let Some(document) = self.document.as_mut() {
-            reap_orphaned_gesture(&mut document.edits, pointer_down);
+            reap_orphaned_gesture(&mut document.core.edits, pointer_down);
         }
         let (revision_changed, due, delay) = {
             let Some(document) = self.document.as_mut() else {
                 return;
             };
-            let revision_changed = document.autosave.observe(
-                document.edits.revision(),
-                document.edits.gesture_active(),
+            let revision_changed = document.core.autosave.observe(
+                document.core.edits.revision(),
+                document.core.edits.gesture_active(),
                 now,
             );
-            let due = document.autosave.take_due(now);
-            let delay = document.autosave.delay(now);
+            let due = document.core.autosave.take_due(now);
+            let delay = document.core.autosave.delay(now);
             (revision_changed, due, delay)
         };
         if revision_changed
@@ -99,16 +98,17 @@ impl RohditorApp {
         let document_id = self.next_document_id;
         self.next_document_id = self.next_document_id.saturating_add(1);
         let mut document = Document::opening(document_id, path.clone(), recipe, warning);
-        document.initialize_white_balance_from_metadata = initialize_white_balance_from_metadata;
         // Only a photo without saved edits starts from the automatic default.
-        document.noise = NoiseState::for_new_photo(
-            initialize_white_balance_from_metadata && self.settings.auto_noise_reduction(),
-        );
+        if initialize_white_balance_from_metadata {
+            document
+                .core
+                .mark_new_photo(self.settings.auto_noise_reduction());
+        }
         self.document = Some(document);
         if self.gpu_required_but_unavailable() {
             if let Some(document) = self.document.as_mut() {
-                document.open_status = None;
-                document.error = self.startup_error.clone();
+                document.core.open_status = None;
+                document.core.error = self.startup_error.clone();
             }
             self.update_window_title(context);
             return;
@@ -116,8 +116,8 @@ impl RohditorApp {
         if let Err(error) = self.coordinator.open(document_id, path)
             && let Some(document) = self.document.as_mut()
         {
-            document.open_status = None;
-            document.error = Some(error);
+            document.core.open_status = None;
+            document.core.error = Some(error);
         }
         self.update_window_title(context);
     }
@@ -135,7 +135,7 @@ impl RohditorApp {
         self.tool = ActiveTool::default();
         if let Some(mut document) = self.document.take() {
             self.release_gpu_preview(&mut document);
-            self.coordinator.abandon(document.id);
+            self.coordinator.abandon(document.core.id);
         }
         self.update_window_title(context);
     }
@@ -148,18 +148,18 @@ impl RohditorApp {
     /// Called after the UI debounce, or immediately for navigation and Save.
     pub(super) fn schedule_recipe_save(&mut self, immediate: bool) -> Result<(), String> {
         let Some(document) = self.document.as_ref().filter(|document| {
-            document.is_dirty()
+            document.core.is_dirty()
                 || self
                     .queued_recipe_snapshots
-                    .get(&document.path)
-                    .is_some_and(|(_, recipe)| recipe != document.edits.recipe())
+                    .get(&document.core.path)
+                    .is_some_and(|(_, recipe)| recipe != document.core.edits.recipe())
         }) else {
             return Ok(());
         };
-        let document_id = document.id;
-        let revision = document.edits.revision();
-        let source = document.path.clone();
-        let recipe = document.edits.recipe().clone();
+        let document_id = document.core.id;
+        let revision = document.core.edits.revision();
+        let source = document.core.path.clone();
+        let recipe = document.core.edits.recipe().clone();
         let job = SaveJob {
             document_id,
             revision,
@@ -175,7 +175,7 @@ impl RohditorApp {
         if let Err(error) = self.recipe_saves.enqueue(job, immediate) {
             self.recipe_save_error = Some(error.clone());
             if let Some(document) = self.document.as_mut() {
-                document.error = Some(format!("Could not queue edits for saving: {error}"));
+                document.core.error = Some(format!("Could not queue edits for saving: {error}"));
             }
             return Err(error);
         }
@@ -212,13 +212,13 @@ impl RohditorApp {
                 let same_document = self
                     .document
                     .as_ref()
-                    .is_some_and(|document| document.id == document_id);
+                    .is_some_and(|document| document.core.id == document_id);
                 let current = self
                     .document
                     .as_mut()
-                    .filter(|document| document.id == document_id)
+                    .filter(|document| document.core.id == document_id)
                     .is_some_and(|document| {
-                        document.edits.mark_saved_if_current(revision, &recipe)
+                        document.core.edits.mark_saved_if_current(revision, &recipe)
                     });
                 self.recipe_save_status = Some(if !newer_pending && (!same_document || current) {
                     super::RecipeSaveStatus::Notice {
@@ -232,9 +232,9 @@ impl RohditorApp {
                     && let Some(document) = self
                         .document
                         .as_mut()
-                        .filter(|document| document.id == document_id)
+                        .filter(|document| document.core.id == document_id)
                 {
-                    document.error = None;
+                    document.core.error = None;
                 }
                 self.recipe_save_error = None;
             }
@@ -249,9 +249,9 @@ impl RohditorApp {
                 if let Some(document) = self
                     .document
                     .as_mut()
-                    .filter(|document| document.id == document_id)
+                    .filter(|document| document.core.id == document_id)
                 {
-                    document.error = Some(format!("Could not save edits: {error}"));
+                    document.core.error = Some(format!("Could not save edits: {error}"));
                 }
             }
         }
@@ -261,8 +261,8 @@ impl RohditorApp {
         let title = self.document.as_ref().map_or_else(
             || "Rohditor".to_owned(),
             |document| {
-                let marker = if document.is_dirty() { "* " } else { "" };
-                format!("{marker}{} — Rohditor", document.file_name())
+                let marker = if document.core.is_dirty() { "* " } else { "" };
+                format!("{marker}{} — Rohditor", document.core.file_name())
             },
         );
         context.send_viewport_cmd(egui::ViewportCommand::Title(title));

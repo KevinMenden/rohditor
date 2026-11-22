@@ -7,16 +7,15 @@
 //! history, and it is redone only when the camera profile changes under it,
 //! since colour is fitted against the active profile.
 
-use eframe::egui;
-
 use rohditor_core::CameraLook;
 use rohditor_edit::{CameraProfileSelection, RenderingProfileSelection};
 
-use super::RohditorApp;
+use super::OpenDocument;
+use crate::coordinator::RenderCoordinator;
 
 /// Where a document stands with fitting its camera look.
 #[derive(Debug, Default)]
-pub(super) enum CameraLookState {
+pub enum CameraLookState {
     /// Nothing requested yet.
     #[default]
     Idle,
@@ -40,96 +39,77 @@ impl CameraLookState {
     }
 }
 
-impl RohditorApp {
-    /// Bring the open document's recipe and fit state in line, as needed by
-    /// the current recipe. Cheap enough to run every frame.
-    pub(super) fn sync_camera_look(&mut self, context: &egui::Context) {
-        let Some(document) = self.document.as_mut() else {
-            return;
-        };
-        let recipe = document.edits.recipe();
+impl OpenDocument {
+    /// Bring the recipe and fit state in line, as needed by the current recipe.
+    /// Cheap enough to run every frame. Returns whether the recipe changed, so
+    /// the caller must queue a preview.
+    pub fn sync_camera_look(&mut self, coordinator: &RenderCoordinator) -> bool {
+        let recipe = self.edits.recipe();
         if !matches!(
             recipe.rendering.profile,
             RenderingProfileSelection::RohditorMatched { .. }
         ) {
-            return;
+            return false;
         }
         let profile = recipe.color.camera_profile.clone();
 
         // A fit made against another camera profile no longer matches its colour.
-        if document
+        if self
             .camera_look
             .profile()
             .is_some_and(|fitted_for| *fitted_for != profile)
         {
-            document.camera_look = CameraLookState::Idle;
-            let cleared = document.edits.apply_derived(|recipe| {
+            self.camera_look = CameraLookState::Idle;
+            return self.edits.apply_derived(|recipe| {
                 recipe.rendering.camera_tone = None;
                 recipe.rendering.camera_chroma = None;
             });
-            let document_id = document.id;
-            if cleared {
-                self.queue_preview(context, document_id);
-            }
-            return;
         }
-        if document.edits.recipe().rendering.camera_tone.is_some() {
-            return;
+        if self.edits.recipe().rendering.camera_tone.is_some() {
+            return false;
         }
 
-        match &document.camera_look {
+        match &self.camera_look {
             CameraLookState::Ready(look, _) => {
                 let look = look.clone();
-                let applied = document
-                    .edits
-                    .apply_derived(|recipe| look.store_in(&mut recipe.rendering));
-                let document_id = document.id;
-                if applied {
-                    self.queue_preview(context, document_id);
-                }
+                self.edits
+                    .apply_derived(|recipe| look.store_in(&mut recipe.rendering))
             }
             CameraLookState::Idle => {
-                let Some(frame) = document.frame.clone() else {
-                    return;
+                let Some(frame) = self.frame.clone() else {
+                    return false;
                 };
-                let request = self.coordinator.fit_camera_look(
-                    document.id,
-                    document.path.clone(),
-                    frame,
-                    profile.clone(),
-                );
-                document.camera_look = match request {
+                let request =
+                    coordinator.fit_camera_look(self.id, self.path.clone(), frame, profile.clone());
+                self.camera_look = match request {
                     Ok(()) => CameraLookState::Pending(profile),
                     Err(message) => {
-                        document.warning = Some(message);
+                        self.warning = Some(message);
                         CameraLookState::Unavailable(profile)
                     }
                 };
+                false
             }
-            CameraLookState::Pending(_) | CameraLookState::Unavailable(_) => {}
+            CameraLookState::Pending(_) | CameraLookState::Unavailable(_) => false,
         }
     }
 
-    /// Record a finished (or failed) fit for the open document.
-    pub(super) fn camera_look_ready(
+    /// Record a finished (or failed) fit. Returns whether the recipe changed, so
+    /// the caller must queue a preview.
+    pub fn camera_look_ready(
         &mut self,
-        context: &egui::Context,
-        document_id: u64,
+        coordinator: &RenderCoordinator,
         fitted_for: &CameraProfileSelection,
         result: Result<Box<CameraLook>, String>,
-    ) {
-        let Some(document) = self.document.as_mut().filter(|doc| doc.id == document_id) else {
-            return;
-        };
+    ) -> bool {
         // Only the result of the fit currently awaited is kept: after a camera
         // profile change a newer request replaces it and this one is stale.
-        if !matches!(&document.camera_look, CameraLookState::Pending(profile) if profile == fitted_for)
+        if !matches!(&self.camera_look, CameraLookState::Pending(profile) if profile == fitted_for)
         {
-            return;
+            return false;
         }
         let profile = fitted_for.clone();
-        document.camera_look = CameraLookState::Idle;
-        document.camera_look = match result {
+        self.camera_look = match result {
             Ok(look) => {
                 if let Err(error) = &look.chroma {
                     tracing::info!(%error, "camera chroma not matched; keeping the tone-only look");
@@ -137,12 +117,12 @@ impl RohditorApp {
                 CameraLookState::Ready(look, profile)
             }
             Err(message) => {
-                document.warning = Some(format!(
+                self.warning = Some(format!(
                     "Matched look: {message}. Using the typical camera look."
                 ));
                 CameraLookState::Unavailable(profile)
             }
         };
-        self.sync_camera_look(context);
+        self.sync_camera_look(coordinator)
     }
 }
