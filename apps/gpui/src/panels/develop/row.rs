@@ -108,7 +108,8 @@ impl DevelopPanel {
             .child(self.revealer(adjustment.label(), cx))
             .border_1()
             .border_color(gpui::transparent_black())
-            .focus_visible(move |style| style.border_color(theme.accent))
+            // Also after a press, as it shows what the arrow keys change.
+            .focus(move |style| style.border_color(theme.accent))
             .on_action(cx.listener(move |this, _: &Decrease, _, cx| this.nudge(adjustment, -1, cx)))
             .on_action(cx.listener(move |this, _: &Increase, _, cx| this.nudge(adjustment, 1, cx)))
             .on_action(cx.listener(move |this, _: &DecreaseMore, _, cx| {
@@ -238,7 +239,7 @@ fn press_area(panel: Entity<DevelopPanel>, adjustment: Adjustment) -> impl IntoE
                     && hitbox.is_hovered(window)
                 {
                     panel.update(cx, |panel, cx| {
-                        panel.press(adjustment, event, bounds, window, cx);
+                        panel.press(adjustment, event, bounds, cx);
                     });
                 }
             });

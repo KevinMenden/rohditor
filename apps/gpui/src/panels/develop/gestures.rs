@@ -75,12 +75,8 @@ impl DevelopPanel {
         adjustment: Adjustment,
         event: &MouseDownEvent,
         row: gpui::Bounds<Pixels>,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // The arrow keys keep changing photos after a press; Tab is the way onto a slider.
-        window.prevent_default();
-        window.dispatch_action(Box::new(FocusPhoto), cx);
         self.finish_nudge(cx);
         if event.click_count == 2 {
             self.drag = None;

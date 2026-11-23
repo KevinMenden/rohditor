@@ -375,6 +375,19 @@ fn dragging_a_slider_is_one_undo_step_and_is_saved() {
 
     harness.press(start, 2);
     assert_eq!(harness.exposure(), 0.0);
+    harness.release(start);
+
+    // A press selects the slider for the arrow keys; one on the photo gives them back.
+    harness.press(start, 1);
+    harness.release(start);
+    harness.capture("selected");
+    harness.keys("right right");
+    assert_eq!(harness.exposure(), 0.1);
+    harness.press(center, 1);
+    harness.release(center);
+    harness.keys("right");
+    let open = harness.with_session(|session, _| session.document().map(|d| d.path.clone()));
+    assert_ne!(open, Some(first), "the arrow changed the photo");
 }
 
 #[test]
@@ -447,6 +460,7 @@ fn panels_redraw_only_for_their_own_changes() {
     assert!(after.1 >= before.1 + 3, "a slider redraws its own panel");
     harness.release(exposure);
 
+    harness.keys("escape");
     let before = harness.panel_renders();
     harness.keys("right");
     harness.draw();
@@ -595,8 +609,9 @@ fn the_focused_slider_is_scrolled_to() {
         harness.find(last).bottom() > visible,
         "it starts out of view"
     );
-    harness.keys("ctrl-d");
-    harness.keys(&["down"; 20].join(" "));
+    // Up at the first control and Down at the last one stay there.
+    harness.keys("ctrl-d up up");
+    harness.keys(&["down"; 25].join(" "));
     harness.capture("scrolled");
     assert!(harness.find(last).bottom() < visible);
     harness.keys("right");
@@ -605,7 +620,7 @@ fn the_focused_slider_is_scrolled_to() {
         document.edits.recipe().noise_reduction.chroma
     });
     assert_eq!(noise, 0.01, "it is the one with the focus");
-    harness.keys(&["up"; 20].join(" "));
+    harness.keys(&["up"; 25].join(" "));
     let top = harness.find("section:White Balance").top();
     assert!(top > px(36.0) && top < px(300.0), "{top:?}");
 }

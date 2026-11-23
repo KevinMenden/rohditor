@@ -314,8 +314,12 @@ impl Render for DevelopPanel {
                     .aria_label("Adjustments")
                     .key_context(focus::CONTEXT)
                     .track_focus(&self.focus.entry)
-                    .on_action(|_: &SelectNext, window, cx| window.focus_next(cx))
-                    .on_action(|_: &SelectPrevious, window, cx| window.focus_prev(cx))
+                    .on_action(cx.listener(|this, _: &SelectNext, window, cx| {
+                        this.focus.step(true, window, cx);
+                    }))
+                    .on_action(cx.listener(|this, _: &SelectPrevious, window, cx| {
+                        this.focus.step(false, window, cx);
+                    }))
                     .track_scroll(&self.focus.scroll)
                     .flex_1()
                     .min_h_0()

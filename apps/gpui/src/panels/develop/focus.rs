@@ -41,12 +41,25 @@ impl PanelFocus {
         }
     }
 
+    /// Move to the next or previous control, staying in the list at its ends.
+    pub fn step(&self, forward: bool, window: &mut Window, cx: &mut App) {
+        let start = window.focused(cx);
+        if forward {
+            window.focus_next(cx);
+        } else {
+            window.focus_prev(cx);
+        }
+        if let Some(start) = start.filter(|_| !self.entry.contains_focused(window, cx)) {
+            start.focus(window, cx);
+        }
+    }
+
     pub fn control(&self, label: &str) -> &FocusHandle {
         &self.controls[label]
     }
 }
 
-/// The controls are a list: the vertical arrows move between them, as Tab does.
+/// The controls are a list, which the vertical arrows move in.
 pub(super) fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("down", SelectNext, Some(CONTEXT)),
