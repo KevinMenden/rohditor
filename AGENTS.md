@@ -31,7 +31,9 @@ A frontend can enter the stack at any level; each level only depends on the ones
    plain pixel buffers, inject their own wgpu device/adapter, and pass configuration directories
    in explicitly. The engine does not wrap or re-export the lower crates, and nothing below it
    may depend on it.
-4. **Apps** (`apps/cli`, `apps/desktop`): rendering, widgets, and toolkit glue only.
+4. **Apps** (`apps/cli`, `apps/desktop`, `apps/gpui`): rendering, widgets, and toolkit glue only.
+   `apps/gpui` is replacing the egui app (`apps/desktop`), see `docs/gpui-migration.md`: new UI
+   features go there, egui only gets fixes. It is a Cargo workspace of its own.
 
 Placement rules:
 - Algorithms and editing math go in the lower crates, expressed as pure functions over
@@ -44,7 +46,7 @@ Placement rules:
 
 `scripts/check.sh` enforces the dependency direction (lower crates never depend on `core`, `gpu`,
 `engine` or an app; `rohditor-engine` never depends on an app and has no `pub use rohditor_*`
-re-exports; no crate under `crates/` depends on `eframe`/`egui`/`winit`/`rfd`; `rohditor-cli`
+re-exports; no crate under `crates/` depends on `eframe`/`egui`/`winit`/`rfd`/`gpui`; `rohditor-cli`
 never depends on `rohditor-desktop`).
 
 ## Rules
@@ -54,7 +56,8 @@ never depends on `rohditor-desktop`).
 - Keep RAW data immutable. Represent edits as a validated, versioned recipe
 - Preserve typed image states (sensor mosaic, linear RGB, display RGB), checked
   dimension/byte arithmetic, cancellation, and transactional output writes.
-- Run `./scripts/check.sh` before handing off code. Use the ignored private and
+- Run `./scripts/check.sh` before handing off code, and `./scripts/check-gpui.sh` too when
+  changing `apps/gpui` or an API it uses. Use the ignored private and
   GPU suites when changing decoder, full-resolution, or GPU behavior:
   `cargo test --release --workspace --tests -- --ignored --nocapture` and
   `cargo test --release -p rohditor-gpu -- --ignored --nocapture`.

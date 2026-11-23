@@ -31,7 +31,7 @@ assert_no_dependencies rohditor-engine 'rohditor-(cli|desktop)'
 assert_no_dependencies rohditor-cli 'rohditor-desktop'
 
 # Processing crates must stay replaceable-UI friendly: no windowing/toolkit deps.
-if grep -rEn '^(eframe|egui|winit|rfd)[ .=]' --include=Cargo.toml crates; then
+if grep -rEn '^(eframe|egui|winit|rfd|gpui)[ .=]' --include=Cargo.toml crates; then
     echo "a crate under crates/ depends on a UI toolkit" >&2
     exit 1
 fi

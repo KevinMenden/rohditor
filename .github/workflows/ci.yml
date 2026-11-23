@@ -27,3 +27,18 @@ jobs:
         run: rustup toolchain install 1.92.0 --profile minimal
       - name: Check the declared minimum Rust version
         run: cargo +1.92.0 check --workspace --all-targets --locked
+
+  gpui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the Rust version pinned in rust-toolchain.toml
+        run: |
+          version=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$version" --profile minimal --component rustfmt,clippy
+      - name: Install the libraries GPUI links
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libfontconfig-dev libwayland-dev libxkbcommon-dev
+      - name: Run the GPUI gate
+        run: ./scripts/check-gpui.sh
