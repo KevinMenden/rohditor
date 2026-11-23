@@ -64,7 +64,7 @@ Done when CI builds `apps/gpui` and no test clicks raw pixel positions.
 ## Stage 1: Widget kit
 
 - [x] 1.1 Text input, dropdown, popover, tooltip, modal, context menu, toggle, toasts.
-- [ ] 1.2 Final slider: typing, arrow keys, reset, coloured tracks.
+- [x] 1.2 Final slider: typing, arrow keys, reset, coloured tracks.
 - [ ] 1.3 Focus order and accessible labels (AccessKit).
 
 Done when a full slider edit works by keyboard alone.

@@ -8,7 +8,7 @@ use rohditor_edit::{
     VIBRANCE_RANGE, WHITES_RANGE, WhiteBalance,
 };
 
-use crate::ui::slider::{Format, fraction};
+use crate::ui::slider::{Format, Ramp, TEMPERATURE_RAMP, TINT_RAMP, fraction};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Adjustment {
@@ -120,6 +120,14 @@ impl Adjustment {
             Self::Temperature => Format::Kelvin,
             Self::Exposure => Format::Stops,
             _ => Format::Percent,
+        }
+    }
+
+    pub const fn ramp(self) -> Option<Ramp> {
+        match self {
+            Self::Temperature => Some(TEMPERATURE_RAMP),
+            Self::Tint => Some(TINT_RAMP),
+            _ => None,
         }
     }
 

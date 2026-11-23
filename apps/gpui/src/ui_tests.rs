@@ -501,6 +501,45 @@ fn menus_and_the_filter_work_on_the_sliders() {
 
 #[test]
 #[ignore = "requires a wgpu adapter and ROHDITOR_RAW"]
+fn values_are_typed_and_stepped() {
+    let Some((mut harness, ..)) = opened("typing") else {
+        return;
+    };
+    let row = harness.find(EXPOSURE);
+    let value = point(row.right() - px(20.0), row.center().y);
+    let click = |harness: &mut Harness, position| {
+        harness.press(position, 1);
+        harness.release(position);
+    };
+    click(&mut harness, value);
+    harness.keys("1 . 5 pageup");
+    harness.capture("typing");
+    assert_eq!(harness.exposure(), 0.0, "nothing changes before Enter");
+    harness.keys("enter");
+    assert_eq!(harness.exposure(), 1.5);
+
+    click(&mut harness, value);
+    harness.keys("3 escape");
+    assert_eq!(harness.exposure(), 1.5, "Escape keeps the value");
+    click(&mut harness, value);
+    harness.keys("x y enter");
+    assert_eq!(harness.exposure(), 1.5, "nonsense keeps the value");
+    click(&mut harness, value);
+    harness.keys("2");
+    click(&mut harness, row.center());
+    assert_eq!(
+        harness.exposure(),
+        2.0,
+        "leaving the input keeps what was typed"
+    );
+    harness.keys("ctrl-z");
+    assert_eq!(harness.exposure(), 1.5);
+    harness.keys("ctrl-z");
+    assert_eq!(harness.exposure(), 0.0, "each typed value is one undo step");
+}
+
+#[test]
+#[ignore = "requires a wgpu adapter and ROHDITOR_RAW"]
 fn news_are_announced_and_quitting_asks_while_exporting() {
     let Some((mut harness, ..)) = opened("news") else {
         return;

@@ -2,7 +2,7 @@
 
 use gpui::{Action, App, KeyBinding, actions};
 
-use crate::ui;
+use crate::{panels, ui};
 
 actions!(
     rohditor,
@@ -131,6 +131,7 @@ pub fn bind_keys(cx: &mut App) {
     let bindings: Vec<_> = bindings.collect();
     cx.bind_keys(bindings);
     ui::keys::bind(cx);
+    panels::develop::bind_keys(cx);
 }
 
 pub const WORKSPACE_CONTEXT: &str = "Workspace";

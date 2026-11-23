@@ -1,40 +1,31 @@
 //! Right dock: histogram and adjustments.
 //!
 //! Each adjustment is one row that is its own slider: dragging anywhere on it changes the value
-//! relative to where it was, Shift drags finer, and a double click resets it.
+//! relative to where it was, Shift drags finer, and a double click resets it. A click on the value
+//! types it. With the focus, the arrow keys change it.
+
+mod gestures;
+mod row;
 
 use std::collections::HashSet;
 
-use gpui::{
-    Bounds, Context, CursorStyle, DispatchPhase, Div, Entity, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Window, canvas, div,
-    prelude::*, px, relative,
-};
+use gpui::{Context, Div, Entity, IntoElement, Render, Window, div, prelude::*, px};
 use rohditor_core::{Histogram, WhiteBalanceCoordinates};
 use rohditor_edit::EditRecipe;
+
+use gestures::{Drag, Nudge, Typing, drag_tracker};
+pub use row::bind_keys;
 
 use super::adjustments::{Adjustment, SECTIONS, Section};
 use crate::actions::{AutoTone, ResetAdjustments};
 use crate::assets::Icon;
-use crate::session::{EditPhase, Session};
+use crate::session::Session;
 use crate::theme::{DEVELOP_WIDTH, RADIUS, SMALL_FONT_SIZE, TAB_HEIGHT, theme};
 use crate::ui::button::icon;
 use crate::ui::histogram::histogram;
-use crate::ui::menu::MenuEntry;
 use crate::ui::overlays::Overlays;
-use crate::ui::slider::{dragged, fraction};
 use crate::ui::test_id::TestId as _;
 use crate::ui::toggle::toggle;
-
-const FINE_DRAG: f32 = 0.1;
-
-#[derive(Clone, Copy)]
-struct Drag {
-    adjustment: Adjustment,
-    last_x: Pixels,
-    value: f32,
-    width: Pixels,
-}
 
 /// What the panel shows. Compared on every session change, so that the panel only redraws for
 /// its own content.
@@ -69,6 +60,8 @@ pub struct DevelopPanel {
     #[cfg(test)]
     pub renders: usize,
     drag: Option<Drag>,
+    nudge: Option<Nudge>,
+    typing: Option<Typing>,
     collapsed: HashSet<&'static str>,
     /// Hide what is at its default.
     edited_only: bool,
@@ -95,38 +88,11 @@ impl DevelopPanel {
             #[cfg(test)]
             renders: 0,
             drag: None,
+            nudge: None,
+            typing: None,
             collapsed: HashSet::new(),
             edited_only: false,
         }
-    }
-
-    fn reset(&self, adjustment: Adjustment, cx: &mut Context<Self>) {
-        self.session.update(cx, |session, cx| {
-            let as_shot = session.as_shot();
-            let value = adjustment.default_value(as_shot);
-            session.edit(
-                |recipe| adjustment.set(recipe, as_shot, value),
-                EditPhase::Finished,
-                adjustment.is_white_balance(),
-                cx,
-            );
-        });
-    }
-
-    fn show_menu(
-        &self,
-        adjustment: Adjustment,
-        at: Point<Pixels>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let panel = cx.entity();
-        let entries = vec![MenuEntry::new("Reset", move |_, cx| {
-            panel.update(cx, |panel, cx| panel.reset(adjustment, cx));
-        })];
-        self.overlays.update(cx, |overlays, cx| {
-            overlays.show_menu(at, entries, window, cx);
-        });
     }
 
     /// Whether the panel shows this adjustment.
@@ -136,72 +102,10 @@ impl DevelopPanel {
         recipe: &EditRecipe,
         as_shot: Option<WhiteBalanceCoordinates>,
     ) -> bool {
-        // A slider must not vanish while it is dragged over its default.
-        let dragged = self.drag.is_some_and(|drag| drag.adjustment == adjustment);
-        !self.edited_only || dragged || adjustment.is_edited(recipe, as_shot)
-    }
-
-    fn press(
-        &mut self,
-        adjustment: Adjustment,
-        event: &MouseDownEvent,
-        width: Pixels,
-        cx: &mut Context<Self>,
-    ) {
-        if event.click_count == 2 {
-            self.drag = None;
-            return self.reset(adjustment, cx);
-        }
-        self.session
-            .update(cx, |session, _| session.begin_gesture());
-        let session = self.session.read(cx);
-        if let Some(document) = session.document() {
-            self.drag = Some(Drag {
-                adjustment,
-                last_x: event.position.x,
-                value: adjustment.get(document.edits.recipe(), session.as_shot()),
-                width,
-            });
-        }
-        cx.notify();
-    }
-
-    fn drag_to(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
-        let Some(drag) = self.drag.as_mut() else {
-            return;
-        };
-        if !event.dragging() {
-            // The release happened outside the window.
-            return self.release(cx);
-        }
-        let speed = if event.modifiers.shift {
-            FINE_DRAG
-        } else {
-            1.0
-        };
-        let delta = (event.position.x - drag.last_x) / drag.width * speed;
-        drag.last_x = event.position.x;
-        let adjustment = drag.adjustment;
-        drag.value = dragged(adjustment.format(), adjustment.range(), drag.value, delta);
-        let value = drag.value;
-        self.session.update(cx, |session, cx| {
-            let as_shot = session.as_shot();
-            session.edit(
-                |recipe| adjustment.set(recipe, as_shot, value),
-                EditPhase::Dragging,
-                adjustment.is_white_balance(),
-                cx,
-            );
-        });
-    }
-
-    fn release(&mut self, cx: &mut Context<Self>) {
-        if let Some(drag) = self.drag.take() {
-            self.session.update(cx, |session, cx| {
-                session.finish_gesture(drag.adjustment.is_white_balance(), cx);
-            });
-            cx.notify();
-        }
+        // A slider must not vanish while it is changed.
+        let active = self.drag.map(|drag| drag.adjustment) == Some(adjustment)
+            || self.typing.as_ref().map(|typing| typing.adjustment) == Some(adjustment);
+        !self.edited_only || active || adjustment.is_edited(recipe, as_shot)
     }
 
     fn header(&self, enabled: bool) -> impl IntoElement + use<> {
@@ -309,130 +213,10 @@ impl DevelopPanel {
             )
             .children(rows)
     }
-
-    fn row(
-        &self,
-        adjustment: Adjustment,
-        recipe: &EditRecipe,
-        as_shot: Option<WhiteBalanceCoordinates>,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
-        let theme = theme();
-        let (range, format) = (adjustment.range(), adjustment.format());
-        let value = adjustment.get(recipe, as_shot);
-        let default = adjustment.default_value(as_shot);
-        let at = |value| fraction(format, range, value);
-        let (from, to) = (at(default).min(at(value)), at(default).max(at(value)));
-        let edited = adjustment.is_edited(recipe, as_shot);
-        let active = self.drag.is_some_and(|drag| drag.adjustment == adjustment);
-        let panel = cx.entity();
-        div()
-            .id(adjustment.label())
-            .test_id(format!("adjustment:{}", adjustment.label()))
-            .relative()
-            .flex()
-            .items_center()
-            .justify_between()
-            .h(px(24.0))
-            .px_2()
-            .rounded(RADIUS)
-            .overflow_hidden()
-            .bg(if active { theme.hover } else { theme.element })
-            .hover(move |style| style.bg(theme.hover))
-            .cursor(CursorStyle::ResizeLeftRight)
-            .child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .bottom_0()
-                    .left(relative(from))
-                    .w(relative(to - from))
-                    .bg(theme.fill),
-            )
-            // Marks the value, so that a slider at its default still shows its position.
-            .child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .bottom_0()
-                    .left(relative(at(value).min(0.993)))
-                    .w(px(2.0))
-                    .bg(if edited || active {
-                        theme.accent
-                    } else {
-                        theme.selected
-                    }),
-            )
-            .child(
-                div()
-                    .relative()
-                    .text_color(if edited { theme.text } else { theme.muted })
-                    .child(adjustment.label()),
-            )
-            .child(
-                div()
-                    .relative()
-                    .text_size(SMALL_FONT_SIZE)
-                    .text_color(if edited { theme.text } else { theme.faint })
-                    .child(format.label(value, range)),
-            )
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    this.show_menu(adjustment, event.position, window, cx);
-                }),
-            )
-            .child(press_area(panel, adjustment))
-    }
 }
 
 fn hint(text: &'static str) -> Div {
     div().p_3().text_color(theme().faint).child(text)
-}
-
-/// Covers a row and reports presses together with the row's width.
-fn press_area(panel: Entity<DevelopPanel>, adjustment: Adjustment) -> impl IntoElement {
-    canvas(
-        |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
-        move |bounds: Bounds<Pixels>, hitbox, window, _| {
-            window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
-                if phase == DispatchPhase::Bubble
-                    && event.button == MouseButton::Left
-                    && hitbox.is_hovered(window)
-                {
-                    panel.update(cx, |panel, cx| {
-                        panel.press(adjustment, event, bounds.size.width, cx);
-                    });
-                }
-            });
-        },
-    )
-    .absolute()
-    .size_full()
-    .top_0()
-    .left_0()
-}
-
-/// Follows a drag wherever the pointer goes.
-fn drag_tracker(panel: Entity<DevelopPanel>) -> impl IntoElement {
-    canvas(
-        |_, _, _| (),
-        move |_, (), window, _| {
-            let moved = panel.clone();
-            window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
-                if phase == DispatchPhase::Capture {
-                    moved.update(cx, |panel, cx| panel.drag_to(event, cx));
-                }
-            });
-            window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
-                if phase == DispatchPhase::Capture && event.button == MouseButton::Left {
-                    panel.update(cx, |panel, cx| panel.release(cx));
-                }
-            });
-        },
-    )
-    .absolute()
-    .size_0()
 }
 
 impl Render for DevelopPanel {
