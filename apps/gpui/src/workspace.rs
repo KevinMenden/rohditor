@@ -12,6 +12,7 @@ use crate::actions::{
     Quit, Redo, ResetAdjustments, Save, ToggleCommandPalette, ToggleDevelop, ToggleFiles, Undo,
     WORKSPACE_CONTEXT, ZoomToFit,
 };
+use crate::library::Library;
 use crate::panels::command_palette::CommandPalette;
 use crate::panels::develop::DevelopPanel;
 use crate::panels::files::FilesPanel;
@@ -21,6 +22,7 @@ use crate::viewport::Viewport;
 
 pub struct Workspace {
     session: Entity<Session>,
+    library: Entity<Library>,
     files: Entity<FilesPanel>,
     develop: Entity<DevelopPanel>,
     viewport: Entity<Viewport>,
@@ -37,7 +39,12 @@ impl Focusable for Workspace {
 }
 
 impl Workspace {
-    pub fn new(session: Entity<Session>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        session: Entity<Session>,
+        library: Entity<Library>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         cx.observe_in(&session, window, |_, session, window, cx| {
@@ -49,11 +56,13 @@ impl Workspace {
             cx.notify();
         })
         .detach();
+        cx.observe(&library, |_, _, cx| cx.notify()).detach();
         Self {
-            files: cx.new(|cx| FilesPanel::new(session.clone(), cx)),
+            files: cx.new(|cx| FilesPanel::new(session.clone(), library.clone(), cx)),
             develop: cx.new(|cx| DevelopPanel::new(session.clone(), cx)),
             viewport: cx.new(|cx| Viewport::new(session.clone(), cx)),
             session,
+            library,
             palette: None,
             files_open: true,
             develop_open: true,
@@ -68,23 +77,30 @@ impl Workspace {
             multiple: false,
             prompt: None,
         });
-        let session = self.session.clone();
+        let (session, library) = (self.session.clone(), self.library.clone());
         cx.spawn(async move |_, cx| match chosen.await {
             Ok(Ok(Some(paths))) => {
                 if let Some(path) = paths.into_iter().next() {
-                    session.update(cx, |session, cx| {
-                        if folder {
-                            session.open_folder(path, cx);
-                        } else {
-                            session.open_file(path, cx);
-                        }
-                    });
+                    if folder {
+                        library.update(cx, |library, cx| library.open_folder(path, cx));
+                    } else {
+                        session.update(cx, |session, cx| session.open_file(path, cx));
+                    }
                 }
             }
             Ok(Err(error)) => log::error!("the file dialog failed: {error:#}"),
             Ok(Ok(None)) | Err(_) => {}
         })
         .detach();
+    }
+
+    /// Open the photo after or before the current one in the folder.
+    fn open_adjacent(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let current = self.session.read(cx).document().map(|d| d.path.as_path());
+        if let Some(path) = self.library.read(cx).adjacent(current, forward) {
+            self.session
+                .update(cx, |session, cx| session.open_file(path, cx));
+        }
     }
 
     fn toggle_palette(
@@ -125,8 +141,6 @@ impl Workspace {
         }
         let root = on_session!(root,
             CloseFile => |session, cx| session.close_document(cx),
-            NextPhoto => |session, cx| session.open_adjacent(true, cx),
-            PreviousPhoto => |session, cx| session.open_adjacent(false, cx),
             Save => |session, cx| { session.save_now(); session.tick(cx); },
             Export => |session, cx| session.prompt_export(cx),
             Undo => |session, cx| session.undo(cx),
@@ -134,7 +148,9 @@ impl Workspace {
             ResetAdjustments => |session, cx| session.reset(cx),
             AutoTone => |session, cx| session.auto_tone(cx),
         );
-        root.on_action(cx.listener(|this, _: &OpenFile, _, cx| this.prompt(false, cx)))
+        root.on_action(cx.listener(|this, _: &NextPhoto, _, cx| this.open_adjacent(true, cx)))
+            .on_action(cx.listener(|this, _: &PreviousPhoto, _, cx| this.open_adjacent(false, cx)))
+            .on_action(cx.listener(|this, _: &OpenFile, _, cx| this.prompt(false, cx)))
             .on_action(cx.listener(|this, _: &OpenFolder, _, cx| this.prompt(true, cx)))
             .on_action(cx.listener(|this, _: &ZoomToFit, window, cx| {
                 this.viewport

@@ -16,7 +16,8 @@ use rohditor_engine::persistence;
 use rohditor_engine::preview::WgpuContext;
 use rohditor_gpu::{GpuPreviewProcessor, GpuSensorProcessor, GpuSpatialProcessor};
 
-use crate::session::{Directories, Display, Session};
+use crate::library::{Library, LibraryWorker};
+use crate::session::{Display, Session, SessionWorkers};
 use crate::workspace::Workspace;
 use crate::{actions, assets, device};
 
@@ -24,6 +25,7 @@ struct Harness {
     cx: HeadlessAppContext,
     window: WindowHandle<Workspace>,
     session: Entity<Session>,
+    library: Entity<Library>,
 }
 
 impl Harness {
@@ -40,17 +42,24 @@ impl Harness {
         let window = cx
             .open_window(size(px(1440.0), px(900.0)), |window, cx| {
                 let session = cx.new(|cx| {
-                    Session::new(device::shared_context(), Directories::default(), cx)
-                        .expect("the engine starts")
+                    let workers = SessionWorkers::start().expect("the engine starts");
+                    let settings = rohditor_engine::settings::AppSettings::default();
+                    Session::new(workers, settings, device::shared_context(), cx)
                 });
-                created = Some(session.clone());
-                cx.new(|cx| Workspace::new(session, window, cx))
+                let library = cx.new(|cx| {
+                    let worker = LibraryWorker::start().expect("the catalog starts");
+                    Library::new(worker, None, &session, cx)
+                });
+                created = Some((session.clone(), library.clone()));
+                cx.new(|cx| Workspace::new(session, library, window, cx))
             })
             .expect("headless window");
+        let (session, library) = created.expect("the window was built");
         Self {
             cx,
             window,
-            session: created.expect("the window was built"),
+            session,
+            library,
         }
     }
 
@@ -78,6 +87,17 @@ impl Harness {
             });
             assert_eq!(problem, None, "while waiting for {what}");
             assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn wait_for_library(&mut self, what: &str, done: impl Fn(&Library) -> bool) {
+        let library = self.library.clone();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !self.cx.update(|cx| done(library.read(cx))) {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            self.cx.update(|cx| library.update(cx, Library::tick));
+            self.cx.run_until_parked();
             std::thread::sleep(Duration::from_millis(10));
         }
     }
@@ -298,7 +318,7 @@ fn the_palette_runs_commands_and_arrows_change_photos() {
     let open = |harness: &mut Harness| {
         harness.with_session(|session, _| session.document().map(|open| open.path.clone()))
     };
-    harness.wait_until("the folder", |session| session.library.order().len() == 2);
+    harness.wait_for_library("the folder", |library| library.len() == 2);
 
     harness.keys("ctrl-shift-p");
     harness.keys("n e x t");
@@ -311,10 +331,10 @@ fn the_palette_runs_commands_and_arrows_change_photos() {
     harness.keys("enter");
     assert_eq!(open(&mut harness).as_ref(), Some(&second));
     harness.wait_until("the second photo", settled);
-    harness.wait_until("the thumbnails", |session| {
+    harness.wait_for_library("the thumbnails", |library| {
         [&first, &second]
             .iter()
-            .all(|path| session.library.texture(path).is_some())
+            .all(|path| library.thumbnail(path).is_some())
     });
 
     harness.keys("left");

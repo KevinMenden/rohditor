@@ -9,7 +9,7 @@ use super::Session;
 
 impl Session {
     pub(super) fn process_worker_events(&mut self) {
-        let events: Vec<_> = self.coordinator.try_events().collect();
+        let events: Vec<_> = self.renderer.coordinator.try_events().collect();
         for event in events {
             self.process_worker_event(event);
         }
@@ -57,16 +57,20 @@ impl Session {
                         .is_some_and(PreviewSource::is_developed)
                 {
                     document.preview.source = Some(PreviewSource::Embedded);
-                    self.show_cpu_image(image.width, image.height, &image.pixels);
+                    self.display
+                        .show_cpu_image(image.width, image.height, &image.pixels);
                 }
             }
             WorkerEvent::RawReady { document_id, frame } => {
-                let render_options = self.settings.render_options();
+                let render_options = self.renderer.settings.render_options();
                 if let Some(document) = self.current(document_id) {
                     document.raw_ready(frame);
                     self.queue_preview();
                     if let Some(document) = self.document.as_mut() {
-                        document.start_default_noise_estimate(&self.coordinator, render_options);
+                        document.start_default_noise_estimate(
+                            &self.renderer.coordinator,
+                            render_options,
+                        );
                     }
                 }
             }
@@ -77,7 +81,11 @@ impl Session {
                 histogram,
                 diagnostics,
             } => {
-                let Some(document) = self.current(ticket.document_id) else {
+                let Some(document) = self
+                    .document
+                    .as_mut()
+                    .filter(|open| open.id == ticket.document_id)
+                else {
                     return;
                 };
                 let superseded = document
@@ -95,9 +103,10 @@ impl Session {
                 preview.status = None;
                 preview.last_time = Some(diagnostics.timings.total);
                 preview.diagnostics = Some(DocumentPreviewDiagnostics::cpu(diagnostics));
+                self.display.sync(preview);
                 document.error = None;
-                self.sync_display();
-                self.show_cpu_image(image.width, image.height, &image.pixels);
+                self.display
+                    .show_cpu_image(image.width, image.height, &image.pixels);
             }
             WorkerEvent::GpuUploadReady {
                 ticket,
@@ -105,31 +114,45 @@ impl Session {
                 diagnostics,
                 upload_preparation,
             } => {
-                if self.current(ticket.document_id).is_some() {
-                    self.with_preview(|runtime, coordinator, preview, request| {
-                        let upload = GpuUpload {
-                            ticket,
-                            prepared: *source,
-                            diagnostics,
-                            upload_preparation,
-                        };
-                        let outcome =
-                            runtime.install_gpu_upload(coordinator, preview, request, upload);
-                        ((), outcome)
-                    });
+                if let Some(document) = self
+                    .document
+                    .as_mut()
+                    .filter(|open| open.id == ticket.document_id)
+                {
+                    let display = &mut self.display;
+                    self.renderer.run(
+                        document,
+                        display,
+                        |runtime, coordinator, preview, request| {
+                            let upload = GpuUpload {
+                                ticket,
+                                prepared: *source,
+                                diagnostics,
+                                upload_preparation,
+                            };
+                            let outcome =
+                                runtime.install_gpu_upload(coordinator, preview, request, upload);
+                            ((), outcome)
+                        },
+                    );
                 }
             }
             WorkerEvent::GpuSpatialFailed { ticket, message } => {
-                if self
+                if let Some(document) = self
                     .document
-                    .as_ref()
-                    .is_some_and(|document| document.ticket() == ticket)
+                    .as_mut()
+                    .filter(|document| document.ticket() == ticket)
                 {
-                    self.with_preview(|runtime, coordinator, preview, request| {
-                        let outcome =
-                            runtime.handle_gpu_failure(coordinator, preview, request, message);
-                        ((), outcome)
-                    });
+                    let display = &mut self.display;
+                    self.renderer.run(
+                        document,
+                        display,
+                        |runtime, coordinator, preview, request| {
+                            let outcome =
+                                runtime.handle_gpu_failure(coordinator, preview, request, message);
+                            ((), outcome)
+                        },
+                    );
                 }
             }
             WorkerEvent::ExportReady {
@@ -171,7 +194,11 @@ impl Session {
                     .as_mut()
                     .filter(|open| open.id == document_id)
                     .is_some_and(|document| {
-                        document.camera_look_ready(&self.coordinator, &camera_profile, result)
+                        document.camera_look_ready(
+                            &self.renderer.coordinator,
+                            &camera_profile,
+                            result,
+                        )
                     });
                 if changed {
                     self.queue_preview();
