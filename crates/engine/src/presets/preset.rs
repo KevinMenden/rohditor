@@ -5,6 +5,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 const MAX_NAME_CHARS: usize = 64;
+/// The slug becomes a file name (plus `.json`); file systems allow 255 bytes,
+/// and non-ASCII letters take up to 4 bytes each.
+const MAX_SLUG_BYTES: usize = 128;
 
 /// Why a preset could not be created, stored or found.
 #[derive(Debug, Error)]
@@ -191,8 +194,12 @@ fn checked_name(name: &str) -> Result<String, PresetError> {
     if name.chars().any(char::is_control) {
         return Err(PresetError::InvalidName("it contains a control character"));
     }
-    if slug(name).is_empty() {
+    let slug = slug(name);
+    if slug.is_empty() {
         return Err(PresetError::InvalidName("it has no letters or digits"));
+    }
+    if slug.len() > MAX_SLUG_BYTES {
+        return Err(PresetError::InvalidName("its file name would be too long"));
     }
     Ok(name.to_owned())
 }

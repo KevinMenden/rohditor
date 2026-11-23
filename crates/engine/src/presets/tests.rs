@@ -183,7 +183,10 @@ fn names_are_trimmed_and_checked() {
         Preset::new("  Moody  ", &recipe, &section).unwrap().name(),
         "Moody"
     );
-    for bad in ["", "   ", "---", "a\nb", &"x".repeat(65)] {
+    // 64 characters of 4 bytes each: within the character limit, but too long
+    // for a file name.
+    let wide = "𝒜".repeat(64);
+    for bad in ["", "   ", "---", "a\nb", &"x".repeat(65), wide.as_str()] {
         assert!(
             matches!(
                 Preset::new(bad, &recipe, &section),
@@ -321,4 +324,27 @@ fn without_a_config_directory_the_store_is_empty_and_cannot_save() {
         Err(PresetError::NoDirectory)
     ));
     assert!(store.presets().is_empty());
+}
+
+#[test]
+fn a_failed_rename_keeps_the_old_name_and_leaves_one_file() {
+    let directory = TestDirectory::new();
+    let mut store = PresetStore::load(Some(directory.path()));
+    store.save(warm_look()).unwrap();
+    let folder = directory.preset_directory();
+
+    // Make removing the old file fail: a non-empty directory cannot be
+    // removed with `remove_file`, whoever runs the test.
+    let old = folder.join("warm-look.json");
+    fs::remove_file(&old).unwrap();
+    fs::create_dir(&old).unwrap();
+    fs::write(old.join("keep"), b"x").unwrap();
+
+    assert!(matches!(
+        store.rename("Warm look", "Golden hour"),
+        Err(PresetError::Write { .. })
+    ));
+    assert!(store.get("Warm look").is_some());
+    assert!(store.get("Golden hour").is_none());
+    assert!(!folder.join("golden-hour.json").exists());
 }

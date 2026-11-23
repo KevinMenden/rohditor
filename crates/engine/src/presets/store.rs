@@ -124,8 +124,21 @@ impl PresetStore {
         // Write the new file before removing the old one, so a failure never
         // loses the preset.
         self.write(&renamed)?;
-        if self.path_for(renamed.name())? != old_path {
-            let _ = fs::remove_file(&old_path);
+        let new_path = self.path_for(renamed.name())?;
+        if new_path != old_path {
+            match fs::remove_file(&old_path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(source) => {
+                    // Keep the old name as it was, rather than leave both
+                    // files to load as two presets next time.
+                    let _ = fs::remove_file(&new_path);
+                    return Err(PresetError::Write {
+                        path: old_path,
+                        source,
+                    });
+                }
+            }
         }
         self.presets[index] = renamed;
         self.sort();
