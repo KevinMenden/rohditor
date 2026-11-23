@@ -4,7 +4,7 @@ mod chrome;
 
 use gpui::{
     App, Context, DismissEvent, Entity, FocusHandle, Focusable, IntoElement, PathPromptOptions,
-    Render, Window, div, prelude::*, px,
+    Pixels, Render, StyleRefinement, Window, div, prelude::*, px,
 };
 
 use crate::actions::{
@@ -17,7 +17,7 @@ use crate::panels::command_palette::CommandPalette;
 use crate::panels::develop::DevelopPanel;
 use crate::panels::files::FilesPanel;
 use crate::session::Session;
-use crate::theme::{UI_FONT_SIZE, theme};
+use crate::theme::{DEVELOP_WIDTH, FILES_WIDTH, UI_FONT_SIZE, theme};
 use crate::viewport::Viewport;
 
 pub struct Workspace {
@@ -173,6 +173,13 @@ impl Workspace {
     }
 }
 
+/// A side panel, redrawn only when it notifies.
+fn dock<P: Render>(panel: &Entity<P>, width: Pixels) -> impl IntoElement + use<P> {
+    panel
+        .clone()
+        .cached(StyleRefinement::default().flex_none().w(width).h_full())
+}
+
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme();
@@ -193,7 +200,9 @@ impl Render for Workspace {
                     .flex()
                     .flex_1()
                     .min_h_0()
-                    .when(self.files_open, |body| body.child(self.files.clone()))
+                    .when(self.files_open, |body| {
+                        body.child(dock(&self.files, FILES_WIDTH))
+                    })
                     .child(
                         div()
                             .flex()
@@ -203,7 +212,9 @@ impl Render for Workspace {
                             .children(self.tab(cx))
                             .child(self.viewport.clone()),
                     )
-                    .when(self.develop_open, |body| body.child(self.develop.clone())),
+                    .when(self.develop_open, |body| {
+                        body.child(dock(&self.develop, DEVELOP_WIDTH))
+                    }),
             )
             .child(self.status_bar(window, cx))
             .children(self.palette.clone().map(|palette| {
@@ -219,5 +230,12 @@ impl Render for Workspace {
                     .child(palette)
             }))
             .children(chrome::resize_edges(window))
+    }
+}
+
+#[cfg(test)]
+impl Workspace {
+    pub fn panel_renders(&self, cx: &App) -> (usize, usize) {
+        (self.files.read(cx).renders, self.develop.read(cx).renders)
     }
 }

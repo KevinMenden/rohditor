@@ -1,12 +1,12 @@
 //! Flat icon buttons.
 
 use gpui::{
-    App, ClickEvent, ElementId, Hsla, IntoElement, Pixels, Stateful, Window, div, prelude::*, px,
-    svg,
+    App, ClickEvent, Hsla, IntoElement, Pixels, Stateful, Window, div, prelude::*, px, svg,
 };
 
 use crate::assets::Icon;
 use crate::theme::{RADIUS, theme};
+use crate::ui::test_id::TestId as _;
 
 pub fn icon(icon: Icon, color: Hsla) -> impl IntoElement {
     svg()
@@ -17,7 +17,7 @@ pub fn icon(icon: Icon, color: Hsla) -> impl IntoElement {
 }
 
 pub fn icon_button(
-    id: impl Into<ElementId>,
+    id: &'static str,
     glyph: Icon,
     enabled: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -35,7 +35,8 @@ pub fn icon_button(
         .rounded(RADIUS)
         // Keep presses on a button from moving the window when it sits in the title bar.
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .child(icon(glyph, color));
+        .child(icon(glyph, color))
+        .test_id(format!("button:{id}"));
     if enabled {
         button
             .cursor_pointer()

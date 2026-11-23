@@ -1,5 +1,7 @@
 //! Left dock: the photos of the open folder.
 
+use std::path::PathBuf;
+
 use gpui::{
     Context, Corners, Entity, IntoElement, Render, Window, canvas, div, prelude::*, px,
     uniform_list,
@@ -11,18 +13,35 @@ use crate::library::Library;
 use crate::session::Session;
 use crate::theme::{FILES_WIDTH, RADIUS, TAB_HEIGHT, theme};
 use crate::ui::button::icon;
+use crate::ui::test_id::TestId as _;
 
 pub struct FilesPanel {
     session: Entity<Session>,
     library: Entity<Library>,
+    /// The open photo, which is highlighted.
+    open: Option<PathBuf>,
+    #[cfg(test)]
+    pub renders: usize,
 }
 
 impl FilesPanel {
     pub fn new(session: Entity<Session>, library: Entity<Library>, cx: &mut Context<Self>) -> Self {
-        // The session, for which photo is open.
-        cx.observe(&session, |_, _, cx| cx.notify()).detach();
+        cx.observe(&session, |panel, session, cx| {
+            let open = session.read(cx).document().map(|document| &document.path);
+            if panel.open.as_ref() != open {
+                panel.open = open.cloned();
+                cx.notify();
+            }
+        })
+        .detach();
         cx.observe(&library, |_, _, cx| cx.notify()).detach();
-        Self { session, library }
+        Self {
+            session,
+            library,
+            open: None,
+            #[cfg(test)]
+            renders: 0,
+        }
     }
 
     fn row(&self, position: usize, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
@@ -30,11 +49,7 @@ impl FilesPanel {
         let library = self.library.read(cx);
         let path = library.path(position)?.to_path_buf();
         let name = library.name(position)?.to_owned();
-        let open = self
-            .session
-            .read(cx)
-            .document()
-            .is_some_and(|document| document.path == path);
+        let open = self.open.as_ref() == Some(&path);
         let thumbnail = library.thumbnail(&path).map(|t| t.image().clone());
         let thumbnail = match thumbnail {
             Some(image) => canvas(
@@ -79,6 +94,7 @@ impl FilesPanel {
             .cursor_pointer()
             .text_color(if open { theme.text } else { theme.muted })
             .child(thumbnail)
+            .test_id(format!("file:{name}"))
             .child(div().min_w_0().truncate().child(name))
             .on_click(cx.listener(move |this, _, _, cx| {
                 let path = path.clone();
@@ -96,6 +112,10 @@ impl FilesPanel {
 
 impl Render for FilesPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(test)]
+        {
+            self.renders += 1;
+        }
         let theme = theme();
         let library = self.library.read(cx);
         let count = library.len();

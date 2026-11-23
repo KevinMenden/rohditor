@@ -3,3 +3,4 @@
 pub mod button;
 pub mod histogram;
 pub mod slider;
+pub mod test_id;

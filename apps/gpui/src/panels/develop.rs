@@ -9,7 +9,7 @@ use gpui::{
     Bounds, Context, CursorStyle, DispatchPhase, Entity, IntoElement, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, Pixels, Render, Window, canvas, div, prelude::*, px, relative,
 };
-use rohditor_core::WhiteBalanceCoordinates;
+use rohditor_core::{Histogram, WhiteBalanceCoordinates};
 use rohditor_edit::EditRecipe;
 
 use super::adjustments::{Adjustment, SECTIONS, Section};
@@ -20,6 +20,7 @@ use crate::theme::{DEVELOP_WIDTH, RADIUS, SMALL_FONT_SIZE, TAB_HEIGHT, theme};
 use crate::ui::button::icon;
 use crate::ui::histogram::histogram;
 use crate::ui::slider::{dragged, fraction};
+use crate::ui::test_id::TestId as _;
 
 const FINE_DRAG: f32 = 0.1;
 
@@ -31,17 +32,56 @@ struct Drag {
     width: Pixels,
 }
 
+/// What the panel shows. Compared on every session change, so that the panel only redraws for
+/// its own content.
+#[derive(Clone, Default, PartialEq)]
+struct Model {
+    /// The recipe of the open photo, once it can be edited.
+    recipe: Option<EditRecipe>,
+    as_shot: Option<WhiteBalanceCoordinates>,
+    histogram: Option<Histogram>,
+}
+
+impl Model {
+    fn of(session: &Session) -> Self {
+        let Some(document) = session
+            .document()
+            .filter(|document| document.frame.is_some())
+        else {
+            return Self::default();
+        };
+        Self {
+            recipe: Some(document.edits.recipe().clone()),
+            as_shot: session.as_shot(),
+            histogram: document.preview.histogram,
+        }
+    }
+}
+
 pub struct DevelopPanel {
     session: Entity<Session>,
+    model: Model,
+    #[cfg(test)]
+    pub renders: usize,
     drag: Option<Drag>,
     collapsed: HashSet<&'static str>,
 }
 
 impl DevelopPanel {
     pub fn new(session: Entity<Session>, cx: &mut Context<Self>) -> Self {
-        cx.observe(&session, |_, _, cx| cx.notify()).detach();
+        cx.observe(&session, |panel, session, cx| {
+            let model = Model::of(session.read(cx));
+            if panel.model != model {
+                panel.model = model;
+                cx.notify();
+            }
+        })
+        .detach();
         Self {
             session,
+            model: Model::default(),
+            #[cfg(test)]
+            renders: 0,
             drag: None,
             collapsed: HashSet::new(),
         }
@@ -190,6 +230,7 @@ impl DevelopPanel {
             .child(
                 div()
                     .id(title)
+                    .test_id(format!("section:{title}"))
                     .flex()
                     .items_center()
                     .gap_1()
@@ -227,6 +268,7 @@ impl DevelopPanel {
         let panel = cx.entity();
         div()
             .id(adjustment.label())
+            .test_id(format!("adjustment:{}", adjustment.label()))
             .relative()
             .flex()
             .items_center()
@@ -325,14 +367,17 @@ fn drag_tracker(panel: Entity<DevelopPanel>) -> impl IntoElement {
 
 impl Render for DevelopPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(test)]
+        {
+            self.renders += 1;
+        }
         let theme = theme();
-        let session = self.session.read(cx);
-        let as_shot = session.as_shot();
-        let document = session
-            .document()
-            .filter(|document| document.frame.is_some());
-        let recipe = document.map(|document| document.edits.recipe().clone());
-        let graph = histogram(document.and_then(|document| document.preview.histogram.as_ref()));
+        let Model {
+            recipe,
+            as_shot,
+            histogram: bins,
+        } = self.model.clone();
+        let graph = histogram(bins.as_ref());
         let body = match &recipe {
             Some(recipe) => {
                 let sections: Vec<_> = SECTIONS

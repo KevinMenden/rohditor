@@ -11,6 +11,7 @@ use rohditor_engine::view::{ViewState, fit_scale};
 use crate::actions::{commands, key_label};
 use crate::session::{Display, Session};
 use crate::theme::{RADIUS, theme};
+use crate::ui::test_id::TestId as _;
 
 /// Pixels per wheel line, for mice that report lines.
 const LINE_HEIGHT: Pixels = px(20.0);
@@ -228,6 +229,7 @@ impl Render for Viewport {
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
             .on_mouse_move(cx.listener(Self::mouse_move))
             .on_scroll_wheel(cx.listener(Self::scroll))
+            .test_id("viewport")
             .child(
                 canvas(
                     |_, _, _| (),
