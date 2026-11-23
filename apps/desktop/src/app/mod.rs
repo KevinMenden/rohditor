@@ -887,7 +887,8 @@ impl RohditorApp {
         }
     }
 
-    fn show_top_bar(&mut self, context: &egui::Context) {
+    fn show_top_bar(&mut self, root: &mut egui::Ui) {
+        let context = &root.ctx().clone();
         let model = ToolbarModel {
             mode: self.view_mode,
             document_name: self
@@ -922,7 +923,7 @@ impl RohditorApp {
                     document.core.frame.is_some() && document.core.export_status.is_none()
                 }),
         };
-        let actions = toolbar::show_top(context, &model);
+        let actions = toolbar::show_top(root, &model);
         if let Some(mode) = actions.view_mode
             && mode != self.view_mode
         {
@@ -1043,7 +1044,8 @@ impl RohditorApp {
         }
     }
 
-    fn show_file_panel(&mut self, context: &egui::Context) {
+    fn show_file_panel(&mut self, root: &mut egui::Ui) {
+        let context = &root.ctx().clone();
         let model = FilePanelModel {
             file_name: self
                 .document
@@ -1067,13 +1069,14 @@ impl RohditorApp {
                 .and_then(|document| document.core.preview.source)
                 .map(|source| source.short_label().to_owned()),
         };
-        let output = toolbar::show_file_panel(context, &model);
+        let output = toolbar::show_file_panel(root, &model);
         if output.close {
             self.request_close_document(context);
         }
     }
 
-    fn show_adjustment_panel(&mut self, context: &egui::Context) {
+    fn show_adjustment_panel(&mut self, root: &mut egui::Ui) {
+        let context = &root.ctx().clone();
         let model = self.document.as_ref().map(|document| {
             document_panel_model(
                 document,
@@ -1087,7 +1090,7 @@ impl RohditorApp {
             state: &mut self.presets_ui,
             presets: self.presets.presets(),
         };
-        let output = tool_panel::show(context, &panel, |ui| {
+        let output = tool_panel::show(root, &panel, |ui| {
             adjustment_panel::show_body(ui, model, presets)
         });
         let picker_mode = output.picker_mode;
@@ -1227,7 +1230,8 @@ impl RohditorApp {
         }
     }
 
-    fn show_viewport(&mut self, context: &egui::Context) {
+    fn show_viewport(&mut self, root: &mut egui::Ui) {
+        let context = &root.ctx().clone();
         self.refresh_clipping_overlay(context);
         let crop_overlay = self
             .tool
@@ -1265,7 +1269,7 @@ impl RohditorApp {
                 )
             });
             viewport::show(
-                context,
+                root,
                 ViewportModel {
                     has_document: true,
                     preparing,
@@ -1284,7 +1288,7 @@ impl RohditorApp {
         } else {
             let mut empty_view = ViewState::default();
             viewport::show(
-                context,
+                root,
                 ViewportModel {
                     has_document: false,
                     preparing: false,
@@ -1471,7 +1475,8 @@ impl RohditorApp {
         }
     }
 
-    fn show_status_bar(&mut self, context: &egui::Context) {
+    fn show_status_bar(&mut self, root: &mut egui::Ui) {
+        let context = &root.ctx().clone();
         self.refresh_recipe_save_status(context);
         let mut activities = Vec::new();
         let mut busy = false;
@@ -1521,7 +1526,7 @@ impl RohditorApp {
                     .map(|status| status.message().to_owned())
             });
         toolbar::show_status(
-            context,
+            root,
             &StatusBarModel {
                 processor: self.processor_description(),
                 ui_renderer: format!("{} UI", self.ui_renderer),
@@ -1546,12 +1551,13 @@ impl RohditorApp {
     }
 
     /// Library-mode central panel: lazy textures, model, grid, and actions.
-    fn show_library(&mut self, context: &egui::Context) {
+    fn show_library(&mut self, root: &mut egui::Ui) {
+        let context = &root.ctx().clone();
         self.library.sync(&self.catalog);
         let opened_by_keyboard = self.handle_library_keyboard(context);
         self.fill_library_textures(context, self.library.visible);
         let model = self.library_model();
-        let output = catalog::show(context, &model);
+        let output = catalog::show(root, &model);
         self.library.visible = (output.visible_range.start, output.visible_range.end);
         self.library.columns = output.columns.max(1);
         if let Some(sort) = output.sort_changed {
@@ -1684,7 +1690,8 @@ impl RohditorApp {
 
     /// Develop-mode filmstrip below the viewport; clicking a thumbnail opens
     /// that photo, and PageUp/PageDown walk through the folder.
-    fn show_filmstrip(&mut self, context: &egui::Context) {
+    fn show_filmstrip(&mut self, root: &mut egui::Ui) {
+        let context = &root.ctx().clone();
         if self.catalog.entry_count() == 0 {
             return;
         }
@@ -1713,7 +1720,7 @@ impl RohditorApp {
             active: active_grid,
             scroll_to_active,
         };
-        let output = catalog::show_filmstrip(context, &model);
+        let output = catalog::show_filmstrip(root, &model);
         self.filmstrip_visible = (output.visible_range.start, output.visible_range.end);
         if let Some(grid_index) = output.open_entry {
             self.open_catalog_entry(context, grid_index);
@@ -2597,7 +2604,8 @@ fn apply_adjustment_interaction(
 }
 
 impl eframe::App for RohditorApp {
-    fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let context = &root.ctx().clone();
         self.process_worker_events(context);
         self.sync_camera_look(context);
         self.process_recipe_save_events();
@@ -2605,17 +2613,17 @@ impl eframe::App for RohditorApp {
         self.library.begin_frame();
         self.refresh_gpu_queue_completion(context);
         self.refresh_gpu_histogram(context);
-        self.show_top_bar(context);
-        self.show_status_bar(context);
+        self.show_top_bar(root);
+        self.show_status_bar(root);
         match self.view_mode {
             ViewMode::Develop => {
-                self.show_file_panel(context);
-                self.show_tool_rail(context);
-                self.show_tool_panel(context);
-                self.show_filmstrip(context);
-                self.show_viewport(context);
+                self.show_file_panel(root);
+                self.show_tool_rail(root);
+                self.show_tool_panel(root);
+                self.show_filmstrip(root);
+                self.show_viewport(root);
             }
-            ViewMode::Library => self.show_library(context),
+            ViewMode::Library => self.show_library(root),
         }
         self.show_developer_diagnostics(context);
         self.show_application_settings(context);

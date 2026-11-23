@@ -649,7 +649,7 @@ fn primary_button_widget(label: &str) -> egui::Button<'_> {
 
 pub(crate) fn dropdown(
     ui: &mut egui::Ui,
-    id_salt: impl Hash,
+    id_salt: impl Hash + std::fmt::Debug,
     label: &str,
     selected: &str,
     add_contents: impl FnOnce(&mut egui::Ui),
@@ -707,7 +707,7 @@ mod tests {
         section: impl Fn() -> CollapsibleSection<'static>,
     ) -> bool {
         let mut body_ran = false;
-        let _ = context.run(
+        let _ = context.run_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -717,10 +717,10 @@ mod tests {
                 events,
                 ..Default::default()
             },
-            |context| {
+            |root| {
                 egui::CentralPanel::default()
                     .frame(egui::Frame::NONE)
-                    .show(context, |ui| {
+                    .show(root, |ui| {
                         body_ran = section().show_resettable(ui, |_| ()).body.is_some();
                     });
             },
@@ -786,7 +786,7 @@ mod tests {
         let mut resets = Vec::new();
         let mut bodies = Vec::new();
         for (index, events) in frames.into_iter().enumerate() {
-            let _ = context.run(
+            let _ = context.run_ui(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
                         egui::Pos2::ZERO,
@@ -796,10 +796,10 @@ mod tests {
                     events,
                     ..Default::default()
                 },
-                |context| {
+                |root| {
                     egui::CentralPanel::default()
                         .frame(egui::Frame::NONE)
-                        .show(context, |ui| {
+                        .show(root, |ui| {
                             let shown = CollapsibleSection::new("Resettable")
                                 .changed(true)
                                 .resettable()
@@ -895,8 +895,8 @@ mod tests {
             let mut tint_changed = true;
             let temperature_neutral = temperature;
             let tint_neutral = tint;
-            let _ = context.run(egui::RawInput::default(), |context| {
-                egui::CentralPanel::default().show(context, |ui| {
+            let _ = context.run_ui(egui::RawInput::default(), |root| {
+                egui::CentralPanel::default().show(root, |ui| {
                     temperature_changed = temperature_adjustment_slider(
                         ui,
                         &mut temperature,

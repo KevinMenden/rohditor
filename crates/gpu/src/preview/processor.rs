@@ -686,8 +686,8 @@ impl GpuPreviewProcessor {
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("rohditor GPU preview pipeline layout"),
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("rohditor GPU preview shader"),
@@ -1064,15 +1064,11 @@ impl GpuPreviewProcessor {
         if cancellation.is_cancelled() {
             return Err(GpuPreviewError::Cancelled);
         }
-        self.device.push_error_scope(wgpu::ErrorFilter::Internal);
-        self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
-        self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let scopes = crate::error_scopes::ErrorScopes::push(&self.device);
         let result =
             self.render_spatial_full_inner(source, recipe, output_policy, reusable, cancellation);
-        let validation = pollster::block_on(self.device.pop_error_scope());
-        let allocation = pollster::block_on(self.device.pop_error_scope());
-        let internal = pollster::block_on(self.device.pop_error_scope());
-        if let Some(error) = validation.or(allocation).or(internal) {
+        let gpu_error = scopes.finish();
+        if let Some(error) = gpu_error {
             return Err(GpuPreviewError::Unsupported {
                 reason: format!("full-resolution GPU display failed: {error}"),
             });
@@ -3027,9 +3023,9 @@ pub(crate) mod tests {
     fn gpu_test_processor_with_hardware_requirement(
         require_hardware: bool,
     ) -> Option<GpuPreviewProcessor> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
-            ..wgpu::InstanceDescriptor::default()
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,

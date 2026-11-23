@@ -71,11 +71,11 @@ pub(crate) struct LibraryOutput {
     pub columns: usize,
 }
 
-pub(crate) fn show(context: &egui::Context, model: &LibraryModel) -> LibraryOutput {
+pub(crate) fn show(root: &mut egui::Ui, model: &LibraryModel) -> LibraryOutput {
     let mut output = LibraryOutput::default();
     egui::CentralPanel::default()
         .frame(theme::library_frame())
-        .show(context, |ui| {
+        .show(root, |ui| {
             show_header(ui, model, &mut output);
             ui.add_space(metrics::LIBRARY_HEADER_SPACING);
             if let Some(failure) = &model.failure {
@@ -206,12 +206,12 @@ pub(crate) struct FilmstripOutput {
 }
 
 /// Horizontal thumbnail strip below the develop viewport.
-pub(crate) fn show_filmstrip(context: &egui::Context, model: &FilmstripModel) -> FilmstripOutput {
+pub(crate) fn show_filmstrip(root: &mut egui::Ui, model: &FilmstripModel) -> FilmstripOutput {
     let mut output = FilmstripOutput::default();
-    egui::TopBottomPanel::bottom("filmstrip")
-        .exact_height(FILMSTRIP_CELL.y + 24.0)
+    egui::Panel::bottom("filmstrip")
+        .exact_size(FILMSTRIP_CELL.y + 24.0)
         .frame(theme::side_panel_frame())
-        .show(context, |ui| {
+        .show(root, |ui| {
             let mut next_index = 0_usize;
             let mut visible = Range { start: 0, end: 0 };
             egui::ScrollArea::horizontal()

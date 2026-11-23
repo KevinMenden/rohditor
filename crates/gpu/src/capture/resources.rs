@@ -86,7 +86,7 @@ impl TilePlan {
             let binding = pixels as u64 * plane_bytes.max(12);
             if gpu_bytes <= budget
                 && binding <= limits.max_buffer_size
-                && binding <= u64::from(limits.max_storage_buffer_binding_size)
+                && binding <= limits.max_storage_buffer_binding_size
                 && w.div_ceil(8).max(h.div_ceil(8))
                     <= limits.max_compute_workgroups_per_dimension as usize
                 && limits.max_storage_buffers_per_shader_stage >= 3

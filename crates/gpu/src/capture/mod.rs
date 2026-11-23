@@ -62,9 +62,7 @@ pub struct GpuCaptureProcessor {
 
 impl GpuCaptureProcessor {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Result<Self, GpuPreviewError> {
-        device.push_error_scope(wgpu::ErrorFilter::Internal);
-        device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
-        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let scopes = crate::error_scopes::ErrorScopes::push(device);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("capture f32 shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("capture.wgsl").into()),
@@ -78,10 +76,8 @@ impl GpuCaptureProcessor {
             cache: None,
         });
         let detail = detail::DetailPasses::new(device);
-        let validation = pollster::block_on(device.pop_error_scope());
-        let allocation = pollster::block_on(device.pop_error_scope());
-        let internal = pollster::block_on(device.pop_error_scope());
-        if let Some(e) = validation.or(allocation).or(internal) {
+        let gpu_error = scopes.finish();
+        if let Some(e) = gpu_error {
             return Err(error(e));
         }
         Ok(Self {
@@ -198,15 +194,11 @@ impl GpuCaptureProcessor {
                 "capture source, result and staging exceed CPU working-set limit",
             ));
         }
-        self.device.push_error_scope(wgpu::ErrorFilter::Internal);
-        self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
-        self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let scopes = crate::error_scopes::ErrorScopes::push(&self.device);
         let result = self.process_inner(image, contract, &plan, noise, cancellation);
-        let validation = pollster::block_on(self.device.pop_error_scope());
-        let allocation = pollster::block_on(self.device.pop_error_scope());
-        let internal = pollster::block_on(self.device.pop_error_scope());
+        let gpu_error = scopes.finish();
         check_cancel(cancellation)?;
-        if let Some(e) = validation.or(allocation).or(internal) {
+        if let Some(e) = gpu_error {
             return Err(error(e));
         }
         result.map(Some)
@@ -264,9 +256,7 @@ impl GpuCaptureProcessor {
                 "resident capture source and staging exceed CPU working-set limit",
             ));
         }
-        self.device.push_error_scope(wgpu::ErrorFilter::Internal);
-        self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
-        self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let scopes = crate::error_scopes::ErrorScopes::push(&self.device);
         let result = self.process_resident_inner(
             image,
             contract,
@@ -276,11 +266,9 @@ impl GpuCaptureProcessor {
             scatter,
             cancellation,
         );
-        let validation = pollster::block_on(self.device.pop_error_scope());
-        let allocation = pollster::block_on(self.device.pop_error_scope());
-        let internal = pollster::block_on(self.device.pop_error_scope());
+        let gpu_error = scopes.finish();
         check_cancel(cancellation)?;
-        if let Some(error_value) = validation.or(allocation).or(internal) {
+        if let Some(error_value) = gpu_error {
             return Err(error(error_value));
         }
         result

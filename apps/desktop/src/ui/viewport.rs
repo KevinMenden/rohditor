@@ -69,14 +69,15 @@ pub(crate) struct ViewportOutput {
 }
 
 pub(crate) fn show(
-    context: &egui::Context,
+    root: &mut egui::Ui,
     model: ViewportModel<'_>,
     view: &mut ViewState,
 ) -> ViewportOutput {
     let mut output = ViewportOutput::default();
+    let context = root.ctx().clone();
     egui::CentralPanel::default()
         .frame(theme::viewport_frame())
-        .show(context, |ui| {
+        .show(root, |ui| {
             let viewport = ui.max_rect();
             let response = ui.allocate_rect(viewport, egui::Sense::click_and_drag());
             let Some(texture) = model.texture else {
@@ -87,7 +88,7 @@ pub(crate) fn show(
             let padded = viewport.shrink(18.0);
             let image_size = texture.size_vec2();
             let fit_scale = fit_scale(to_pair(padded.size()), to_pair(image_size));
-            let now = context.input(|input| input.time);
+            let now = ui.input(|input| input.time);
             // A mask gesture owns the drag it starts on a handle; any other drag pans. The grab
             // is judged against the image as it is on screen before this frame's pan.
             let masks_capture = model.masks.as_ref().is_some_and(|masks| {
@@ -109,7 +110,7 @@ pub(crate) fn show(
                 );
             }
             if response.hovered() {
-                let scroll = context.input(|input| input.smooth_scroll_delta.y);
+                let scroll = ui.input(|input| input.smooth_scroll_delta.y);
                 if scroll.abs() > f32::EPSILON {
                     view.zoom_by(
                         fit_scale,
@@ -168,12 +169,12 @@ pub(crate) fn show(
             );
 
             if let Some(crop) = model.crop {
-                output.crop = interact_and_paint(context, ui, &response, image_rect, crop);
+                output.crop = interact_and_paint(&context, ui, &response, image_rect, crop);
             }
 
             if let Some(masks) = model.masks.as_ref() {
                 output.masks =
-                    mask_overlay::interact_and_paint(context, ui, &response, image_rect, masks);
+                    mask_overlay::interact_and_paint(&context, ui, &response, image_rect, masks);
             }
 
             if let Some(source) = model.source

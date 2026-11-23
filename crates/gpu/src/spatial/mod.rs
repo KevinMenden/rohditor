@@ -45,9 +45,7 @@ pub struct GpuSpatialProcessor {
 
 impl GpuSpatialProcessor {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Result<Self, GpuPreviewError> {
-        device.push_error_scope(wgpu::ErrorFilter::Internal);
-        device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
-        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let scopes = crate::error_scopes::ErrorScopes::push(device);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("GPU optics and exact area reduction"),
             source: wgpu::ShaderSource::Wgsl(include_str!("spatial.wgsl").into()),
@@ -81,10 +79,8 @@ impl GpuSpatialProcessor {
         let scatter = CaptureScatter::new(device);
         let defringe = defringe::DefringePipelines::new(device);
         let capture = crate::GpuCaptureProcessor::new(device, queue);
-        let validation = pollster::block_on(device.pop_error_scope());
-        let allocation = pollster::block_on(device.pop_error_scope());
-        let internal = pollster::block_on(device.pop_error_scope());
-        if let Some(error) = validation.or(allocation).or(internal) {
+        let gpu_error = scopes.finish();
+        if let Some(error) = gpu_error {
             return Err(invalid(&error.to_string()));
         }
         let capture = capture?;
@@ -147,9 +143,7 @@ impl GpuSpatialProcessor {
             &self.device.limits(),
             self.maximum_tile_edge,
         )?;
-        self.device.push_error_scope(wgpu::ErrorFilter::Internal);
-        self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
-        self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let scopes = crate::error_scopes::ErrorScopes::push(&self.device);
         let started = Instant::now();
         let operation = (|| {
             let planes =
@@ -181,10 +175,8 @@ impl GpuSpatialProcessor {
             };
             Ok::<_, GpuPreviewError>((planes, uploaded_bytes, capture, upload))
         })();
-        let validation = pollster::block_on(self.device.pop_error_scope());
-        let allocation = pollster::block_on(self.device.pop_error_scope());
-        let internal = pollster::block_on(self.device.pop_error_scope());
-        if let Some(error) = validation.or(allocation).or(internal) {
+        let gpu_error = scopes.finish();
+        if let Some(error) = gpu_error {
             return Err(invalid(&error.to_string()));
         }
         let (planes, uploaded_bytes, capture, upload) = operation?;

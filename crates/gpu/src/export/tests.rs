@@ -8,9 +8,9 @@ use rohditor_raw::{RawDecoder, RawlerDecoder};
 use std::sync::Arc;
 
 pub(super) fn processor(hardware: bool) -> Option<GpuExportProcessor> {
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
-        ..Default::default()
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
     let adapter =
         pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))

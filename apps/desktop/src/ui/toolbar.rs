@@ -90,13 +90,13 @@ pub(crate) struct StatusBarModel {
     pub startup_error: Option<String>,
 }
 
-pub(crate) fn show_top(context: &egui::Context, model: &ToolbarModel) -> ToolbarOutput {
+pub(crate) fn show_top(root: &mut egui::Ui, model: &ToolbarModel) -> ToolbarOutput {
     let mut output = ToolbarOutput::default();
-    let narrow = source_actions_compact(context.content_rect().width());
-    egui::TopBottomPanel::top("top_bar")
-        .exact_height(metrics::TOOLBAR_HEIGHT)
+    let narrow = source_actions_compact(root.ctx().content_rect().width());
+    egui::Panel::top("top_bar")
+        .exact_size(metrics::TOOLBAR_HEIGHT)
         .frame(theme::toolbar_frame())
-        .show(context, |ui| {
+        .show(root, |ui| {
             let (menu_output, controls_output) = egui::Sides::new().shrink_left().truncate().show(
                 ui,
                 |ui| {
@@ -292,16 +292,16 @@ fn show_app_menu(ui: &mut egui::Ui, model: &ToolbarModel, output: &mut ToolbarOu
     });
 }
 
-pub(crate) fn show_file_panel(context: &egui::Context, model: &FilePanelModel) -> FilePanelOutput {
+pub(crate) fn show_file_panel(root: &mut egui::Ui, model: &FilePanelModel) -> FilePanelOutput {
     let mut output = FilePanelOutput::default();
-    if !file_panel_visible(context.content_rect().width()) {
+    if !file_panel_visible(root.ctx().content_rect().width()) {
         return output;
     }
-    egui::SidePanel::left("file_navigation")
-        .exact_width(metrics::FILE_PANEL_WIDTH)
+    egui::Panel::left("file_navigation")
+        .exact_size(metrics::FILE_PANEL_WIDTH)
         .resizable(false)
         .frame(theme::side_panel_frame())
-        .show(context, |ui| {
+        .show(root, |ui| {
             widgets::section_header(ui, "Files");
             match &model.file_name {
                 Some(file_name) => {
@@ -367,11 +367,11 @@ pub(crate) fn show_file_panel(context: &egui::Context, model: &FilePanelModel) -
     output
 }
 
-pub(crate) fn show_status(context: &egui::Context, model: &StatusBarModel) {
-    egui::TopBottomPanel::bottom("status_bar")
-        .exact_height(metrics::STATUS_HEIGHT)
+pub(crate) fn show_status(root: &mut egui::Ui, model: &StatusBarModel) {
+    egui::Panel::bottom("status_bar")
+        .exact_size(metrics::STATUS_HEIGHT)
         .frame(theme::status_frame())
-        .show(context, |ui| {
+        .show(root, |ui| {
             egui::Sides::new()
                 .height(17.0)
                 .shrink_left()

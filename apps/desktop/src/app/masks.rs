@@ -372,7 +372,8 @@ fn brush_key_steps(input: &egui::InputState) -> BrushKeySteps {
 }
 
 impl RohditorApp {
-    pub(super) fn show_masks_controls(&mut self, context: &egui::Context) {
+    pub(super) fn show_masks_controls(&mut self, root: &mut egui::Ui) {
+        let context = &root.ctx().clone();
         let (Some(session), Some(document)) = (self.tool.masks(), self.document.as_ref()) else {
             return;
         };
@@ -386,7 +387,7 @@ impl RohditorApp {
             limit: session.limit_reached(),
         };
         let panel = tool_panel_model(Some(document), ToolKind::Masks);
-        let actions = tool_panel::show(context, &panel, |ui| masks::show(ui, &model));
+        let actions = tool_panel::show(root, &panel, |ui| masks::show(ui, &model));
         let mut changed = false;
         for action in actions {
             changed |= self.apply_mask_action(action);

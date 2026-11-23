@@ -54,7 +54,7 @@ pub(crate) mod metrics {
 
 /// Install the complete Rohditor visual language on an egui context.
 pub(crate) fn apply(context: &egui::Context) {
-    let mut style = (*context.style()).clone();
+    let mut style = (*context.global_style()).clone();
     style.text_styles = BTreeMap::from([
         (
             egui::TextStyle::Heading,
@@ -163,7 +163,7 @@ pub(crate) fn apply(context: &egui::Context) {
         expansion: 0.0,
     };
     style.visuals = visuals;
-    context.set_style(style);
+    context.set_global_style(style);
 }
 
 pub(crate) fn toolbar_frame() -> egui::Frame {
@@ -234,7 +234,7 @@ mod tests {
         for starting_visuals in [egui::Visuals::light(), egui::Visuals::dark()] {
             context.set_visuals(starting_visuals);
             apply(&context);
-            let style = context.style();
+            let style = context.global_style();
 
             assert!(style.visuals.dark_mode);
             assert_eq!(style.visuals.panel_fill, colors::PANEL);
