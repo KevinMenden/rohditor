@@ -18,17 +18,17 @@ pub(crate) struct ToolPanelModel<'a> {
 
 /// Shows the panel and runs `body` for the tool's controls.
 pub(crate) fn show<R>(
-    context: &egui::Context,
+    root: &mut egui::Ui,
     model: &ToolPanelModel<'_>,
     body: impl FnOnce(&mut egui::Ui) -> R,
 ) -> R {
-    egui::SidePanel::right("tool_panel")
-        .default_width(metrics::ADJUSTMENT_PANEL_WIDTH)
-        .min_width(280.0)
-        .max_width(350.0)
+    egui::Panel::right("tool_panel")
+        .default_size(metrics::ADJUSTMENT_PANEL_WIDTH)
+        .min_size(280.0)
+        .max_size(350.0)
         .resizable(true)
         .frame(theme::side_panel_frame())
-        .show(context, |ui| {
+        .show(root, |ui| {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .wheel_scroll_multiplier(egui::vec2(1.0, metrics::TOOL_PANEL_SCROLL_MULTIPLIER))

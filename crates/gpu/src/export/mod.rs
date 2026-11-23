@@ -157,9 +157,9 @@ impl GpuExportProcessor {
     /// Create a hardware Vulkan device for a headless/background export.
     /// Unavailable hardware is an explicit error for the caller's CPU fallback.
     pub fn headless() -> Result<Self, GpuPreviewError> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
-            ..Default::default()
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
@@ -289,8 +289,7 @@ impl GpuExportProcessor {
         let estimated_gpu_bytes =
             self.validate_memory(prepared.image().width(), prepared.image().height())?;
         let device = &self.processor.device;
-        device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
-        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let scopes = crate::error_scopes::ErrorScopes::push(device);
         let result = self.render_inner(
             prepared,
             recipe,
@@ -302,9 +301,8 @@ impl GpuExportProcessor {
         );
         // Drain scopes on every return path so allocation/device failures are
         // recoverable by the outer export workflow before any file is written.
-        let validation = pollster::block_on(device.pop_error_scope());
-        let allocation = pollster::block_on(device.pop_error_scope());
-        if let Some(error) = validation.or(allocation) {
+        let gpu_error = scopes.finish();
+        if let Some(error) = gpu_error {
             return Err(input_error(error));
         }
         result
@@ -325,9 +323,7 @@ impl GpuExportProcessor {
         check_cancel(cancellation)?;
         recipe.validate().map_err(input_error)?;
         let device = &self.processor.device;
-        device.push_error_scope(wgpu::ErrorFilter::Internal);
-        device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
-        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let scopes = crate::error_scopes::ErrorScopes::push(device);
         let result = self.render_spatial_inner(
             source,
             recipe,
@@ -338,10 +334,8 @@ impl GpuExportProcessor {
             cancellation,
             spatial_metrics,
         );
-        let validation = pollster::block_on(device.pop_error_scope());
-        let allocation = pollster::block_on(device.pop_error_scope());
-        let internal = pollster::block_on(device.pop_error_scope());
-        if let Some(error) = validation.or(allocation).or(internal) {
+        let gpu_error = scopes.finish();
+        if let Some(error) = gpu_error {
             return Err(input_error(error));
         }
         result
@@ -671,7 +665,7 @@ impl GpuExportProcessor {
         let bytes = u64::from(w) * u64::from(h) * 32 + band * 2 + 64 * 1024;
         if bytes > MEMORY_BUDGET
             || band > limits.max_buffer_size
-            || band > u64::from(limits.max_storage_buffer_binding_size)
+            || band > limits.max_storage_buffer_binding_size
             || w.max(h).div_ceil(WORKGROUP_EDGE) > limits.max_compute_workgroups_per_dimension
         {
             return Err(GpuPreviewError::OverBudget {

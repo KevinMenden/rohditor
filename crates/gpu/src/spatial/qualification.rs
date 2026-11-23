@@ -162,9 +162,9 @@ fn private_spatial_display_parity_and_visual_crops() -> Result<(), Box<dyn Error
 }
 
 fn processors() -> (GpuSpatialProcessor, crate::GpuPreviewProcessor) {
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
-        ..Default::default()
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
     let adapter =
         pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))

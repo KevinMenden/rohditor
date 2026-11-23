@@ -29,10 +29,10 @@ const TOOLS: [(ToolKind, Icon, &str); 3] = [
     (ToolKind::Masks, Icon::Mask, "Masks (M)"),
 ];
 
-pub(crate) fn show(context: &egui::Context, model: ToolRailModel) -> ToolRailOutput {
+pub(crate) fn show(root: &mut egui::Ui, model: ToolRailModel) -> ToolRailOutput {
     let mut output = ToolRailOutput::default();
-    egui::SidePanel::right("tool_rail")
-        .exact_width(metrics::TOOL_RAIL_WIDTH)
+    egui::Panel::right("tool_rail")
+        .exact_size(metrics::TOOL_RAIL_WIDTH)
         .resizable(false)
         .frame(
             egui::Frame::new()
@@ -40,7 +40,7 @@ pub(crate) fn show(context: &egui::Context, model: ToolRailModel) -> ToolRailOut
                 .inner_margin(egui::Margin::symmetric(8, 10))
                 .stroke(egui::Stroke::new(1.0_f32, colors::BORDER)),
         )
-        .show(context, |ui| {
+        .show(root, |ui| {
             ui.vertical_centered(|ui| {
                 ui.spacing_mut().item_spacing.y = 6.0;
                 for (kind, icon, tooltip) in TOOLS {

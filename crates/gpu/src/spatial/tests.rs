@@ -17,9 +17,9 @@ const REAL_RAW_OUTPUT_ABSOLUTE_TOLERANCE: f32 = 2.0e-3;
 const REAL_RAW_OUTPUT_RELATIVE_TOLERANCE: f32 = 2.0e-4;
 
 fn processors() -> (GpuSpatialProcessor, crate::GpuPreviewProcessor) {
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
-        ..Default::default()
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
     let adapter =
         pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))

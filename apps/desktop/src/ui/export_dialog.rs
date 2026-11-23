@@ -226,7 +226,7 @@ mod tests {
         let context = egui::Context::default();
         let mut open = true;
         let mut requested = false;
-        let _ = context.run(
+        let _ = context.run_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -234,7 +234,7 @@ mod tests {
                 )),
                 ..Default::default()
             },
-            |context| requested = show(context, &mut open, &model, settings),
+            |root| requested = show(root.ctx(), &mut open, &model, settings),
         );
         (open, requested)
     }

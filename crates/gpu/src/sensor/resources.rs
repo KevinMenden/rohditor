@@ -56,7 +56,7 @@ impl MosaicLayout {
             });
         }
         if level_bytes > limits.max_buffer_size
-            || level_bytes > u64::from(limits.max_storage_buffer_binding_size)
+            || level_bytes > limits.max_storage_buffer_binding_size
         {
             return Err(GpuPreviewError::Unsupported {
                 reason: "RAW black/white level tables exceed a storage-buffer limit".into(),

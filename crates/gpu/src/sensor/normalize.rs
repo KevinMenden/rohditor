@@ -95,9 +95,7 @@ impl GpuSensorProcessor {
     ) -> Result<Self, GpuPreviewError> {
         validate_texture_support(adapter)?;
         validate_limits(&device.limits())?;
-        device.push_error_scope(wgpu::ErrorFilter::Internal);
-        device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
-        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let scopes = crate::error_scopes::ErrorScopes::push(device);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("RAW u16 normalization shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("normalize.wgsl").into()),
@@ -139,10 +137,8 @@ impl GpuSensorProcessor {
         };
         let demosaic_planes_pipeline = demosaic_pipeline("demosaic_planes");
         let demosaic_tile_pipeline = demosaic_pipeline("demosaic_tile");
-        let validation = pollster::block_on(device.pop_error_scope());
-        let allocation = pollster::block_on(device.pop_error_scope());
-        let internal = pollster::block_on(device.pop_error_scope());
-        if let Some(error) = validation.or(allocation).or(internal) {
+        let gpu_error = scopes.finish();
+        if let Some(error) = gpu_error {
             return Err(invalid(&error.to_string()));
         }
         Ok(Self {
@@ -193,15 +189,11 @@ impl GpuSensorProcessor {
         )?;
         validate_host_staging(frame, layout)?;
 
-        self.device.push_error_scope(wgpu::ErrorFilter::Internal);
-        self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
-        self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let scopes = crate::error_scopes::ErrorScopes::push(&self.device);
         let result = self.normalize_inner(frame, contract, layout, cancellation);
-        let validation = pollster::block_on(self.device.pop_error_scope());
-        let allocation = pollster::block_on(self.device.pop_error_scope());
-        let internal = pollster::block_on(self.device.pop_error_scope());
+        let gpu_error = scopes.finish();
         check_cancel(cancellation)?;
-        if let Some(error) = validation.or(allocation).or(internal) {
+        if let Some(error) = gpu_error {
             return Err(invalid(&error.to_string()));
         }
         result

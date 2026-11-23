@@ -55,9 +55,7 @@ impl super::GpuSpatialProcessor {
             }
             let transient =
                 Reservation::try_new(estimated_bytes.saturating_sub(output_bytes), self.budget)?;
-            self.device.push_error_scope(wgpu::ErrorFilter::Internal);
-            self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
-            self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let scopes = crate::error_scopes::ErrorScopes::push(&self.device);
             let result = self.materialize_preview_inner(
                 source,
                 description,
@@ -65,11 +63,9 @@ impl super::GpuSpatialProcessor {
                 output_bytes,
                 estimated_bytes,
             );
-            let validation = pollster::block_on(self.device.pop_error_scope());
-            let allocation = pollster::block_on(self.device.pop_error_scope());
-            let internal = pollster::block_on(self.device.pop_error_scope());
+            let gpu_error = scopes.finish();
             drop(transient);
-            if let Some(error) = validation.or(allocation).or(internal) {
+            if let Some(error) = gpu_error {
                 return Err(invalid(&error.to_string()));
             }
             let (preview, mut metrics) = result?;
@@ -105,7 +101,7 @@ impl super::GpuSpatialProcessor {
 
         let limits = self.device.limits();
         if scratch_bytes > limits.max_buffer_size
-            || scratch_bytes > u64::from(limits.max_storage_buffer_binding_size)
+            || scratch_bytes > limits.max_storage_buffer_binding_size
             || target_width_u32.div_ceil(16) > limits.max_compute_workgroups_per_dimension
             || (maximum_source_rows as u32).div_ceil(8)
                 > limits.max_compute_workgroups_per_dimension
@@ -117,9 +113,7 @@ impl super::GpuSpatialProcessor {
 
         let transient =
             Reservation::try_new(estimated_bytes.saturating_sub(output_bytes), self.budget)?;
-        self.device.push_error_scope(wgpu::ErrorFilter::Internal);
-        self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
-        self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let scopes = crate::error_scopes::ErrorScopes::push(&self.device);
         let result = self.reduce_preview_inner(
             source,
             description,
@@ -128,11 +122,9 @@ impl super::GpuSpatialProcessor {
             scratch_bytes,
             estimated_bytes,
         );
-        let validation = pollster::block_on(self.device.pop_error_scope());
-        let allocation = pollster::block_on(self.device.pop_error_scope());
-        let internal = pollster::block_on(self.device.pop_error_scope());
+        let gpu_error = scopes.finish();
         drop(transient);
-        if let Some(error) = validation.or(allocation).or(internal) {
+        if let Some(error) = gpu_error {
             return Err(invalid(&error.to_string()));
         }
         let (preview, mut metrics) = result?;

@@ -107,7 +107,7 @@ fn tint_image(mask: &ClippingMask) -> egui::ColorImage {
 impl RohditorApp {
     /// `J` toggles the overlay, unless a text field has the keyboard.
     pub(super) fn handle_clipping_shortcut(&mut self, context: &egui::Context) {
-        if self.document.is_none() || context.wants_keyboard_input() {
+        if self.document.is_none() || context.egui_wants_keyboard_input() {
             return;
         }
         let pressed =

@@ -358,7 +358,7 @@ mod tests {
         value: &mut f32,
         saw_drag_stopped: &mut bool,
     ) {
-        let _ = context.run(
+        let _ = context.run_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -368,10 +368,10 @@ mod tests {
                 events,
                 ..Default::default()
             },
-            |context| {
+            |root| {
                 egui::CentralPanel::default()
                     .frame(egui::Frame::NONE)
-                    .show(context, |ui| {
+                    .show(root, |ui| {
                         if !mounted {
                             return;
                         }
@@ -687,6 +687,7 @@ mod tests {
                 frame as f64 * FRAME,
                 vec![egui::Event::MouseWheel {
                     unit: egui::MouseWheelUnit::Point,
+                    phase: egui::TouchPhase::Move,
                     delta: egui::vec2(0.0, 24.0),
                     modifiers: egui::Modifiers::NONE,
                 }],

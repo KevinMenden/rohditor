@@ -39,20 +39,22 @@ fn rail_model(document_open: bool, tool: &ActiveTool) -> ToolRailModel {
 }
 
 impl RohditorApp {
-    pub(super) fn show_tool_rail(&mut self, context: &egui::Context) {
+    pub(super) fn show_tool_rail(&mut self, root: &mut egui::Ui) {
+        let context = &root.ctx().clone();
         let model = rail_model(self.document.is_some(), &self.tool);
-        if let Some(kind) = tool_rail::show(context, model).selected {
+        if let Some(kind) = tool_rail::show(root, model).selected {
             self.select_tool(context, kind);
         }
     }
 
-    pub(super) fn show_tool_panel(&mut self, context: &egui::Context) {
+    pub(super) fn show_tool_panel(&mut self, root: &mut egui::Ui) {
+        let context = &root.ctx().clone();
         self.handle_tool_shortcuts(context);
         self.handle_clipping_shortcut(context);
         match self.tool.kind() {
-            ToolKind::Edit => self.show_adjustment_panel(context),
-            ToolKind::Crop => self.show_crop_controls(context),
-            ToolKind::Masks => self.show_masks_controls(context),
+            ToolKind::Edit => self.show_adjustment_panel(root),
+            ToolKind::Crop => self.show_crop_controls(root),
+            ToolKind::Masks => self.show_masks_controls(root),
         }
     }
 
@@ -80,7 +82,7 @@ impl RohditorApp {
     /// E, C, M, Esc and Enter, plus the Masks tool's own keys, unless a text field is being
     /// edited.
     fn handle_tool_shortcuts(&mut self, context: &egui::Context) {
-        if self.document.is_none() || context.wants_keyboard_input() {
+        if self.document.is_none() || context.egui_wants_keyboard_input() {
             return;
         }
         if self.handle_mask_shortcuts(context) {
@@ -173,7 +175,8 @@ impl RohditorApp {
         }
     }
 
-    fn show_crop_controls(&mut self, context: &egui::Context) {
+    fn show_crop_controls(&mut self, root: &mut egui::Ui) {
+        let context = &root.ctx().clone();
         let Some(session) = self.tool.crop() else {
             return;
         };
@@ -185,7 +188,7 @@ impl RohditorApp {
             ready: session.full_frame_ready(),
         };
         let panel = tool_panel_model(self.document.as_ref(), ToolKind::Crop);
-        let output = tool_panel::show(context, &panel, |ui| crop::show_controls(ui, &model));
+        let output = tool_panel::show(root, &panel, |ui| crop::show_controls(ui, &model));
         if let Some(session) = self.tool.crop_mut() {
             if let Some(aspect) = output.aspect {
                 session.set_aspect(aspect);

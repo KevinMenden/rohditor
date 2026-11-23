@@ -18,6 +18,7 @@
 //! memory.
 
 mod capabilities;
+mod error_scopes;
 mod export_fallback;
 pub use export_fallback::{ExportBackend, ExportRender, ExportRenderError, FallbackExporter};
 mod memory;

@@ -190,7 +190,7 @@ impl GpuExportProcessor {
         let limits = device.limits();
         let largest = work_bytes.max(band_bytes);
         if largest > limits.max_buffer_size
-            || largest > u64::from(limits.max_storage_buffer_binding_size)
+            || largest > limits.max_storage_buffer_binding_size
             || width.div_ceil(WORKGROUP_EDGE) > limits.max_compute_workgroups_per_dimension
         {
             return Err(GpuPreviewError::OverBudget {

@@ -49,13 +49,13 @@ impl RcdExecutor {
     ) -> Result<Self, GpuPreviewError> {
         let limits = processor.device.limits();
         if SCRATCH_BYTES > limits.max_buffer_size
-            || SCRATCH_BYTES > u64::from(limits.max_storage_buffer_binding_size)
+            || SCRATCH_BYTES > limits.max_storage_buffer_binding_size
             || limits.max_compute_workgroups_per_dimension < (FULL as u32).div_ceil(64)
             || limits.max_storage_buffers_per_shader_stage < 2
             || limits.max_storage_textures_per_shader_stage < 3
             || limits.max_sampled_textures_per_shader_stage < 1
             || limits.max_uniform_buffers_per_shader_stage < 1
-            || limits.max_uniform_buffer_binding_size < UNIFORM_BYTES as u32
+            || limits.max_uniform_buffer_binding_size < UNIFORM_BYTES
             || limits.max_bindings_per_bind_group < 7
             || limits.max_bind_groups < 1
             || limits.max_compute_invocations_per_workgroup < 64
@@ -180,8 +180,8 @@ impl RcdExecutor {
                 .device
                 .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                     label: Some("RCD common stage pipeline layout"),
-                    bind_group_layouts: &[&layout],
-                    push_constant_ranges: &[],
+                    bind_group_layouts: &[Some(&layout)],
+                    immediate_size: 0,
                 });
         let pipelines = NAMES
             .iter()

@@ -101,15 +101,11 @@ impl GpuSensorProcessor {
             .settings()
             .validate()
             .map_err(|e| invalid(&e.to_string()))?;
-        self.device.push_error_scope(wgpu::ErrorFilter::Internal);
-        self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
-        self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let scopes = crate::error_scopes::ErrorScopes::push(&self.device);
         let result = self.demosaic_inner(mosaic, description, capture, algorithm, cancellation);
-        let validation = pollster::block_on(self.device.pop_error_scope());
-        let allocation = pollster::block_on(self.device.pop_error_scope());
-        let internal = pollster::block_on(self.device.pop_error_scope());
+        let gpu_error = scopes.finish();
         check_cancel(cancellation)?;
-        if let Some(error) = validation.or(allocation).or(internal) {
+        if let Some(error) = gpu_error {
             return Err(invalid(&error.to_string()));
         }
         result
