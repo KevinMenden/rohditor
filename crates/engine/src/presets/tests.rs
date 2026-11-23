@@ -362,9 +362,48 @@ fn a_failed_rename_keeps_the_old_name_and_leaves_one_file() {
 
     assert!(matches!(
         store.rename("Warm look", "Golden hour"),
-        Err(PresetError::Write { .. })
+        Err(PresetError::Remove { .. })
     ));
     assert!(store.get("Warm look").is_some());
     assert!(store.get("Golden hour").is_none());
     assert!(!folder.join("golden-hour.json").exists());
+}
+
+#[test]
+fn a_file_that_was_skipped_on_load_is_never_overwritten() {
+    let directory = TestDirectory::new();
+    let mut store = PresetStore::load(Some(directory.path()));
+    store.save(warm_look()).unwrap();
+    let folder = directory.preset_directory();
+    fs::write(folder.join("moody.json"), b"{ half a file").unwrap();
+
+    let mut store = PresetStore::load(Some(directory.path()));
+    assert_eq!(store.warnings().len(), 1);
+    let moody = Preset::new("Moody", &edited(), &[RecipeSection::Tone]).unwrap();
+    assert!(matches!(store.save(moody), Err(PresetError::FileExists(_))));
+    assert!(matches!(
+        store.rename("Warm look", "MOODY"),
+        Err(PresetError::FileExists(_))
+    ));
+    assert_eq!(
+        fs::read(folder.join("moody.json")).unwrap(),
+        b"{ half a file"
+    );
+    assert!(store.get("Warm look").is_some());
+}
+
+#[test]
+fn the_store_holds_a_bounded_number_of_presets() {
+    let directory = TestDirectory::new();
+    let mut store = PresetStore::load(Some(directory.path()));
+    let recipe = edited();
+    for index in 0..256 {
+        let preset = Preset::new(&format!("preset {index}"), &recipe, &[RecipeSection::Tone]);
+        store.save(preset.unwrap()).unwrap();
+    }
+    let one_more = Preset::new("one more", &recipe, &[RecipeSection::Tone]).unwrap();
+    assert!(matches!(
+        store.save(one_more),
+        Err(PresetError::TooMany(256))
+    ));
 }

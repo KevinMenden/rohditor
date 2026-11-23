@@ -87,6 +87,10 @@ impl PresetStore {
         if self.get(preset.name()).is_some() {
             return Err(PresetError::NameTaken(preset.name().to_owned()));
         }
+        if self.presets.len() >= MAX_PRESETS {
+            return Err(PresetError::TooMany(MAX_PRESETS));
+        }
+        self.refuse_unknown_file(preset.name())?;
         self.write(&preset)?;
         self.presets.push(preset);
         self.sort();
@@ -100,7 +104,7 @@ impl PresetStore {
             Ok(()) => {}
             // Already gone: the list should still drop it.
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(source) => return Err(PresetError::Write { path, source }),
+            Err(source) => return Err(PresetError::Remove { path, source }),
         }
         self.presets.remove(index);
         Ok(())
@@ -121,6 +125,9 @@ impl PresetStore {
             return Err(PresetError::NameTaken(renamed.name().to_owned()));
         }
         let old_path = self.path_for(self.presets[index].name())?;
+        if self.path_for(renamed.name())? != old_path {
+            self.refuse_unknown_file(renamed.name())?;
+        }
         // Write the new file before removing the old one, so a failure never
         // loses the preset.
         self.write(&renamed)?;
@@ -133,7 +140,7 @@ impl PresetStore {
                     // Keep the old name as it was, rather than leave both
                     // files to load as two presets next time.
                     let _ = fs::remove_file(&new_path);
-                    return Err(PresetError::Write {
+                    return Err(PresetError::Remove {
                         path: old_path,
                         source,
                     });
@@ -150,6 +157,17 @@ impl PresetStore {
             .iter()
             .position(|preset| same_name(preset.name(), name))
             .ok_or_else(|| PresetError::NotFound(name.to_owned()))
+    }
+
+    /// A file the store did not load (corrupt, newer format, over the size or
+    /// count limit) can occupy the path a new preset would be written to.
+    /// Writing there would destroy it, so refuse instead.
+    fn refuse_unknown_file(&self, name: &str) -> Result<(), PresetError> {
+        let path = self.path_for(name)?;
+        if path.exists() {
+            return Err(PresetError::FileExists(path));
+        }
+        Ok(())
     }
 
     fn path_for(&self, name: &str) -> Result<PathBuf, PresetError> {

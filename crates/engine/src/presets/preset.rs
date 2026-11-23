@@ -24,6 +24,12 @@ pub enum PresetError {
     #[error("a preset named \"{0}\" already exists")]
     NameTaken(String),
 
+    #[error("{0} already exists in the presets folder (perhaps a preset that could not be loaded)")]
+    FileExists(std::path::PathBuf),
+
+    #[error("at most {0} presets can be stored")]
+    TooMany(usize),
+
     #[error("there is no preset named \"{0}\"")]
     NotFound(String),
 
@@ -32,6 +38,13 @@ pub enum PresetError {
 
     #[error("could not write preset {path}: {source}")]
     Write {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("could not remove preset file {path}: {source}")]
+    Remove {
         path: std::path::PathBuf,
         #[source]
         source: std::io::Error,
