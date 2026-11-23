@@ -153,6 +153,11 @@ impl Viewport {
         }
     }
 
+    /// How the open photo is shown.
+    pub fn view<'a>(&self, cx: &'a gpui::App) -> Option<&'a ViewState> {
+        Some(&self.session.read(cx).document()?.preview.view)
+    }
+
     /// The zoom as a share of the displayed image's pixels.
     pub fn zoom_label(&self, window: &Window, cx: &gpui::App) -> Option<String> {
         let session = self.session.read(cx);

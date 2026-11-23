@@ -4,16 +4,18 @@ use gpui::{
     Context, CursorStyle, Decorations, Div, Hsla, IntoElement, MouseButton, ResizeEdge, Window,
     div, prelude::*, px,
 };
+use rohditor_engine::view::ViewState;
 
 use super::Workspace;
 use crate::actions::{
-    CloseFile, Export, Redo, ToggleCommandPalette, ToggleDevelop, ToggleFiles, Undo,
+    ActualPixels, CloseFile, Command, Export, Quit, Redo, ToggleCommandPalette, ToggleDevelop,
+    ToggleFiles, Undo, ZoomToFit,
 };
 use crate::assets::Icon;
-use crate::theme::{
-    RADIUS, SMALL_FONT_SIZE, STATUS_BAR_HEIGHT, TAB_HEIGHT, TITLE_BAR_HEIGHT, theme,
-};
-use crate::ui::button::{icon, icon_button};
+use crate::theme::{SMALL_FONT_SIZE, STATUS_BAR_HEIGHT, TAB_HEIGHT, TITLE_BAR_HEIGHT, theme};
+use crate::ui::button::{command_button, icon_button};
+use crate::ui::dropdown::dropdown;
+use crate::ui::menu::MenuEntry;
 
 const RESIZE_MARGIN: gpui::Pixels = px(5.0);
 
@@ -62,35 +64,19 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .gap_1()
-                    .child(icon_button(
+                    .child(command_button(
                         "search",
                         Icon::Search,
+                        ToggleCommandPalette,
                         true,
-                        |_, window, cx| {
-                            window.dispatch_action(Box::new(ToggleCommandPalette), cx);
-                        },
                     ))
-                    .child(icon_button(
-                        "undo",
-                        Icon::Undo,
-                        can_undo,
-                        |_, window, cx| {
-                            window.dispatch_action(Box::new(Undo), cx);
-                        },
-                    ))
-                    .child(icon_button(
-                        "redo",
-                        Icon::Redo,
-                        can_redo,
-                        |_, window, cx| {
-                            window.dispatch_action(Box::new(Redo), cx);
-                        },
-                    ))
-                    .child(icon_button(
+                    .child(command_button("undo", Icon::Undo, Undo, can_undo))
+                    .child(command_button("redo", Icon::Redo, Redo, can_redo))
+                    .child(command_button(
                         "export",
                         Icon::Export,
+                        Export,
                         session.export_ready(),
-                        |_, window, cx| window.dispatch_action(Box::new(Export), cx),
                     ))
                     .when(own_controls, |bar| bar.child(window_controls())),
             )
@@ -127,14 +113,7 @@ impl Workspace {
                                 .when(dirty, |dot| dot.bg(theme.accent)),
                         )
                         .child(document.file_name())
-                        .child(icon_button(
-                            "close-tab",
-                            Icon::Close,
-                            true,
-                            |_, window, cx| {
-                                window.dispatch_action(Box::new(CloseFile), cx);
-                            },
-                        )),
+                        .child(command_button("close-tab", Icon::Close, CloseFile, true)),
                 ),
         )
     }
@@ -152,12 +131,6 @@ impl Workspace {
             Some(format!("{} × {}", info.width, info.height))
         });
         let zoom = self.viewport.read(cx).zoom_label(window, cx);
-        let toggle = |id, glyph, open: bool, action: Box<dyn gpui::Action>| {
-            icon_button(id, glyph, true, move |_, window, cx| {
-                window.dispatch_action(action.boxed_clone(), cx);
-            })
-            .when(open, |button| button.bg(theme.selected))
-        };
         let text = |text: String| div().text_color(theme.muted).child(text);
         div()
             .flex()
@@ -177,12 +150,10 @@ impl Workspace {
                     .items_center()
                     .gap_2()
                     .min_w_0()
-                    .child(toggle(
-                        "toggle-files",
-                        Icon::Files,
-                        self.files_open,
-                        Box::new(ToggleFiles),
-                    ))
+                    .child(
+                        command_button("toggle-files", Icon::Files, ToggleFiles, true)
+                            .when(self.files_open, |button| button.bg(theme.selected)),
+                    )
                     .child(div().min_w_0().truncate().text_color(color).child(message)),
             )
             .child(
@@ -192,15 +163,35 @@ impl Workspace {
                     .items_center()
                     .gap_3()
                     .children(details.map(text))
-                    .children(zoom.map(text))
+                    .children(zoom.map(|zoom| self.zoom_dropdown(zoom)))
                     .child(text(session.processor()))
-                    .child(toggle(
-                        "toggle-develop",
-                        Icon::Sliders,
-                        self.develop_open,
-                        Box::new(ToggleDevelop),
-                    )),
+                    .child(
+                        command_button("toggle-develop", Icon::Sliders, ToggleDevelop, true)
+                            .when(self.develop_open, |button| button.bg(theme.selected)),
+                    ),
             )
+    }
+
+    fn zoom_dropdown(&self, zoom: String) -> impl IntoElement + use<> {
+        let viewport = self.viewport.clone();
+        dropdown("zoom", "Zoom", zoom, self.overlays.clone(), move |_, cx| {
+            let view = viewport.read(cx).view(cx);
+            let entry = |action: Box<dyn gpui::Action>, checked| {
+                let command = Command::of(action.as_ref());
+                MenuEntry::new(command.title(), move |window, cx| {
+                    window.dispatch_action(action.boxed_clone(), cx);
+                })
+                .key(command.key_label().map(Into::into))
+                .checked(checked)
+            };
+            vec![
+                entry(Box::new(ZoomToFit), view.is_some_and(ViewState::is_fit)),
+                entry(
+                    Box::new(ActualPixels),
+                    view.is_some_and(ViewState::is_actual_size),
+                ),
+            ]
+        })
     }
 
     /// The most important thing to say about the open photo.
@@ -221,8 +212,6 @@ impl Workspace {
             (format!("{busy}…"), theme.muted)
         } else if let Some(warning) = &document.warning {
             (warning.clone(), theme.warning)
-        } else if let Some(notice) = &document.notice {
-            (notice.clone(), theme.success)
         } else {
             (String::new(), theme.muted)
         }
@@ -238,6 +227,7 @@ fn window_controls() -> impl IntoElement {
         .child(icon_button(
             "minimize",
             Icon::Minimize,
+            "Minimize",
             true,
             |_, window, _| {
                 window.minimize_window();
@@ -246,25 +236,13 @@ fn window_controls() -> impl IntoElement {
         .child(icon_button(
             "maximize",
             Icon::Maximize,
+            "Maximize",
             true,
             |_, window, _| {
                 window.zoom_window();
             },
         ))
-        .child(
-            div()
-                .id("close-window")
-                .size(px(24.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(RADIUS)
-                .cursor_pointer()
-                .hover(|style| style.bg(theme().error))
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(|_, _, cx| cx.quit())
-                .child(icon(Icon::Close, theme().muted)),
-        )
+        .child(command_button("close-window", Icon::Close, Quit, true))
 }
 
 /// Grab areas along the window border, where the desktop does not provide them.

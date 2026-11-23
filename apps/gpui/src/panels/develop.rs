@@ -6,8 +6,9 @@
 use std::collections::HashSet;
 
 use gpui::{
-    Bounds, Context, CursorStyle, DispatchPhase, Entity, IntoElement, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Render, Window, canvas, div, prelude::*, px, relative,
+    Bounds, Context, CursorStyle, DispatchPhase, Div, Entity, IntoElement, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Window, canvas, div,
+    prelude::*, px, relative,
 };
 use rohditor_core::{Histogram, WhiteBalanceCoordinates};
 use rohditor_edit::EditRecipe;
@@ -19,8 +20,11 @@ use crate::session::{EditPhase, Session};
 use crate::theme::{DEVELOP_WIDTH, RADIUS, SMALL_FONT_SIZE, TAB_HEIGHT, theme};
 use crate::ui::button::icon;
 use crate::ui::histogram::histogram;
+use crate::ui::menu::MenuEntry;
+use crate::ui::overlays::Overlays;
 use crate::ui::slider::{dragged, fraction};
 use crate::ui::test_id::TestId as _;
+use crate::ui::toggle::toggle;
 
 const FINE_DRAG: f32 = 0.1;
 
@@ -60,15 +64,22 @@ impl Model {
 
 pub struct DevelopPanel {
     session: Entity<Session>,
+    overlays: Entity<Overlays>,
     model: Model,
     #[cfg(test)]
     pub renders: usize,
     drag: Option<Drag>,
     collapsed: HashSet<&'static str>,
+    /// Hide what is at its default.
+    edited_only: bool,
 }
 
 impl DevelopPanel {
-    pub fn new(session: Entity<Session>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        session: Entity<Session>,
+        overlays: Entity<Overlays>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         cx.observe(&session, |panel, session, cx| {
             let model = Model::of(session.read(cx));
             if panel.model != model {
@@ -79,12 +90,55 @@ impl DevelopPanel {
         .detach();
         Self {
             session,
+            overlays,
             model: Model::default(),
             #[cfg(test)]
             renders: 0,
             drag: None,
             collapsed: HashSet::new(),
+            edited_only: false,
         }
+    }
+
+    fn reset(&self, adjustment: Adjustment, cx: &mut Context<Self>) {
+        self.session.update(cx, |session, cx| {
+            let as_shot = session.as_shot();
+            let value = adjustment.default_value(as_shot);
+            session.edit(
+                |recipe| adjustment.set(recipe, as_shot, value),
+                EditPhase::Finished,
+                adjustment.is_white_balance(),
+                cx,
+            );
+        });
+    }
+
+    fn show_menu(
+        &self,
+        adjustment: Adjustment,
+        at: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let panel = cx.entity();
+        let entries = vec![MenuEntry::new("Reset", move |_, cx| {
+            panel.update(cx, |panel, cx| panel.reset(adjustment, cx));
+        })];
+        self.overlays.update(cx, |overlays, cx| {
+            overlays.show_menu(at, entries, window, cx);
+        });
+    }
+
+    /// Whether the panel shows this adjustment.
+    fn shows(
+        &self,
+        adjustment: Adjustment,
+        recipe: &EditRecipe,
+        as_shot: Option<WhiteBalanceCoordinates>,
+    ) -> bool {
+        // A slider must not vanish while it is dragged over its default.
+        let dragged = self.drag.is_some_and(|drag| drag.adjustment == adjustment);
+        !self.edited_only || dragged || adjustment.is_edited(recipe, as_shot)
     }
 
     fn press(
@@ -96,17 +150,7 @@ impl DevelopPanel {
     ) {
         if event.click_count == 2 {
             self.drag = None;
-            self.session.update(cx, |session, cx| {
-                let as_shot = session.as_shot();
-                let value = adjustment.default_value(as_shot);
-                session.edit(
-                    |recipe| adjustment.set(recipe, as_shot, value),
-                    EditPhase::Finished,
-                    adjustment.is_white_balance(),
-                    cx,
-                );
-            });
-            return;
+            return self.reset(adjustment, cx);
         }
         self.session
             .update(cx, |session, _| session.begin_gesture());
@@ -197,6 +241,21 @@ impl DevelopPanel {
             )
     }
 
+    fn filter(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let panel = cx.entity();
+        div().flex().flex_none().px_2().child(toggle(
+            "edited-only",
+            "Edited only",
+            self.edited_only,
+            move |_, cx| {
+                panel.update(cx, |panel, cx| {
+                    panel.edited_only = !panel.edited_only;
+                    cx.notify();
+                });
+            },
+        ))
+    }
+
     fn section(
         &self,
         section: &Section,
@@ -218,6 +277,7 @@ impl DevelopPanel {
             section
                 .adjustments
                 .iter()
+                .filter(|&&adjustment| self.shows(adjustment, recipe, as_shot))
                 .map(|&adjustment| self.row(adjustment, recipe, as_shot, cx).into_any_element())
                 .collect()
         };
@@ -263,7 +323,7 @@ impl DevelopPanel {
         let default = adjustment.default_value(as_shot);
         let at = |value| fraction(format, range, value);
         let (from, to) = (at(default).min(at(value)), at(default).max(at(value)));
-        let edited = (at(value) - at(default)).abs() > 1e-4;
+        let edited = adjustment.is_edited(recipe, as_shot);
         let active = self.drag.is_some_and(|drag| drag.adjustment == adjustment);
         let panel = cx.entity();
         div()
@@ -316,8 +376,18 @@ impl DevelopPanel {
                     .text_color(if edited { theme.text } else { theme.faint })
                     .child(format.label(value, range)),
             )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.show_menu(adjustment, event.position, window, cx);
+                }),
+            )
             .child(press_area(panel, adjustment))
     }
+}
+
+fn hint(text: &'static str) -> Div {
+    div().p_3().text_color(theme().faint).child(text)
 }
 
 /// Covers a row and reports presses together with the row's width.
@@ -382,17 +452,24 @@ impl Render for DevelopPanel {
             Some(recipe) => {
                 let sections: Vec<_> = SECTIONS
                     .iter()
+                    .filter(|section| {
+                        section
+                            .adjustments
+                            .iter()
+                            .any(|&adjustment| self.shows(adjustment, recipe, as_shot))
+                    })
                     .map(|section| {
                         self.section(section, recipe, as_shot, cx)
                             .into_any_element()
                     })
                     .collect();
-                div().pt_1().children(sections)
+                let empty = sections.is_empty();
+                div()
+                    .pt_1()
+                    .children(sections)
+                    .when(empty, |body| body.child(hint("Nothing is edited yet.")))
             }
-            None => div()
-                .p_4()
-                .text_color(theme.faint)
-                .child("Open a photo to adjust it."),
+            None => hint("Open a photo to adjust it."),
         };
         div()
             .flex()
@@ -414,6 +491,7 @@ impl Render for DevelopPanel {
                     .bg(theme.editor)
                     .child(graph),
             )
+            .when(recipe.is_some(), |panel| panel.child(self.filter(cx)))
             .child(
                 div()
                     .id("adjustments")

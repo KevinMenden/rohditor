@@ -9,10 +9,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AppContext, Bounds, Entity, HeadlessAppContext, Keystroke, Modifiers, MouseButton,
+    AppContext, Bounds, Entity, HeadlessAppContext, KeyUpEvent, Keystroke, Modifiers, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, PlatformInput, Point, Size, WindowHandle,
     point, px, size,
 };
+use rohditor_engine::open_document::ExportActivity;
 use rohditor_engine::persistence;
 use rohditor_engine::preview::WgpuContext;
 use rohditor_gpu::{GpuPreviewProcessor, GpuSensorProcessor, GpuSpatialProcessor};
@@ -155,6 +156,16 @@ impl Harness {
             .expect("window is open");
     }
 
+    fn right_click(&mut self, name: &str) {
+        let position = self.find(name).center();
+        self.send(PlatformInput::MouseDown(MouseDownEvent {
+            button: MouseButton::Right,
+            position,
+            click_count: 1,
+            ..Default::default()
+        }));
+    }
+
     fn press(&mut self, position: Point<Pixels>, click_count: usize) {
         self.send(PlatformInput::MouseDown(MouseDownEvent {
             button: MouseButton::Left,
@@ -189,7 +200,10 @@ impl Harness {
             }
             self.cx
                 .update_window(self.window.into(), |_, window, cx| {
-                    window.dispatch_keystroke(keystroke, cx);
+                    window.dispatch_keystroke(keystroke.clone(), cx);
+                    window.draw(cx).clear(cx);
+                    // Buttons react to the release.
+                    window.dispatch_event(PlatformInput::KeyUp(KeyUpEvent { keystroke }), cx);
                 })
                 .expect("window is open");
             self.cx.run_until_parked();
@@ -374,7 +388,7 @@ fn the_palette_runs_commands_and_arrows_change_photos() {
         Some(&first),
         "typing runs nothing"
     );
-    harness.keys("enter");
+    harness.keys("x backspace enter");
     assert_eq!(open(&mut harness).as_ref(), Some(&second));
     harness.wait_until("the second photo", settled);
     harness.wait_for_library("the thumbnails", |library| {
@@ -438,6 +452,80 @@ fn panels_redraw_only_for_their_own_changes() {
     assert_eq!(harness.lookup(EXPOSURE), None, "the section collapsed");
     harness.click("button:toggle-files");
     assert_eq!(harness.lookup("file:A.ARW"), None, "the panel closed");
+}
+
+#[test]
+#[ignore = "requires a wgpu adapter and ROHDITOR_RAW"]
+fn menus_and_the_filter_work_on_the_sliders() {
+    let Some((mut harness, ..)) = opened("menus") else {
+        return;
+    };
+    harness.click("toggle:edited-only");
+    assert_eq!(harness.lookup(EXPOSURE), None, "nothing is edited");
+    harness.click("toggle:edited-only");
+    let start = harness.find(EXPOSURE).center();
+    harness.press(start, 1);
+    harness.drag_to(start + point(px(30.0), px(0.0)));
+    harness.release(start + point(px(30.0), px(0.0)));
+    harness.click("toggle:edited-only");
+    harness.find(EXPOSURE);
+    assert_eq!(harness.lookup("adjustment:Contrast"), None);
+    harness.capture("edited-only");
+
+    harness.right_click(EXPOSURE);
+    harness.capture("context-menu");
+    harness.keys("escape");
+    assert_eq!(harness.lookup("menu:Reset"), None, "Escape closes the menu");
+    harness.right_click(EXPOSURE);
+    harness.click("menu:Reset");
+    assert_eq!(harness.exposure(), 0.0);
+    assert_eq!(harness.lookup("menu:Reset"), None, "the menu closed");
+
+    let fit = |session: &Session| session.document().map(|d| d.preview.view.is_fit());
+    harness.click("dropdown:zoom");
+    harness.capture("dropdown");
+    // Zoom to fit is checked, so that the arrow selects the next entry.
+    harness.keys("down enter");
+    assert_eq!(harness.with_session(|session, _| fit(session)), Some(false));
+    harness.click("dropdown:zoom");
+    let beside = harness.find("viewport").center();
+    harness.press(beside, 1);
+    assert_eq!(
+        harness.lookup("menu:Zoom to fit"),
+        None,
+        "a press beside it closes it"
+    );
+    harness.keys("ctrl-0");
+    assert_eq!(harness.with_session(|session, _| fit(session)), Some(true));
+}
+
+#[test]
+#[ignore = "requires a wgpu adapter and ROHDITOR_RAW"]
+fn news_are_announced_and_quitting_asks_while_exporting() {
+    let Some((mut harness, ..)) = opened("news") else {
+        return;
+    };
+    harness.with_session(|session, cx| {
+        let document = session.document_mut().expect("a photo is open");
+        document.notice = Some("Exported a.jpg".to_owned());
+        document.export_status = Some(ExportActivity {
+            id: 9,
+            recipe_revision: 0,
+            detail: "Exporting".to_owned(),
+        });
+        cx.notify();
+    });
+    harness.find("toast");
+    harness.keys("ctrl-q");
+    harness.capture("confirm");
+    harness.find("button:accept");
+    // Tab stays inside the dialog; the first stop is Cancel.
+    harness.keys("tab tab tab enter");
+    assert_eq!(harness.lookup("button:accept"), None, "Cancel closes it");
+    harness.keys("ctrl-q escape");
+    assert_eq!(harness.lookup("button:accept"), None, "Escape closes it");
+    harness.click("button:dismiss-toast");
+    assert_eq!(harness.lookup("toast"), None);
 }
 
 /// Prints what one step of a slider drag costs. The CPU time covers the edit, submitting the

@@ -18,6 +18,7 @@ anyhow = "1.0"
 env_logger = "0.11"
 log = "0.4"
 futures = "0.3"
+unicode-segmentation = "1"
 # Last Zed revision on crates.io wgpu 29; later ones use a git revision past wgpu 30.
 gpui = { git = "https://github.com/zed-industries/zed", rev = "21001b273f93d1156d13d4eb67b255478a61276b", default-features = false, features = ["font-kit", "wayland"] }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "21001b273f93d1156d13d4eb67b255478a61276b", default-features = false, features = ["font-kit", "wayland"] }
