@@ -135,6 +135,26 @@ fn amount_blends_towards_the_preset() {
 }
 
 #[test]
+fn an_out_of_range_or_nan_amount_is_clamped() {
+    let preset = warm_look();
+    let photo = EditRecipe::default();
+    let at = |amount| {
+        preset.apply(
+            &photo,
+            &ApplyOptions {
+                amount,
+                ..ApplyOptions::default()
+            },
+        )
+    };
+
+    assert_eq!(at(7.0), at(1.0));
+    assert_eq!(at(-3.0), photo);
+    assert_eq!(at(f32::NAN), photo);
+    assert_eq!(at(f32::INFINITY), at(1.0));
+}
+
+#[test]
 fn chosen_sections_narrow_what_is_applied() {
     let preset = warm_look();
     let applied = preset.apply(
