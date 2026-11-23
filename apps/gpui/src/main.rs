@@ -2,41 +2,54 @@
 
 mod actions;
 mod assets;
+mod atlas_image;
 mod device;
+mod library;
 mod panels;
 mod session;
 mod theme;
 mod ui;
 mod viewport;
+mod wake;
 mod workspace;
 
 use std::path::PathBuf;
 
+use anyhow::Result;
 use gpui::{
     App, AppContext, Bounds, TitlebarOptions, WindowBounds, WindowDecorations, WindowOptions, px,
     size,
 };
 
-use crate::session::{Directories, Session};
+use crate::library::{Library, LibraryWorker};
+use crate::session::{Session, SessionWorkers};
 use crate::workspace::Workspace;
 
-fn main() {
+fn main() -> Result<()> {
     env_logger::init();
-    run(std::env::args_os().nth(1).map(PathBuf::from));
+    let workers = Workers {
+        session: SessionWorkers::start()?,
+        library: LibraryWorker::start()?,
+    };
+    run(std::env::args_os().nth(1).map(PathBuf::from), workers);
+    Ok(())
+}
+
+struct Workers {
+    session: SessionWorkers,
+    library: LibraryWorker,
 }
 
 /// `$XDG_CONFIG_HOME/rohditor`, shared with the egui app.
-fn directories() -> Directories {
+fn config_directory() -> Option<PathBuf> {
     let config = std::env::var_os("XDG_CONFIG_HOME")
         .filter(|directory| !directory.is_empty())
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")));
-    Directories {
-        config: config.map(|base| base.join("rohditor")),
-    }
+    config.map(|base| base.join("rohditor"))
 }
 
-fn run(open: Option<PathBuf>) {
+fn run(open: Option<PathBuf>, workers: Workers) {
     gpui_platform::application()
         .with_assets(assets::Assets)
         .run(move |cx: &mut App| {
@@ -55,22 +68,26 @@ fn run(open: Option<PathBuf>) {
             };
             let opened = cx.open_window(options, |window, cx| {
                 // The window's renderer exists by now, and with it GPUI's device.
+                let config = config_directory();
+                let settings = rohditor_engine::settings::load(config.as_deref()).settings;
                 let session = cx.new(|cx| {
-                    Session::new(device::shared_context(), directories(), cx)
-                        .unwrap_or_else(|error| panic!("could not start the engine: {error:#}"))
+                    Session::new(workers.session, settings, device::shared_context(), cx)
                 });
-                session.update(cx, |session, cx| match open {
-                    Some(path) if path.is_dir() => session.open_folder(path, cx),
-                    Some(path) => session.open_file(path, cx),
-                    None => session.restore_folder(cx),
-                });
+                let library = cx.new(|cx| Library::new(workers.library, config, &session, cx));
+                match open {
+                    Some(path) if path.is_dir() => {
+                        library.update(cx, |library, cx| library.open_folder(path, cx));
+                    }
+                    Some(path) => session.update(cx, |session, cx| session.open_file(path, cx)),
+                    None => library.update(cx, Library::restore_folder),
+                }
                 let closing = session.clone();
                 cx.on_app_quit(move |cx| {
                     closing.update(cx, |session, cx| session.shut_down(cx));
                     async {}
                 })
                 .detach();
-                cx.new(|cx| Workspace::new(session, window, cx))
+                cx.new(|cx| Workspace::new(session, library, window, cx))
             });
             if let Err(error) = opened {
                 eprintln!("could not open the window: {error:#}");

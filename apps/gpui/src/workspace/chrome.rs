@@ -25,7 +25,7 @@ impl Workspace {
     ) -> impl IntoElement + use<> {
         let theme = theme();
         let session = self.session.read(cx);
-        let folder = session.catalog.folder_name();
+        let folder = self.library.read(cx).folder_name();
         let edits = session.document().map(|document| &document.edits);
         let can_undo = edits.is_some_and(|edits| edits.can_undo());
         let can_redo = edits.is_some_and(|edits| edits.can_redo());

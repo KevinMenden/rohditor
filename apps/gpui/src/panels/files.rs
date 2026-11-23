@@ -7,30 +7,35 @@ use gpui::{
 
 use crate::actions::OpenFolder;
 use crate::assets::Icon;
+use crate::library::Library;
 use crate::session::Session;
 use crate::theme::{FILES_WIDTH, RADIUS, TAB_HEIGHT, theme};
 use crate::ui::button::icon;
 
 pub struct FilesPanel {
     session: Entity<Session>,
+    library: Entity<Library>,
 }
 
 impl FilesPanel {
-    pub fn new(session: Entity<Session>, cx: &mut Context<Self>) -> Self {
+    pub fn new(session: Entity<Session>, library: Entity<Library>, cx: &mut Context<Self>) -> Self {
+        // The session, for which photo is open.
         cx.observe(&session, |_, _, cx| cx.notify()).detach();
-        Self { session }
+        cx.observe(&library, |_, _, cx| cx.notify()).detach();
+        Self { session, library }
     }
 
-    fn row(&self, grid_index: usize, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+    fn row(&self, position: usize, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let theme = theme();
-        let session = self.session.read(cx);
-        let index = session.library.catalog_index(grid_index)?;
-        let path = session.catalog.entry_path(index)?.to_path_buf();
-        let name = session.catalog.entry_name(index)?.to_owned();
-        let open = session
+        let library = self.library.read(cx);
+        let path = library.path(position)?.to_path_buf();
+        let name = library.name(position)?.to_owned();
+        let open = self
+            .session
+            .read(cx)
             .document()
             .is_some_and(|document| document.path == path);
-        let thumbnail = session.library.texture(&path).map(|t| t.image().clone());
+        let thumbnail = library.thumbnail(&path).map(|t| t.image().clone());
         let thumbnail = match thumbnail {
             Some(image) => canvas(
                 |_, _, _| (),
@@ -63,7 +68,7 @@ impl FilesPanel {
                 .into_any_element(),
         };
         let row = div()
-            .id(grid_index)
+            .id(position)
             .flex()
             .items_center()
             .gap_2()
@@ -92,12 +97,12 @@ impl FilesPanel {
 impl Render for FilesPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme();
-        let session = self.session.read(cx);
-        let count = session.library.order().len();
-        let folder = session.catalog.folder_name();
-        let empty = match (&folder, session.catalog.failure()) {
+        let library = self.library.read(cx);
+        let count = library.len();
+        let folder = library.folder_name();
+        let empty = match (&folder, library.failure()) {
             (_, Some(failure)) => Some(failure.to_owned()),
-            (Some(_), None) if count == 0 && !session.catalog.scanning() => {
+            (Some(_), None) if count == 0 && !library.scanning() => {
                 Some("No RAW files in this folder.".to_owned())
             }
             _ => None,
@@ -106,13 +111,13 @@ impl Render for FilesPanel {
             "files",
             count,
             cx.processor(|this: &mut Self, range: std::ops::Range<usize>, _, cx| {
-                // Deferred: the session must not change while the panel renders.
-                let session = this.session.clone();
+                // Deferred: the library must not change while the panel renders.
+                let library = this.library.clone();
                 let (start, end) = (range.start, range.end);
                 // The list also asks for its first row alone, to measure it.
                 if range != (0..1) {
                     cx.defer(move |cx| {
-                        session.update(cx, |session, cx| session.set_visible_files(start, end, cx));
+                        library.update(cx, |library, cx| library.set_visible(start, end, cx));
                     });
                 }
                 range

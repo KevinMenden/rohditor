@@ -6,7 +6,6 @@ use gpui::Context;
 use rohditor_core::paths_refer_to_same_file;
 use rohditor_engine::export_options::ExportOptions;
 use rohditor_engine::open_document::ExportActivity;
-use rohditor_engine::preview::ProcessorPreference;
 
 use super::Session;
 
@@ -93,7 +92,7 @@ impl Session {
         });
         document.error = None;
         document.notice = None;
-        if let Err(error) = self.coordinator.export(
+        if let Err(error) = self.renderer.coordinator.export(
             document_id,
             export_id,
             recipe_revision,
@@ -101,8 +100,8 @@ impl Session {
             frame,
             document.edits.recipe().clone(),
             settings,
-            self.settings.render_options(),
-            self.runtime.preference() != ProcessorPreference::Cpu,
+            self.renderer.settings.render_options(),
+            self.renderer.gpu_allowed(),
         ) {
             document.export_status = None;
             document.error = Some(error);
