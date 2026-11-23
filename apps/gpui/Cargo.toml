@@ -1,0 +1,44 @@
+# The GPUI frontend (docs/gpui-migration.md). Deliberately its own workspace, so the main
+# Cargo.lock and checks do not depend on Zed.
+[workspace]
+members = ["."]
+exclude = ["vendor"]
+resolver = "3"
+
+[package]
+name = "rohditor-gpui"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "GPL-3.0-or-later"
+publish = false
+
+[dependencies]
+anyhow = "1.0"
+env_logger = "0.11"
+log = "0.4"
+futures = "0.3"
+# Last Zed revision on crates.io wgpu 29; later ones use a git revision past wgpu 30.
+gpui = { git = "https://github.com/zed-industries/zed", rev = "21001b273f93d1156d13d4eb67b255478a61276b", default-features = false, features = ["font-kit", "wayland"] }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "21001b273f93d1156d13d4eb67b255478a61276b", default-features = false, features = ["font-kit", "wayland"] }
+gpui_wgpu = { path = "vendor/gpui_wgpu" }
+image = { version = "0.25", default-features = false }
+rohditor-core = { path = "../../crates/core" }
+rohditor-edit = { path = "../../crates/edit" }
+rohditor-engine = { path = "../../crates/engine" }
+# The main workspace's pin. Cargo unifies it with the version gpui_wgpu uses.
+wgpu = { version = "=29.0.4", default-features = false }
+
+[dev-dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", rev = "21001b273f93d1156d13d4eb67b255478a61276b", default-features = false, features = ["test-support"] }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "21001b273f93d1156d13d4eb67b255478a61276b", default-features = false, features = ["test-support"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+rohditor-gpu = { path = "../../crates/gpu" }
+
+[patch."https://github.com/zed-industries/zed"]
+gpui_wgpu = { path = "vendor/gpui_wgpu" }
+
+# Zed's own registry patch that GPUI's Linux backend relies on.
+[patch.crates-io]
+calloop = { git = "https://github.com/zed-industries/calloop", rev = "3759371fee14c40066d64777e2a36b6ffcc22590" }
+async-task = { git = "https://github.com/zed-industries/async-task.git", rev = "015845a19fc31752c02367567d3b8900a406f9da" }
