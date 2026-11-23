@@ -11,7 +11,7 @@ use rohditor_edit::EditRecipe;
 use super::DevelopPanel;
 use crate::panels::adjustments::Adjustment;
 use crate::theme::{RADIUS, SMALL_FONT_SIZE, theme};
-use crate::ui::keys::{Cancel, Confirm, SelectNext, SelectPrevious};
+use crate::ui::keys::{Cancel, Confirm};
 use crate::ui::menu::MenuEntry;
 use crate::ui::slider::{Ramp, fraction};
 use crate::ui::test_id::TestId as _;
@@ -25,7 +25,7 @@ const CONTEXT: &str = "Slider";
 /// Steps of Page Up and Page Down.
 const MANY_STEPS: i8 = 10;
 
-pub fn bind_keys(cx: &mut App) {
+pub(super) fn bind_keys(cx: &mut App) {
     let slider = Some(CONTEXT);
     cx.bind_keys([
         KeyBinding::new("left", Decrease, slider),
@@ -35,8 +35,6 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("delete", ResetValue, slider),
         KeyBinding::new("backspace", ResetValue, slider),
         KeyBinding::new("enter", Confirm, slider),
-        KeyBinding::new("down", SelectNext, slider),
-        KeyBinding::new("up", SelectPrevious, slider),
     ]);
 }
 
@@ -106,7 +104,8 @@ impl DevelopPanel {
                 move |_, _, cx| panel.update(cx, |panel, cx| panel.nudge(adjustment, -1, cx))
             })
             .when(idle, |row| row.key_context(CONTEXT))
-            .tab_index(0)
+            .track_focus(self.focus.control(adjustment.label()))
+            .child(self.revealer(adjustment.label(), cx))
             .border_1()
             .border_color(gpui::transparent_black())
             .focus_visible(move |style| style.border_color(theme.accent))
@@ -139,8 +138,6 @@ impl DevelopPanel {
                     }),
                 )
             })
-            .on_action(|_: &SelectNext, window, cx| window.focus_next(cx))
-            .on_action(|_: &SelectPrevious, window, cx| window.focus_prev(cx))
             .test_id(format!("adjustment:{}", adjustment.label()))
             .relative()
             .flex()

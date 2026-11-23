@@ -4,17 +4,20 @@
 //! relative to where it was, Shift drags finer, and a double click resets it. A click on the value
 //! types it. With the focus, the arrow keys change it.
 
+mod focus;
 mod gestures;
 mod row;
 
 use std::collections::HashSet;
 
-use gpui::{Context, Div, Entity, IntoElement, Render, Window, div, prelude::*, px};
+use gpui::{
+    App, Context, Div, Entity, IntoElement, MouseButton, Render, Role, Window, div, prelude::*, px,
+};
 use rohditor_core::{Histogram, WhiteBalanceCoordinates};
 use rohditor_edit::EditRecipe;
 
+use focus::PanelFocus;
 use gestures::{Drag, Nudge, Typing, drag_tracker};
-pub use row::bind_keys;
 
 use super::adjustments::{Adjustment, SECTIONS, Section};
 use crate::actions::{AutoTone, ResetAdjustments};
@@ -23,6 +26,7 @@ use crate::session::Session;
 use crate::theme::{DEVELOP_WIDTH, RADIUS, SMALL_FONT_SIZE, TAB_HEIGHT, theme};
 use crate::ui::button::icon;
 use crate::ui::histogram::histogram;
+use crate::ui::keys::{SelectNext, SelectPrevious};
 use crate::ui::overlays::Overlays;
 use crate::ui::test_id::TestId as _;
 use crate::ui::toggle::toggle;
@@ -53,6 +57,11 @@ impl Model {
     }
 }
 
+pub fn bind_keys(cx: &mut App) {
+    focus::bind_keys(cx);
+    row::bind_keys(cx);
+}
+
 pub struct DevelopPanel {
     session: Entity<Session>,
     overlays: Entity<Overlays>,
@@ -65,6 +74,7 @@ pub struct DevelopPanel {
     collapsed: HashSet<&'static str>,
     /// Hide what is at its default.
     edited_only: bool,
+    focus: PanelFocus,
 }
 
 impl DevelopPanel {
@@ -92,6 +102,7 @@ impl DevelopPanel {
             typing: None,
             collapsed: HashSet::new(),
             edited_only: false,
+            focus: PanelFocus::new(cx),
         }
     }
 
@@ -113,12 +124,20 @@ impl DevelopPanel {
         let link = |id, label, action: Box<dyn gpui::Action>| {
             let link = div()
                 .id(id)
+                .role(Role::Button)
+                .aria_label(label)
+                .test_id(format!("button:{id}"))
+                .border_1()
+                .border_color(gpui::transparent_black())
+                .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                 .px_1p5()
                 .rounded(RADIUS)
                 .text_size(SMALL_FONT_SIZE)
                 .child(label);
             if enabled {
-                link.text_color(theme.muted)
+                link.tab_index(0)
+                    .focus_visible(move |style| style.border_color(theme.accent))
+                    .text_color(theme.muted)
                     .cursor_pointer()
                     .hover(move |style| style.bg(theme.hover).text_color(theme.text))
                     .on_click(move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx))
@@ -194,6 +213,17 @@ impl DevelopPanel {
             .child(
                 div()
                     .id(title)
+                    .role(Role::Button)
+                    .aria_label(title)
+                    .aria_expanded(!collapsed)
+                    .track_focus(self.focus.control(title))
+                    .relative()
+                    .child(self.revealer(title, cx))
+                    .rounded(RADIUS)
+                    .border_1()
+                    .border_color(gpui::transparent_black())
+                    .focus_visible(move |style| style.border_color(theme.accent))
+                    .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                     .test_id(format!("section:{title}"))
                     .flex()
                     .items_center()
@@ -220,11 +250,12 @@ fn hint(text: &'static str) -> Div {
 }
 
 impl Render for DevelopPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(test)]
         {
             self.renders += 1;
         }
+        self.forget_lost_focus(window);
         let theme = theme();
         let Model {
             recipe,
@@ -279,6 +310,13 @@ impl Render for DevelopPanel {
             .child(
                 div()
                     .id("adjustments")
+                    .role(Role::Group)
+                    .aria_label("Adjustments")
+                    .key_context(focus::CONTEXT)
+                    .track_focus(&self.focus.entry)
+                    .on_action(|_: &SelectNext, window, cx| window.focus_next(cx))
+                    .on_action(|_: &SelectPrevious, window, cx| window.focus_prev(cx))
+                    .track_scroll(&self.focus.scroll)
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()

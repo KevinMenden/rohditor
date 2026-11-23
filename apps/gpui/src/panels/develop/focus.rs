@@ -1,0 +1,112 @@
+//! Keyboard focus within the panel. What gets it is scrolled into view.
+
+use std::collections::HashMap;
+
+use gpui::{
+    App, Bounds, Context, Entity, FocusHandle, IntoElement, KeyBinding, Pixels, ScrollHandle,
+    Window, canvas, point, prelude::*, px,
+};
+
+use super::DevelopPanel;
+use crate::panels::adjustments::SECTIONS;
+use crate::ui::keys::{SelectNext, SelectPrevious};
+
+pub(super) const CONTEXT: &str = "Adjustments";
+/// Space kept around a control that is scrolled to.
+const MARGIN: Pixels = px(8.0);
+
+pub(super) struct PanelFocus {
+    /// Before the first control, so that the one after it is the first.
+    pub entry: FocusHandle,
+    /// Of the section headers and rows, by their labels.
+    controls: HashMap<&'static str, FocusHandle>,
+    pub scroll: ScrollHandle,
+    /// The control last scrolled to, so that scrolling away from it works.
+    revealed: Option<FocusHandle>,
+}
+
+impl PanelFocus {
+    pub fn new(cx: &mut Context<DevelopPanel>) -> Self {
+        let labels = SECTIONS.iter().flat_map(|section| {
+            let rows = section.adjustments.iter().map(|row| row.label());
+            std::iter::once(section.title).chain(rows)
+        });
+        Self {
+            entry: cx.focus_handle(),
+            controls: labels
+                .map(|label| (label, cx.focus_handle().tab_stop(true)))
+                .collect(),
+            scroll: ScrollHandle::new(),
+            revealed: None,
+        }
+    }
+
+    pub fn control(&self, label: &str) -> &FocusHandle {
+        &self.controls[label]
+    }
+}
+
+/// The controls are a list: the vertical arrows move between them, as Tab does.
+pub(super) fn bind_keys(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("down", SelectNext, Some(CONTEXT)),
+        KeyBinding::new("up", SelectPrevious, Some(CONTEXT)),
+    ]);
+}
+
+impl DevelopPanel {
+    /// Focus the first control of the adjustments. If the panel only opens now, the next Tab does.
+    pub fn focus_adjustments(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus.entry.focus(window, cx);
+        window.focus_next(cx);
+    }
+
+    /// Covers the control with this label and scrolls to it when it gets the focus by key.
+    pub(super) fn revealer(&self, label: &str, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let panel: Entity<Self> = cx.entity();
+        let control = self.focus.control(label).clone();
+        canvas(
+            move |bounds, window, cx| {
+                if control.is_focused(window) && window.last_input_was_keyboard() {
+                    panel.update(cx, |panel, cx| panel.reveal(&control, bounds, cx));
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+    }
+
+    fn reveal(&mut self, control: &FocusHandle, bounds: Bounds<Pixels>, cx: &mut Context<Self>) {
+        if self.focus.revealed.as_ref() == Some(control) {
+            return;
+        }
+        self.focus.revealed = Some(control.clone());
+        let visible = self.focus.scroll.bounds();
+        let above = visible.top() + MARGIN - bounds.top();
+        let below = bounds.bottom() + MARGIN - visible.bottom();
+        let change = if above > px(0.0) {
+            above
+        } else if below > px(0.0) {
+            -below
+        } else {
+            return;
+        };
+        let offset = self.focus.scroll.offset();
+        let y = (offset.y + change).clamp(-self.focus.scroll.max_offset().y, px(0.0));
+        self.focus.scroll.set_offset(point(offset.x, y));
+        // This frame is already laid out.
+        let panel = cx.entity();
+        cx.defer(move |cx| panel.update(cx, |_, cx| cx.notify()));
+    }
+
+    /// Scroll to the control again when the focus returns to it.
+    pub(super) fn forget_lost_focus(&mut self, window: &Window) {
+        let lost = |control: &FocusHandle| !control.is_focused(window);
+        if self.focus.revealed.as_ref().is_some_and(lost) {
+            self.focus.revealed = None;
+        }
+    }
+}

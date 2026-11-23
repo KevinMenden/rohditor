@@ -199,6 +199,11 @@ impl Render for FilesPanel {
             .child(
                 div()
                     .id("folder")
+                    .role(Role::Button)
+                    .aria_label("Open folder")
+                    .tab_index(0)
+                    .focus_visible(move |style| style.bg(theme.selected))
+                    .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                     .flex()
                     .flex_none()
                     .items_center()

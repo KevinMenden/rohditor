@@ -36,6 +36,10 @@ struct Harness {
 
 impl Harness {
     fn new() -> Self {
+        Self::sized(WINDOW)
+    }
+
+    fn sized(window: Size<Pixels>) -> Self {
         let mut cx = HeadlessAppContext::with_platform(
             Arc::new(gpui_wgpu::CosmicTextSystem::new("Noto Sans")),
             Arc::new(assets::Assets),
@@ -46,7 +50,7 @@ impl Harness {
         cx.update(actions::bind_keys);
         let mut created = None;
         let window = cx
-            .open_window(WINDOW, |window, cx| {
+            .open_window(window, |window, cx| {
                 let session = cx.new(|cx| {
                     let workers = SessionWorkers::start().expect("the engine starts");
                     let settings = rohditor_engine::settings::AppSettings::default();
@@ -252,8 +256,12 @@ fn scratch_photos(name: &str) -> Option<(PathBuf, PathBuf)> {
 }
 
 fn opened(name: &str) -> Option<(Harness, PathBuf, PathBuf)> {
+    opened_in(WINDOW, name)
+}
+
+fn opened_in(window: Size<Pixels>, name: &str) -> Option<(Harness, PathBuf, PathBuf)> {
     let (first, second) = scratch_photos(name)?;
-    let mut harness = Harness::new();
+    let mut harness = Harness::sized(window);
     let path = first.clone();
     harness.with_session(|session, cx| session.open_file(path, cx));
     // The camera look is fitted in the background and changes the picture once it is ready.
@@ -536,6 +544,70 @@ fn values_are_typed_and_stepped() {
     assert_eq!(harness.exposure(), 1.5);
     harness.keys("ctrl-z");
     assert_eq!(harness.exposure(), 0.0, "each typed value is one undo step");
+}
+
+#[test]
+#[ignore = "requires a wgpu adapter and ROHDITOR_RAW"]
+fn a_slider_is_edited_by_keyboard_alone() {
+    let Some((mut harness, _, second)) = opened("keyboard") else {
+        return;
+    };
+    harness.wait_for_library("the folder", |library| library.len() == 2);
+    // The White Balance header and its two rows, the Light header, Exposure.
+    harness.keys("ctrl-d");
+    harness.keys("down down down tab");
+    harness.keys("right right right left pageup");
+    harness.capture("keyboard");
+    assert_eq!(harness.exposure(), 0.6);
+    harness.keys("enter 1 enter right");
+    assert_eq!(harness.exposure(), 1.05, "the slider has the focus again");
+    harness.keys("ctrl-z");
+    assert_eq!(harness.exposure(), 1.0);
+    harness.keys("ctrl-z ctrl-z");
+    assert_eq!(
+        harness.exposure(),
+        0.0,
+        "a run of arrow keys is one undo step"
+    );
+    harness.keys("ctrl-shift-z delete");
+    assert_eq!(harness.exposure(), 0.0, "Delete resets");
+
+    // Enter on the header of the section collapses it.
+    harness.keys("up enter");
+    assert_eq!(harness.lookup(EXPOSURE), None);
+    harness.keys("enter");
+    harness.find(EXPOSURE);
+
+    harness.keys("escape right");
+    let open = harness.with_session(|session, _| session.document().map(|d| d.path.clone()));
+    assert_eq!(open, Some(second), "Escape gives the arrow keys back");
+}
+
+#[test]
+#[ignore = "requires a wgpu adapter and ROHDITOR_RAW"]
+fn the_focused_slider_is_scrolled_to() {
+    let Some((mut harness, ..)) = opened_in(size(px(1000.0), px(500.0)), "scroll") else {
+        return;
+    };
+    let last = "adjustment:Color Noise";
+    let visible = px(470.0);
+    assert!(
+        harness.find(last).bottom() > visible,
+        "it starts out of view"
+    );
+    harness.keys("ctrl-d");
+    harness.keys(&["down"; 20].join(" "));
+    harness.capture("scrolled");
+    assert!(harness.find(last).bottom() < visible);
+    harness.keys("right");
+    let noise = harness.with_session(|session, _| {
+        let document = session.document().expect("a photo is open");
+        document.edits.recipe().noise_reduction.chroma
+    });
+    assert_eq!(noise, 0.01, "it is the one with the focus");
+    harness.keys(&["up"; 20].join(" "));
+    let top = harness.find("section:White Balance").top();
+    assert!(top > px(36.0) && top < px(300.0), "{top:?}");
 }
 
 #[test]

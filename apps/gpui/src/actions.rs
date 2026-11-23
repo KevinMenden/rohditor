@@ -22,6 +22,7 @@ actions!(
         ActualPixels,
         ToggleFiles,
         ToggleDevelop,
+        FocusAdjustments,
         FocusPhoto,
         ToggleCommandPalette,
         Quit,
@@ -64,6 +65,7 @@ pub fn commands() -> Vec<Command> {
         command("view: actual preview pixels", Some("ctrl-1"), ActualPixels),
         command("view: toggle files panel", Some("ctrl-b"), ToggleFiles),
         command("view: toggle develop panel", Some("ctrl-r"), ToggleDevelop),
+        command("view: focus adjustments", Some("ctrl-d"), FocusAdjustments),
         command("view: focus photo", Some("escape"), FocusPhoto),
         command(
             "view: command palette",
