@@ -523,13 +523,12 @@ pub struct GpuDisplayReadbackPending {
 }
 
 impl GpuDisplayReadbackPending {
-    /// Try to consume the completed readback without waiting.
-    ///
-    /// `Ok(None)` means that the GPU has not completed the copy yet.
-    pub fn try_finish(&mut self) -> Result<Option<GpuDisplayReadback>, GpuPreviewError> {
+    /// Whether the GPU has completed the copy, so that [`Self::finish`] can follow. Must not be
+    /// called again once it returned `true`.
+    pub fn poll_ready(&mut self) -> Result<bool, GpuPreviewError> {
         let result = match self.ready.try_recv() {
             Ok(result) => result,
-            Err(mpsc::TryRecvError::Empty) => return Ok(None),
+            Err(mpsc::TryRecvError::Empty) => return Ok(false),
             Err(mpsc::TryRecvError::Disconnected) => {
                 return Err(GpuPreviewError::Readback {
                     reason: "GPU readback completion channel closed unexpectedly".to_owned(),
@@ -539,7 +538,12 @@ impl GpuDisplayReadbackPending {
         result.map_err(|error| GpuPreviewError::Readback {
             reason: error.to_string(),
         })?;
+        Ok(true)
+    }
 
+    /// Copy the pixels out after [`Self::poll_ready`] returned `true`. Takes several milliseconds
+    /// for a large frame; may run on any thread.
+    pub fn finish(self) -> Result<GpuDisplayReadback, GpuPreviewError> {
         let mapped = self.buffer.slice(..).get_mapped_range();
         let output_len = self
             .unpadded_bytes_per_row
@@ -556,11 +560,11 @@ impl GpuDisplayReadbackPending {
         }
         drop(mapped);
         self.buffer.unmap();
-        Ok(Some(GpuDisplayReadback {
+        Ok(GpuDisplayReadback {
             width: self.width,
             height: self.height,
             rgba,
-        }))
+        })
     }
 }
 
@@ -1506,11 +1510,12 @@ impl GpuPreviewProcessor {
             .map_err(|error| GpuPreviewError::Readback {
                 reason: format!("{error:?}"),
             })?;
-        pending
-            .try_finish()?
-            .ok_or_else(|| GpuPreviewError::Readback {
+        if !pending.poll_ready()? {
+            return Err(GpuPreviewError::Readback {
                 reason: "GPU readback did not complete after a blocking poll".to_owned(),
-            })
+            });
+        }
+        pending.finish()
     }
 
     /// Submit a display-texture readback without waiting for completion.

@@ -23,18 +23,19 @@ impl Histogram {
     /// Build a histogram from an sRGB8 display image.
     #[must_use]
     pub fn from_display_rgb8(image: &DisplayRgbImage<u8>) -> Self {
-        let mut histogram = Self::default();
-        for row in image.data().chunks(image.row_stride()).take(image.height()) {
-            for pixel in row[..image.width() * 3].as_chunks::<3>().0 {
-                histogram.add_pixel(pixel[0], pixel[1], pixel[2]);
-            }
-        }
-        histogram
+        Self::count(
+            image
+                .data()
+                .chunks(image.row_stride())
+                .take(image.height())
+                .flat_map(|row| row[..image.width() * 3].as_chunks::<3>().0)
+                .copied(),
+        )
     }
 
     /// Build a histogram from a packed RGBA8 display buffer.
     ///
-    /// This is used by the debounced asynchronous GPU-preview analysis path.
+    /// This is used by the throttled asynchronous GPU-preview analysis path.
     /// The GPU display texture remains the normal display source; the readback
     /// is consumed by analysis and never installed as the UI texture.
     pub fn from_rgba8(width: usize, height: usize, rgba: &[u8]) -> Option<Self> {
@@ -42,11 +43,12 @@ impl Histogram {
         if rgba.len() != expected {
             return None;
         }
-        let mut histogram = Self::default();
-        for pixel in rgba.as_chunks::<4>().0 {
-            histogram.add_pixel(pixel[0], pixel[1], pixel[2]);
-        }
-        Some(histogram)
+        let pixels = rgba.as_chunks::<4>().0;
+        Some(Self::count(
+            pixels
+                .iter()
+                .map(|&[red, green, blue, _]| [red, green, blue]),
+        ))
     }
 
     /// Return the luminance bin containing the requested cumulative fraction.
@@ -67,24 +69,38 @@ impl Histogram {
             .unwrap_or(0)
     }
 
-    fn add_pixel(&mut self, red: u8, green: u8, blue: u8) {
-        self.red[usize::from(red)] += 1;
-        self.green[usize::from(green)] += 1;
-        self.blue[usize::from(blue)] += 1;
-        let luminance =
-            (0.2126 * f32::from(red) + 0.7152 * f32::from(green) + 0.0722 * f32::from(blue))
-                .round()
-                .clamp(0.0, 255.0) as usize;
-        self.luminance[luminance] += 1;
-        for (index, value) in [red, green, blue].into_iter().enumerate() {
-            if is_shadow_clipped(value) {
-                self.shadow_clipped[index] += 1;
-            }
-            if is_highlight_clipped(value) {
-                self.highlight_clipped[index] += 1;
+    fn count(pixels: impl Iterator<Item = [u8; 3]>) -> Self {
+        let mut histogram = Self::default();
+        // `for_each`, as it is much faster than a loop over the flattened rows.
+        pixels.for_each(|[red, green, blue]| {
+            histogram.red[usize::from(red)] += 1;
+            histogram.green[usize::from(green)] += 1;
+            histogram.blue[usize::from(blue)] += 1;
+            histogram.luminance[usize::from(luminance(red, green, blue))] += 1;
+        });
+        for (index, bins) in [&histogram.red, &histogram.green, &histogram.blue]
+            .into_iter()
+            .enumerate()
+        {
+            for (value, &count) in (0..=u8::MAX).zip(bins) {
+                if is_shadow_clipped(value) {
+                    histogram.shadow_clipped[index] += count;
+                }
+                if is_highlight_clipped(value) {
+                    histogram.highlight_clipped[index] += count;
+                }
             }
         }
+        histogram
     }
+}
+
+/// Rec. 709 luminance of display values, rounded. In integers, as this runs for every pixel of a
+/// preview while a slider is dragged.
+fn luminance(red: u8, green: u8, blue: u8) -> u8 {
+    let weighted = 2126 * u32::from(red) + 7152 * u32::from(green) + 722 * u32::from(blue);
+    // The weights add up to 10000, so this is at most 255.
+    ((weighted + 5000) / 10_000) as u8
 }
 
 fn percentile(counts: &[u64; HISTOGRAM_BINS], fraction: f32) -> u8 {
@@ -118,7 +134,7 @@ impl Default for Histogram {
 
 #[cfg(test)]
 mod tests {
-    use super::Histogram;
+    use super::{Histogram, luminance};
     use rohditor_image::{DisplayColorSpace, DisplayRgbImage};
 
     #[test]
@@ -141,6 +157,19 @@ mod tests {
         assert_eq!(histogram.shadow_clipped, [1, 0, 0]);
         assert_eq!(histogram.highlight_clipped, [1, 0, 1]);
         assert_eq!(histogram.luminance.iter().sum::<u64>(), 2);
+    }
+
+    #[test]
+    fn luminance_weights_and_rounds_every_channel() {
+        for value in 0..=u8::MAX {
+            assert_eq!(luminance(value, value, value), value);
+        }
+        assert_eq!(luminance(255, 0, 0), 54);
+        assert_eq!(luminance(0, 255, 0), 182);
+        assert_eq!(luminance(0, 0, 255), 18);
+        // 2.4344 and 2.5066 before rounding.
+        assert_eq!(luminance(0, 3, 4), 2);
+        assert_eq!(luminance(0, 3, 5), 3);
     }
 
     #[test]

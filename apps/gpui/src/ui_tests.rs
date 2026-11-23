@@ -476,3 +476,47 @@ fn drag_step_cost() {
         steps[30], completions[30]
     );
 }
+
+/// Also prints the cost of the steps, as reading the histogram back must not stall the drag.
+#[test]
+#[ignore = "requires a wgpu adapter and ROHDITOR_RAW"]
+fn the_histogram_follows_a_drag() {
+    let Some((mut harness, ..)) = opened("histogram") else {
+        return;
+    };
+    let shown = |harness: &mut Harness| {
+        harness.with_session(|session, _| session.document()?.preview.histogram)
+    };
+    let start = harness.find(EXPOSURE).center();
+    harness.press(start, 1);
+    let mut last = shown(&mut harness);
+    let mut updates = 0;
+    let mut steps = Vec::new();
+    for step in 1..=100 {
+        let begun = Instant::now();
+        harness.drag_to(start + point(px(step as f32 * 0.3), px(0.0)));
+        harness.draw();
+        steps.push(begun.elapsed());
+        // Without a pause a debounce would end in.
+        std::thread::sleep(Duration::from_millis(8));
+        let now = shown(&mut harness);
+        updates += usize::from(now != last);
+        last = now;
+    }
+    let total: Duration = steps.iter().sum();
+    steps.sort_unstable();
+    println!(
+        "{updates} histograms; step median {:?}, 95% {:?}, max {:?}, total {total:?}",
+        steps[50], steps[95], steps[99]
+    );
+    harness.release(start + point(px(30.0), px(0.0)));
+    assert!(updates >= 5, "only {updates} histograms during the drag");
+
+    // The last one is the one of the final frame.
+    harness.wait_until("the final histogram", settled);
+    let settled_histogram = shown(&mut harness);
+    assert_ne!(settled_histogram, None);
+    std::thread::sleep(Duration::from_millis(100));
+    harness.with_session(|session, cx| session.tick(cx));
+    assert_eq!(shown(&mut harness), settled_histogram);
+}

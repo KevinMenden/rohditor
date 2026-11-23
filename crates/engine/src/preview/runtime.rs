@@ -405,7 +405,8 @@ impl PreviewRuntime {
             frame,
             ..
         } = resident;
-        preview.pending_histogram = None;
+        // A histogram readback in flight goes on: it shows a recent frame, and
+        // dropping it would mean no update until the drag pauses.
         preview.histogram_due = None;
         preview.histogram_revision = None;
         let revision = request.revision;

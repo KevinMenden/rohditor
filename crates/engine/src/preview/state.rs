@@ -10,16 +10,17 @@ use std::time::{Duration, Instant};
 use rohditor_core::Histogram;
 use rohditor_edit::EditRecipe;
 
-use super::gpu::{GpuDocumentPreview, PendingGpuHistogram};
+use super::gpu::GpuDocumentPreview;
+use super::histogram::PendingGpuHistogram;
 use super::routing::{gpu_supports_recipe, preview_intent_matches_resolution};
 use super::{DocumentPreviewDiagnostics, PreviewSource};
 use crate::coordinator::PreviewResolution;
 use crate::document::{PreviewIntent, PreviewTicket};
 use crate::view::ViewState;
 
-/// How long the histogram readback waits after a GPU render before starting,
-/// so a drag does not queue a readback per frame.
-pub(super) const GPU_HISTOGRAM_DEBOUNCE: Duration = Duration::from_millis(75);
+/// Least time between the starts of two histogram readbacks, so a drag does
+/// not read back every frame.
+const GPU_HISTOGRAM_INTERVAL: Duration = Duration::from_millis(33);
 
 /// The GPU display texture a frontend should be showing.
 pub struct GpuDisplay<'a> {
@@ -39,11 +40,14 @@ pub struct DocumentPreview {
     display_generation: u64,
     pub(super) pending_histogram: Option<PendingGpuHistogram>,
     pub(super) histogram_due: Option<(PreviewTicket, Instant)>,
+    /// When the last histogram readback started.
+    pub(super) histogram_started: Option<Instant>,
     /// Source 1:1 inspection is requested instead of the fitted preview.
     pub source_scale_requested: bool,
     /// The background neural demosaic has finished, so a classic stand-in
     /// base no longer counts as current.
     pub neural_ready: bool,
+    /// While editing this may be a few frames older than the displayed one.
     pub histogram: Option<Histogram>,
     /// The recipe revision `histogram` belongs to. Cleared while a newer
     /// revision renders, so an old graph is never used as Auto Tone input.
@@ -67,6 +71,7 @@ impl DocumentPreview {
             display_generation: 0,
             pending_histogram: None,
             histogram_due: None,
+            histogram_started: None,
             source_scale_requested: false,
             neural_ready: false,
             histogram: None,
@@ -211,8 +216,9 @@ impl DocumentPreview {
         let algorithm = preview.algorithm;
         self.gpu = Some(preview);
         self.mark_display_changed();
-        self.histogram_due = (resolution == PreviewResolution::Fit || histogram_always)
-            .then_some((ticket, Instant::now() + GPU_HISTOGRAM_DEBOUNCE));
+        let due = next_histogram(Instant::now(), self.histogram_started);
+        self.histogram_due =
+            (resolution == PreviewResolution::Fit || histogram_always).then_some((ticket, due));
         self.source = Some(if resolution == PreviewResolution::SourceScale {
             PreviewSource::OneToOneGpu
         } else {
@@ -220,6 +226,12 @@ impl DocumentPreview {
         });
         self.status = None;
     }
+}
+
+/// When the readback of a frame rendered `now` starts. Deliberately not a
+/// debounce: a drag renders frames faster than any pause would end.
+fn next_histogram(now: Instant, last_started: Option<Instant>) -> Instant {
+    last_started.map_or(now, |started| now.max(started + GPU_HISTOGRAM_INTERVAL))
 }
 
 #[cfg(test)]
@@ -262,6 +274,19 @@ mod tests {
         assert!(!preview.accepts(5, first, PreviewIntent::CommittedFit));
         assert!(preview.accepts(5, second, PreviewIntent::CropToolFullFrame));
         assert!(!preview.accepts(6, second, PreviewIntent::CropToolFullFrame));
+    }
+
+    #[test]
+    fn frames_of_a_drag_do_not_postpone_the_histogram() {
+        let start = Instant::now();
+        assert_eq!(next_histogram(start, None), start);
+        let due = start + GPU_HISTOGRAM_INTERVAL;
+        for frame in [1, 16, 32] {
+            let now = start + Duration::from_millis(frame);
+            assert_eq!(next_histogram(now, Some(start)), due);
+        }
+        let later = start + Duration::from_secs(1);
+        assert_eq!(next_histogram(later, Some(start)), later);
     }
 
     #[test]

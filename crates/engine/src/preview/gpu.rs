@@ -5,13 +5,10 @@
 //! display texture is exposed as a plain `wgpu::TextureView` that the
 //! frontend registers with whatever toolkit it uses.
 
-use std::time::Instant;
-
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_edit::{EditRecipe, OpticsAdjustments};
 use rohditor_gpu::{
-    GpuCapabilities, GpuDisplayReadbackPending, GpuPreviewFrame, GpuPreviewProcessor,
-    GpuPreviewSource, GpuSpatialFullSource,
+    GpuCapabilities, GpuPreviewFrame, GpuPreviewProcessor, GpuPreviewSource, GpuSpatialFullSource,
 };
 use tracing::info;
 
@@ -121,11 +118,4 @@ pub struct GpuDocumentPreview {
     pub resolution: PreviewResolution,
     pub source: GpuDocumentSource,
     pub frame: GpuPreviewFrame,
-}
-
-/// A display readback for the histogram that the GPU has not finished yet.
-pub(super) struct PendingGpuHistogram {
-    pub(super) ticket: PreviewTicket,
-    pub(super) readback: GpuDisplayReadbackPending,
-    pub(super) started: Instant,
 }
