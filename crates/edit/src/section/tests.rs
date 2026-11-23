@@ -500,3 +500,39 @@ fn a_blend_of_valid_recipes_is_valid() {
             .unwrap_or_else(|error| panic!("invalid at {amount}: {error:?}"));
     }
 }
+
+#[test]
+fn changed_sections_lists_exactly_the_edited_sections() {
+    let defaults = EditRecipe::default();
+    assert!(changed_sections(&defaults, &defaults).is_empty());
+
+    let mut recipe = defaults.clone();
+    recipe.light.exposure_ev = 0.5;
+    recipe.presence.clarity = 20.0;
+    assert_eq!(
+        changed_sections(&recipe, &defaults),
+        [RecipeSection::Tone, RecipeSection::Presence]
+    );
+
+    // Every section of a fully edited recipe differs from the defaults.
+    assert_eq!(
+        changed_sections(&fully_edited(), &defaults),
+        RecipeSection::ALL
+    );
+}
+
+#[test]
+fn section_names_round_trip_through_serde_and_have_labels() {
+    for section in RecipeSection::ALL {
+        let json = serde_json::to_string(&section).expect("serialize section");
+        assert_eq!(
+            serde_json::from_str::<RecipeSection>(&json).expect("deserialize section"),
+            section
+        );
+        assert!(!section.label().is_empty());
+    }
+    assert_eq!(
+        serde_json::to_string(&RecipeSection::HighlightReconstruction).expect("serialize section"),
+        "\"highlight_reconstruction\""
+    );
+}

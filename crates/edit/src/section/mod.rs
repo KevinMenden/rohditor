@@ -13,10 +13,14 @@ mod blend;
 #[cfg(test)]
 mod tests;
 
-pub use blend::{blend_sections, copy_sections};
+use serde::{Deserialize, Serialize};
 
-/// One group of recipe fields. See the module documentation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub use blend::{blend_sections, changed_sections, copy_sections};
+
+/// One group of recipe fields. See the module documentation. The serialized
+/// names are stable: presets store them in files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RecipeSection {
     /// Exposure, contrast, highlights, shadows, whites and blacks.
     Tone,
@@ -70,6 +74,30 @@ impl RecipeSection {
         Self::Geometry,
         Self::LocalMasks,
     ];
+
+    /// The section's name for a person, as shown in lists of sections.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Tone => "Tone",
+            Self::ToneCurve => "Tone curve",
+            Self::Presence => "Presence",
+            Self::WhiteBalance => "White balance",
+            Self::Saturation => "Saturation & vibrance",
+            Self::ColorMixer => "Color mixer",
+            Self::ColorGrading => "Three-way RGB tint",
+            Self::ColorProfile => "Color profile",
+            Self::CameraLook => "Camera look",
+            Self::HighlightReconstruction => "Highlight reconstruction",
+            Self::NoiseReduction => "Noise reduction",
+            Self::CaptureSharpening => "Capture sharpening",
+            Self::FalseColor => "Moiré / false colour",
+            Self::Defringe => "Defringe",
+            Self::Optics => "Optics",
+            Self::Geometry => "Crop & orientation",
+            Self::LocalMasks => "Masks",
+        }
+    }
 
     /// Whether the section describes one photo (its light, camera, lens or
     /// framing) rather than a taste. Copying these between photos is usually

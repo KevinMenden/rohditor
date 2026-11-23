@@ -34,6 +34,7 @@ use crate::ui::ViewMode;
 use crate::ui::adjustment_panel::{
     self, AdjustmentInteraction, AdjustmentRange, AdjustmentRanges, AdjustmentTarget,
     AdjustmentValues, CameraProfileChoice, DocumentPanelModel, PanelDefaults, PanelSection,
+    PresetsPanel,
 };
 use crate::ui::catalog::{
     self, FilmstripModel, LibraryEntryModel, LibraryEntryState, LibraryModel,
@@ -45,6 +46,7 @@ use crate::ui::diagnostics::{
 };
 use crate::ui::export_dialog::{self, ExportDialogModel};
 use crate::ui::optics::OpticsPanelModel;
+use crate::ui::presets::PresetsPanelState;
 use crate::ui::settings as settings_ui;
 use crate::ui::theme;
 use crate::ui::tool_panel;
@@ -60,6 +62,7 @@ use rohditor_engine::coordinator::{
 };
 use rohditor_engine::document::{EditSession, PreviewIntent, PreviewTicket};
 use rohditor_engine::export_options::{ExportKind, ExportOptions};
+use rohditor_engine::presets::PresetStore;
 use rohditor_engine::preview::{
     DocumentPreview, GpuUpload, PreviewOutcome, PreviewRequest, PreviewRuntime, PreviewSource,
 };
@@ -82,6 +85,7 @@ mod lifecycle;
 mod masks;
 mod neural_model;
 mod noise_reduction;
+mod presets;
 mod screenshot;
 mod tools;
 #[cfg(test)]
@@ -246,6 +250,8 @@ pub(crate) struct RohditorApp {
     recipe_save_error: Option<String>,
     queued_recipe_snapshots: HashMap<PathBuf, (u64, EditRecipe)>,
     camera_profiles: CameraProfileRegistry,
+    presets: PresetStore,
+    presets_ui: PresetsPanelState,
     settings_dialog: Option<SettingsDialog>,
     /// Where settings, session and camera profiles persist. Injected so tests
     /// can use a scratch directory instead of the user's real one.
@@ -395,6 +401,8 @@ impl RohditorApp {
             recipe_save_error: None,
             queued_recipe_snapshots: HashMap::new(),
             camera_profiles: CameraProfileRegistry::load(config_dir.as_deref()),
+            presets: PresetStore::load(config_dir.as_deref()),
+            presets_ui: PresetsPanelState::default(),
             settings_dialog: None,
             config_dir,
             screenshot: None,
@@ -1127,7 +1135,13 @@ impl RohditorApp {
             )
         });
         let panel = tools::tool_panel_model(self.document.as_ref(), ToolKind::Edit);
-        let output = tool_panel::show(context, &panel, |ui| adjustment_panel::show_body(ui, model));
+        let presets = PresetsPanel {
+            state: &mut self.presets_ui,
+            presets: self.presets.presets(),
+        };
+        let output = tool_panel::show(context, &panel, |ui| {
+            adjustment_panel::show_body(ui, model, presets)
+        });
         let picker_mode = output.picker_mode;
         let mut changed_document = None;
         let mut white_balance_draft = None;
@@ -1247,6 +1261,9 @@ impl RohditorApp {
             && !draft_rendered
         {
             self.queue_preview(context, document_id);
+        }
+        if let Some(action) = output.presets {
+            self.handle_presets_action(context, action);
         }
         if output.import_camera_profile {
             self.import_camera_profile(context);
@@ -2355,6 +2372,7 @@ fn document_panel_model(
         defringe: document.edits.recipe().defringe,
         presence: document.edits.recipe().presence,
         noise_suggestion: document.noise.suggestion(),
+        changed_sections: presets::edited_sections(document),
     }
 }
 

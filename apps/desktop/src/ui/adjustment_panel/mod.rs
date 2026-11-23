@@ -14,6 +14,7 @@ use rohditor_edit::{
     CameraProfileSelection, HighlightAdjustments, HighlightMethod, LensProfileSelection,
     OpticsAction, RecipeSection, RenderingProfileSelection,
 };
+use rohditor_engine::presets::Preset;
 use rohditor_engine::tools::Picker;
 
 use self::changes::SectionChanges;
@@ -26,6 +27,7 @@ use super::detail;
 use super::info::{self, InfoPanelModel};
 use super::optics::{self, OpticsPanelModel};
 use super::presence;
+use super::presets::{self, PresetsAction, PresetsPanelState};
 use super::theme::{self, colors};
 use super::widgets::{self, AdjustmentSpec, CollapsibleSection};
 
@@ -169,6 +171,14 @@ pub(crate) struct DocumentPanelModel {
     pub defringe: rohditor_edit::Defringe,
     pub presence: rohditor_edit::PresenceAdjustments,
     pub noise_suggestion: NoiseSuggestion,
+    /// Sections with edits, where saving a preset starts.
+    pub changed_sections: Vec<RecipeSection>,
+}
+
+/// The saved presets and the Presets section's own state.
+pub(crate) struct PresetsPanel<'a> {
+    pub state: &'a mut PresetsPanelState,
+    pub presets: &'a [Preset],
 }
 
 /// The document's default values for the settings that are not simply the
@@ -226,6 +236,7 @@ pub(crate) struct AdjustmentPanelOutput {
     pub reset_all: bool,
     /// The reset button of one section's header.
     pub reset_section: Option<PanelSection>,
+    pub presets: Option<PresetsAction>,
 }
 
 /// The collapsible sections of the Edit panel that can be reset on their own.
@@ -283,6 +294,7 @@ impl AdjustmentPanelOutput {
 pub(crate) fn show_body(
     ui: &mut egui::Ui,
     document: Option<DocumentPanelModel>,
+    presets: PresetsPanel<'_>,
 ) -> AdjustmentPanelOutput {
     let mut output = AdjustmentPanelOutput::default();
     let Some(mut document) = document else {
@@ -303,6 +315,17 @@ pub(crate) fn show_body(
         // Read-only, so it bypasses `section` and has no reset button.
         CollapsibleSection::new("Info").show_resettable(ui, |ui| info::show(ui, model));
     }
+    output.presets = CollapsibleSection::new("Presets")
+        .show_resettable(ui, |ui| {
+            presets::show(
+                ui,
+                presets.state,
+                presets.presets,
+                &document.changed_sections,
+            )
+        })
+        .body
+        .flatten();
     show_sections(ui, &mut document, &mut output);
     output
 }
