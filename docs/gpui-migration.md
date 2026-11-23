@@ -57,7 +57,7 @@ Assumed from the recommendations unless marked open; change them here if they tu
 - [x] 0.1 Land the wgpu 29 / egui 0.35 update on main (`chore/wgpu-29`).
 - [x] 0.2 Clean up the spike and merge `apps/gpui` as an experimental app, with its own CI job.
 - [x] 0.3 Split `Session`, so that tools and panels do not all land in it.
-- [ ] 0.4 Find elements by selector in UI tests; cache the panels that did not change.
+- [x] 0.4 Find elements by selector in UI tests; cache the panels that did not change.
 
 Done when CI builds `apps/gpui` and no test clicks raw pixel positions.
 

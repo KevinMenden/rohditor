@@ -9,8 +9,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AppContext, Entity, HeadlessAppContext, Keystroke, Modifiers, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, PlatformInput, Point, WindowHandle, point, px, size,
+    AppContext, Bounds, Entity, HeadlessAppContext, Keystroke, Modifiers, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, PlatformInput, Point, Size, WindowHandle,
+    point, px, size,
 };
 use rohditor_engine::persistence;
 use rohditor_engine::preview::WgpuContext;
@@ -18,8 +19,12 @@ use rohditor_gpu::{GpuPreviewProcessor, GpuSensorProcessor, GpuSpatialProcessor}
 
 use crate::library::{Library, LibraryWorker};
 use crate::session::{Display, Session, SessionWorkers};
+use crate::ui::test_id::recorded;
 use crate::workspace::Workspace;
 use crate::{actions, assets, device};
+
+const WINDOW: Size<Pixels> = size(px(1440.0), px(900.0));
+const EXPOSURE: &str = "adjustment:Exposure";
 
 struct Harness {
     cx: HeadlessAppContext,
@@ -40,7 +45,7 @@ impl Harness {
         cx.update(actions::bind_keys);
         let mut created = None;
         let window = cx
-            .open_window(size(px(1440.0), px(900.0)), |window, cx| {
+            .open_window(WINDOW, |window, cx| {
                 let session = cx.new(|cx| {
                     let workers = SessionWorkers::start().expect("the engine starts");
                     let settings = rohditor_engine::settings::AppSettings::default();
@@ -109,6 +114,45 @@ impl Harness {
             })
             .expect("window is open");
         self.cx.run_until_parked();
+    }
+
+    /// The bounds of the element with this test id, if it is shown.
+    fn lookup(&mut self, name: &str) -> Option<Bounds<Pixels>> {
+        // Cached panels record nothing, so lay out everything anew.
+        recorded::clear();
+        self.cx
+            .update_window(self.window.into(), |_, window, cx| {
+                window.refresh();
+                drop(window.draw(cx));
+            })
+            .expect("window is open");
+        recorded::get(name)
+    }
+
+    fn find(&mut self, name: &str) -> Bounds<Pixels> {
+        self.lookup(name)
+            .unwrap_or_else(|| panic!("{name} is not shown"))
+    }
+
+    fn click(&mut self, name: &str) {
+        let position = self.find(name).center();
+        self.press(position, 1);
+        self.release(position);
+    }
+
+    /// How often the files and develop panels were rendered.
+    fn panel_renders(&mut self) -> (usize, usize) {
+        let window = self.window;
+        self.cx
+            .update(|cx| window.update(cx, |workspace, _, cx| workspace.panel_renders(cx)))
+            .expect("window is open")
+    }
+
+    /// Draw a frame if something changed, as the window would.
+    fn draw(&mut self) {
+        self.cx
+            .update_window(self.window.into(), |_, window, cx| drop(window.draw(cx)))
+            .expect("window is open");
     }
 
     fn press(&mut self, position: Point<Pixels>, click_count: usize) {
@@ -217,9 +261,11 @@ fn settled(session: &Session) -> bool {
         })
 }
 
-/// The brightness of the photo around the window's centre.
-fn brightness(shot: &image::RgbaImage) -> f64 {
-    let (cx, cy) = (shot.width() / 2, shot.height() / 2);
+/// The brightness of the photo around `center`.
+fn brightness(shot: &image::RgbaImage, center: Point<Pixels>) -> f64 {
+    let scale = shot.width() as f32 / WINDOW.width.as_f32();
+    let pixel = |logical: Pixels| (logical.as_f32() * scale) as u32;
+    let (cx, cy) = (pixel(center.x), pixel(center.y));
     let mut sum = 0.0;
     for y in cy - 100..cy + 100 {
         for x in cx - 100..cx + 100 {
@@ -230,12 +276,6 @@ fn brightness(shot: &image::RgbaImage) -> f64 {
     sum / (200.0 * 200.0 * 3.0)
 }
 
-// Positions in the default 1440x900 layout.
-fn exposure_row() -> Point<Pixels> {
-    point(px(1290.0), px(315.0))
-}
-
-/// GPUI requests its device with low limits, so this can break with a GPUI update.
 #[test]
 #[ignore = "requires a wgpu adapter"]
 fn the_engine_pipelines_build_on_gpuis_device() {
@@ -273,9 +313,10 @@ fn dragging_a_slider_is_one_undo_step_and_is_saved() {
         return;
     };
     let before = harness.capture("photo");
-    let dark = brightness(&before);
+    let center = harness.find("viewport").center();
+    let dark = brightness(&before, center);
 
-    let start = exposure_row();
+    let start = harness.find(EXPOSURE).center();
     harness.press(start, 1);
     harness.drag_to(start + point(px(10.0), px(0.0)));
     harness.drag_to(start + point(px(30.0), px(0.0)));
@@ -285,7 +326,7 @@ fn dragging_a_slider_is_one_undo_step_and_is_saved() {
     harness.wait_until("the edited preview", settled);
     let after = harness.capture("photo-edited");
     assert!(
-        brightness(&after) > dark * 1.2,
+        brightness(&after, center) > dark * 1.2,
         "the frame follows the edit"
     );
 
@@ -300,9 +341,14 @@ fn dragging_a_slider_is_one_undo_step_and_is_saved() {
     harness.keys("ctrl-z");
     assert_eq!(harness.exposure(), 0.0);
     harness.wait_until("the undone preview", settled);
-    let undone = brightness(&harness.capture("photo-undone"));
+    let undone = brightness(&harness.capture("photo-undone"), center);
     assert!((undone - dark).abs() < 1.0);
     harness.keys("ctrl-shift-z");
+    assert_eq!(harness.exposure(), exposure);
+
+    harness.click("button:undo");
+    assert_eq!(harness.exposure(), 0.0);
+    harness.click("button:redo");
     assert_eq!(harness.exposure(), exposure);
 
     harness.press(start, 2);
@@ -341,8 +387,57 @@ fn the_palette_runs_commands_and_arrows_change_photos() {
     assert_eq!(open(&mut harness).as_ref(), Some(&first));
     harness.wait_until("the first photo again", settled);
     harness.capture("switched");
-    harness.keys("ctrl-w");
+    harness.click("button:close-tab");
     assert_eq!(open(&mut harness), None);
+}
+
+#[test]
+#[ignore = "requires a wgpu adapter and ROHDITOR_RAW"]
+fn panels_redraw_only_for_their_own_changes() {
+    let Some((mut harness, _, second)) = opened("redraw") else {
+        return;
+    };
+    harness.wait_for_library("the folder", |library| library.len() == 2);
+    let viewport = harness.find("viewport").center();
+    let exposure = harness.find(EXPOSURE).center();
+    harness.draw();
+
+    // GPUI redraws the whole window for a press and a release, so only count what is between.
+    harness.press(viewport, 1);
+    harness.draw();
+    let before = harness.panel_renders();
+    for step in 1..=3 {
+        harness.drag_to(viewport + point(px(step as f32 * 5.0), px(0.0)));
+        harness.draw();
+    }
+    assert_eq!(harness.panel_renders(), before, "panning redraws no panel");
+    harness.release(viewport);
+
+    harness.press(exposure, 1);
+    harness.draw();
+    let before = harness.panel_renders();
+    for step in 1..=3 {
+        harness.drag_to(exposure + point(px(step as f32 * 5.0), px(0.0)));
+        harness.draw();
+    }
+    let after = harness.panel_renders();
+    assert_eq!(after.0, before.0, "a slider does not redraw the files");
+    assert!(after.1 >= before.1 + 3, "a slider redraws its own panel");
+    harness.release(exposure);
+
+    let before = harness.panel_renders();
+    harness.keys("right");
+    harness.draw();
+    assert!(harness.panel_renders().0 > before.0, "the highlight moves");
+    harness.click("file:A.ARW");
+    let open = harness.with_session(|session, _| session.document().map(|d| d.path.clone()));
+    assert_ne!(open, Some(second));
+
+    harness.wait_until("the photo again", settled);
+    harness.click("section:Light");
+    assert_eq!(harness.lookup(EXPOSURE), None, "the section collapsed");
+    harness.click("button:toggle-files");
+    assert_eq!(harness.lookup("file:A.ARW"), None, "the panel closed");
 }
 
 /// Prints what one step of a slider drag costs. The CPU time covers the edit, submitting the
@@ -353,7 +448,7 @@ fn drag_step_cost() {
     let Some((mut harness, ..)) = opened("cost") else {
         return;
     };
-    let start = exposure_row();
+    let start = harness.find(EXPOSURE).center();
     harness.press(start, 1);
     let (mut steps, mut completions) = (Vec::new(), Vec::new());
     for step in 1..=60 {
