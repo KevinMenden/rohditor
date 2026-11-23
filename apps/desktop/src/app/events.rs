@@ -5,12 +5,11 @@
 
 use eframe::egui;
 
-use rohditor_core::white_balance_from_camera_sample;
-
-use rohditor_engine::coordinator::{JobKind, PreviewResolution, WorkerEvent};
+use rohditor_engine::coordinator::{PreviewResolution, WorkerEvent};
+use rohditor_engine::document::PreviewTicket;
 use rohditor_engine::preview::{DocumentPreviewDiagnostics, PreviewSource};
 
-use super::{RohditorApp, default_recipe_for_document, document_as_shot_colour, install_texture};
+use super::{Document, RohditorApp, install_texture};
 
 impl RohditorApp {
     pub(super) fn process_worker_events(&mut self, context: &egui::Context) {
@@ -30,39 +29,15 @@ impl RohditorApp {
                 export_id,
                 detail,
             } => {
-                let Some(document) = self.document.as_mut().filter(|doc| doc.id == document_id)
-                else {
-                    return;
-                };
-                match job {
-                    JobKind::Open => document.open_status = Some(detail),
-                    JobKind::Preview => {
-                        if preview_ticket.is_some_and(|ticket| document.ticket() == ticket)
-                            || (preview_ticket.is_none()
-                                && revision == Some(document.edits.revision()))
-                        {
-                            document.preview.status = Some((document.edits.revision(), detail));
-                        }
-                    }
-                    JobKind::Export => {
-                        if let Some(activity) = document.export_status.as_mut()
-                            && export_id == Some(activity.id)
-                        {
-                            activity.detail = detail;
-                        }
-                    }
+                if let Some(document) = self.current_document_mut(document_id) {
+                    document
+                        .core
+                        .job_progress(job, revision, preview_ticket, export_id, detail);
                 }
             }
             WorkerEvent::MetadataReady { document_id, info } => {
-                if let Some(document) = self.document.as_mut().filter(|doc| doc.id == document_id) {
-                    document.info = Some(*info);
-                    if document.initialize_white_balance_from_metadata {
-                        document.initialize_white_balance_from_metadata = false;
-                        if !document.edits.is_dirty() {
-                            let recipe = default_recipe_for_document(document);
-                            document.edits.replace_clean_baseline(recipe);
-                        }
-                    }
+                if let Some(document) = self.current_document_mut(document_id) {
+                    document.core.metadata_ready(*info);
                 }
             }
             WorkerEvent::OpticsMatchReady {
@@ -72,17 +47,19 @@ impl RohditorApp {
                 database,
                 error,
             } => {
-                if let Some(document) = self.document.as_mut().filter(|doc| doc.id == document_id) {
-                    document.optics_match = result;
-                    document.optics_candidates = candidates;
-                    document.optics_database = database;
-                    document.optics_error = error;
+                if let Some(document) = self.current_document_mut(document_id) {
+                    document
+                        .core
+                        .optics_match_ready(result, candidates, database, error);
                 }
             }
             WorkerEvent::PlaceholderReady { document_id, image } => {
-                if let Some(document) = self.document.as_mut().filter(|doc| doc.id == document_id)
+                if let Some(document) = self
+                    .document
+                    .as_mut()
+                    .filter(|doc| doc.core.id == document_id)
                     && !matches!(
-                        document.preview.source,
+                        document.core.preview.source,
                         Some(source) if source.is_developed()
                     )
                 {
@@ -90,17 +67,8 @@ impl RohditorApp {
                 }
             }
             WorkerEvent::RawReady { document_id, frame } => {
-                let should_preview = if let Some(document) =
-                    self.document.as_mut().filter(|doc| doc.id == document_id)
-                {
-                    document.info = Some(frame.info.clone());
-                    document.frame = Some(frame);
-                    document.open_status = None;
-                    true
-                } else {
-                    false
-                };
-                if should_preview {
+                if let Some(document) = self.current_document_mut(document_id) {
+                    document.core.raw_ready(frame);
                     self.queue_preview(context, document_id);
                     self.start_default_noise_estimate(document_id);
                 }
@@ -124,21 +92,22 @@ impl RohditorApp {
                     }
                 };
                 let should_install = self.document.as_ref().is_some_and(|document| {
-                    document.accepts_preview(ticket, intent)
+                    document.core.accepts_preview(ticket, intent)
                         && match resolution {
                             PreviewResolution::Fit => {
-                                !document.preview.source_scale_requested
+                                !document.core.preview.source_scale_requested
                                     && self.tool.crop().is_none()
                             }
                             PreviewResolution::CropToolFullFrame => self.tool.crop().is_some(),
                             PreviewResolution::SourceScale => {
-                                document.preview.source_scale_requested
+                                document.core.preview.source_scale_requested
                             }
                         }
                         && (matches!(
                             resolution,
                             PreviewResolution::SourceScale | PreviewResolution::CropToolFullFrame
                         ) || document
+                            .core
                             .preview
                             .gpu()
                             .is_none_or(|preview| preview.ticket != ticket))
@@ -156,7 +125,7 @@ impl RohditorApp {
                     let Some(document) = self.document.as_mut() else {
                         return;
                     };
-                    let previous_source = document.preview.source;
+                    let previous_source = document.core.preview.source;
                     let source = if resolution == PreviewResolution::SourceScale {
                         PreviewSource::OneToOneCpu
                     } else {
@@ -164,20 +133,20 @@ impl RohditorApp {
                     };
                     install_texture(context, document, image, source);
                     if resolution != PreviewResolution::CropToolFullFrame {
-                        document.preview.histogram = Some(*histogram);
-                        document.preview.histogram_revision = Some(ticket.revision);
+                        document.core.preview.histogram = Some(*histogram);
+                        document.core.preview.histogram_revision = Some(ticket.revision);
                     }
                     if resolution == PreviewResolution::SourceScale {
-                        document.preview.view.source_scale_frame_ready(
+                        document.core.preview.view.source_scale_frame_ready(
                             previous_source,
                             context.input(|input| input.time),
                         );
                     }
-                    document.preview.status = None;
-                    document.preview.last_time = Some(diagnostics.timings.total);
-                    document.preview.diagnostics =
+                    document.core.preview.status = None;
+                    document.core.preview.last_time = Some(diagnostics.timings.total);
+                    document.core.preview.diagnostics =
                         Some(DocumentPreviewDiagnostics::cpu(diagnostics));
-                    document.error = None;
+                    document.core.error = None;
                     if resolution == PreviewResolution::CropToolFullFrame
                         && let Some(session) = self.tool.crop_mut()
                     {
@@ -206,78 +175,16 @@ impl RohditorApp {
                 if self
                     .document
                     .as_ref()
-                    .is_some_and(|document| document.ticket() == ticket)
+                    .is_some_and(|document| document.core.ticket() == ticket)
                 {
                     self.handle_gpu_failure(context, ticket.document_id, message);
                 }
             }
             WorkerEvent::WhiteBalanceSampleReady { ticket, sample } => {
-                if self.pending_white_balance_pick != Some(ticket) {
-                    return;
-                }
-                let Some(current_document) = self.document.as_mut() else {
-                    self.pending_white_balance_pick = None;
-                    return;
-                };
-                if current_document.id != ticket.document_id {
-                    self.pending_white_balance_pick = None;
-                    return;
-                }
-                if current_document.ticket() != ticket {
-                    self.pending_white_balance_pick = None;
-                    if current_document
-                        .preview
-                        .status
-                        .as_ref()
-                        .is_some_and(|(revision, _)| *revision == ticket.revision)
-                    {
-                        current_document.preview.status = None;
-                    }
-                    return;
-                }
-                let mut queue_preview = false;
-                self.pending_white_balance_pick = None;
-                let document = current_document;
-                document.preview.status = None;
-                let Some(resolved) = document_as_shot_colour(document) else {
-                    document.error = Some(
-                        "The RAW file did not provide a usable camera colour calibration"
-                            .to_owned(),
-                    );
-                    return;
-                };
-                let as_shot = document
-                    .frame
-                    .as_ref()
-                    .map(|frame| frame.info.as_shot_white_balance)
-                    .or_else(|| {
-                        document
-                            .info
-                            .as_ref()
-                            .map(|info| info.as_shot_white_balance)
-                    });
-                let Some(balance) = white_balance_from_camera_sample(
-                    sample,
-                    resolved.unbalanced_camera_to_xyz,
-                    as_shot,
-                ) else {
-                    document.error = Some(
-                        "That sample could not be represented by the available white-balance range"
-                            .to_owned(),
-                    );
-                    return;
-                };
-                let mut next = document.edits.recipe().clone();
-                next.color.white_balance = balance;
-                if document.edits.set_discrete(next) {
-                    queue_preview = true;
-                }
-                document.notice = None;
-                document.error = None;
-                if queue_preview {
-                    let document_id = document.id;
-                    let _ = document;
-                    self.queue_preview(context, document_id);
+                if let Some(document) = self.take_white_balance_pick(ticket)
+                    && document.core.apply_white_balance_sample(sample)
+                {
+                    self.queue_preview(context, ticket.document_id);
                 }
             }
             WorkerEvent::ColorRangeSampleReady {
@@ -295,32 +202,9 @@ impl RohditorApp {
             } => self.install_range_overlay(context, ticket, layer, &overlay),
             WorkerEvent::MaskOverlayFailed { ticket, .. } => self.fail_range_overlay(ticket),
             WorkerEvent::WhiteBalanceSampleFailed { ticket, message } => {
-                if self.pending_white_balance_pick != Some(ticket) {
-                    return;
+                if let Some(document) = self.take_white_balance_pick(ticket) {
+                    document.core.white_balance_sample_failed(message);
                 }
-                let Some(document) = self.document.as_mut() else {
-                    self.pending_white_balance_pick = None;
-                    return;
-                };
-                if document.id != ticket.document_id {
-                    self.pending_white_balance_pick = None;
-                    return;
-                }
-                if document.ticket() != ticket {
-                    self.pending_white_balance_pick = None;
-                    if document
-                        .preview
-                        .status
-                        .as_ref()
-                        .is_some_and(|(revision, _)| *revision == ticket.revision)
-                    {
-                        document.preview.status = None;
-                    }
-                    return;
-                }
-                self.pending_white_balance_pick = None;
-                document.preview.status = None;
-                document.error = Some(message);
             }
             WorkerEvent::ExportReady {
                 document_id,
@@ -330,20 +214,14 @@ impl RohditorApp {
                 report,
                 elapsed,
             } => {
-                if let Some(document) = self.document.as_mut().filter(|doc| doc.id == document_id)
-                    && document.export_status.as_ref().map(|job| job.id) == Some(export_id)
-                {
-                    document.export_status = None;
-                    document.error = None;
-                    document.notice = Some(format!(
-                        "Exported revision {recipe_revision} as {}-bit {}×{} ({} bytes) to {} in {:.2} s.",
-                        report.bit_depth.bits(),
-                        report.width,
-                        report.height,
-                        report.bytes_written,
-                        destination.display(),
-                        elapsed.as_secs_f64()
-                    ));
+                if let Some(document) = self.current_document_mut(document_id) {
+                    document.core.export_ready(
+                        export_id,
+                        recipe_revision,
+                        &destination,
+                        &report,
+                        elapsed,
+                    );
                 }
             }
             WorkerEvent::NoiseProfileReady {
@@ -356,8 +234,12 @@ impl RohditorApp {
                 result,
             } => self.camera_look_ready(context, document_id, &camera_profile, result),
             WorkerEvent::NeuralDemosaicReady { document_id } => {
-                if let Some(document) = self.document.as_mut().filter(|doc| doc.id == document_id) {
-                    document.preview.neural_ready = true;
+                if let Some(document) = self
+                    .document
+                    .as_mut()
+                    .filter(|doc| doc.core.id == document_id)
+                {
+                    document.core.preview.neural_ready = true;
                     self.refresh_current_presentation(context);
                 }
             }
@@ -365,8 +247,8 @@ impl RohditorApp {
                 document_id,
                 message,
             } => {
-                if let Some(document) = self.document.as_mut().filter(|doc| doc.id == document_id) {
-                    document.warning = Some(message);
+                if let Some(document) = self.current_document_mut(document_id) {
+                    document.core.warning = Some(message);
                 }
             }
             WorkerEvent::Failed {
@@ -376,43 +258,37 @@ impl RohditorApp {
                 export_id,
                 message,
             } => {
-                let Some(document) = self.document.as_mut().filter(|doc| doc.id == document_id)
-                else {
-                    return;
-                };
-                let current = match job {
-                    JobKind::Open => {
-                        document.open_status = None;
-                        true
-                    }
-                    JobKind::Preview => {
-                        let current = revision == Some(document.edits.revision());
-                        if current {
-                            document.preview.status = None;
-                        }
-                        current
-                    }
-                    JobKind::Export => {
-                        let current =
-                            document.export_status.as_ref().map(|job| job.id) == export_id;
-                        if current {
-                            document.export_status = None;
-                        }
-                        current
-                    }
-                };
-                if current {
-                    document.error = Some(message);
+                if let Some(document) = self.current_document_mut(document_id) {
+                    document.core.job_failed(job, revision, export_id, message);
                 }
             }
             WorkerEvent::WorkerStopped { message } => {
                 if let Some(document) = self.document.as_mut() {
-                    document.open_status = None;
-                    document.preview.status = None;
-                    document.export_status = None;
-                    document.error = Some(message);
+                    document.core.worker_stopped(message);
                 }
             }
         }
+    }
+
+    /// The open document, when it is the one a worker result is for.
+    fn current_document_mut(&mut self, document_id: u64) -> Option<&mut Document> {
+        self.document
+            .as_mut()
+            .filter(|doc| doc.core.id == document_id)
+    }
+
+    /// Settle the awaited white-balance pick when its result for `ticket`
+    /// arrives. The document is returned only if the result still applies to its
+    /// current recipe; a stale or foreign result just ends the pick.
+    fn take_white_balance_pick(&mut self, ticket: PreviewTicket) -> Option<&mut Document> {
+        if self.pending_white_balance_pick != Some(ticket) {
+            return None;
+        }
+        self.pending_white_balance_pick = None;
+        let document = self.document.as_mut()?;
+        document
+            .core
+            .white_balance_pick_is_current(ticket)
+            .then_some(document)
     }
 }

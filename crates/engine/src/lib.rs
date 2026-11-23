@@ -16,6 +16,7 @@ pub mod coordinator;
 pub mod document;
 pub mod export_options;
 pub mod models;
+pub mod open_document;
 pub mod persistence;
 pub mod presets;
 pub mod preview;

@@ -9,11 +9,10 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use rohditor_core::NEURAL_FALLBACK_DEMOSAIC;
 use rohditor_core::{
-    CameraCalibration, DatabaseProvenance, HighlightDiagnostics, JPEG_QUALITY_DEFAULT,
-    OutputPolicy, PreviewOptions, ProfileMatch, WhiteBalanceCoordinates, WhiteBalanceMode,
-    WhiteBalanceModeMemory, auto_tone, camera_color_transform, default_recipe,
-    hsl_channel_weights_from_display_rgb, paths_refer_to_same_file, resolve_camera_colour,
-    sample_rgb_patch, with_default_noise_reduction,
+    CameraCalibration, HighlightDiagnostics, JPEG_QUALITY_DEFAULT, OutputPolicy, PreviewOptions,
+    WhiteBalanceCoordinates, WhiteBalanceMode, WhiteBalanceModeMemory, auto_tone,
+    camera_color_transform, hsl_channel_weights_from_display_rgb, paths_refer_to_same_file,
+    resolve_camera_colour, sample_rgb_patch,
 };
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_edit::{
@@ -23,7 +22,7 @@ use rohditor_edit::{
     SHADOWS_RANGE, TEMPERATURE_RANGE, TINT_RANGE, TONE_CURVE_RANGE, VIBRANCE_RANGE,
     WHITE_BALANCE_MULTIPLIER_RANGE, WHITES_RANGE, WhiteBalance, with_hue_edge,
 };
-use rohditor_raw::{RawFileInfo, RawFrame};
+use rohditor_raw::RawFileInfo;
 use tracing::{info, warn};
 
 #[cfg(test)]
@@ -52,7 +51,6 @@ use crate::ui::theme;
 use crate::ui::tool_panel;
 use crate::ui::toolbar::{self, FilePanelModel, StatusBarModel, ToolbarModel};
 use crate::ui::viewport::{self, PreviewTexture, ViewportModel};
-use rohditor_engine::autosave::Autosave;
 use rohditor_engine::camera_profiles::CameraProfileRegistry;
 use rohditor_engine::catalog::library::{LibraryNavigation, LibraryState};
 use rohditor_engine::catalog::{CatalogCoordinator, CatalogState, ThumbnailSlot};
@@ -62,6 +60,7 @@ use rohditor_engine::coordinator::{
 };
 use rohditor_engine::document::{EditSession, PreviewIntent, PreviewTicket};
 use rohditor_engine::export_options::{ExportKind, ExportOptions};
+use rohditor_engine::open_document::{ExportActivity, OpenDocument};
 use rohditor_engine::presets::PresetStore;
 use rohditor_engine::preview::{
     DocumentPreview, GpuUpload, PreviewOutcome, PreviewRequest, PreviewRuntime, PreviewSource,
@@ -73,8 +72,8 @@ use rohditor_engine::view::ViewState;
 use rohditor_engine::wake::WakeFn;
 
 const RECIPE_SAVE_NOTICE_DURATION: Duration = Duration::from_secs(3);
-mod camera_look;
 mod clipping;
+mod derived_data;
 #[path = "events.rs"]
 mod events;
 #[path = "gpu.rs"]
@@ -84,22 +83,11 @@ mod info;
 mod lifecycle;
 mod masks;
 mod neural_model;
-mod noise_reduction;
 mod presets;
 mod screenshot;
 mod tools;
 #[cfg(test)]
 mod ui_tests;
-
-use camera_look::CameraLookState;
-use noise_reduction::NoiseState;
-
-#[derive(Debug)]
-struct ExportActivity {
-    id: u64,
-    recipe_revision: u64,
-    detail: String,
-}
 
 #[derive(Debug)]
 enum RecipeSaveStatus {
@@ -133,13 +121,10 @@ struct SettingsDialog {
     draft: AppSettings,
 }
 
+/// The engine's open document plus the egui state that presents it.
 struct Document {
-    autosave: Autosave,
-    id: u64,
-    path: PathBuf,
-    info: Option<RawFileInfo>,
-    frame: Option<Arc<RawFrame>>,
-    edits: EditSession,
+    /// Toolkit-free document state: edits, RAW frame, preview runtime, job status.
+    core: OpenDocument,
     texture: Option<PreviewTexture>,
     /// The Masks tool's red tint of the selected mask.
     mask_overlay: Option<masks::MaskTint>,
@@ -147,27 +132,11 @@ struct Document {
     /// after a failure, so a failing request is not repeated every frame.
     range_overlay_requested: Option<(u64, u32)>,
     preview_pixels: Option<DisplayPreviewPixels>,
-    /// Toolkit-free preview state: request tickets, resident GPU frame,
-    /// histogram, view and diagnostics.
-    preview: DocumentPreview,
     /// egui's id for the engine's GPU display texture.
     gpu_texture_id: Option<egui::TextureId>,
     /// The `preview` display generation `texture` was last synced to.
     synced_display_generation: u64,
     clipping: clipping::ClippingState,
-    open_status: Option<String>,
-    export_status: Option<ExportActivity>,
-    optics_match: Option<ProfileMatch>,
-    optics_candidates: Vec<rohditor_core::LensProfileSummary>,
-    optics_profile_filter: String,
-    optics_database: Option<DatabaseProvenance>,
-    optics_error: Option<String>,
-    warning: Option<String>,
-    error: Option<String>,
-    notice: Option<String>,
-    initialize_white_balance_from_metadata: bool,
-    camera_look: CameraLookState,
-    noise: NoiseState,
 }
 
 #[derive(Debug, Clone)]
@@ -180,54 +149,15 @@ struct DisplayPreviewPixels {
 impl Document {
     fn opening(id: u64, path: PathBuf, recipe: EditRecipe, warning: Option<String>) -> Self {
         Self {
-            id,
-            autosave: Autosave::default(),
-            path,
-            info: None,
-            frame: None,
-            edits: EditSession::from_saved(recipe),
+            core: OpenDocument::opening(id, path, recipe, warning),
             texture: None,
             mask_overlay: None,
             range_overlay_requested: None,
             preview_pixels: None,
-            preview: DocumentPreview::new(id),
             gpu_texture_id: None,
             synced_display_generation: 0,
             clipping: clipping::ClippingState::default(),
-            open_status: Some("Opening RAW file".to_owned()),
-            export_status: None,
-            optics_match: None,
-            optics_candidates: Vec::new(),
-            optics_profile_filter: String::new(),
-            optics_database: None,
-            optics_error: None,
-            warning,
-            error: None,
-            notice: None,
-            initialize_white_balance_from_metadata: false,
-            camera_look: CameraLookState::default(),
-            noise: NoiseState::default(),
         }
-    }
-
-    fn file_name(&self) -> String {
-        display_file_name(&self.path)
-    }
-
-    fn is_dirty(&self) -> bool {
-        self.edits.is_dirty()
-    }
-
-    fn ticket(&self) -> PreviewTicket {
-        self.preview.ticket(self.edits.revision())
-    }
-
-    fn begin_preview_request(&mut self, intent: PreviewIntent) -> PreviewTicket {
-        self.preview.begin_request(self.edits.revision(), intent)
-    }
-
-    fn accepts_preview(&self, ticket: PreviewTicket, intent: PreviewIntent) -> bool {
-        self.preview.accepts(self.edits.revision(), ticket, intent)
     }
 }
 
@@ -443,7 +373,7 @@ impl RohditorApp {
         let Some(info) = self
             .document
             .as_ref()
-            .and_then(|document| document.info.clone())
+            .and_then(|document| document.core.info.clone())
         else {
             return;
         };
@@ -458,15 +388,15 @@ impl RohditorApp {
         match result {
             Ok(profile) => {
                 let changed_document = self.document.as_mut().and_then(|document| {
-                    let mut next = document.edits.recipe().clone();
+                    let mut next = document.core.edits.recipe().clone();
                     next.color.camera_profile =
                         rohditor_edit::CameraProfileSelection::Matrix(profile);
-                    let changed = document.edits.set_discrete(next);
-                    document.error = None;
+                    let changed = document.core.edits.set_discrete(next);
+                    document.core.error = None;
                     if self.camera_profiles.warning().is_some() {
-                        document.warning = self.camera_profiles.warning().map(str::to_owned);
+                        document.core.warning = self.camera_profiles.warning().map(str::to_owned);
                     }
-                    changed.then_some(document.id)
+                    changed.then_some(document.core.id)
                 });
                 if let Some(document_id) = changed_document {
                     self.queue_preview(context, document_id);
@@ -474,7 +404,7 @@ impl RohditorApp {
             }
             Err(error) => {
                 if let Some(document) = self.document.as_mut() {
-                    document.error = Some(error);
+                    document.core.error = Some(error);
                 }
             }
         }
@@ -509,9 +439,9 @@ impl RohditorApp {
 
     fn document_work_in_flight(&self) -> bool {
         self.document.as_ref().is_some_and(|document| {
-            document.open_status.is_some()
-                || document.preview.status.is_some()
-                || document.export_status.is_some()
+            document.core.open_status.is_some()
+                || document.core.preview.status.is_some()
+                || document.core.export_status.is_some()
         }) || self.pending_white_balance_pick.is_some()
     }
 
@@ -526,9 +456,9 @@ impl RohditorApp {
     /// borrow the document's preview state mutably at the same time.
     fn preview_request(&self, context: &egui::Context, document: &Document) -> PreviewRequest {
         PreviewRequest {
-            frame: document.frame.clone(),
-            recipe: document.edits.recipe().clone(),
-            revision: document.edits.revision(),
+            frame: document.core.frame.clone(),
+            recipe: document.core.edits.recipe().clone(),
+            revision: document.core.edits.revision(),
             options: self.preview_options(),
             histogram_always: self.show_clipping,
             now: context.input(|input| input.time),
@@ -552,17 +482,17 @@ impl RohditorApp {
             context,
             self.document
                 .as_ref()
-                .filter(|document| document.id == document_id)?,
+                .filter(|document| document.core.id == document_id)?,
         );
         let document = self.document.as_mut()?;
         let (result, outcome) = operation(
             &mut self.preview_runtime,
             &self.coordinator,
-            &mut document.preview,
+            &mut document.core.preview,
             &request,
         );
-        outcome.error.apply(&mut document.error);
-        outcome.warning.apply(&mut document.warning);
+        outcome.error.apply(&mut document.core.error);
+        outcome.warning.apply(&mut document.core.warning);
         if let Some(gpu) = &self.egui_gpu {
             gpu.sync_display(document);
         }
@@ -586,7 +516,7 @@ impl RohditorApp {
     /// settings change is not an edit, so this advances only the presentation
     /// sequence and deliberately leaves the recipe history untouched.
     fn refresh_current_presentation(&mut self, context: &egui::Context) {
-        let Some(document_id) = self.document.as_ref().map(|document| document.id) else {
+        let Some(document_id) = self.document.as_ref().map(|document| document.core.id) else {
             return;
         };
         if self.tool.crop().is_none() {
@@ -596,12 +526,14 @@ impl RohditorApp {
 
         let options = self.preview_options();
         let request = self.document.as_mut().and_then(|document| {
-            let frame = document.frame.as_ref().map(Arc::clone)?;
-            let ticket = document.begin_preview_request(PreviewIntent::CropToolFullFrame);
-            let recipe = document.edits.recipe().clone();
-            document.preview.histogram_revision = None;
-            document.preview.diagnostics = None;
-            document.preview.status = Some((
+            let frame = document.core.frame.as_ref().map(Arc::clone)?;
+            let ticket = document
+                .core
+                .begin_preview_request(PreviewIntent::CropToolFullFrame);
+            let recipe = document.core.edits.recipe().clone();
+            document.core.preview.histogram_revision = None;
+            document.core.preview.diagnostics = None;
+            document.core.preview.status = Some((
                 ticket.revision,
                 "Rebuilding full image for crop with the selected demosaic algorithm".to_owned(),
             ));
@@ -616,8 +548,8 @@ impl RohditorApp {
             .crop_tool_preview(ticket, frame, recipe, options)
             && let Some(document) = self.document.as_mut()
         {
-            document.preview.status = None;
-            document.error = Some(error);
+            document.core.preview.status = None;
+            document.core.error = Some(error);
         }
     }
 
@@ -767,7 +699,7 @@ impl RohditorApp {
 
     /// Drop the document's resident GPU frame and free its egui texture.
     fn release_gpu_preview(&self, document: &mut Document) {
-        document.preview.release_gpu();
+        document.core.preview.release_gpu();
         if let Some(gpu) = &self.egui_gpu {
             gpu.sync_display(document);
         }
@@ -777,7 +709,7 @@ impl RohditorApp {
         let Some(mut document) = self.document.take() else {
             return;
         };
-        if document.id == document_id {
+        if document.core.id == document_id {
             self.release_gpu_preview(&mut document);
         }
         self.document = Some(document);
@@ -788,7 +720,10 @@ impl RohditorApp {
             self.preview_runtime.poll_device();
             return;
         };
-        if let Some(after) = self.preview_runtime.poll_completion(&mut document.preview) {
+        if let Some(after) = self
+            .preview_runtime
+            .poll_completion(&mut document.core.preview)
+        {
             context.request_repaint_after(after);
         }
     }
@@ -798,8 +733,8 @@ impl RohditorApp {
             return;
         };
         let poll = self.preview_runtime.poll_histogram(
-            &mut document.preview,
-            document.edits.revision(),
+            &mut document.core.preview,
+            document.core.edits.revision(),
             self.show_clipping,
         );
         if poll.repaint {
@@ -826,7 +761,7 @@ impl RohditorApp {
             if self
                 .document
                 .as_ref()
-                .and_then(|document| document.preview.diagnostics)
+                .and_then(|document| document.core.preview.diagnostics)
                 .is_some_and(|diagnostics| diagnostics.worker.capture_cpu_recovery)
             {
                 return format!("CPU sensor recovery · GPU spatial/color · {hardware}");
@@ -834,7 +769,7 @@ impl RohditorApp {
             match self
                 .document
                 .as_ref()
-                .and_then(|document| document.preview.diagnostics)
+                .and_then(|document| document.core.preview.diagnostics)
                 .map(|diagnostics| diagnostics.worker.backend)
             {
                 Some(PreviewBackend::Cpu) => format!("CPU fallback · GPU available · {hardware}"),
@@ -842,7 +777,7 @@ impl RohditorApp {
                     let sensor_gpu = self
                         .document
                         .as_ref()
-                        .and_then(|d| d.preview.diagnostics)
+                        .and_then(|d| d.core.preview.diagnostics)
                         .is_some_and(|d| d.worker.sensor_gpu);
                     if sensor_gpu {
                         format!("GPU sensor/spatial/color · {hardware}")
@@ -865,11 +800,13 @@ impl RohditorApp {
         let Some(document) = self.document.as_ref() else {
             return;
         };
-        if document.frame.is_none() || document.export_status.is_some() {
+        if document.core.frame.is_none() || document.core.export_status.is_some() {
             return;
         }
         let extension = self.export_settings.extension();
-        let suggested = self.export_settings.suggested_file_name(&document.path);
+        let suggested = self
+            .export_settings
+            .suggested_file_name(&document.core.path);
         let filter_name = match self.export_settings.kind {
             ExportKind::Jpeg => "JPEG image",
             ExportKind::Png => "PNG image",
@@ -889,14 +826,14 @@ impl RohditorApp {
         let settings = self.export_settings.core();
         if let Err(error) = settings.validate_destination(&destination) {
             if let Some(document) = self.document.as_mut() {
-                document.error = Some(error.to_string());
+                document.core.error = Some(error.to_string());
             }
             return;
         }
-        match paths_refer_to_same_file(&document.path, &destination) {
+        match paths_refer_to_same_file(&document.core.path, &destination) {
             Ok(true) => {
                 if let Some(document) = self.document.as_mut() {
-                    document.error = Some(
+                    document.core.error = Some(
                         "Refusing to replace the source RAW, including through a symbolic or hard link. Choose a different export destination."
                             .to_owned(),
                     );
@@ -906,7 +843,7 @@ impl RohditorApp {
             Ok(false) => {}
             Err(error) => {
                 if let Some(document) = self.document.as_mut() {
-                    document.error = Some(format!(
+                    document.core.error = Some(format!(
                         "Could not validate the export destination {}: {error}",
                         destination.display()
                     ));
@@ -917,21 +854,21 @@ impl RohditorApp {
 
         let export_id = self.next_export_id;
         self.next_export_id = self.next_export_id.saturating_add(1);
-        let document_id = document.id;
-        let recipe_revision = document.edits.revision();
-        let recipe = document.edits.recipe().clone();
-        let frame = document.frame.as_ref().map(Arc::clone);
+        let document_id = document.core.id;
+        let recipe_revision = document.core.edits.revision();
+        let recipe = document.core.edits.recipe().clone();
+        let frame = document.core.frame.as_ref().map(Arc::clone);
         let Some(frame) = frame else {
             return;
         };
         if let Some(document) = self.document.as_mut() {
-            document.export_status = Some(ExportActivity {
+            document.core.export_status = Some(ExportActivity {
                 id: export_id,
                 recipe_revision,
                 detail: "Queued full-resolution export".to_owned(),
             });
-            document.error = None;
-            document.notice = None;
+            document.core.error = None;
+            document.core.notice = None;
         }
         if let Err(error) = self.coordinator.export(
             document_id,
@@ -945,38 +882,44 @@ impl RohditorApp {
             self.preview_runtime.preference() != ProcessorPreference::Cpu,
         ) && let Some(document) = self.document.as_mut()
         {
-            document.export_status = None;
-            document.error = Some(error);
+            document.core.export_status = None;
+            document.core.error = Some(error);
         }
     }
 
     fn show_top_bar(&mut self, context: &egui::Context) {
         let model = ToolbarModel {
             mode: self.view_mode,
-            document_name: self.document.as_ref().map(Document::file_name),
+            document_name: self
+                .document
+                .as_ref()
+                .map(|document| document.core.file_name()),
             can_undo: self
                 .document
                 .as_ref()
-                .is_some_and(|document| document.edits.can_undo()),
+                .is_some_and(|document| document.core.edits.can_undo()),
             can_redo: self
                 .document
                 .as_ref()
-                .is_some_and(|document| document.edits.can_redo()),
+                .is_some_and(|document| document.core.edits.can_redo()),
             fit_selected: self
                 .document
                 .as_ref()
-                .is_none_or(|document| document.preview.view.is_fit()),
+                .is_none_or(|document| document.core.preview.view.is_fit()),
             source_scale_selected: source_scale_selected(self.document.as_ref()),
             zoom_label: self.document.as_ref().map_or_else(
                 || "FIT".to_owned(),
-                |document| document.preview.view.zoom_label(),
+                |document| document.core.preview.view.zoom_label(),
             ),
             diagnostics_open: self.show_diagnostics,
             clipping_selected: self.show_clipping,
-            dirty: self.document.as_ref().is_some_and(Document::is_dirty),
+            dirty: self
+                .document
+                .as_ref()
+                .is_some_and(|document| document.core.is_dirty()),
             export_ready: self.view_mode == ViewMode::Develop
                 && self.document.as_ref().is_some_and(|document| {
-                    document.frame.is_some() && document.export_status.is_none()
+                    document.core.frame.is_some() && document.core.export_status.is_none()
                 }),
         };
         let actions = toolbar::show_top(context, &model);
@@ -986,7 +929,7 @@ impl RohditorApp {
             // The mode switch swaps the entire central UI, unmounting any
             // dragged slider, so it commits an open gesture first.
             if let Some(document) = self.document.as_mut() {
-                document.edits.finish_gesture();
+                document.core.edits.finish_gesture();
             }
             if mode == ViewMode::Library {
                 // The crop overlay and pickers belong to the develop viewport.
@@ -1026,39 +969,40 @@ impl RohditorApp {
         if let Some(document) = self.document.as_mut() {
             let mut changed = false;
             if actions.undo {
-                changed |= document.edits.undo();
+                changed |= document.core.edits.undo();
             }
             if actions.redo {
-                changed |= document.edits.redo();
+                changed |= document.core.edits.redo();
             }
             if actions.reset {
-                let recipe = default_recipe_for_document(document);
-                changed |= document.edits.reset_to(recipe);
+                let recipe = document.core.default_recipe();
+                changed |= document.core.edits.reset_to(recipe);
             }
             if changed {
-                document.notice = None;
-                changed_document = Some(document.id);
+                document.core.notice = None;
+                changed_document = Some(document.core.id);
             }
             if actions.fit {
-                let changed_mode = document.preview.source_scale_requested;
-                document.preview.source_scale_requested = false;
-                document.preview.view.fit(now);
+                let changed_mode = document.core.preview.source_scale_requested;
+                document.core.preview.source_scale_requested = false;
+                document.core.preview.view.fit(now);
                 if changed_mode {
-                    view_changed_document = Some(document.id);
+                    view_changed_document = Some(document.core.id);
                 }
             }
             if actions.actual_size && self.tool.crop().is_none() {
-                let changed_mode = !document.preview.source_scale_requested;
-                document.preview.source_scale_requested = true;
+                let changed_mode = !document.core.preview.source_scale_requested;
+                document.core.preview.source_scale_requested = true;
                 let preview_is_source_scale = document
+                    .core
                     .preview
                     .source
                     .is_some_and(PreviewSource::is_source_scale);
                 if preview_is_source_scale {
-                    document.preview.view.actual_size(now);
+                    document.core.preview.view.actual_size(now);
                 }
                 if changed_mode {
-                    view_changed_document = Some(document.id);
+                    view_changed_document = Some(document.core.id);
                 }
             }
         }
@@ -1084,11 +1028,11 @@ impl RohditorApp {
             ready: self
                 .document
                 .as_ref()
-                .is_some_and(|document| document.frame.is_some()),
+                .is_some_and(|document| document.core.frame.is_some()),
             in_progress: self
                 .document
                 .as_ref()
-                .is_some_and(|document| document.export_status.is_some()),
+                .is_some_and(|document| document.core.export_status.is_some()),
         };
         let mut open = true;
         let export_requested =
@@ -1101,9 +1045,13 @@ impl RohditorApp {
 
     fn show_file_panel(&mut self, context: &egui::Context) {
         let model = FilePanelModel {
-            file_name: self.document.as_ref().map(Document::file_name),
+            file_name: self
+                .document
+                .as_ref()
+                .map(|document| document.core.file_name()),
             camera: self.document.as_ref().and_then(|document| {
                 document
+                    .core
                     .info
                     .as_ref()
                     .map(|info| format!("{} {}", info.clean_make, info.clean_model))
@@ -1111,12 +1059,12 @@ impl RohditorApp {
             dimensions: self
                 .document
                 .as_ref()
-                .and_then(|document| document.info.as_ref())
+                .and_then(|document| document.core.info.as_ref())
                 .map(|info| (info.width, info.height)),
             source_state: self
                 .document
                 .as_ref()
-                .and_then(|document| document.preview.source)
+                .and_then(|document| document.core.preview.source)
                 .map(|source| source.short_label().to_owned()),
         };
         let output = toolbar::show_file_panel(context, &model);
@@ -1151,62 +1099,62 @@ impl RohditorApp {
             let mut changed = false;
             let mut auto_tone_applied = false;
             if let Some(selection) = output.camera_profile {
-                let mut next = document.edits.recipe().clone();
+                let mut next = document.core.edits.recipe().clone();
                 next.color.camera_profile = selection;
-                changed |= document.edits.set_discrete(next);
+                changed |= document.core.edits.set_discrete(next);
             }
             if let Some(selection) = output.rendering_profile {
-                let mut next = document.edits.recipe().clone();
+                let mut next = document.core.edits.recipe().clone();
                 next.rendering.profile = selection;
-                changed |= document.edits.set_discrete(next);
+                changed |= document.core.edits.set_discrete(next);
             }
             if let Some(enabled) = output.capture_enabled {
-                let mut next = document.edits.recipe().clone();
+                let mut next = document.core.edits.recipe().clone();
                 next.capture_sharpening.enabled = enabled;
-                changed |= document.edits.set_discrete(next);
+                changed |= document.core.edits.set_discrete(next);
             }
             if let Some(method) = output.highlight_method {
-                changed |= set_highlight_method(&mut document.edits, method);
+                changed |= set_highlight_method(&mut document.core.edits, method);
             }
             // Temperature is camera-calibrated and tint is relative to the
             // As Shot locus offset. Resolve the current profile after applying
             // a profile selection so mode switches and slider edits start from
             // this document's actual As Shot white point.
-            let as_shot_coordinates = document_as_shot_coordinates(document);
+            let as_shot_coordinates = document.core.as_shot_coordinates();
             if let Some(mode) = output.white_balance_mode {
-                let mut next = document.edits.recipe().clone();
+                let mut next = document.core.edits.recipe().clone();
                 next.color.white_balance = white_balance_memory.select(
                     next.color.white_balance,
                     mode,
                     as_shot_coordinates,
                 );
-                let mode_changed = document.edits.set_discrete(next);
+                let mode_changed = document.core.edits.set_discrete(next);
                 changed |= mode_changed;
                 if mode_changed {
-                    white_balance_draft = Some(document.id);
-                    white_balance_exact = Some(document.id);
+                    white_balance_draft = Some(document.core.id);
+                    white_balance_exact = Some(document.core.id);
                 }
             }
             if let Some(action) = output.optics_action {
-                let mut next = document.edits.recipe().clone();
+                let mut next = document.core.edits.recipe().clone();
                 next.optics = action.apply(&next.optics);
-                changed |= document.edits.set_discrete(next);
+                changed |= document.core.edits.set_discrete(next);
             }
             if let Some(filter) = output.optics_filter {
-                document.optics_profile_filter = filter;
+                document.core.optics_profile_filter = filter;
             }
             if output.auto_tone
-                && document.preview.histogram_revision == Some(document.edits.revision())
-                && let Some(histogram) = document.preview.histogram.as_ref()
+                && document.core.preview.histogram_revision == Some(document.core.edits.revision())
+                && let Some(histogram) = document.core.preview.histogram.as_ref()
             {
-                let auto_changed = auto_tone(document.edits.recipe(), histogram)
-                    .is_some_and(|next| document.edits.set_discrete(next));
+                let auto_changed = auto_tone(document.core.edits.recipe(), histogram)
+                    .is_some_and(|next| document.core.edits.set_discrete(next));
                 changed |= auto_changed;
                 auto_tone_applied = auto_changed;
             }
             for interaction in output.interactions {
                 let interaction_changed = apply_adjustment_interaction(
-                    &mut document.edits,
+                    &mut document.core.edits,
                     interaction,
                     as_shot_coordinates,
                 );
@@ -1214,40 +1162,40 @@ impl RohditorApp {
                 let (request_draft, request_exact) =
                     white_balance_preview_request(interaction, interaction_changed);
                 if request_draft {
-                    white_balance_draft = Some(document.id);
+                    white_balance_draft = Some(document.core.id);
                 }
                 if request_exact {
-                    white_balance_exact = Some(document.id);
+                    white_balance_exact = Some(document.core.id);
                 }
             }
             if output.reset_all {
-                let defaults = default_recipe_for_document(document);
-                changed |= document.edits.reset_to(defaults);
+                let defaults = document.core.default_recipe();
+                changed |= document.core.edits.reset_to(defaults);
                 // Hidden values are UI state, but reset-all should reset them
                 // too; otherwise switching away from As-shot after a reset
                 // would unexpectedly resurrect an older manual WB choice.
                 white_balance_memory = WhiteBalanceModeMemory::default();
             }
             if let Some(section) = output.reset_section {
-                let defaults = default_recipe_for_document(document);
+                let defaults = document.core.default_recipe();
                 let next = rohditor_edit::copy_sections(
-                    document.edits.recipe(),
+                    document.core.edits.recipe(),
                     &defaults,
                     &[section.recipe_section()],
                 );
-                changed |= document.edits.set_discrete(next);
+                changed |= document.core.edits.set_discrete(next);
                 if section == PanelSection::WhiteBalance {
                     // Same reason as reset-all: forget the hidden manual choice.
                     white_balance_memory = WhiteBalanceModeMemory::default();
                 }
             }
             if changed {
-                document.notice = None;
-                changed_document = Some(document.id);
+                document.core.notice = None;
+                changed_document = Some(document.core.id);
             }
-            white_balance_memory.remember(document.edits.recipe().color.white_balance);
+            white_balance_memory.remember(document.core.edits.recipe().color.white_balance);
             if auto_tone_applied {
-                document.notice = Some(
+                document.core.notice = Some(
                     "Auto tone applied from the current display histogram heuristic".to_owned(),
                 );
             }
@@ -1290,7 +1238,8 @@ impl RohditorApp {
                 active_handle: session.active_handle(),
             });
         let output = if let Some(document) = self.document.as_mut() {
-            let preparing = document.open_status.is_some() || document.preview.status.is_some();
+            let preparing =
+                document.core.open_status.is_some() || document.core.preview.status.is_some();
             let crop_policy = self.settings.render_options().raw_crop_policy;
             if let Some(session) = self.tool.masks() {
                 let options = PreviewOptions {
@@ -1309,8 +1258,8 @@ impl RohditorApp {
             let masks = self.tool.masks().and_then(|session| {
                 masks::overlay_model(
                     session,
-                    &document.edits,
-                    document.frame.as_deref(),
+                    &document.core.edits,
+                    document.core.frame.as_deref(),
                     crop_policy,
                     document.mask_overlay.as_ref(),
                 )
@@ -1325,12 +1274,12 @@ impl RohditorApp {
                         .clipping
                         .texture_for(document.texture.as_ref())
                         .filter(|_| self.show_clipping),
-                    source: document.preview.source,
+                    source: document.core.preview.source,
                     picker_mode: self.tool.picker(),
                     crop: crop_overlay,
                     masks,
                 },
-                &mut document.preview.view,
+                &mut document.core.preview.view,
             )
         } else {
             let mut empty_view = ViewState::default();
@@ -1380,7 +1329,7 @@ impl RohditorApp {
         }
         let Some((ticket, frame, recipe)) = self.document.as_ref().and_then(|document| {
             let source_ready = matches!(
-                document.preview.source,
+                document.core.preview.source,
                 Some(
                     PreviewSource::FastCpu
                         | PreviewSource::FastGpu
@@ -1388,19 +1337,19 @@ impl RohditorApp {
                         | PreviewSource::HighQualityGpu
                 )
             );
-            if !source_ready || document.preview.source_scale_requested {
+            if !source_ready || document.core.preview.source_scale_requested {
                 return None;
             }
-            document.frame.as_ref().map(|frame| {
+            document.core.frame.as_ref().map(|frame| {
                 (
-                    document.ticket(),
+                    document.core.ticket(),
                     Arc::clone(frame),
-                    document.edits.recipe().clone(),
+                    document.core.edits.recipe().clone(),
                 )
             })
         }) else {
             if let Some(document) = self.document.as_mut() {
-                document.error = Some(
+                document.core.error = Some(
                     "Fit a developed RAW preview before using the white-balance picker".to_owned(),
                 );
             }
@@ -1419,19 +1368,19 @@ impl RohditorApp {
                 if let Some(document) = self
                     .document
                     .as_mut()
-                    .filter(|document| document.ticket() == ticket)
+                    .filter(|document| document.core.ticket() == ticket)
                 {
-                    document.preview.status = Some((
+                    document.core.preview.status = Some((
                         ticket.revision,
                         "Sampling a camera-native white-balance patch".to_owned(),
                     ));
-                    document.error = None;
+                    document.core.error = None;
                 }
                 context.request_repaint();
             }
             Err(error) => {
                 if let Some(document) = self.document.as_mut() {
-                    document.error = Some(error);
+                    document.core.error = Some(error);
                 }
             }
         }
@@ -1442,7 +1391,7 @@ impl RohditorApp {
         let sample = self.sample_display_pixel(normalized);
         let Some(sample) = sample else {
             if let Some(document) = self.document.as_mut() {
-                document.error = Some(
+                document.core.error = Some(
                     "A current developed preview is required to pick a Color Mixer band".to_owned(),
                 );
             }
@@ -1450,7 +1399,7 @@ impl RohditorApp {
         };
         let Some(weights) = hsl_channel_weights_from_display_rgb(sample) else {
             if let Some(document) = self.document.as_mut() {
-                document.error =
+                document.core.error =
                     Some("That sample is too neutral to identify a Color Mixer band".to_owned());
             }
             return;
@@ -1463,8 +1412,8 @@ impl RohditorApp {
             .unwrap_or(0);
         self.color_mixer_channel = selected;
         if let Some(document) = self.document.as_mut() {
-            document.notice = None;
-            document.error = None;
+            document.core.notice = None;
+            document.core.error = None;
         }
     }
 
@@ -1478,6 +1427,7 @@ impl RohditorApp {
         }
         let document = self.document.as_ref()?;
         if !document
+            .core
             .preview
             .source
             .is_some_and(PreviewSource::is_developed)
@@ -1493,7 +1443,9 @@ impl RohditorApp {
                 [normalized.x, normalized.y],
             );
         }
-        let readback = self.preview_runtime.readback_display(&document.preview)?;
+        let readback = self
+            .preview_runtime
+            .readback_display(&document.core.preview)?;
         sample_rgb_patch(
             usize::try_from(readback.width).ok()?,
             usize::try_from(readback.height).ok()?,
@@ -1527,23 +1479,23 @@ impl RohditorApp {
             activities.push(note.to_owned());
         }
         if let Some(document) = &self.document {
-            if let Some(error) = &document.error {
+            if let Some(error) = &document.core.error {
                 activities.push(format!("Error: {error}"));
             }
-            if let Some(warning) = &document.warning {
+            if let Some(warning) = &document.core.warning {
                 activities.push(format!("Warning: {warning}"));
             }
-            if let Some(notice) = &document.notice {
+            if let Some(notice) = &document.core.notice {
                 activities.push(notice.clone());
             }
-            if let Some(status) = &document.open_status {
+            if let Some(status) = &document.core.open_status {
                 activities.push(status.clone());
                 busy = true;
-            } else if let Some((revision, status)) = &document.preview.status {
+            } else if let Some((revision, status)) = &document.core.preview.status {
                 activities.push(format!("{status} · revision {revision}"));
                 busy = true;
             }
-            if let Some(export) = &document.export_status {
+            if let Some(export) = &document.core.export_status {
                 activities.push(format!(
                     "{} · recipe revision {}",
                     export.detail, export.recipe_revision
@@ -1586,7 +1538,7 @@ impl RohditorApp {
                 preview_milliseconds: self
                     .document
                     .as_ref()
-                    .and_then(|document| document.preview.last_time)
+                    .and_then(|document| document.core.preview.last_time)
                     .map(|duration| duration.as_secs_f64() * 1_000.0),
                 startup_error: self.startup_error.clone(),
             },
@@ -1628,7 +1580,7 @@ impl RohditorApp {
         if self
             .document
             .as_ref()
-            .is_some_and(|document| document.path == path)
+            .is_some_and(|document| document.core.path == path)
         {
             return;
         }
@@ -1740,7 +1692,7 @@ impl RohditorApp {
         let active_catalog_index = self
             .document
             .as_ref()
-            .and_then(|document| self.catalog.entry_index_for_path(&document.path));
+            .and_then(|document| self.catalog.entry_index_for_path(&document.core.path));
         let active_grid =
             active_catalog_index.and_then(|catalog_index| self.library.grid_index(catalog_index));
         let scroll_to_active = active_grid != self.filmstrip_active;
@@ -1790,10 +1742,10 @@ impl RohditorApp {
 
     fn background_work_is_active(&self) -> bool {
         self.document.as_ref().is_some_and(|document| {
-            document.open_status.is_some()
-                || document.preview.status.is_some()
-                || document.export_status.is_some()
-                || document.preview.has_pending_histogram()
+            document.core.open_status.is_some()
+                || document.core.preview.status.is_some()
+                || document.core.export_status.is_some()
+                || document.core.preview.has_pending_histogram()
         }) || self.pending_white_balance_pick.is_some()
             || self.catalog.scanning()
             || self.catalog.pending_count() > 0
@@ -1826,7 +1778,7 @@ impl RohditorApp {
         let preview = self
             .document
             .as_ref()
-            .and_then(|document| document.preview.diagnostics)
+            .and_then(|document| document.core.preview.diagnostics)
             .and_then(|preview| {
                 let document = self.document.as_ref()?;
                 Some(PreviewModel {
@@ -1883,7 +1835,7 @@ impl RohditorApp {
                             },
                         ),
                     rendering: rendering_profile_diagnostic(
-                        document.edits.recipe().rendering.profile,
+                        document.core.edits.recipe().rendering.profile,
                     ),
                     output_policy: output_policy_diagnostic(
                         self.settings.render_options().output_policy,
@@ -1991,11 +1943,11 @@ impl RohditorApp {
                 warning: self
                     .document
                     .as_ref()
-                    .and_then(|document| document.warning.clone()),
+                    .and_then(|document| document.core.warning.clone()),
                 error: self
                     .document
                     .as_ref()
-                    .and_then(|document| document.error.clone()),
+                    .and_then(|document| document.core.error.clone()),
             },
         }
     }
@@ -2042,7 +1994,7 @@ impl RohditorApp {
         match result {
             Ok(()) => {
                 if let Some(document) = self.document.as_mut() {
-                    document.notice = Some(format!(
+                    document.core.notice = Some(format!(
                         "Saved support-safe diagnostics report to {}.",
                         destination.display()
                     ));
@@ -2050,7 +2002,7 @@ impl RohditorApp {
             }
             Err(error) => {
                 if let Some(document) = self.document.as_mut() {
-                    document.error = Some(error);
+                    document.core.error = Some(error);
                 } else {
                     self.startup_error = Some(error);
                 }
@@ -2060,14 +2012,14 @@ impl RohditorApp {
 }
 
 fn camera_profile_diagnostic(document: &Document) -> String {
-    let Some(info) = document.info.as_ref() else {
+    let Some(info) = document.core.info.as_ref() else {
         return "unavailable (RAW metadata pending)".to_owned();
     };
     let calibration = CameraCalibration::from_raw_info(info);
     resolve_camera_colour(
         &calibration,
-        &document.edits.recipe().color.camera_profile,
-        document.edits.recipe().color.white_balance,
+        &document.core.edits.recipe().color.camera_profile,
+        document.core.edits.recipe().color.white_balance,
     )
     .map(|resolved| resolved.provenance.to_string())
     .unwrap_or_else(|error| format!("unavailable ({error})"))
@@ -2099,46 +2051,7 @@ fn output_gamut_statistics(diagnostics: rohditor_core::GamutMappingDiagnostics) 
 }
 
 fn source_scale_selected(document: Option<&Document>) -> bool {
-    document.is_some_and(|document| document.preview.source_scale_requested)
-}
-
-/// Resolve the camera-specific coordinates represented by the source's
-/// decoder-provided As Shot gains. Coordinates are a display convenience;
-/// rendering continues to use the original gains when projection is not
-/// possible for a particular calibration.
-fn document_as_shot_coordinates(document: &Document) -> Option<WhiteBalanceCoordinates> {
-    document_as_shot_colour(document).and_then(|resolved| resolved.as_shot_coordinates)
-}
-
-/// Resolve the camera transform currently selected for a document while
-/// asking the core for its authoritative As Shot white-balance gains.
-fn document_as_shot_colour(document: &Document) -> Option<rohditor_core::ResolvedCameraColour> {
-    let info = document
-        .frame
-        .as_ref()
-        .map(|frame| &frame.info)
-        .or(document.info.as_ref())?;
-    let calibration = CameraCalibration::from_raw_info(info);
-    resolve_camera_colour(
-        &calibration,
-        &document.edits.recipe().color.camera_profile,
-        WhiteBalance::AsShot,
-    )
-    .or_else(|_| {
-        // A RAW can omit As Shot multipliers while still carrying a usable
-        // camera matrix. Keep custom Temperature/Tint usable in that case; the
-        // As Shot mode itself will continue to report the authoritative
-        // metadata error when it is rendered.
-        resolve_camera_colour(
-            &calibration,
-            &document.edits.recipe().color.camera_profile,
-            WhiteBalance::TemperatureTint {
-                temperature: TEMPERATURE_RANGE.neutral,
-                tint: TINT_RANGE.neutral,
-            },
-        )
-    })
-    .ok()
+    document.is_some_and(|document| document.core.preview.source_scale_requested)
 }
 
 fn document_panel_model(
@@ -2147,17 +2060,17 @@ fn document_panel_model(
     color_mixer_channel: usize,
     camera_profiles: &CameraProfileRegistry,
 ) -> DocumentPanelModel {
-    let camera_profile = document.edits.recipe().color.camera_profile.clone();
+    let camera_profile = document.core.edits.recipe().color.camera_profile.clone();
     let mut camera_profile_choices = vec![CameraProfileChoice {
         selection: rohditor_edit::CameraProfileSelection::Automatic,
         label: "Automatic (RAW / decoder matrix)".to_owned(),
-        detail: document.info.as_ref().map_or_else(
+        detail: document.core.info.as_ref().map_or_else(
             || "Decoder matrix selected when RAW metadata is available".to_owned(),
             automatic_profile_detail,
         ),
         tooltip: "Use the existing decoder-derived camera calibration".to_owned(),
     }];
-    if let Some(info) = &document.info {
+    if let Some(info) = &document.core.info {
         for profile in camera_profiles.compatible_profiles(info) {
             camera_profile_choices.push(camera_profile_choice(profile));
         }
@@ -2170,10 +2083,13 @@ fn document_panel_model(
         camera_profile_choices.push(camera_profile_choice(profile.clone()));
     }
     let as_shot_coordinates =
-        document_as_shot_coordinates(document).unwrap_or(WhiteBalanceCoordinates {
-            temperature: TEMPERATURE_RANGE.neutral,
-            tint: TINT_RANGE.neutral,
-        });
+        document
+            .core
+            .as_shot_coordinates()
+            .unwrap_or(WhiteBalanceCoordinates {
+                temperature: TEMPERATURE_RANGE.neutral,
+                tint: TINT_RANGE.neutral,
+            });
     let (
         white_balance_mode,
         white_balance_red,
@@ -2181,7 +2097,7 @@ fn document_panel_model(
         white_balance_blue,
         white_balance_temperature,
         white_balance_tint,
-    ) = match document.edits.recipe().color.white_balance {
+    ) = match document.core.edits.recipe().color.white_balance {
         WhiteBalance::AsShot => (
             WhiteBalanceMode::AsShot,
             WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
@@ -2208,20 +2124,24 @@ fn document_panel_model(
         ),
     };
     // Built once per frame and shared by everything that compares to defaults.
-    let defaults = default_recipe_for_document(document);
+    let defaults = document.core.default_recipe();
     DocumentPanelModel {
-        file_name: document.file_name(),
-        camera: document.info.as_ref().map(RawFileInfo::camera_label),
-        sensor_dimensions: document.info.as_ref().map(|info| (info.width, info.height)),
-        info: document.info.as_ref().map(info::info_panel_model),
-        revision: document.edits.revision(),
-        dirty: document.is_dirty(),
-        has_adjustments: differs_from_defaults(document, &defaults),
-        white_balance_changed: document.edits.recipe().color.white_balance
+        file_name: document.core.file_name(),
+        camera: document.core.info.as_ref().map(RawFileInfo::camera_label),
+        sensor_dimensions: document
+            .core
+            .info
+            .as_ref()
+            .map(|info| (info.width, info.height)),
+        info: document.core.info.as_ref().map(info::info_panel_model),
+        revision: document.core.edits.revision(),
+        dirty: document.core.is_dirty(),
+        has_adjustments: document.core.differs_from_defaults(&defaults),
+        white_balance_changed: document.core.edits.recipe().color.white_balance
             != defaults.color.white_balance,
         camera_profile,
         camera_profile_choices,
-        rendering_profile: document.edits.recipe().rendering.profile,
+        rendering_profile: document.core.edits.recipe().rendering.profile,
         values: AdjustmentValues {
             white_balance_mode,
             white_balance_red,
@@ -2229,17 +2149,18 @@ fn document_panel_model(
             white_balance_blue,
             white_balance_temperature,
             white_balance_tint,
-            exposure: document.edits.recipe().light.exposure_ev,
-            contrast: document.edits.recipe().light.contrast,
-            highlights: document.edits.recipe().light.highlights,
-            shadows: document.edits.recipe().light.shadows,
-            whites: document.edits.recipe().light.whites,
-            blacks: document.edits.recipe().light.blacks,
-            highlight_method: document.edits.recipe().raw.highlights.method,
-            highlight_threshold: match document.edits.recipe().raw.highlights.method {
-                HighlightMethod::Clip => document.edits.recipe().raw.highlights.clip.threshold,
+            exposure: document.core.edits.recipe().light.exposure_ev,
+            contrast: document.core.edits.recipe().light.contrast,
+            highlights: document.core.edits.recipe().light.highlights,
+            shadows: document.core.edits.recipe().light.shadows,
+            whites: document.core.edits.recipe().light.whites,
+            blacks: document.core.edits.recipe().light.blacks,
+            highlight_method: document.core.edits.recipe().raw.highlights.method,
+            highlight_threshold: match document.core.edits.recipe().raw.highlights.method {
+                HighlightMethod::Clip => document.core.edits.recipe().raw.highlights.clip.threshold,
                 HighlightMethod::Opposed => {
                     document
+                        .core
                         .edits
                         .recipe()
                         .raw
@@ -2247,15 +2168,16 @@ fn document_panel_model(
                         .opposed
                         .detection_threshold
                 }
-                HighlightMethod::Off => document.edits.recipe().raw.highlights.clip.threshold,
+                HighlightMethod::Off => document.core.edits.recipe().raw.highlights.clip.threshold,
             },
-            tone_curve_shadows: document.edits.recipe().light.tone_curve.shadows,
-            tone_curve_darks: document.edits.recipe().light.tone_curve.darks,
-            tone_curve_lights: document.edits.recipe().light.tone_curve.lights,
-            tone_curve_highlights: document.edits.recipe().light.tone_curve.highlights,
-            saturation: document.edits.recipe().color.saturation,
-            vibrance: document.edits.recipe().color.vibrance,
+            tone_curve_shadows: document.core.edits.recipe().light.tone_curve.shadows,
+            tone_curve_darks: document.core.edits.recipe().light.tone_curve.darks,
+            tone_curve_lights: document.core.edits.recipe().light.tone_curve.lights,
+            tone_curve_highlights: document.core.edits.recipe().light.tone_curve.highlights,
+            saturation: document.core.edits.recipe().color.saturation,
+            vibrance: document.core.edits.recipe().color.vibrance,
             hsl: document
+                .core
                 .edits
                 .recipe()
                 .color
@@ -2263,9 +2185,9 @@ fn document_panel_model(
                 .channels
                 .map(|channel| [channel.hue, channel.saturation, channel.luminance]),
             grading: [
-                document.edits.recipe().color.grading.shadows,
-                document.edits.recipe().color.grading.midtones,
-                document.edits.recipe().color.grading.highlights,
+                document.core.edits.recipe().color.grading.shadows,
+                document.core.edits.recipe().color.grading.midtones,
+                document.core.edits.recipe().color.grading.highlights,
             ],
         },
         ranges: AdjustmentRanges {
@@ -2355,12 +2277,13 @@ fn document_panel_model(
                 neutral: COLOR_GRADING_RANGE.neutral,
             },
         },
-        auto_tone_available: document.preview.histogram_revision == Some(document.edits.revision()),
+        auto_tone_available: document.core.preview.histogram_revision
+            == Some(document.core.edits.revision()),
         picker_mode,
         color_mixer_channel,
         optics: optics_panel_model(document),
-        false_color: document.edits.recipe().false_color,
-        noise_reduction: document.edits.recipe().noise_reduction,
+        false_color: document.core.edits.recipe().false_color,
+        noise_reduction: document.core.edits.recipe().noise_reduction,
         defaults: PanelDefaults {
             camera_profile: defaults.color.camera_profile.clone(),
             rendering_profile: defaults.rendering.profile,
@@ -2368,54 +2291,54 @@ fn document_panel_model(
             noise_reduction: defaults.noise_reduction,
             capture_sharpening: defaults.capture_sharpening,
         },
-        capture_sharpening: document.edits.recipe().capture_sharpening,
-        defringe: document.edits.recipe().defringe,
-        presence: document.edits.recipe().presence,
-        noise_suggestion: document.noise.suggestion(),
+        capture_sharpening: document.core.edits.recipe().capture_sharpening,
+        defringe: document.core.edits.recipe().defringe,
+        presence: document.core.edits.recipe().presence,
+        noise_suggestion: document.core.noise_suggestion(),
         changed_sections: presets::edited_sections(document),
     }
 }
 
 fn optics_panel_model(document: &Document) -> OpticsPanelModel {
-    let (camera, lens, focal_length, aperture, focus_distance) =
-        document
-            .info
-            .as_ref()
-            .map_or((None, None, None, None, None), |info| {
-                (
-                    Some(info.camera_label()),
-                    info.capture.lens_label(),
-                    info.capture.focal_length_label(),
-                    info.capture.aperture_label(),
-                    info.capture.focus_distance_label(),
-                )
-            });
-    let (applied, used_infinity_distance_fallback, scale) =
-        document
-            .preview
-            .diagnostics
-            .map_or((None, false, None), |diagnostics| {
-                (
-                    diagnostics.worker.optics_applied,
-                    diagnostics.worker.optics_used_infinity_distance_fallback,
-                    diagnostics.worker.optics_scale,
-                )
-            });
+    let (camera, lens, focal_length, aperture, focus_distance) = document
+        .core
+        .info
+        .as_ref()
+        .map_or((None, None, None, None, None), |info| {
+            (
+                Some(info.camera_label()),
+                info.capture.lens_label(),
+                info.capture.focal_length_label(),
+                info.capture.aperture_label(),
+                info.capture.focus_distance_label(),
+            )
+        });
+    let (applied, used_infinity_distance_fallback, scale) = document
+        .core
+        .preview
+        .diagnostics
+        .map_or((None, false, None), |diagnostics| {
+            (
+                diagnostics.worker.optics_applied,
+                diagnostics.worker.optics_used_infinity_distance_fallback,
+                diagnostics.worker.optics_scale,
+            )
+        });
     OpticsPanelModel {
-        profile: document.edits.recipe().optics.profile.clone(),
-        distortion: document.edits.recipe().optics.distortion,
-        vignetting: document.edits.recipe().optics.vignetting,
-        chromatic_aberration: document.edits.recipe().optics.chromatic_aberration,
+        profile: document.core.edits.recipe().optics.profile.clone(),
+        distortion: document.core.edits.recipe().optics.distortion,
+        vignetting: document.core.edits.recipe().optics.vignetting,
+        chromatic_aberration: document.core.edits.recipe().optics.chromatic_aberration,
         camera,
         lens,
         focal_length,
         aperture,
         focus_distance,
-        match_result: document.optics_match.clone(),
-        candidates: document.optics_candidates.clone(),
-        profile_filter: document.optics_profile_filter.clone(),
-        database: document.optics_database.clone(),
-        error: document.optics_error.clone(),
+        match_result: document.core.optics_match.clone(),
+        candidates: document.core.optics_candidates.clone(),
+        profile_filter: document.core.optics_profile_filter.clone(),
+        database: document.core.optics_database.clone(),
+        error: document.core.optics_error.clone(),
         applied,
         used_infinity_distance_fallback,
         scale,
@@ -2468,29 +2391,6 @@ fn camera_profile_choice(
         ),
         selection: rohditor_edit::CameraProfileSelection::Matrix(profile),
     }
-}
-
-#[cfg(test)]
-fn has_user_adjustments(document: &Document) -> bool {
-    differs_from_defaults(document, &default_recipe_for_document(document))
-}
-
-/// Whether the recipe differs from the document's defaults. The fitted camera
-/// look is derived from the photo rather than chosen, so it does not count.
-fn differs_from_defaults(document: &Document, defaults: &EditRecipe) -> bool {
-    let mut current = document.edits.recipe().clone();
-    current.rendering.camera_tone = None;
-    current.rendering.camera_chroma = None;
-    current != *defaults
-}
-
-/// The recipe a document is reset to: camera-specific white balance, plus the
-/// noise reduction derived from its own noise estimate when it has one.
-fn default_recipe_for_document(document: &Document) -> EditRecipe {
-    with_default_noise_reduction(
-        default_recipe(document_as_shot_coordinates(document)),
-        document.noise.default_profile(),
-    )
 }
 
 fn set_highlight_method(edits: &mut EditSession, method: HighlightMethod) -> bool {
@@ -2763,7 +2663,7 @@ fn install_texture(
         rgb: pixels,
     });
     document.clipping.mark_stale();
-    let texture_name = format!("document-{}-preview", document.id);
+    let texture_name = format!("document-{}-preview", document.core.id);
     match document.texture.as_mut() {
         Some(PreviewTexture::Cpu(texture)) => {
             texture.set(color, egui::TextureOptions::LINEAR);
@@ -2776,18 +2676,12 @@ fn install_texture(
             )));
         }
     }
-    document.preview.source = Some(source);
-}
-
-fn display_file_name(path: &Path) -> String {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("RAW file")
-        .to_owned()
+    document.core.preview.source = Some(source);
 }
 
 #[cfg(test)]
 mod tests {
+    use rohditor_core::default_recipe;
     use rohditor_engine::preview::gpu_supports_recipe;
 
     use super::*;
@@ -3027,7 +2921,7 @@ mod tests {
         let context = egui::Context::default();
         let mut document =
             Document::opening(7, PathBuf::from("fixture.arw"), EditRecipe::default(), None);
-        document.preview.view.actual_size(0.0);
+        document.core.preview.view.actual_size(0.0);
         let pixels = vec![255, 0, 0, 0, 255, 0];
 
         install_texture(
@@ -3041,29 +2935,29 @@ mod tests {
             PreviewSource::FastCpu,
         );
 
-        assert!(!document.preview.view.is_fit());
-        assert_eq!(document.preview.view.zoom_label(), "SOURCE 100%");
+        assert!(!document.core.preview.view.is_fit());
+        assert_eq!(document.core.preview.view.zoom_label(), "SOURCE 100%");
     }
 
     #[test]
     fn a_fitted_camera_look_is_not_a_user_adjustment() {
         let mut document =
             Document::opening(7, PathBuf::from("fixture.arw"), default_recipe(None), None);
-        assert!(!has_user_adjustments(&document));
+        assert!(!document.core.has_user_adjustments());
 
-        document.edits.apply_derived(|recipe| {
+        document.core.edits.apply_derived(|recipe| {
             recipe.rendering.camera_tone = Some(rohditor_edit::CameraTone::static_fallback());
         });
-        assert!(!has_user_adjustments(&document));
+        assert!(!document.core.has_user_adjustments());
         assert!(
-            !document.is_dirty(),
+            !document.core.is_dirty(),
             "opening a photo must not create a sidecar"
         );
 
-        let mut recipe = document.edits.recipe().clone();
+        let mut recipe = document.core.edits.recipe().clone();
         recipe.light.exposure_ev = 0.5;
-        assert!(document.edits.set_discrete(recipe));
-        assert!(has_user_adjustments(&document));
+        assert!(document.core.edits.set_discrete(recipe));
+        assert!(document.core.has_user_adjustments());
     }
 
     #[test]
@@ -3097,12 +2991,12 @@ mod tests {
     fn source_scale_toolbar_selection_tracks_resolution_request() {
         let mut document =
             Document::opening(7, PathBuf::from("fixture.arw"), EditRecipe::default(), None);
-        document.preview.source_scale_requested = true;
-        document.preview.view.fit(0.0);
+        document.core.preview.source_scale_requested = true;
+        document.core.preview.view.fit(0.0);
 
         assert!(source_scale_selected(Some(&document)));
 
-        document.preview.source_scale_requested = false;
+        document.core.preview.source_scale_requested = false;
         assert!(!source_scale_selected(Some(&document)));
     }
 }

@@ -26,7 +26,7 @@ pub(super) fn tool_panel_model(document: Option<&Document>, tool: ToolKind) -> T
         title,
         subtitle,
         has_document: document.is_some(),
-        histogram: document.and_then(|document| document.preview.histogram.as_ref()),
+        histogram: document.and_then(|document| document.core.preview.histogram.as_ref()),
     }
 }
 
@@ -66,7 +66,7 @@ impl RohditorApp {
         // The switch swaps the panel and unmounts any dragged slider, so the
         // switch itself is the commit boundary for an open drag gesture.
         if let Some(document) = self.document.as_mut() {
-            document.edits.finish_gesture();
+            document.core.edits.finish_gesture();
         }
         self.leave_tool(context, true);
         self.exit_masks_tool();
@@ -106,21 +106,27 @@ impl RohditorApp {
             return;
         }
         let request = self.document.as_mut().and_then(|document| {
-            let frame = document.frame.as_ref().map(Arc::clone)?;
-            document.preview.source_scale_requested = false;
-            document.preview.view.fit(context.input(|input| input.time));
+            let frame = document.core.frame.as_ref().map(Arc::clone)?;
+            document.core.preview.source_scale_requested = false;
+            document
+                .core
+                .preview
+                .view
+                .fit(context.input(|input| input.time));
             let (width, height) = document
                 .texture
                 .as_ref()
                 .map(PreviewTexture::dimensions)
                 .unwrap_or((frame.info.width, frame.info.height));
             let session =
-                CropToolSession::new(document.edits.recipe().geometry.crop, width, height);
-            let ticket = document.begin_preview_request(PreviewIntent::CropToolFullFrame);
-            let recipe = document.edits.recipe().clone();
-            document.preview.status =
+                CropToolSession::new(document.core.edits.recipe().geometry.crop, width, height);
+            let ticket = document
+                .core
+                .begin_preview_request(PreviewIntent::CropToolFullFrame);
+            let recipe = document.core.edits.recipe().clone();
+            document.core.preview.status =
                 Some((ticket.revision, "Preparing full image for crop".to_owned()));
-            Some((document.id, ticket, frame, recipe, session))
+            Some((document.core.id, ticket, frame, recipe, session))
         });
         let Some((document_id, ticket, frame, recipe, session)) = request else {
             return;
@@ -137,10 +143,10 @@ impl RohditorApp {
             if let Some(document) = self
                 .document
                 .as_mut()
-                .filter(|document| document.id == document_id)
+                .filter(|document| document.core.id == document_id)
             {
-                document.preview.status = None;
-                document.error = Some(error);
+                document.core.preview.status = None;
+                document.core.error = Some(error);
             }
         }
     }
@@ -154,14 +160,14 @@ impl RohditorApp {
         let tool = std::mem::take(&mut self.tool);
         let mut changed_document = None;
         if let Some(document) = self.document.as_mut()
-            && let Some(next) = tool.leave(document.edits.recipe(), commit)
-            && document.edits.set_discrete(next)
+            && let Some(next) = tool.leave(document.core.edits.recipe(), commit)
+            && document.core.edits.set_discrete(next)
         {
-            document.notice = None;
-            changed_document = Some(document.id);
+            document.core.notice = None;
+            changed_document = Some(document.core.id);
         }
         let document_id =
-            changed_document.or_else(|| self.document.as_ref().map(|document| document.id));
+            changed_document.or_else(|| self.document.as_ref().map(|document| document.core.id));
         if let Some(document_id) = document_id {
             self.queue_preview(context, document_id);
         }

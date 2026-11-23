@@ -8,7 +8,7 @@ use eframe::egui;
 use rohditor_edit::changed_sections;
 use rohditor_engine::presets::{ApplyOptions, Preset};
 
-use super::{RohditorApp, default_recipe_for_document};
+use super::{Document, RohditorApp};
 use crate::ui::presets::PresetsAction;
 
 impl RohditorApp {
@@ -37,10 +37,10 @@ impl RohditorApp {
             amount,
             ..ApplyOptions::default()
         };
-        let next = preset.apply(document.edits.recipe(), &options);
-        if document.edits.set_discrete(next) {
-            document.notice = Some(format!("Applied preset \"{}\"", preset.name()));
-            let id = document.id;
+        let next = preset.apply(document.core.edits.recipe(), &options);
+        if document.core.edits.set_discrete(next) {
+            document.core.notice = Some(format!("Applied preset \"{}\"", preset.name()));
+            let id = document.core.id;
             self.queue_preview(context, id);
         }
     }
@@ -49,7 +49,7 @@ impl RohditorApp {
         let Some(document) = self.document.as_ref() else {
             return;
         };
-        let result = Preset::new(name, document.edits.recipe(), sections)
+        let result = Preset::new(name, document.core.edits.recipe(), sections)
             .and_then(|preset| self.presets.save(preset));
         match result {
             Ok(()) => {
@@ -63,9 +63,9 @@ impl RohditorApp {
 }
 
 /// The sections of `document` that differ from its defaults.
-pub(super) fn edited_sections(document: &super::Document) -> Vec<rohditor_edit::RecipeSection> {
+pub(super) fn edited_sections(document: &Document) -> Vec<rohditor_edit::RecipeSection> {
     changed_sections(
-        document.edits.recipe(),
-        &default_recipe_for_document(document),
+        document.core.edits.recipe(),
+        &document.core.default_recipe(),
     )
 }

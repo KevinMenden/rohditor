@@ -38,12 +38,12 @@ impl EguiGpu {
     /// or update the engine's GPU frame, or release the texture when that frame
     /// is gone. Cheap when nothing changed.
     pub(super) fn sync_display(&self, document: &mut Document) {
-        let generation = document.preview.display_generation();
+        let generation = document.core.preview.display_generation();
         if document.synced_display_generation == generation {
             return;
         }
         document.synced_display_generation = generation;
-        let Some(display) = document.preview.gpu_display() else {
+        let Some(display) = document.core.preview.gpu_display() else {
             // The GPU frame is gone: release its texture, and the viewport's
             // reference to it if that is what it shows.
             if let Some(id) = document.gpu_texture_id.take() {

@@ -147,7 +147,7 @@ pub(super) fn refresh_tint(
     let Some(layer) = session.overlay_layer() else {
         return;
     };
-    let recipe = document.edits.recipe();
+    let recipe = document.core.edits.recipe();
     let Some(shown) = recipe.local.layer(layer) else {
         // The selection is stale (the layer was deleted): show nothing rather than its tint.
         document.mask_overlay = None;
@@ -157,7 +157,7 @@ pub(super) fn refresh_tint(
         .components
         .iter()
         .any(|component| component.shape.is_range());
-    let revision = ranged.then(|| document.edits.revision());
+    let revision = ranged.then(|| document.core.edits.revision());
     if document
         .mask_overlay
         .as_ref()
@@ -170,7 +170,7 @@ pub(super) fn refresh_tint(
         return;
     }
     let source = TintSource::new(recipe, shown, policy, None);
-    let Some(info) = document.frame.as_ref().map(|frame| &frame.info) else {
+    let Some(info) = document.core.frame.as_ref().map(|frame| &frame.info) else {
         return;
     };
     let Some(developed) = developed_size(info, policy) else {
@@ -178,7 +178,7 @@ pub(super) fn refresh_tint(
         return;
     };
     let alpha = rohditor_core::render_mask_overlay_preview(
-        document.edits.recipe(),
+        document.core.edits.recipe(),
         layer,
         developed,
         info.orientation,
@@ -200,16 +200,17 @@ fn request_range_overlay(
     coordinator: &RenderCoordinator,
     options: PreviewOptions,
 ) {
-    let revision = document.edits.revision();
-    if document.range_overlay_requested == Some((revision, layer)) || document.open_status.is_some()
+    let revision = document.core.edits.revision();
+    if document.range_overlay_requested == Some((revision, layer))
+        || document.core.open_status.is_some()
     {
         return;
     }
-    let Some(frame) = document.frame.clone() else {
+    let Some(frame) = document.core.frame.clone() else {
         return;
     };
-    let ticket = document.ticket();
-    let recipe = document.edits.recipe().clone();
+    let ticket = document.core.ticket();
+    let recipe = document.core.edits.recipe().clone();
     // A failed request is remembered too, so it is not repeated every frame.
     document.range_overlay_requested = Some((revision, layer));
     if coordinator
@@ -246,7 +247,7 @@ fn install_tint(
             document.mask_overlay = Some(MaskTint {
                 source,
                 texture: context.load_texture(
-                    format!("document-{}-mask-tint", document.id),
+                    format!("document-{}-mask-tint", document.core.id),
                     image,
                     egui::TextureOptions::LINEAR,
                 ),
@@ -376,7 +377,7 @@ impl RohditorApp {
             return;
         };
         let model = MasksPanelModel {
-            layers: &document.edits.recipe().local.layers,
+            layers: &document.core.edits.recipe().local.layers,
             selected_layer: session.selected_layer,
             selected_component: session.selected_component,
             mode: session.mode,
@@ -420,18 +421,19 @@ impl RohditorApp {
         let Some(document) = self.document.as_mut() else {
             return;
         };
-        let Some(frame) = document.frame.clone() else {
-            document.error = Some("Open a developed RAW preview before picking colors".to_owned());
+        let Some(frame) = document.core.frame.clone() else {
+            document.core.error =
+                Some("Open a developed RAW preview before picking colors".to_owned());
             return;
         };
-        let ticket = document.ticket();
-        let recipe = document.edits.recipe().clone();
+        let ticket = document.core.ticket();
+        let recipe = document.core.edits.recipe().clone();
         match self
             .coordinator
             .sample_color_range(ticket, frame, recipe, position, pick, options)
         {
             Ok(()) => self.pending_color_pick = Some(ticket),
-            Err(error) => document.error = Some(error),
+            Err(error) => document.core.error = Some(error),
         }
     }
 
@@ -451,12 +453,14 @@ impl RohditorApp {
         else {
             return;
         };
-        if document.id != ticket.document_id || document.edits.revision() != ticket.revision {
+        if document.core.id != ticket.document_id
+            || document.core.edits.revision() != ticket.revision
+        {
             return;
         }
-        let recipe = document.edits.recipe().clone();
+        let recipe = document.core.edits.recipe().clone();
         let changed = install_discrete(
-            &mut document.edits,
+            &mut document.core.edits,
             session.pick_color(&recipe, sample, pick),
         );
         self.finish_mask_interaction(context, changed);
@@ -470,9 +474,9 @@ impl RohditorApp {
         if let Some(document) = self
             .document
             .as_mut()
-            .filter(|document| document.id == ticket.document_id)
+            .filter(|document| document.core.id == ticket.document_id)
         {
-            document.error = Some(message);
+            document.core.error = Some(message);
         }
     }
 
@@ -489,17 +493,17 @@ impl RohditorApp {
         let Some(document) = self
             .document
             .as_mut()
-            .filter(|document| document.id == ticket.document_id)
+            .filter(|document| document.core.id == ticket.document_id)
         else {
             return;
         };
         if document.range_overlay_requested == Some((ticket.revision, layer)) {
             document.range_overlay_requested = None;
         }
-        if document.edits.revision() != ticket.revision {
+        if document.core.edits.revision() != ticket.revision {
             return;
         }
-        let recipe = document.edits.recipe();
+        let recipe = document.core.edits.recipe();
         let Some(shown) = recipe.local.layer(layer) else {
             return;
         };
@@ -512,7 +516,8 @@ impl RohditorApp {
     /// A failure for a recipe the user has since edited says nothing about the current one.
     pub(super) fn fail_range_overlay(&mut self, ticket: PreviewTicket) {
         if let Some(document) = self.document.as_mut().filter(|document| {
-            document.id == ticket.document_id && document.edits.revision() == ticket.revision
+            document.core.id == ticket.document_id
+                && document.core.edits.revision() == ticket.revision
         }) {
             document.mask_overlay = None;
         }
@@ -523,7 +528,7 @@ impl RohditorApp {
         else {
             return false;
         };
-        drive_pointer(&mut document.edits, session, output, view)
+        drive_pointer(&mut document.core.edits, session, output, view)
     }
 
     /// A changed recipe needs a new preview. Selection and overlay changes do not: the tint is
@@ -535,8 +540,8 @@ impl RohditorApp {
         let Some(document) = self.document.as_mut() else {
             return;
         };
-        document.notice = None;
-        let id = document.id;
+        document.core.notice = None;
+        let id = document.core.id;
         self.queue_preview(context, id);
     }
 
@@ -546,7 +551,7 @@ impl RohditorApp {
         else {
             return false;
         };
-        let edits = &mut document.edits;
+        let edits = &mut document.core.edits;
         let recipe = edits.recipe().clone();
         match action {
             MasksAction::SelectLayer(layer) => session.select_layer(&recipe, layer),
@@ -651,8 +656,9 @@ impl RohditorApp {
         } else if pressed(egui::Key::Delete) || pressed(egui::Key::Backspace) {
             if let (Some(document), Some(session)) = (self.document.as_mut(), self.tool.masks_mut())
             {
-                let recipe = document.edits.recipe().clone();
-                changed = install_discrete(&mut document.edits, session.delete_selected(&recipe));
+                let recipe = document.core.edits.recipe().clone();
+                changed =
+                    install_discrete(&mut document.core.edits, session.delete_selected(&recipe));
             }
         } else if pressed(egui::Key::Escape) {
             used = self
@@ -677,8 +683,8 @@ impl RohditorApp {
             return;
         };
         let mut session = MaskToolSession::default();
-        if let Some(first) = document.edits.recipe().local.layers.first() {
-            session.select_layer(document.edits.recipe(), first.id);
+        if let Some(first) = document.core.edits.recipe().local.layers.first() {
+            session.select_layer(document.core.edits.recipe(), first.id);
         }
         self.pending_white_balance_pick = None;
         // Entering Masks drops any active picker.

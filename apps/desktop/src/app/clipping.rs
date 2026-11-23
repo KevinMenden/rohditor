@@ -126,7 +126,7 @@ impl RohditorApp {
             // Rebuild from the current frame: from the CPU pixels on the next
             // `refresh_clipping_overlay`, or from a fresh GPU readback.
             document.clipping.mark_stale();
-            document.preview.request_histogram_now();
+            document.core.preview.request_histogram_now();
         } else {
             document.clipping = ClippingState::default();
         }
@@ -147,6 +147,7 @@ impl RohditorApp {
         // The embedded preview is the camera's JPEG, not the render being
         // judged, so it gets no overlay.
         if !document
+            .core
             .preview
             .source
             .is_some_and(rohditor_engine::preview::PreviewSource::is_developed)
@@ -159,7 +160,7 @@ impl RohditorApp {
         let Some(mask) = ClippingMask::from_rgb8(pixels.width, pixels.height, &pixels.rgb) else {
             return;
         };
-        let id = document.id;
+        let id = document.core.id;
         document.clipping.install(context, id, &mask);
     }
 }
@@ -173,7 +174,7 @@ pub(super) fn install_gpu_readback(
     rgba: &[u8],
 ) {
     if let Some(mask) = ClippingMask::from_rgba8(width, height, rgba) {
-        let id = document.id;
+        let id = document.core.id;
         document.clipping.install(context, id, &mask);
     }
 }

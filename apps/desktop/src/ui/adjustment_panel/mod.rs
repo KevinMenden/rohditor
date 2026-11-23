@@ -193,18 +193,7 @@ pub(crate) struct PanelDefaults {
     pub capture_sharpening: rohditor_edit::CaptureSharpening,
 }
 
-/// The noise-reduction strength Auto would set, as far as it is known.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum NoiseSuggestion {
-    /// Not estimated yet; clicking Auto estimates first.
-    Unknown,
-    Estimating,
-    /// The frame is too small to profile, or the estimate failed.
-    Unavailable,
-    Suggested {
-        chroma: f32,
-    },
-}
+pub(crate) use rohditor_engine::open_document::NoiseSuggestion;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct AdjustmentInteraction {
