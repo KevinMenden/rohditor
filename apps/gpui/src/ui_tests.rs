@@ -4,6 +4,7 @@
 //! photo. The photo is copied to a scratch folder first, so sidecars never end up next to the
 //! original. `ROHDITOR_SHOTS=DIR` writes a PNG per scenario.
 
+mod light;
 mod viewport;
 
 use std::path::{Path, PathBuf};
@@ -627,8 +628,8 @@ fn a_section_shows_that_it_is_edited_and_resets() {
     harness.keys("ctrl-z");
     assert_eq!(recipe(&mut harness), edited, "a reset is one undo step");
 
-    // By keyboard: the White balance header and its rows, the Tone header.
-    harness.keys("ctrl-d down down down delete");
+    // By keyboard, on the Tone header.
+    harness.keys("ctrl-d delete");
     assert_eq!(recipe(&mut harness).light, original.light);
     harness.keys("ctrl-z");
 
@@ -737,9 +738,9 @@ fn a_slider_is_edited_by_keyboard_alone() {
         return;
     };
     harness.wait_for_library("the folder", |library| library.len() == 2);
-    // The White balance header and its two rows, the Tone header, Exposure.
+    // The Tone header, Exposure.
     harness.keys("ctrl-d");
-    harness.keys("down down down tab");
+    harness.keys("tab");
     harness.keys("right right right left pageup");
     harness.capture("keyboard");
     assert_eq!(harness.exposure(), 0.6);
@@ -781,7 +782,7 @@ fn the_focused_slider_is_scrolled_to() {
     );
     // Up at the first control and Down at the last one stay there.
     harness.keys("ctrl-d up up");
-    harness.keys(&["down"; 25].join(" "));
+    harness.keys(&["down"; 40].join(" "));
     harness.capture("scrolled");
     assert!(harness.find(last).bottom() < visible);
     harness.keys("right");
@@ -790,8 +791,8 @@ fn the_focused_slider_is_scrolled_to() {
         document.edits.recipe().noise_reduction.chroma
     });
     assert_eq!(noise, 0.01, "it is the one with the focus");
-    harness.keys(&["up"; 25].join(" "));
-    let top = harness.find("section:WhiteBalance").top();
+    harness.keys(&["up"; 40].join(" "));
+    let top = harness.find("section:Tone").top();
     assert!(top > px(36.0) && top < px(300.0), "{top:?}");
 }
 

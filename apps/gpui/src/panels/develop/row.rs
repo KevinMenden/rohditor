@@ -9,6 +9,7 @@ use rohditor_edit::EditRecipe;
 
 use super::DevelopPanel;
 use super::focus::Control;
+use super::gestures::Grip;
 use crate::panels::adjustments::Adjustment;
 use crate::theme::{RADIUS, SMALL_FONT_SIZE, theme};
 use crate::ui::keys::{Cancel, Confirm};
@@ -251,7 +252,7 @@ fn press_area(panel: Entity<DevelopPanel>, adjustment: Adjustment) -> impl IntoE
                     && hitbox.is_hovered(window)
                 {
                     panel.update(cx, |panel, cx| {
-                        panel.press(adjustment, event, bounds, cx);
+                        panel.press(adjustment, Grip::Row, event, bounds, cx);
                     });
                 }
             });

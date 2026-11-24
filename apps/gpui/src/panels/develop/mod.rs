@@ -4,10 +4,13 @@
 //! relative to where it was, Shift drags finer, and a double click resets it. A click on the value
 //! types it. With the focus, the arrow keys change it.
 
+mod filter;
 mod focus;
 mod gestures;
+mod highlights;
 mod row;
 mod section;
+mod tone_curve;
 
 use std::collections::HashSet;
 
@@ -20,7 +23,7 @@ use rohditor_edit::{EditRecipe, RecipeSection};
 use focus::PanelFocus;
 use gestures::{Drag, Nudge, Typing, drag_tracker};
 
-use super::adjustments::{Adjustment, SECTIONS};
+use super::adjustments::GROUPS;
 use crate::actions::{AutoTone, ResetAdjustments};
 use crate::session::Session;
 use crate::theme::{DEVELOP_WIDTH, RADIUS, SMALL_FONT_SIZE, TAB_HEIGHT, theme};
@@ -28,7 +31,7 @@ use crate::ui::histogram::histogram;
 use crate::ui::keys::{SelectNext, SelectPrevious};
 use crate::ui::overlays::Overlays;
 use crate::ui::test_id::TestId as _;
-use crate::ui::toggle::toggle;
+use crate::ui::text_input::{Changed, TextInput};
 
 /// What the panel shows. Compared on every session change, so that the panel only redraws for
 /// its own content.
@@ -70,6 +73,7 @@ pub struct DevelopPanel {
     nudge: Option<Nudge>,
     typing: Option<Typing>,
     collapsed: HashSet<RecipeSection>,
+    search: Entity<TextInput>,
     /// Hide what is at its default.
     edited_only: bool,
     focus: PanelFocus,
@@ -89,6 +93,10 @@ impl DevelopPanel {
             }
         })
         .detach();
+        let search =
+            cx.new(|cx| TextInput::new("Search adjustments", "Search…", String::new(), cx));
+        cx.subscribe(&search, |_, _, _: &Changed, cx| cx.notify())
+            .detach();
         Self {
             session,
             overlays,
@@ -98,24 +106,15 @@ impl DevelopPanel {
             drag: None,
             nudge: None,
             typing: None,
-            collapsed: HashSet::new(),
+            // Used less often than what follows them.
+            collapsed: HashSet::from([
+                RecipeSection::ToneCurve,
+                RecipeSection::HighlightReconstruction,
+            ]),
+            search,
             edited_only: false,
             focus: PanelFocus::new(cx),
         }
-    }
-
-    /// Whether the panel shows this adjustment.
-    fn shows(&self, adjustment: &Adjustment, recipe: &EditRecipe, defaults: &EditRecipe) -> bool {
-        // A slider must not vanish while it is changed.
-        let parameter = adjustment.parameter;
-        let active = [
-            self.drag.as_ref().map(|drag| drag.adjustment.parameter),
-            self.typing
-                .as_ref()
-                .map(|typing| typing.adjustment.parameter),
-        ]
-        .contains(&Some(parameter));
-        !self.edited_only || active || parameter.is_changed(recipe, defaults)
     }
 
     fn header(&self, enabled: bool) -> impl IntoElement + use<> {
@@ -162,21 +161,6 @@ impl DevelopPanel {
                     .child(link("reset", "Reset", Box::new(ResetAdjustments))),
             )
     }
-
-    fn filter(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let panel = cx.entity();
-        div().flex().flex_none().px_2().child(toggle(
-            "edited-only",
-            "Edited only",
-            self.edited_only,
-            move |_, cx| {
-                panel.update(cx, |panel, cx| {
-                    panel.edited_only = !panel.edited_only;
-                    cx.notify();
-                });
-            },
-        ))
-    }
 }
 
 fn hint(text: &'static str) -> Div {
@@ -198,15 +182,20 @@ impl Render for DevelopPanel {
         let graph = histogram(bins.as_ref());
         let body = match &recipes {
             Some((recipe, defaults)) => {
-                let sections: Vec<_> = SECTIONS
+                let groups: Vec<_> = GROUPS
                     .iter()
-                    .filter_map(|section| self.section(section, recipe, defaults, cx))
+                    .filter_map(|group| self.group(group, recipe, defaults, cx))
                     .collect();
-                let empty = sections.is_empty();
+                let empty = groups.is_empty();
+                let nothing = if self.searching(cx) {
+                    "Nothing found."
+                } else {
+                    "Nothing is edited yet."
+                };
                 div()
                     .pt_1()
-                    .children(sections)
-                    .when(empty, |body| body.child(hint("Nothing is edited yet.")))
+                    .children(groups)
+                    .when(empty, |body| body.child(hint(nothing)))
             }
             None => hint("Open a photo to adjust it."),
         };

@@ -4,8 +4,8 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui::{
-    App, Bounds, Entity, IntoElement, Pixels, Role, SharedString, Window, canvas, div, prelude::*,
-    px,
+    App, Bounds, Div, Entity, Pixels, Role, SharedString, Stateful, Window, canvas, div,
+    prelude::*, px,
 };
 
 use crate::assets::Icon;
@@ -21,7 +21,7 @@ pub fn dropdown(
     value: impl Into<SharedString>,
     overlays: Entity<Overlays>,
     entries: impl Fn(&mut Window, &mut App) -> Vec<MenuEntry> + 'static,
-) -> impl IntoElement {
+) -> Stateful<Div> {
     let theme = theme();
     let value = value.into();
     let bounds = Rc::new(Cell::new(Bounds::<Pixels>::default()));

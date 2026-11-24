@@ -1,9 +1,9 @@
 //! Everything the user can do by key, button or command palette.
 
 use gpui::{Action, App, KeyBinding, NoAction, SharedString, actions};
-use rohditor_edit::RecipeSection;
+use rohditor_edit::{HighlightMethod, RecipeSection};
 
-use crate::panels::adjustments::SECTIONS;
+use crate::panels::adjustments::{HIGHLIGHT_METHODS, method_label, sections};
 use crate::{panels, ui};
 
 actions!(
@@ -26,6 +26,7 @@ actions!(
         ToggleFiles,
         ToggleDevelop,
         FocusAdjustments,
+        SearchAdjustments,
         FocusPhoto,
         ToggleCommandPalette,
         Quit,
@@ -36,6 +37,11 @@ actions!(
 #[derive(Debug, Clone, PartialEq, Eq, Action)]
 #[action(namespace = rohditor, no_json)]
 pub struct ResetSection(pub RecipeSection);
+
+/// Choose how clipped highlights are treated.
+#[derive(Debug, Clone, PartialEq, Eq, Action)]
+#[action(namespace = rohditor, no_json)]
+pub struct SetHighlightMethod(pub HighlightMethod);
 
 /// An entry of the command palette and, when it has a key, of the keymap.
 pub struct Command {
@@ -79,6 +85,11 @@ pub fn commands() -> Vec<Command> {
         command("view: toggle files panel", Some("ctrl-b"), ToggleFiles),
         command("view: toggle develop panel", Some("ctrl-r"), ToggleDevelop),
         command("view: focus adjustments", Some("ctrl-d"), FocusAdjustments),
+        command(
+            "view: search adjustments",
+            Some("ctrl-f"),
+            SearchAdjustments,
+        ),
         command("view: focus photo", Some("escape"), FocusPhoto),
         command(
             "view: command palette",
@@ -87,10 +98,17 @@ pub fn commands() -> Vec<Command> {
         ),
         command("rohditor: quit", Some("ctrl-q"), Quit),
     ];
-    commands.extend(SECTIONS.iter().map(|section| {
+    commands.extend(sections().map(|section| {
         let section = section.section;
         let name = format!("develop: reset {}", section.label().to_lowercase());
         command(name, None, ResetSection(section))
+    }));
+    commands.extend(HIGHLIGHT_METHODS.into_iter().map(|method| {
+        let name = format!(
+            "develop: highlight reconstruction {}",
+            method_label(method).to_lowercase()
+        );
+        command(name, None, SetHighlightMethod(method))
     }));
     commands
 }

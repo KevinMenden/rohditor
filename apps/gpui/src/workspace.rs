@@ -10,8 +10,9 @@ use gpui::{
 
 use crate::actions::{
     ActualPixels, AutoTone, CloseFile, Export, FocusAdjustments, FocusPhoto, NextPhoto, OpenFile,
-    OpenFolder, PreviousPhoto, Quit, Redo, ResetAdjustments, ResetSection, Save, ToggleClipping,
-    ToggleCommandPalette, ToggleDevelop, ToggleFiles, Undo, WORKSPACE_CONTEXT, ZoomToFit,
+    OpenFolder, PreviousPhoto, Quit, Redo, ResetAdjustments, ResetSection, Save, SearchAdjustments,
+    SetHighlightMethod, ToggleClipping, ToggleCommandPalette, ToggleDevelop, ToggleFiles, Undo,
+    WORKSPACE_CONTEXT, ZoomToFit,
 };
 use crate::library::Library;
 use crate::panels::command_palette::CommandPalette;
@@ -207,6 +208,16 @@ impl Workspace {
             .on_action(cx.listener(|this, action: &ResetSection, window, cx| {
                 this.develop
                     .update(cx, |panel, cx| panel.reset_section(action.0, window, cx));
+            }))
+            .on_action(cx.listener(|this, action: &SetHighlightMethod, _, cx| {
+                this.develop
+                    .update(cx, |panel, cx| panel.set_highlight_method(action.0, cx));
+            }))
+            .on_action(cx.listener(|this, _: &SearchAdjustments, window, cx| {
+                this.develop_open = true;
+                cx.notify();
+                this.develop
+                    .update(cx, |panel, cx| panel.focus_search(window, cx));
             }))
             .on_action(cx.listener(Self::toggle_palette))
             .on_action(cx.listener(|this, _: &FocusAdjustments, window, cx| {

@@ -2,7 +2,7 @@
 
 use gpui::Context;
 use rohditor_core::auto_tone;
-use rohditor_edit::{Parameter, RecipeSection, copy_sections};
+use rohditor_edit::{HighlightMethod, Parameter, RecipeSection, copy_sections};
 use rohditor_engine::document::EditSession;
 use rohditor_engine::open_document::OpenDocument;
 
@@ -76,6 +76,15 @@ impl Session {
         };
         let defaults = document.default_recipe();
         let next = copy_sections(document.edits.recipe(), &defaults, &[section]);
+        self.change_history(|edits| edits.set_discrete(next), cx);
+    }
+
+    pub fn set_highlight_method(&mut self, method: HighlightMethod, cx: &mut Context<Self>) {
+        let Some(document) = self.document.as_ref() else {
+            return;
+        };
+        let mut next = document.edits.recipe().clone();
+        next.raw.highlights.method = method;
         self.change_history(|edits| edits.set_discrete(next), cx);
     }
 

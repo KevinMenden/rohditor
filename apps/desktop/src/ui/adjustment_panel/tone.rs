@@ -218,15 +218,14 @@ pub(super) fn show_tone_curve_controls(
         egui::Stroke::new(2.0_f32, colors::ACCENT_HOVER),
     ));
 
-    const CONTROL_INPUTS: [f32; 4] = [0.12, 0.35, 0.65, 0.88];
     let targets = [
         Parameter::ToneCurveShadows,
         Parameter::ToneCurveDarks,
         Parameter::ToneCurveLights,
         Parameter::ToneCurveHighlights,
     ];
-    for index in 0..CONTROL_INPUTS.len() {
-        let input = CONTROL_INPUTS[index];
+    for index in 0..ToneCurve::INPUTS.len() {
+        let input = ToneCurve::INPUTS[index];
         let point = curve_graph_position(rect, input, tone_curve_graph_value(input, values));
         let handle_rect = egui::Rect::from_center_size(point, egui::vec2(18.0, 18.0));
         let response = ui.interact(

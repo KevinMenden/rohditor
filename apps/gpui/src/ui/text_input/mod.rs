@@ -86,6 +86,12 @@ impl TextInput {
         self.buffer.text()
     }
 
+    pub fn clear(&mut self, cx: &mut Context<Self>) {
+        self.buffer = Buffer::new(String::new());
+        cx.emit(Changed);
+        cx.notify();
+    }
+
     fn edit(&mut self, range: Option<Range<usize>>, text: &str, cx: &mut Context<Self>) {
         self.buffer.replace(range, text);
         cx.emit(Changed);

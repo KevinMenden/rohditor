@@ -4,9 +4,11 @@ use std::time::Duration;
 
 use gpui::{
     Context, DispatchPhase, Entity, FocusHandle, Focusable, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Subscription, Task, Window, canvas,
-    prelude::*, px,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Size, Subscription, Task, Window,
+    canvas, prelude::*, px,
 };
+
+use rohditor_core::ToneCurveHandle;
 
 use super::DevelopPanel;
 use crate::actions::FocusPhoto;
@@ -21,12 +23,21 @@ const VALUE_WIDTH: Pixels = px(72.0);
 /// Arrow key presses closer together than this are one undo step.
 const NUDGE_PAUSE: Duration = Duration::from_millis(600);
 
+/// What a drag holds.
+#[derive(Clone, Copy)]
+pub(super) enum Grip {
+    Row,
+    Curve(ToneCurveHandle),
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct Drag {
     pub adjustment: Adjustment,
-    last_x: Pixels,
+    grip: Grip,
+    last: Point<Pixels>,
     value: f32,
-    width: Pixels,
+    /// Of the row or the graph.
+    size: Size<Pixels>,
     moved: bool,
     on_value: bool,
 }
@@ -77,8 +88,9 @@ impl DevelopPanel {
     pub(super) fn press(
         &mut self,
         adjustment: Adjustment,
+        grip: Grip,
         event: &MouseDownEvent,
-        row: gpui::Bounds<Pixels>,
+        area: gpui::Bounds<Pixels>,
         cx: &mut Context<Self>,
     ) {
         self.finish_nudge(cx);
@@ -93,11 +105,12 @@ impl DevelopPanel {
             .update(cx, |session, _| session.begin_gesture());
         self.drag = Some(Drag {
             adjustment,
-            last_x: event.position.x,
+            grip,
+            last: event.position,
             value,
-            width: row.size.width,
+            size: area.size,
             moved: false,
-            on_value: row.right() - event.position.x < VALUE_WIDTH,
+            on_value: matches!(grip, Grip::Row) && area.right() - event.position.x < VALUE_WIDTH,
         });
         cx.notify();
     }
@@ -111,7 +124,12 @@ impl DevelopPanel {
             drag.on_value = false;
             return self.release(window, cx);
         }
-        if event.position.x == drag.last_x {
+        let moved = event.position - drag.last;
+        let delta = match drag.grip {
+            Grip::Row => moved.x / drag.size.width,
+            Grip::Curve(_) => -moved.y / drag.size.height,
+        };
+        if delta == 0.0 {
             return;
         }
         let speed = if event.modifiers.shift {
@@ -119,11 +137,19 @@ impl DevelopPanel {
         } else {
             1.0
         };
-        let delta = (event.position.x - drag.last_x) / drag.width * speed;
-        drag.last_x = event.position.x;
+        let delta = delta * speed;
+        drag.last = event.position;
         drag.moved = true;
         let adjustment = drag.adjustment;
-        drag.value = dragged(adjustment.format, adjustment.range(), drag.value, delta);
+        drag.value = match drag.grip {
+            Grip::Row => dragged(adjustment.format, adjustment.range(), drag.value, delta),
+            Grip::Curve(handle) => {
+                let Some(document) = self.session.read(cx).document() else {
+                    return;
+                };
+                handle.dragged(&document.edits.recipe().light.tone_curve, delta)
+            }
+        };
         let value = drag.value;
         self.set(adjustment, value, EditPhase::Dragging, cx);
     }

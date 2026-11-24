@@ -1,13 +1,16 @@
 //! A section of the panel: its header and its rows.
 
-use gpui::{App, Context, IntoElement, KeyBinding, MouseButton, Role, Window, div, prelude::*, px};
+use gpui::{
+    App, Context, IntoElement, KeyBinding, MouseButton, Role, SharedString, Window, div,
+    prelude::*, px,
+};
 use rohditor_edit::{EditRecipe, RecipeSection};
 
 use super::DevelopPanel;
 use super::focus::Control;
 use super::row::ResetValue;
 use crate::assets::Icon;
-use crate::panels::adjustments::Section;
+use crate::panels::adjustments::{Group, Section};
 use crate::theme::{RADIUS, SMALL_FONT_SIZE, theme};
 use crate::ui::button::{icon, icon_button};
 use crate::ui::test_id::TestId as _;
@@ -50,9 +53,54 @@ impl DevelopPanel {
         cx.notify();
     }
 
+    /// Whether the rows of the section are shown. Always while searching.
+    fn is_open(&self, section: RecipeSection, cx: &Context<Self>) -> bool {
+        self.searching(cx) || !self.collapsed.contains(&section)
+    }
+
+    /// The group's title and sections, or `None` when the filter hides all of them.
+    pub(super) fn group(
+        &self,
+        group: &Group,
+        recipe: &EditRecipe,
+        defaults: &EditRecipe,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement + use<>> {
+        let sections: Vec<_> = group
+            .sections
+            .iter()
+            .filter_map(|section| self.section(group, section, recipe, defaults, cx))
+            .collect();
+        if sections.is_empty() {
+            return None;
+        }
+        let theme = theme();
+        let title = div()
+            .test_id(format!("group:{}", group.title))
+            .relative()
+            .mx_2()
+            .mb_1()
+            .px_1()
+            .pb_1()
+            .border_b_1()
+            .border_color(theme.border)
+            .text_color(theme.text)
+            .child(group.title);
+        Some(
+            div()
+                .id(group.title)
+                .role(Role::Group)
+                .aria_label(group.title)
+                .pt_2()
+                .child(title)
+                .children(sections),
+        )
+    }
+
     /// The header and the visible rows, or `None` when the filter hides all of them.
     pub(super) fn section(
         &self,
+        group: &Group,
         section: &Section,
         recipe: &EditRecipe,
         defaults: &EditRecipe,
@@ -62,12 +110,19 @@ impl DevelopPanel {
         let shown: Vec<_> = section
             .adjustments
             .iter()
-            .filter(|adjustment| self.shows(adjustment, recipe, defaults))
+            .filter(|adjustment| self.shows(group, section, adjustment, recipe, defaults, cx))
             .collect();
-        if shown.is_empty() && !changed {
+        let method = self.shows_highlight_method(group, section, recipe, defaults, cx);
+        // Also without a row for what is changed.
+        let found = changed && self.finds(group, section, "", cx);
+        if shown.is_empty() && !method && !found {
             return None;
         }
-        let rows: Vec<_> = if self.collapsed.contains(&section.section) {
+        let open = self.is_open(section.section, cx);
+        let curve = (open && section.section == RecipeSection::ToneCurve && !shown.is_empty())
+            .then(|| self.tone_curve(&recipe.light.tone_curve, cx));
+        let method = (open && method).then(|| self.highlight_method(recipe, cx));
+        let rows: Vec<_> = if !open {
             Vec::new()
         } else {
             shown
@@ -78,12 +133,17 @@ impl DevelopPanel {
         let header = self.section_header(section.section, changed, cx);
         Some(
             div()
+                .id(SharedString::from(format!("{:?}", section.section)))
+                .role(Role::Group)
+                .aria_label(section.section.label())
                 .flex()
                 .flex_col()
                 .gap(px(3.0))
                 .px_2()
                 .pb_2()
                 .child(header)
+                .children(curve)
+                .children(method)
                 .children(rows),
         )
     }
@@ -121,7 +181,7 @@ impl DevelopPanel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let theme = theme();
-        let collapsed = self.collapsed.contains(&section);
+        let collapsed = !self.is_open(section, cx);
         let chevron = if collapsed {
             Icon::ChevronRight
         } else {
