@@ -2,13 +2,13 @@
 
 use gpui::{
     AccessibleAction, App, Bounds, Context, CursorStyle, DispatchPhase, Entity, IntoElement,
-    KeyBinding, MouseButton, MouseDownEvent, Pixels, Point, Role, Window, actions, canvas, div,
-    linear_color_stop, linear_gradient, prelude::*, px, relative, rgb,
+    KeyBinding, MouseButton, MouseDownEvent, Pixels, Point, Role, SharedString, Window, actions,
+    canvas, div, linear_color_stop, linear_gradient, prelude::*, px, relative, rgb,
 };
-use rohditor_core::WhiteBalanceCoordinates;
 use rohditor_edit::EditRecipe;
 
 use super::DevelopPanel;
+use super::focus::Control;
 use crate::panels::adjustments::Adjustment;
 use crate::theme::{RADIUS, SMALL_FONT_SIZE, theme};
 use crate::ui::keys::{Cancel, Confirm};
@@ -67,29 +67,38 @@ impl DevelopPanel {
         &self,
         adjustment: Adjustment,
         recipe: &EditRecipe,
-        as_shot: Option<WhiteBalanceCoordinates>,
+        defaults: &EditRecipe,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let theme = theme();
-        let (range, format) = (adjustment.range(), adjustment.format());
-        let value = adjustment.get(recipe, as_shot);
-        let default = adjustment.default_value(as_shot);
+        let Adjustment {
+            parameter,
+            label,
+            format,
+            ramp,
+        } = adjustment;
+        let range = adjustment.range();
+        let control = Control::Parameter(parameter);
+        let value = parameter.get(recipe, defaults);
+        let default = parameter.get(defaults, defaults);
         let at = |value| fraction(format, range, value);
         let (from, to) = (at(default).min(at(value)), at(default).max(at(value)));
-        let edited = adjustment.is_edited(recipe, as_shot);
-        let active = self.drag.is_some_and(|drag| drag.adjustment == adjustment);
+        let edited = parameter.is_changed(recipe, defaults);
+        let active = self
+            .drag
+            .is_some_and(|drag| drag.adjustment.parameter == parameter);
         let panel = cx.entity();
         let typing = self
             .typing
             .as_ref()
-            .filter(|typing| typing.adjustment == adjustment)
+            .filter(|typing| typing.adjustment.parameter == parameter)
             .map(|typing| typing.input.clone());
         // The input gets the presses and keys while typing.
         let idle = typing.is_none();
         div()
-            .id(adjustment.label())
+            .id(SharedString::from(format!("{parameter:?}")))
             .role(Role::Slider)
-            .aria_label(adjustment.label())
+            .aria_label(label)
             .aria_value(format.label(value, range))
             .aria_numeric_value(f64::from(value))
             .aria_min_numeric_value(f64::from(range.minimum))
@@ -104,8 +113,8 @@ impl DevelopPanel {
                 move |_, _, cx| panel.update(cx, |panel, cx| panel.nudge(adjustment, -1, cx))
             })
             .when(idle, |row| row.key_context(CONTEXT))
-            .track_focus(self.focus.control(adjustment.label()))
-            .child(self.revealer(adjustment.label(), cx))
+            .track_focus(self.focus.control(control))
+            .child(self.revealer(control, cx))
             .border_1()
             .border_color(gpui::transparent_black())
             // Also after a press, as it shows what the arrow keys change.
@@ -142,7 +151,7 @@ impl DevelopPanel {
                     }),
                 )
             })
-            .test_id(format!("adjustment:{}", adjustment.label()))
+            .test_id(format!("adjustment:{parameter:?}"))
             .relative()
             .flex()
             .items_center()
@@ -154,7 +163,7 @@ impl DevelopPanel {
             .bg(if active { theme.hover } else { theme.element })
             .hover(move |style| style.bg(theme.hover))
             .cursor(CursorStyle::ResizeLeftRight)
-            .children(adjustment.ramp().map(|ramp| track(ramp, at(range.neutral))))
+            .children(ramp.map(|ramp| track(ramp, at(range.neutral))))
             .child(
                 div()
                     .absolute()
@@ -182,7 +191,7 @@ impl DevelopPanel {
                 div()
                     .relative()
                     .text_color(if edited { theme.text } else { theme.muted })
-                    .child(adjustment.label()),
+                    .child(label),
             )
             .child(
                 div()

@@ -1,6 +1,6 @@
 use eframe::egui;
 use rohditor_core::WhiteBalanceMode;
-use rohditor_edit::RenderingProfileSelection;
+use rohditor_edit::{Parameter, RenderingProfileSelection};
 use rohditor_engine::tools::Picker;
 
 use super::{
@@ -182,7 +182,7 @@ pub(super) fn show_white_balance_controls(
         record_slider(
             ui,
             &mut output.interactions,
-            AdjustmentTarget::WhiteBalanceTemperature,
+            Parameter::Temperature,
             &mut document.values.white_balance_temperature,
             AdjustmentSpec {
                 label: "Temperature",
@@ -198,7 +198,7 @@ pub(super) fn show_white_balance_controls(
         record_slider(
             ui,
             &mut output.interactions,
-            AdjustmentTarget::WhiteBalanceTint,
+            Parameter::Tint,
             &mut document.values.white_balance_tint,
             AdjustmentSpec {
                 label: "Tint",
@@ -257,7 +257,7 @@ pub(super) fn show_saturation_controls(
     record_slider(
         ui,
         &mut output.interactions,
-        AdjustmentTarget::Saturation,
+        Parameter::Saturation,
         &mut document.values.saturation,
         AdjustmentSpec {
             label: "Saturation",
@@ -273,7 +273,7 @@ pub(super) fn show_saturation_controls(
     record_slider(
         ui,
         &mut output.interactions,
-        AdjustmentTarget::Vibrance,
+        Parameter::Vibrance,
         &mut document.values.vibrance,
         AdjustmentSpec {
             label: "Vibrance",
@@ -343,9 +343,9 @@ pub(super) fn show_color_mixer_controls(
     let labels = ["Hue", "Saturation", "Luminance"];
     for component in 0..3 {
         let target = match component {
-            0 => AdjustmentTarget::HslHue(selected),
-            1 => AdjustmentTarget::HslSaturation(selected),
-            _ => AdjustmentTarget::HslLuminance(selected),
+            0 => Parameter::HslHue(selected),
+            1 => Parameter::HslSaturation(selected),
+            _ => Parameter::HslLuminance(selected),
         };
         let range = ranges[component];
         record_slider(
@@ -428,18 +428,16 @@ pub(super) fn show_color_grading_controls(
             .color(colors::TEXT_MUTED),
     );
     for (group, label, target) in [
-        (0, "Shadows", AdjustmentTarget::GradingShadows(0)),
-        (1, "Midtones", AdjustmentTarget::GradingMidtones(0)),
-        (2, "Highlights", AdjustmentTarget::GradingHighlights(0)),
+        (0, "Shadows", Parameter::GradingShadows(0)),
+        (1, "Midtones", Parameter::GradingMidtones(0)),
+        (2, "Highlights", Parameter::GradingHighlights(0)),
     ] {
         ui.label(egui::RichText::new(label).small().color(colors::TEXT_MUTED));
         for channel in 0..3 {
             let target = match target {
-                AdjustmentTarget::GradingShadows(_) => AdjustmentTarget::GradingShadows(channel),
-                AdjustmentTarget::GradingMidtones(_) => AdjustmentTarget::GradingMidtones(channel),
-                AdjustmentTarget::GradingHighlights(_) => {
-                    AdjustmentTarget::GradingHighlights(channel)
-                }
+                Parameter::GradingShadows(_) => Parameter::GradingShadows(channel),
+                Parameter::GradingMidtones(_) => Parameter::GradingMidtones(channel),
+                Parameter::GradingHighlights(_) => Parameter::GradingHighlights(channel),
                 _ => unreachable!("color grading group is fixed"),
             };
             let label = ["Red", "Green", "Blue"][channel];

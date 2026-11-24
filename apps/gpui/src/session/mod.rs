@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use gpui::{Context, EventEmitter, Task};
-use rohditor_core::{WhiteBalanceCoordinates, default_recipe};
+use rohditor_core::default_recipe;
 use rohditor_edit::EditRecipe;
 use rohditor_engine::coordinator::RenderCoordinator;
 use rohditor_engine::open_document::OpenDocument;
@@ -104,10 +104,6 @@ impl Session {
     /// Seconds since start, the clock of the view's zoom feedback.
     pub fn now(&self) -> f64 {
         self.renderer.now()
-    }
-
-    pub fn as_shot(&self) -> Option<WhiteBalanceCoordinates> {
-        self.document.as_ref()?.as_shot_coordinates()
     }
 
     /// The adapter previews render on, or that the CPU does.

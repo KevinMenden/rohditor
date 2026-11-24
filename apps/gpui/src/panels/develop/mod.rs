@@ -7,24 +7,23 @@
 mod focus;
 mod gestures;
 mod row;
+mod section;
 
 use std::collections::HashSet;
 
 use gpui::{
-    App, Context, Div, Entity, IntoElement, MouseButton, Render, Role, Window, div, prelude::*, px,
+    App, Context, Div, Entity, IntoElement, MouseButton, Render, Role, Window, div, prelude::*,
 };
-use rohditor_core::{Histogram, WhiteBalanceCoordinates};
-use rohditor_edit::EditRecipe;
+use rohditor_core::Histogram;
+use rohditor_edit::{EditRecipe, RecipeSection};
 
 use focus::PanelFocus;
 use gestures::{Drag, Nudge, Typing, drag_tracker};
 
-use super::adjustments::{Adjustment, SECTIONS, Section};
+use super::adjustments::{Adjustment, SECTIONS};
 use crate::actions::{AutoTone, ResetAdjustments};
-use crate::assets::Icon;
 use crate::session::Session;
 use crate::theme::{DEVELOP_WIDTH, RADIUS, SMALL_FONT_SIZE, TAB_HEIGHT, theme};
-use crate::ui::button::icon;
 use crate::ui::histogram::histogram;
 use crate::ui::keys::{SelectNext, SelectPrevious};
 use crate::ui::overlays::Overlays;
@@ -35,9 +34,8 @@ use crate::ui::toggle::toggle;
 /// its own content.
 #[derive(Clone, Default, PartialEq)]
 struct Model {
-    /// The recipe of the open photo, once it can be edited.
-    recipe: Option<EditRecipe>,
-    as_shot: Option<WhiteBalanceCoordinates>,
+    /// The recipe of the open photo and its defaults, once it can be edited.
+    recipes: Option<(EditRecipe, EditRecipe)>,
     histogram: Option<Histogram>,
 }
 
@@ -50,8 +48,7 @@ impl Model {
             return Self::default();
         };
         Self {
-            recipe: Some(document.edits.recipe().clone()),
-            as_shot: session.as_shot(),
+            recipes: Some((document.edits.recipe().clone(), document.default_recipe())),
             histogram: document.preview.histogram,
         }
     }
@@ -60,6 +57,7 @@ impl Model {
 pub fn bind_keys(cx: &mut App) {
     focus::bind_keys(cx);
     row::bind_keys(cx);
+    section::bind_keys(cx);
 }
 
 pub struct DevelopPanel {
@@ -71,7 +69,7 @@ pub struct DevelopPanel {
     drag: Option<Drag>,
     nudge: Option<Nudge>,
     typing: Option<Typing>,
-    collapsed: HashSet<&'static str>,
+    collapsed: HashSet<RecipeSection>,
     /// Hide what is at its default.
     edited_only: bool,
     focus: PanelFocus,
@@ -107,16 +105,17 @@ impl DevelopPanel {
     }
 
     /// Whether the panel shows this adjustment.
-    fn shows(
-        &self,
-        adjustment: Adjustment,
-        recipe: &EditRecipe,
-        as_shot: Option<WhiteBalanceCoordinates>,
-    ) -> bool {
+    fn shows(&self, adjustment: &Adjustment, recipe: &EditRecipe, defaults: &EditRecipe) -> bool {
         // A slider must not vanish while it is changed.
-        let active = self.drag.map(|drag| drag.adjustment) == Some(adjustment)
-            || self.typing.as_ref().map(|typing| typing.adjustment) == Some(adjustment);
-        !self.edited_only || active || adjustment.is_edited(recipe, as_shot)
+        let parameter = adjustment.parameter;
+        let active = [
+            self.drag.as_ref().map(|drag| drag.adjustment.parameter),
+            self.typing
+                .as_ref()
+                .map(|typing| typing.adjustment.parameter),
+        ]
+        .contains(&Some(parameter));
+        !self.edited_only || active || parameter.is_changed(recipe, defaults)
     }
 
     fn header(&self, enabled: bool) -> impl IntoElement + use<> {
@@ -178,71 +177,6 @@ impl DevelopPanel {
             },
         ))
     }
-
-    fn section(
-        &self,
-        section: &Section,
-        recipe: &EditRecipe,
-        as_shot: Option<WhiteBalanceCoordinates>,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
-        let theme = theme();
-        let title = section.title;
-        let collapsed = self.collapsed.contains(title);
-        let chevron = if collapsed {
-            Icon::ChevronRight
-        } else {
-            Icon::ChevronDown
-        };
-        let rows: Vec<_> = if collapsed {
-            Vec::new()
-        } else {
-            section
-                .adjustments
-                .iter()
-                .filter(|&&adjustment| self.shows(adjustment, recipe, as_shot))
-                .map(|&adjustment| self.row(adjustment, recipe, as_shot, cx).into_any_element())
-                .collect()
-        };
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(3.0))
-            .px_2()
-            .pb_2()
-            .child(
-                div()
-                    .id(title)
-                    .role(Role::Button)
-                    .aria_label(title)
-                    .aria_expanded(!collapsed)
-                    .track_focus(self.focus.control(title))
-                    .relative()
-                    .child(self.revealer(title, cx))
-                    .rounded(RADIUS)
-                    .border_1()
-                    .border_color(gpui::transparent_black())
-                    .focus_visible(move |style| style.border_color(theme.accent))
-                    .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-                    .test_id(format!("section:{title}"))
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .h(px(28.0))
-                    .cursor_pointer()
-                    .text_size(SMALL_FONT_SIZE)
-                    .text_color(theme.muted)
-                    .child(icon(chevron, theme.faint))
-                    .child(title)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if !this.collapsed.remove(title) {
-                            this.collapsed.insert(title);
-                        }
-                        cx.notify();
-                    })),
-            )
-            .children(rows)
-    }
 }
 
 fn hint(text: &'static str) -> Div {
@@ -258,25 +192,15 @@ impl Render for DevelopPanel {
         self.forget_lost_focus(window);
         let theme = theme();
         let Model {
-            recipe,
-            as_shot,
+            recipes,
             histogram: bins,
         } = self.model.clone();
         let graph = histogram(bins.as_ref());
-        let body = match &recipe {
-            Some(recipe) => {
+        let body = match &recipes {
+            Some((recipe, defaults)) => {
                 let sections: Vec<_> = SECTIONS
                     .iter()
-                    .filter(|section| {
-                        section
-                            .adjustments
-                            .iter()
-                            .any(|&adjustment| self.shows(adjustment, recipe, as_shot))
-                    })
-                    .map(|section| {
-                        self.section(section, recipe, as_shot, cx)
-                            .into_any_element()
-                    })
+                    .filter_map(|section| self.section(section, recipe, defaults, cx))
                     .collect();
                 let empty = sections.is_empty();
                 div()
@@ -296,7 +220,7 @@ impl Render for DevelopPanel {
             .border_l_1()
             .border_color(theme.border)
             .child(drag_tracker(cx.entity()))
-            .child(self.header(recipe.is_some()))
+            .child(self.header(recipes.is_some()))
             .child(
                 div()
                     .flex_none()
@@ -306,7 +230,7 @@ impl Render for DevelopPanel {
                     .bg(theme.editor)
                     .child(graph),
             )
-            .when(recipe.is_some(), |panel| panel.child(self.filter(cx)))
+            .when(recipes.is_some(), |panel| panel.child(self.filter(cx)))
             .child(
                 div()
                     .id("adjustments")

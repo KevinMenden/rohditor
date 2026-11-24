@@ -288,7 +288,7 @@ mod tests {
 
     use super::{is_gesture_orphaned, reap_orphaned_gesture};
     use crate::app::apply_adjustment_interaction;
-    use crate::ui::adjustment_panel::{AdjustmentInteraction, AdjustmentTarget};
+    use crate::ui::adjustment_panel::AdjustmentInteraction;
     use rohditor_engine::autosave::Autosave;
 
     const FRAME: f64 = 1.0 / 60.0;
@@ -382,7 +382,7 @@ mod tests {
                             let _ = apply_adjustment_interaction(
                                 edits,
                                 AdjustmentInteraction {
-                                    target: AdjustmentTarget::Exposure,
+                                    target: rohditor_edit::Parameter::Exposure.into(),
                                     value: *value,
                                     changed: response.changed(),
                                     drag_started: response.drag_started(),
@@ -390,7 +390,7 @@ mod tests {
                                     drag_stopped: response.drag_stopped(),
                                     reset: false,
                                 },
-                                None,
+                                &rohditor_edit::EditRecipe::default(),
                             );
                         }
                     });

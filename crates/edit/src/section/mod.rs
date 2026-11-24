@@ -10,16 +10,18 @@
 //! a test fails when a field is added without being assigned.
 
 mod blend;
+mod changes;
 #[cfg(test)]
 mod tests;
 
 use serde::{Deserialize, Serialize};
 
-pub use blend::{blend_sections, changed_sections, copy_sections};
+pub use blend::{blend_sections, copy_sections};
+pub use changes::changed_sections;
 
 /// One group of recipe fields. See the module documentation. The serialized
 /// names are stable: presets store them in files.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecipeSection {
     /// Exposure, contrast, highlights, shadows, whites and blacks.

@@ -10,12 +10,15 @@ mod local;
 mod local_detail;
 mod local_range;
 mod noise_reduction;
+mod parameter;
 mod presence;
 mod profile;
 mod raw;
 mod recipe;
 mod section;
 mod sharpening;
+#[cfg(test)]
+mod test_support;
 mod validation;
 
 pub use camera_chroma::*;
@@ -28,6 +31,7 @@ pub use local::*;
 pub use local_detail::*;
 pub use local_range::*;
 pub use noise_reduction::*;
+pub use parameter::Parameter;
 pub use presence::*;
 pub use profile::*;
 pub use raw::*;

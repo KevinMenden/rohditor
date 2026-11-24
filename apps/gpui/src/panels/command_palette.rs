@@ -54,7 +54,7 @@ impl CommandPalette {
     fn visible(&self, cx: &App) -> Vec<usize> {
         let query = self.query.read(cx).text();
         (0..self.commands.len())
-            .filter(|&index| matches(self.commands[index].name, query))
+            .filter(|&index| matches(&self.commands[index].name, query))
             .collect()
     }
 
@@ -93,7 +93,7 @@ impl CommandPalette {
         let entry = div()
             .id(index)
             .role(Role::ListBoxOption)
-            .aria_label(command.name)
+            .aria_label(command.name.clone())
             .aria_selected(selected)
             .flex()
             .items_center()
@@ -102,7 +102,7 @@ impl CommandPalette {
             .px_2()
             .rounded(RADIUS)
             .cursor_pointer()
-            .child(command.name)
+            .child(command.name.clone())
             .children(command.key_label().map(|key| {
                 div()
                     .text_size(SMALL_FONT_SIZE)

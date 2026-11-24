@@ -17,10 +17,10 @@ use rohditor_core::{
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_edit::{
     BLACKS_RANGE, COLOR_GRADING_RANGE, CONTRAST_RANGE, EXPOSURE_EV_RANGE, EditRecipe,
-    FALSE_COLOR_MAX_STEPS, HIGHLIGHT_THRESHOLD_RANGE, HIGHLIGHTS_RANGE, HSL_CHANNEL_COUNT,
-    HSL_HUE_RANGE, HSL_LUMINANCE_RANGE, HSL_SATURATION_RANGE, HighlightMethod, SATURATION_RANGE,
-    SHADOWS_RANGE, TEMPERATURE_RANGE, TINT_RANGE, TONE_CURVE_RANGE, VIBRANCE_RANGE,
-    WHITE_BALANCE_MULTIPLIER_RANGE, WHITES_RANGE, WhiteBalance, with_hue_edge,
+    HIGHLIGHT_THRESHOLD_RANGE, HIGHLIGHTS_RANGE, HSL_CHANNEL_COUNT, HSL_HUE_RANGE,
+    HSL_LUMINANCE_RANGE, HSL_SATURATION_RANGE, HighlightMethod, Parameter, RecipeSection,
+    SATURATION_RANGE, SHADOWS_RANGE, TEMPERATURE_RANGE, TINT_RANGE, TONE_CURVE_RANGE,
+    VIBRANCE_RANGE, WHITE_BALANCE_MULTIPLIER_RANGE, WHITES_RANGE, WhiteBalance,
 };
 use rohditor_raw::RawFileInfo;
 use tracing::{info, warn};
@@ -32,8 +32,7 @@ use crate::ProcessorPreference;
 use crate::ui::ViewMode;
 use crate::ui::adjustment_panel::{
     self, AdjustmentInteraction, AdjustmentRange, AdjustmentRanges, AdjustmentTarget,
-    AdjustmentValues, CameraProfileChoice, DocumentPanelModel, PanelDefaults, PanelSection,
-    PresetsPanel,
+    AdjustmentValues, CameraProfileChoice, DocumentPanelModel, PresetsPanel,
 };
 use crate::ui::catalog::{
     self, FilmstripModel, LibraryEntryModel, LibraryEntryState, LibraryModel,
@@ -217,8 +216,7 @@ fn white_balance_preview_request(
 ) -> (bool, bool) {
     let is_white_balance = matches!(
         interaction.target,
-        AdjustmentTarget::WhiteBalanceTemperature
-            | AdjustmentTarget::WhiteBalanceTint
+        AdjustmentTarget::Parameter(Parameter::Temperature | Parameter::Tint)
             | AdjustmentTarget::WhiteBalanceRed
             | AdjustmentTarget::WhiteBalanceGreen
             | AdjustmentTarget::WhiteBalanceBlue
@@ -1141,12 +1139,10 @@ impl RohditorApp {
                 changed |= auto_changed;
                 auto_tone_applied = auto_changed;
             }
+            let defaults = document.core.default_recipe();
             for interaction in output.interactions {
-                let interaction_changed = apply_adjustment_interaction(
-                    &mut document.core.edits,
-                    interaction,
-                    as_shot_coordinates,
-                );
+                let interaction_changed =
+                    apply_adjustment_interaction(&mut document.core.edits, interaction, &defaults);
                 changed |= interaction_changed;
                 let (request_draft, request_exact) =
                     white_balance_preview_request(interaction, interaction_changed);
@@ -1170,10 +1166,10 @@ impl RohditorApp {
                 let next = rohditor_edit::copy_sections(
                     document.core.edits.recipe(),
                     &defaults,
-                    &[section.recipe_section()],
+                    &[section],
                 );
                 changed |= document.core.edits.set_discrete(next);
-                if section == PanelSection::WhiteBalance {
+                if section == RecipeSection::WhiteBalance {
                     // Same reason as reset-all: forget the hidden manual choice.
                     white_balance_memory = WhiteBalanceModeMemory::default();
                 }
@@ -2130,8 +2126,6 @@ fn document_panel_model(
         revision: document.core.edits.revision(),
         dirty: document.core.is_dirty(),
         has_adjustments: document.core.differs_from_defaults(&defaults),
-        white_balance_changed: document.core.edits.recipe().color.white_balance
-            != defaults.color.white_balance,
         camera_profile,
         camera_profile_choices,
         rendering_profile: document.core.edits.recipe().rendering.profile,
@@ -2277,18 +2271,11 @@ fn document_panel_model(
         optics: optics_panel_model(document),
         false_color: document.core.edits.recipe().false_color,
         noise_reduction: document.core.edits.recipe().noise_reduction,
-        defaults: PanelDefaults {
-            camera_profile: defaults.color.camera_profile.clone(),
-            rendering_profile: defaults.rendering.profile,
-            highlights: defaults.raw.highlights,
-            noise_reduction: defaults.noise_reduction,
-            capture_sharpening: defaults.capture_sharpening,
-        },
         capture_sharpening: document.core.edits.recipe().capture_sharpening,
         defringe: document.core.edits.recipe().defringe,
         presence: document.core.edits.recipe().presence,
         noise_suggestion: document.core.noise_suggestion(),
-        changed_sections: presets::edited_sections(document),
+        changed_sections: rohditor_edit::changed_sections(document.core.edits.recipe(), &defaults),
     }
 }
 
@@ -2412,165 +2399,40 @@ fn gpu_base_highlights_match(
     }
 }
 
+/// `recipe` with one of the manual white-balance multipliers at `value`.
+fn with_multiplier(recipe: &EditRecipe, channel: usize, value: f32) -> EditRecipe {
+    let mut multipliers = match recipe.color.white_balance {
+        WhiteBalance::AsShot | WhiteBalance::TemperatureTint { .. } => {
+            [WHITE_BALANCE_MULTIPLIER_RANGE.neutral; 3]
+        }
+        WhiteBalance::ManualMultipliers { red, green, blue } => [red, green, blue],
+    };
+    multipliers[channel] = value;
+    let [red, green, blue] = multipliers;
+    let mut next = recipe.clone();
+    next.color.white_balance = WhiteBalance::ManualMultipliers { red, green, blue };
+    next
+}
+
 fn apply_adjustment_interaction(
     edits: &mut EditSession,
     interaction: AdjustmentInteraction,
-    as_shot: Option<WhiteBalanceCoordinates>,
+    defaults: &EditRecipe,
 ) -> bool {
     if interaction.drag_started {
         edits.begin_gesture();
     }
 
-    let mut next = edits.recipe().clone();
-    match interaction.target {
-        AdjustmentTarget::WhiteBalanceRed
-        | AdjustmentTarget::WhiteBalanceGreen
-        | AdjustmentTarget::WhiteBalanceBlue => {
-            let (mut red, mut green, mut blue) = match next.color.white_balance {
-                WhiteBalance::AsShot | WhiteBalance::TemperatureTint { .. } => (
-                    WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
-                    WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
-                    WHITE_BALANCE_MULTIPLIER_RANGE.neutral,
-                ),
-                WhiteBalance::ManualMultipliers { red, green, blue } => (red, green, blue),
-            };
-            match interaction.target {
-                AdjustmentTarget::WhiteBalanceRed => red = interaction.value,
-                AdjustmentTarget::WhiteBalanceGreen => green = interaction.value,
-                AdjustmentTarget::WhiteBalanceBlue => blue = interaction.value,
-                AdjustmentTarget::WhiteBalanceTemperature
-                | AdjustmentTarget::WhiteBalanceTint
-                | AdjustmentTarget::ToneCurveShadows
-                | AdjustmentTarget::ToneCurveDarks
-                | AdjustmentTarget::ToneCurveLights
-                | AdjustmentTarget::ToneCurveHighlights
-                | AdjustmentTarget::HslHue(_)
-                | AdjustmentTarget::HslSaturation(_)
-                | AdjustmentTarget::HslLuminance(_)
-                | AdjustmentTarget::GradingShadows(_)
-                | AdjustmentTarget::GradingMidtones(_)
-                | AdjustmentTarget::GradingHighlights(_)
-                | AdjustmentTarget::PresenceTexture
-                | AdjustmentTarget::PresenceClarity
-                | AdjustmentTarget::PresenceDehaze
-                | AdjustmentTarget::HighlightThreshold
-                | AdjustmentTarget::FalseColorSteps
-                | AdjustmentTarget::ChromaNoiseReduction
-                | AdjustmentTarget::LuminanceNoiseReduction
-                | AdjustmentTarget::LuminanceDetail
-                | AdjustmentTarget::CaptureAmount
-                | AdjustmentTarget::CaptureRadius
-                | AdjustmentTarget::CaptureNoise
-                | AdjustmentTarget::DefringePurpleAmount
-                | AdjustmentTarget::DefringePurpleHueStart
-                | AdjustmentTarget::DefringePurpleHueEnd
-                | AdjustmentTarget::DefringeGreenAmount
-                | AdjustmentTarget::DefringeGreenHueStart
-                | AdjustmentTarget::DefringeGreenHueEnd => {}
-                AdjustmentTarget::Exposure
-                | AdjustmentTarget::Contrast
-                | AdjustmentTarget::Highlights
-                | AdjustmentTarget::Shadows
-                | AdjustmentTarget::Whites
-                | AdjustmentTarget::Blacks
-                | AdjustmentTarget::Saturation
-                | AdjustmentTarget::Vibrance => {}
-            }
-            next.color.white_balance = WhiteBalance::ManualMultipliers { red, green, blue };
+    let next = match interaction.target {
+        AdjustmentTarget::Parameter(parameter) => {
+            parameter.with_value(edits.recipe(), defaults, interaction.value)
         }
-        AdjustmentTarget::WhiteBalanceTemperature | AdjustmentTarget::WhiteBalanceTint => {
-            let as_shot = as_shot.unwrap_or(WhiteBalanceCoordinates {
-                temperature: TEMPERATURE_RANGE.neutral,
-                tint: TINT_RANGE.neutral,
-            });
-            let (mut temperature, mut tint) = match next.color.white_balance {
-                WhiteBalance::TemperatureTint { temperature, tint } => (temperature, tint),
-                _ => (as_shot.temperature, as_shot.tint),
-            };
-            match interaction.target {
-                AdjustmentTarget::WhiteBalanceTemperature => temperature = interaction.value,
-                AdjustmentTarget::WhiteBalanceTint => tint = interaction.value,
-                _ => unreachable!("temperature/tint branch only handles its controls"),
-            }
-            next.color.white_balance = WhiteBalance::TemperatureTint { temperature, tint };
+        AdjustmentTarget::WhiteBalanceRed => with_multiplier(edits.recipe(), 0, interaction.value),
+        AdjustmentTarget::WhiteBalanceGreen => {
+            with_multiplier(edits.recipe(), 1, interaction.value)
         }
-        // The slider works in whole steps; round in case a typed value is fractional.
-        AdjustmentTarget::FalseColorSteps => {
-            next.false_color.steps = interaction
-                .value
-                .round()
-                .clamp(0.0, f32::from(FALSE_COLOR_MAX_STEPS))
-                as u8
-        }
-        AdjustmentTarget::ChromaNoiseReduction => next.noise_reduction.chroma = interaction.value,
-        AdjustmentTarget::LuminanceNoiseReduction => {
-            next.noise_reduction.luminance = interaction.value
-        }
-        AdjustmentTarget::LuminanceDetail => {
-            next.noise_reduction.luminance_detail = interaction.value
-        }
-        AdjustmentTarget::CaptureAmount => next.capture_sharpening.amount = interaction.value,
-        AdjustmentTarget::CaptureRadius => next.capture_sharpening.radius = interaction.value,
-        AdjustmentTarget::CaptureNoise => {
-            next.capture_sharpening.noise_protection = interaction.value
-        }
-        AdjustmentTarget::DefringePurpleAmount => next.defringe.purple_amount = interaction.value,
-        AdjustmentTarget::DefringePurpleHueStart => {
-            next.defringe.purple_hue = with_hue_edge(next.defringe.purple_hue, 0, interaction.value)
-        }
-        AdjustmentTarget::DefringePurpleHueEnd => {
-            next.defringe.purple_hue = with_hue_edge(next.defringe.purple_hue, 1, interaction.value)
-        }
-        AdjustmentTarget::DefringeGreenAmount => next.defringe.green_amount = interaction.value,
-        AdjustmentTarget::DefringeGreenHueStart => {
-            next.defringe.green_hue = with_hue_edge(next.defringe.green_hue, 0, interaction.value)
-        }
-        AdjustmentTarget::DefringeGreenHueEnd => {
-            next.defringe.green_hue = with_hue_edge(next.defringe.green_hue, 1, interaction.value)
-        }
-        AdjustmentTarget::PresenceTexture => next.presence.texture = interaction.value,
-        AdjustmentTarget::PresenceClarity => next.presence.clarity = interaction.value,
-        AdjustmentTarget::PresenceDehaze => next.presence.dehaze = interaction.value,
-        AdjustmentTarget::Exposure => next.light.exposure_ev = interaction.value,
-        AdjustmentTarget::Contrast => next.light.contrast = interaction.value,
-        AdjustmentTarget::Highlights => next.light.highlights = interaction.value,
-        AdjustmentTarget::Shadows => next.light.shadows = interaction.value,
-        AdjustmentTarget::Whites => next.light.whites = interaction.value,
-        AdjustmentTarget::Blacks => next.light.blacks = interaction.value,
-        AdjustmentTarget::HighlightThreshold => match next.raw.highlights.method {
-            HighlightMethod::Off => {}
-            HighlightMethod::Clip => next.raw.highlights.clip.threshold = interaction.value,
-            HighlightMethod::Opposed => {
-                next.raw.highlights.opposed.detection_threshold = interaction.value
-            }
-        },
-        AdjustmentTarget::ToneCurveShadows => next.light.tone_curve.shadows = interaction.value,
-        AdjustmentTarget::ToneCurveDarks => next.light.tone_curve.darks = interaction.value,
-        AdjustmentTarget::ToneCurveLights => next.light.tone_curve.lights = interaction.value,
-        AdjustmentTarget::ToneCurveHighlights => {
-            next.light.tone_curve.highlights = interaction.value
-        }
-        AdjustmentTarget::Saturation => next.color.saturation = interaction.value,
-        AdjustmentTarget::Vibrance => next.color.vibrance = interaction.value,
-        AdjustmentTarget::HslHue(channel) => {
-            next.color.hsl.channels[channel].hue = interaction.value
-        }
-        AdjustmentTarget::HslSaturation(channel) => {
-            next.color.hsl.channels[channel].saturation = interaction.value
-        }
-        AdjustmentTarget::HslLuminance(channel) => {
-            next.color.hsl.channels[channel].luminance = interaction.value
-        }
-        AdjustmentTarget::GradingShadows(channel) => {
-            next.color.grading.shadows[channel] = interaction.value
-        }
-        AdjustmentTarget::GradingMidtones(channel) => {
-            next.color.grading.midtones[channel] = interaction.value
-        }
-        AdjustmentTarget::GradingHighlights(channel) => {
-            next.color.grading.highlights[channel] = interaction.value
-        }
-    }
+        AdjustmentTarget::WhiteBalanceBlue => with_multiplier(edits.recipe(), 2, interaction.value),
+    };
 
     let changed = if interaction.reset {
         edits.set_discrete(next)
@@ -2685,7 +2547,7 @@ mod tests {
         let mut edits = EditSession::default();
         for interaction in [
             AdjustmentInteraction {
-                target: AdjustmentTarget::Exposure,
+                target: Parameter::Exposure.into(),
                 value: 0.25,
                 changed: true,
                 drag_started: true,
@@ -2694,7 +2556,7 @@ mod tests {
                 reset: false,
             },
             AdjustmentInteraction {
-                target: AdjustmentTarget::Exposure,
+                target: Parameter::Exposure.into(),
                 value: 0.75,
                 changed: true,
                 drag_started: false,
@@ -2703,7 +2565,7 @@ mod tests {
                 reset: false,
             },
             AdjustmentInteraction {
-                target: AdjustmentTarget::Exposure,
+                target: Parameter::Exposure.into(),
                 value: 0.75,
                 changed: false,
                 drag_started: false,
@@ -2712,7 +2574,7 @@ mod tests {
                 reset: false,
             },
         ] {
-            let _ = apply_adjustment_interaction(&mut edits, interaction, None);
+            let _ = apply_adjustment_interaction(&mut edits, interaction, &EditRecipe::default());
         }
 
         assert_eq!(edits.revision(), 2);
@@ -2725,12 +2587,12 @@ mod tests {
     #[test]
     fn hsl_and_grading_interactions_remain_gpu_supported_through_undo_and_reset() {
         for target in [
-            AdjustmentTarget::HslHue(0),
-            AdjustmentTarget::HslSaturation(3),
-            AdjustmentTarget::HslLuminance(7),
-            AdjustmentTarget::GradingShadows(0),
-            AdjustmentTarget::GradingMidtones(1),
-            AdjustmentTarget::GradingHighlights(2),
+            Parameter::HslHue(0),
+            Parameter::HslSaturation(3),
+            Parameter::HslLuminance(7),
+            Parameter::GradingShadows(0),
+            Parameter::GradingMidtones(1),
+            Parameter::GradingHighlights(2),
         ] {
             let mut edits = EditSession::default();
             let original = edits.recipe().clone();
@@ -2740,7 +2602,7 @@ mod tests {
                 apply_adjustment_interaction(
                     &mut edits,
                     AdjustmentInteraction {
-                        target,
+                        target: target.into(),
                         value,
                         changed: !stop,
                         drag_started: start,
@@ -2748,7 +2610,7 @@ mod tests {
                         drag_stopped: stop,
                         reset: false,
                     },
-                    None,
+                    &EditRecipe::default(),
                 );
                 assert!(gpu_supports_recipe(edits.recipe()));
             }
@@ -2761,7 +2623,7 @@ mod tests {
             apply_adjustment_interaction(
                 &mut edits,
                 AdjustmentInteraction {
-                    target,
+                    target: target.into(),
                     value: 0.0,
                     changed: true,
                     drag_started: false,
@@ -2769,7 +2631,7 @@ mod tests {
                     drag_stopped: false,
                     reset: true,
                 },
-                None,
+                &EditRecipe::default(),
             );
             assert_eq!(edits.recipe(), &original);
             assert!(gpu_supports_recipe(edits.recipe()));
@@ -2783,7 +2645,7 @@ mod tests {
             apply_adjustment_interaction(
                 &mut edits,
                 AdjustmentInteraction {
-                    target: AdjustmentTarget::CaptureRadius,
+                    target: Parameter::CaptureRadius.into(),
                     value,
                     changed: !stop,
                     drag_started: start,
@@ -2791,7 +2653,7 @@ mod tests {
                     drag_stopped: stop,
                     reset: false,
                 },
-                None,
+                &EditRecipe::default(),
             );
         }
         assert_eq!(edits.recipe().capture_sharpening.radius, 0.9);
@@ -2802,7 +2664,7 @@ mod tests {
         apply_adjustment_interaction(
             &mut edits,
             AdjustmentInteraction {
-                target: AdjustmentTarget::CaptureRadius,
+                target: Parameter::CaptureRadius.into(),
                 value: 0.6,
                 changed: true,
                 drag_started: false,
@@ -2810,7 +2672,7 @@ mod tests {
                 drag_stopped: false,
                 reset: true,
             },
-            None,
+            &EditRecipe::default(),
         );
         assert_eq!(edits.recipe().capture_sharpening.radius, 0.6);
     }
@@ -2818,7 +2680,7 @@ mod tests {
     #[test]
     fn white_balance_drag_uses_gpu_drafts_and_commits_once_on_release() {
         let dragging = AdjustmentInteraction {
-            target: AdjustmentTarget::WhiteBalanceTemperature,
+            target: Parameter::Temperature.into(),
             value: 5_100.0,
             changed: true,
             drag_started: false,
@@ -2846,68 +2708,6 @@ mod tests {
             ..dragging
         };
         assert_eq!(white_balance_preview_request(typed, true), (true, true));
-    }
-
-    #[test]
-    fn temperature_edit_starts_from_as_shot_balance() {
-        let mut recipe = EditRecipe::default();
-        recipe.color.white_balance = WhiteBalance::AsShot;
-        let mut edits = EditSession::from_saved(recipe);
-
-        assert!(apply_adjustment_interaction(
-            &mut edits,
-            AdjustmentInteraction {
-                target: AdjustmentTarget::WhiteBalanceTemperature,
-                value: 7_200.0,
-                changed: true,
-                drag_started: false,
-                dragged: false,
-                drag_stopped: false,
-                reset: false,
-            },
-            Some(WhiteBalanceCoordinates {
-                temperature: 5_200.0,
-                tint: -0.2,
-            }),
-        ));
-        assert_eq!(
-            edits.recipe().color.white_balance,
-            WhiteBalance::TemperatureTint {
-                temperature: 7_200.0,
-                tint: -0.2,
-            }
-        );
-    }
-
-    #[test]
-    fn tint_edit_starts_from_as_shot_balance() {
-        let mut recipe = EditRecipe::default();
-        recipe.color.white_balance = WhiteBalance::AsShot;
-        let mut edits = EditSession::from_saved(recipe);
-
-        assert!(apply_adjustment_interaction(
-            &mut edits,
-            AdjustmentInteraction {
-                target: AdjustmentTarget::WhiteBalanceTint,
-                value: 0.25,
-                changed: true,
-                drag_started: false,
-                dragged: false,
-                drag_stopped: false,
-                reset: false,
-            },
-            Some(WhiteBalanceCoordinates {
-                temperature: 5_200.0,
-                tint: -0.2,
-            }),
-        ));
-        assert_eq!(
-            edits.recipe().color.white_balance,
-            WhiteBalance::TemperatureTint {
-                temperature: 5_200.0,
-                tint: 0.25,
-            }
-        );
     }
 
     #[test]

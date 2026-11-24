@@ -529,7 +529,7 @@ fn panels_redraw_only_for_their_own_changes() {
     assert_ne!(open, Some(second));
 
     harness.wait_until("the photo again", settled);
-    harness.click("section:Light");
+    harness.click("section:Tone");
     assert_eq!(harness.lookup(EXPOSURE), None, "the section collapsed");
     harness.click("button:toggle-files");
     assert_eq!(harness.lookup("file:A.ARW"), None, "the panel closed");
@@ -579,6 +579,84 @@ fn menus_and_the_filter_work_on_the_sliders() {
     );
     harness.keys("ctrl-0");
     assert_eq!(harness.with_session(|session, _| fit(session)), Some(true));
+}
+
+#[test]
+#[ignore = "requires a wgpu adapter and ROHDITOR_RAW"]
+fn a_section_shows_that_it_is_edited_and_resets() {
+    let Some((mut harness, ..)) = opened("sections") else {
+        return;
+    };
+    const CONTRAST: &str = "adjustment:Contrast";
+    const CLARITY: &str = "adjustment:Clarity";
+    const MARKER: &str = "changed:Tone";
+    let drag = |harness: &mut Harness, name: &str| {
+        let start = harness.find(name).center();
+        harness.press(start, 1);
+        harness.drag_to(start + point(px(30.0), px(0.0)));
+        harness.release(start + point(px(30.0), px(0.0)));
+        harness.draw();
+    };
+    let recipe = |harness: &mut Harness| {
+        harness.with_session(|session, _| {
+            let document = session.document().expect("a photo is open");
+            document.edits.recipe().clone()
+        })
+    };
+    let original = recipe(&mut harness);
+    assert_eq!(harness.lookup(MARKER), None, "a fresh photo is unedited");
+    assert_eq!(harness.lookup("changed:NoiseReduction"), None);
+
+    drag(&mut harness, EXPOSURE);
+    drag(&mut harness, CONTRAST);
+    drag(&mut harness, CLARITY);
+    let edited = recipe(&mut harness);
+    harness.find(MARKER);
+    harness.capture("section-edited");
+    // A collapsed section still shows it.
+    harness.click("section:Tone");
+    assert_eq!(harness.lookup(EXPOSURE), None);
+    harness.find(MARKER);
+    harness.click("section:Tone");
+
+    harness.click("button:reset-Tone");
+    let reset = recipe(&mut harness);
+    assert_eq!(reset.light, original.light);
+    assert_eq!(reset.presence, edited.presence, "other sections stay");
+    assert_eq!(harness.lookup(MARKER), None);
+    harness.keys("ctrl-z");
+    assert_eq!(recipe(&mut harness), edited, "a reset is one undo step");
+
+    // By keyboard: the White balance header and its rows, the Tone header.
+    harness.keys("ctrl-d down down down delete");
+    assert_eq!(recipe(&mut harness).light, original.light);
+    harness.keys("ctrl-z");
+
+    harness.keys("ctrl-shift-p");
+    for letter in "reset presence".chars() {
+        let key = if letter == ' ' {
+            "space".to_owned()
+        } else {
+            letter.to_string()
+        };
+        harness.keys(&key);
+    }
+    harness.keys("enter");
+    harness.draw();
+    let reset = recipe(&mut harness);
+    assert_eq!(reset.presence, original.presence);
+    assert_eq!(reset.light, edited.light);
+
+    // A value being typed is dropped, not applied after the reset.
+    let row = harness.find(EXPOSURE);
+    let value = point(row.right() - px(20.0), row.center().y);
+    harness.press(value, 1);
+    harness.release(value);
+    harness.keys("2");
+    harness.click("button:reset-Tone");
+    harness.keys("escape");
+    harness.draw();
+    assert_eq!(recipe(&mut harness), original);
 }
 
 #[test]
@@ -659,7 +737,7 @@ fn a_slider_is_edited_by_keyboard_alone() {
         return;
     };
     harness.wait_for_library("the folder", |library| library.len() == 2);
-    // The White Balance header and its two rows, the Light header, Exposure.
+    // The White balance header and its two rows, the Tone header, Exposure.
     harness.keys("ctrl-d");
     harness.keys("down down down tab");
     harness.keys("right right right left pageup");
@@ -695,7 +773,7 @@ fn the_focused_slider_is_scrolled_to() {
     let Some((mut harness, ..)) = opened_in(size(px(1000.0), px(500.0)), "scroll") else {
         return;
     };
-    let last = "adjustment:Color Noise";
+    let last = "adjustment:ChromaNoiseReduction";
     let visible = px(470.0);
     assert!(
         harness.find(last).bottom() > visible,
@@ -713,7 +791,7 @@ fn the_focused_slider_is_scrolled_to() {
     });
     assert_eq!(noise, 0.01, "it is the one with the focus");
     harness.keys(&["up"; 25].join(" "));
-    let top = harness.find("section:White Balance").top();
+    let top = harness.find("section:WhiteBalance").top();
     assert!(top > px(36.0) && top < px(300.0), "{top:?}");
 }
 
