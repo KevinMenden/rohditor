@@ -153,31 +153,9 @@ impl OpenDocument {
         self.error = Some(message);
     }
 
-    /// Whether a white-balance sample for `ticket` still belongs to this
-    /// document's current recipe. A stale one drops the status of the preview
-    /// work it was waiting on; the caller then forgets the pick.
-    pub fn white_balance_pick_is_current(&mut self, ticket: PreviewTicket) -> bool {
-        if self.id != ticket.document_id {
-            return false;
-        }
-        if self.ticket() != ticket {
-            if self
-                .preview
-                .status
-                .as_ref()
-                .is_some_and(|(revision, _)| *revision == ticket.revision)
-            {
-                self.preview.status = None;
-            }
-            return false;
-        }
-        true
-    }
-
     /// Turn the sampled camera RGB into the document's white balance. Returns
     /// whether the recipe changed, so the caller must queue a preview.
-    pub fn apply_white_balance_sample(&mut self, sample: [f32; 3]) -> bool {
-        self.preview.status = None;
+    pub(super) fn apply_white_balance_sample(&mut self, sample: [f32; 3]) -> bool {
         let Some(resolved) = self.as_shot_colour() else {
             self.error =
                 Some("The RAW file did not provide a usable camera colour calibration".to_owned());
@@ -204,12 +182,6 @@ impl OpenDocument {
         self.error = None;
         changed
     }
-
-    /// The white-balance sample could not be taken.
-    pub fn white_balance_sample_failed(&mut self, message: String) {
-        self.preview.status = None;
-        self.error = Some(message);
-    }
 }
 
 #[cfg(test)]
@@ -219,7 +191,6 @@ mod tests {
     use rohditor_core::default_recipe;
 
     use super::*;
-    use crate::document::PreviewIntent;
 
     fn document() -> OpenDocument {
         OpenDocument::opening(3, PathBuf::from("fixture.arw"), default_recipe(None), None)
@@ -295,23 +266,5 @@ mod tests {
         assert!(document.preview.status.is_none());
         assert!(document.export_status.is_none());
         assert_eq!(document.error.as_deref(), Some("gone"));
-    }
-
-    #[test]
-    fn a_stale_white_balance_pick_is_rejected_and_frees_its_status() {
-        let mut document = document();
-        let ticket = document.begin_preview_request(PreviewIntent::CommittedFit);
-        assert!(document.white_balance_pick_is_current(ticket));
-        // An edit moves the revision on: the sample no longer matches.
-        let mut next = document.edits.recipe().clone();
-        next.light.exposure_ev = 0.5;
-        assert!(document.edits.set_discrete(next));
-        document.preview.status = Some((ticket.revision, "sampling".to_owned()));
-        assert!(!document.white_balance_pick_is_current(ticket));
-        assert!(document.preview.status.is_none());
-        // A ticket of another document never matches.
-        let mut foreign = ticket;
-        foreign.document_id += 1;
-        assert!(!document.white_balance_pick_is_current(foreign));
     }
 }

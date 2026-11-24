@@ -3,6 +3,7 @@
 
 mod clipping;
 pub mod overlay;
+mod picker;
 mod welcome;
 
 use std::sync::Arc;
@@ -19,6 +20,7 @@ use crate::theme::theme;
 use crate::ui::test_id::TestId as _;
 use clipping::ClippingOverlay;
 use overlay::{Overlay, pair};
+use picker::PickerOverlay;
 use welcome::welcome;
 
 /// Pixels per wheel line, for mice that report lines.
@@ -60,7 +62,10 @@ impl Viewport {
     pub fn new(session: Entity<Session>, cx: &mut Context<Self>) -> Self {
         cx.observe(&session, |_, _, cx| cx.notify()).detach();
         Self {
-            overlays: vec![Box::new(ClippingOverlay(session.clone()))],
+            overlays: vec![
+                Box::new(ClippingOverlay(session.clone())),
+                Box::new(PickerOverlay(session.clone())),
+            ],
             session,
             bounds: Bounds::default(),
             drag: None,

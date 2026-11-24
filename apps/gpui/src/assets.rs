@@ -21,6 +21,7 @@ pub enum Icon {
     ChevronRight,
     Image,
     Clipping,
+    Pipette,
 }
 
 impl Icon {
@@ -40,6 +41,7 @@ impl Icon {
             Self::ChevronRight => "chevron-right.svg",
             Self::Image => "image.svg",
             Self::Clipping => "clipping.svg",
+            Self::Pipette => "pipette.svg",
         }
     }
 }
@@ -71,6 +73,7 @@ impl AssetSource for Assets {
             "chevron-right.svg",
             "image.svg",
             "clipping.svg",
+            "pipette.svg",
         ];
         Ok(bytes.map(Cow::Borrowed))
     }

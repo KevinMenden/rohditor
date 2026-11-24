@@ -1,7 +1,7 @@
 //! Translates render-worker events into document state.
 
 use rohditor_engine::coordinator::{PreviewResolution, WorkerEvent};
-use rohditor_engine::document::PreviewIntent;
+use rohditor_engine::document::{PreviewIntent, PreviewTicket};
 use rohditor_engine::open_document::OpenDocument;
 use rohditor_engine::preview::{DocumentPreviewDiagnostics, GpuUpload, PreviewSource};
 
@@ -18,6 +18,15 @@ impl Session {
 
     fn current(&mut self, document_id: u64) -> Option<&mut OpenDocument> {
         self.document.as_mut().filter(|open| open.id == document_id)
+    }
+
+    fn white_balance_picked(&mut self, ticket: PreviewTicket, sample: Result<[f32; 3], String>) {
+        if self
+            .current(ticket.document_id)
+            .is_some_and(|document| document.white_balance_picked(ticket, sample))
+        {
+            self.queue_preview();
+        }
     }
 
     fn process_worker_event(&mut self, event: WorkerEvent) {
@@ -257,10 +266,19 @@ impl Session {
                     document.worker_stopped(message);
                 }
             }
-            // Features this frontend never requests: crop, pickers, masks and the neural demosaic.
+            WorkerEvent::WhiteBalanceSampleReady { ticket, sample } => {
+                self.white_balance_picked(ticket, Ok(sample));
+            }
+            WorkerEvent::WhiteBalanceSampleFailed { ticket, message } => {
+                self.white_balance_picked(ticket, Err(message));
+            }
+            WorkerEvent::ColorMixerSampled { ticket, channel } => {
+                self.picked_channel = self
+                    .current(ticket.document_id)
+                    .and_then(|document| document.color_mixer_picked(ticket, channel));
+            }
+            // Features this frontend never requests: crop, masks and the neural demosaic.
             WorkerEvent::PreviewReady { .. }
-            | WorkerEvent::WhiteBalanceSampleReady { .. }
-            | WorkerEvent::WhiteBalanceSampleFailed { .. }
             | WorkerEvent::ColorRangeSampleReady { .. }
             | WorkerEvent::ColorRangeSampleFailed { .. }
             | WorkerEvent::MaskOverlayReady { .. }

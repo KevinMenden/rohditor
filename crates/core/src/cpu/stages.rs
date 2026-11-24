@@ -827,22 +827,11 @@ pub(super) mod adjustments {
         weights
     }
 
-    /// Find Color Mixer band weights for one display-encoded sRGB sample.
-    ///
-    /// The sample is transformed back into Rohditor's linear Rec.2020 working
-    /// space before its hue is classified. Nearly neutral samples have no stable
-    /// hue and deliberately return `None`.
-    #[must_use]
-    pub fn hsl_channel_weights_from_display_rgb(
-        display_rgb: [u8; 3],
+    /// The mixer weights of a colour in the working space (linear Rec.2020).
+    /// Nearly neutral colours have no stable hue and return `None`.
+    pub(crate) fn hsl_channel_weights_from_working(
+        working: [f32; 3],
     ) -> Option<[f32; HSL_CHANNEL_COUNT]> {
-        let linear_srgb =
-            display_rgb.map(|value| crate::srgb_to_linear_srgb(f32::from(value) / 255.0));
-        let linear_srgb_to_rec2020 = crate::XYZ_D65_TO_LINEAR_SRGB
-            .inverse()
-            .ok()?
-            .then(crate::XYZ_D65_TO_LINEAR_REC2020);
-        let working = linear_srgb_to_rec2020.transform(linear_srgb);
         if working.iter().any(|value| !value.is_finite()) {
             return None;
         }
@@ -1307,7 +1296,7 @@ fn invalid_dimensions(
 #[cfg(test)]
 use adjustments::{
     apply_adjustments, apply_hsl_adjustments, apply_luminance_delta, evaluate_tone_curve,
-    hsl_channel_weights, hsl_channel_weights_from_display_rgb, hsl_to_rgb, luminance, rgb_to_hsl,
+    hsl_channel_weights, hsl_channel_weights_from_working, hsl_to_rgb, luminance, rgb_to_hsl,
 };
 #[cfg(test)]
 use display::{
@@ -2029,13 +2018,17 @@ mod tests {
         apply_hsl_adjustments(&mut pixel, &adjustments);
 
         assert_eq!(pixel, [0.4; 3]);
-        assert!(hsl_channel_weights_from_display_rgb([128; 3]).is_none());
+        assert!(hsl_channel_weights_from_working([0.4; 3]).is_none());
     }
 
     #[test]
-    fn display_rgb_picker_maps_primaries_to_the_expected_mixer_bands() {
-        for (sample, expected) in [([255, 0, 0], 0), ([0, 255, 0], 3), ([0, 0, 255], 5)] {
-            let weights = hsl_channel_weights_from_display_rgb(sample)
+    fn working_colors_map_to_the_expected_mixer_bands() {
+        for (sample, expected) in [
+            ([1.0, 0.0, 0.0], 0),
+            ([0.0, 1.0, 0.0], 3),
+            ([0.0, 0.0, 1.0], 5),
+        ] {
+            let weights = hsl_channel_weights_from_working(sample)
                 .expect("a saturated display primary has a stable hue");
             let selected = weights
                 .into_iter()

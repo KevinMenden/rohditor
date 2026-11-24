@@ -687,7 +687,7 @@ impl RohditorApp {
         if let Some(first) = document.core.edits.recipe().local.layers.first() {
             session.select_layer(document.core.edits.recipe(), first.id);
         }
-        self.pending_white_balance_pick = None;
+        self.cancel_pick();
         // Entering Masks drops any active picker.
         self.tool.enter_masks(session);
     }

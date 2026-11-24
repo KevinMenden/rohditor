@@ -47,7 +47,7 @@ pub fn dropdown(
         .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
             window.prevent_default();
         })
-        .child(value)
+        .child(div().truncate().child(value))
         .child(icon(Icon::ChevronDown, theme.faint))
         .child(
             canvas(move |bounds, _, _| measured.set(bounds), |_, _, _, _| {})

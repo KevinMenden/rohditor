@@ -23,7 +23,6 @@ mod white_balance;
 pub use adjustments::{
     HSL_CHANNEL_CENTERS, HSL_HUE_SHIFT_PER_FULL_VALUE, apply_adjustments,
     apply_adjustments_extended, evaluate_tone_curve, hsl_channel_weights,
-    hsl_channel_weights_from_display_rgb,
 };
 pub use display::{
     render_display_p3_8_with_geometry, render_display_srgb8, render_display_srgb8_dithered,
@@ -34,7 +33,9 @@ pub use extended::render_extended_linear_with_geometry;
 pub use normalize::{normalize_raw, normalize_raw_preview};
 pub use white_balance::{white_balance_gains, white_balance_gains_from_calibration};
 
-pub(crate) use adjustments::{ReferenceChain, apply_adjustments_with_local};
+pub(crate) use adjustments::{
+    ReferenceChain, apply_adjustments_with_local, hsl_channel_weights_from_working,
+};
 pub(crate) use display::{
     render_display_srgb8_cancellable_with_geometry,
     render_display_srgb8_dithered_with_geometry_and_diagnostics,

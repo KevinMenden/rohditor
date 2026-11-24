@@ -10,6 +10,8 @@
 
 mod camera_look;
 mod noise;
+mod picks;
+mod sections;
 mod worker_events;
 
 use std::path::{Path, PathBuf};
@@ -19,7 +21,9 @@ use rohditor_core::{
     CameraCalibration, DatabaseProvenance, LensProfileSummary, ProfileMatch, ResolvedCameraColour,
     WhiteBalanceCoordinates, default_recipe, resolve_camera_colour, with_default_noise_reduction,
 };
-use rohditor_edit::{EditRecipe, TEMPERATURE_RANGE, TINT_RANGE, WhiteBalance};
+use rohditor_edit::{
+    CameraProfileSelection, EditRecipe, TEMPERATURE_RANGE, TINT_RANGE, WhiteBalance,
+};
 use rohditor_raw::{RawFileInfo, RawFrame};
 
 pub use camera_look::CameraLookState;
@@ -62,6 +66,8 @@ pub struct OpenDocument {
     pub initialize_white_balance_from_metadata: bool,
     camera_look: CameraLookState,
     noise: NoiseState,
+    /// A picker's sample on its way from the worker.
+    pending_pick: Option<PreviewTicket>,
 }
 
 impl OpenDocument {
@@ -88,6 +94,7 @@ impl OpenDocument {
             initialize_white_balance_from_metadata: false,
             camera_look: CameraLookState::default(),
             noise: NoiseState::default(),
+            pending_pick: None,
         }
     }
 
@@ -122,13 +129,19 @@ impl OpenDocument {
     /// The camera colour currently selected for the document, resolved with the
     /// core's authoritative As Shot white-balance gains.
     pub fn as_shot_colour(&self) -> Option<ResolvedCameraColour> {
+        self.as_shot_colour_for(&self.edits.recipe().color.camera_profile)
+    }
+
+    fn as_shot_colour_for(
+        &self,
+        camera_profile: &CameraProfileSelection,
+    ) -> Option<ResolvedCameraColour> {
         let info = self
             .frame
             .as_ref()
             .map(|frame| &frame.info)
             .or(self.info.as_ref())?;
         let calibration = CameraCalibration::from_raw_info(info);
-        let camera_profile = &self.edits.recipe().color.camera_profile;
         resolve_camera_colour(&calibration, camera_profile, WhiteBalance::AsShot)
             .or_else(|_| {
                 // A RAW can omit As Shot multipliers while still carrying a usable
@@ -151,7 +164,14 @@ impl OpenDocument {
     /// Coordinates are a display convenience; rendering keeps using the original
     /// gains when projection is not possible for a particular calibration.
     pub fn as_shot_coordinates(&self) -> Option<WhiteBalanceCoordinates> {
-        self.as_shot_colour()
+        self.as_shot_coordinates_for(&self.edits.recipe().color.camera_profile)
+    }
+
+    fn as_shot_coordinates_for(
+        &self,
+        camera_profile: &CameraProfileSelection,
+    ) -> Option<WhiteBalanceCoordinates> {
+        self.as_shot_colour_for(camera_profile)
             .and_then(|resolved| resolved.as_shot_coordinates)
     }
 

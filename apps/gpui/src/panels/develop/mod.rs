@@ -4,28 +4,33 @@
 //! relative to where it was, Shift drags finer, and a double click resets it. A click on the value
 //! types it. With the focus, the arrow keys change it.
 
+mod choices;
 mod filter;
 mod focus;
 mod gestures;
-mod highlights;
+mod mixer;
 mod row;
 mod section;
 mod tone_curve;
+mod wheels;
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use gpui::{
-    App, Context, Div, Entity, IntoElement, MouseButton, Render, Role, Window, div, prelude::*,
+    App, Context, Div, Entity, IntoElement, MouseButton, Render, RenderImage, Role, Window, div,
+    prelude::*,
 };
 use rohditor_core::Histogram;
 use rohditor_edit::{EditRecipe, RecipeSection};
+use rohditor_engine::tools::Picker;
 
 use focus::PanelFocus;
 use gestures::{Drag, Nudge, Typing, drag_tracker};
 
 use super::adjustments::GROUPS;
 use crate::actions::{AutoTone, ResetAdjustments};
-use crate::session::Session;
+use crate::session::{MixerColorPicked, Session};
 use crate::theme::{DEVELOP_WIDTH, RADIUS, SMALL_FONT_SIZE, TAB_HEIGHT, theme};
 use crate::ui::histogram::histogram;
 use crate::ui::keys::{SelectNext, SelectPrevious};
@@ -40,6 +45,7 @@ struct Model {
     /// The recipe of the open photo and its defaults, once it can be edited.
     recipes: Option<(EditRecipe, EditRecipe)>,
     histogram: Option<Histogram>,
+    picker: Option<Picker>,
 }
 
 impl Model {
@@ -53,6 +59,7 @@ impl Model {
         Self {
             recipes: Some((document.edits.recipe().clone(), document.default_recipe())),
             histogram: document.preview.histogram,
+            picker: session.picker(),
         }
     }
 }
@@ -76,6 +83,9 @@ pub struct DevelopPanel {
     search: Entity<TextInput>,
     /// Hide what is at its default.
     edited_only: bool,
+    /// The colour whose mixer sliders are listed.
+    mixer_channel: usize,
+    wheel_picture: Arc<RenderImage>,
     focus: PanelFocus,
 }
 
@@ -83,6 +93,7 @@ impl DevelopPanel {
     pub fn new(
         session: Entity<Session>,
         overlays: Entity<Overlays>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&session, |panel, session, cx| {
@@ -92,6 +103,14 @@ impl DevelopPanel {
                 cx.notify();
             }
         })
+        .detach();
+        cx.subscribe_in(
+            &session,
+            window,
+            |panel, _, picked: &MixerColorPicked, window, cx| {
+                panel.show_mixer_channel(picked.0, window, cx);
+            },
+        )
         .detach();
         let search =
             cx.new(|cx| TextInput::new("Search adjustments", "Search…", String::new(), cx));
@@ -110,9 +129,14 @@ impl DevelopPanel {
             collapsed: HashSet::from([
                 RecipeSection::ToneCurve,
                 RecipeSection::HighlightReconstruction,
+                RecipeSection::ColorMixer,
+                RecipeSection::ColorGrading,
+                RecipeSection::ColorProfile,
             ]),
             search,
             edited_only: false,
+            mixer_channel: 0,
+            wheel_picture: wheels::wheel_picture(),
             focus: PanelFocus::new(cx),
         }
     }
@@ -178,6 +202,7 @@ impl Render for DevelopPanel {
         let Model {
             recipes,
             histogram: bins,
+            ..
         } = self.model.clone();
         let graph = histogram(bins.as_ref());
         let body = match &recipes {

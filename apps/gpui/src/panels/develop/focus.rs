@@ -7,9 +7,10 @@ use gpui::{
     Window, canvas, point, prelude::*, px,
 };
 
-use rohditor_edit::{Parameter, RecipeSection};
+use rohditor_edit::{GradingTones, Parameter, RecipeSection};
 
 use super::DevelopPanel;
+use super::choices::Choice;
 use crate::panels::adjustments::sections;
 use crate::ui::keys::{SelectNext, SelectPrevious};
 
@@ -23,7 +24,9 @@ pub(super) enum Control {
     /// The header of a section.
     Section(RecipeSection),
     Parameter(Parameter),
-    HighlightMethod,
+    Choice(Choice),
+    MixerChannels,
+    Wheel(GradingTones),
 }
 
 pub(super) struct PanelFocus {
@@ -31,6 +34,8 @@ pub(super) struct PanelFocus {
     pub entry: FocusHandle,
     controls: HashMap<Control, FocusHandle>,
     pub scroll: ScrollHandle,
+    /// Scroll to this control once it is laid out.
+    wanted: Option<Control>,
     /// The control last scrolled to, so that scrolling away from it works.
     revealed: Option<FocusHandle>,
 }
@@ -45,10 +50,13 @@ impl PanelFocus {
         Self {
             entry: cx.focus_handle(),
             controls: controls
-                .chain([Control::HighlightMethod])
+                .chain(Choice::ALL.map(Control::Choice))
+                .chain([Control::MixerChannels])
+                .chain(GradingTones::ALL.map(Control::Wheel))
                 .map(|control| (control, cx.focus_handle().tab_stop(true)))
                 .collect(),
             scroll: ScrollHandle::new(),
+            wanted: None,
             revealed: None,
         }
     }
@@ -86,6 +94,18 @@ impl DevelopPanel {
         window.focus_next(cx);
     }
 
+    /// Focus the control, and scroll to it also if it is only listed in the next frame.
+    pub(super) fn scroll_to(
+        &mut self,
+        control: Control,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.focus.revealed = None;
+        self.focus.wanted = Some(control);
+        self.focus.control(control).focus(window, cx);
+    }
+
     /// Covers the control and scrolls to it when it gets the focus by key.
     pub(super) fn revealer(
         &self,
@@ -93,10 +113,16 @@ impl DevelopPanel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let panel: Entity<Self> = cx.entity();
+        let wanted = self.focus.wanted == Some(control);
         let control = self.focus.control(control).clone();
         canvas(
             move |bounds, window, cx| {
-                if control.is_focused(window) && window.last_input_was_keyboard() {
+                if wanted {
+                    panel.update(cx, |panel, cx| {
+                        panel.focus.wanted = None;
+                        panel.reveal(&control, bounds, cx);
+                    });
+                } else if control.is_focused(window) && window.last_input_was_keyboard() {
                     panel.update(cx, |panel, cx| panel.reveal(&control, bounds, cx));
                 }
             },

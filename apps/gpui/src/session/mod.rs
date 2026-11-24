@@ -8,6 +8,8 @@ mod display;
 mod editing;
 mod events;
 mod export;
+mod picking;
+mod profiles;
 mod renderer;
 mod saving;
 mod upload;
@@ -20,11 +22,13 @@ use anyhow::{Result, anyhow};
 use gpui::{Context, EventEmitter, Task};
 use rohditor_core::default_recipe;
 use rohditor_edit::EditRecipe;
+use rohditor_engine::camera_profiles::CameraProfileRegistry;
 use rohditor_engine::coordinator::RenderCoordinator;
 use rohditor_engine::open_document::OpenDocument;
 use rohditor_engine::persistence;
 use rohditor_engine::preview::WgpuContext;
 use rohditor_engine::settings::AppSettings;
+use rohditor_engine::tools::ActiveTool;
 
 pub use display::Display;
 use display::DisplaySlot;
@@ -58,6 +62,10 @@ pub struct Session {
     document: Option<OpenDocument>,
     display: DisplaySlot,
     saves: Saves,
+    profiles: CameraProfileRegistry,
+    tool: ActiveTool,
+    /// A picked mixer colour that is not announced yet.
+    picked_channel: Option<usize>,
     next_document_id: u64,
     next_export_id: u64,
     _wake: Task<()>,
@@ -69,11 +77,17 @@ pub struct PhotoOpened(pub PathBuf);
 
 impl EventEmitter<PhotoOpened> for Session {}
 
+/// A colour of the mixer was picked on the photo.
+pub struct MixerColorPicked(pub usize);
+
+impl EventEmitter<MixerColorPicked> for Session {}
+
 impl Session {
     /// `gpu` is the device GPUI renders with; without one the CPU renders previews.
     pub fn new(
         workers: SessionWorkers,
         settings: AppSettings,
+        profiles: CameraProfileRegistry,
         gpu: Option<WgpuContext>,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -82,6 +96,9 @@ impl Session {
             document: None,
             display: DisplaySlot::default(),
             saves: workers.saves,
+            profiles,
+            tool: ActiveTool::default(),
+            picked_channel: None,
             next_document_id: 1,
             next_export_id: 1,
             _wake: workers.woken.run(cx, Self::tick),
@@ -162,6 +179,7 @@ impl Session {
 
     pub fn close_document(&mut self, cx: &mut Context<Self>) {
         self.save_now();
+        self.tool.set_picker(None);
         self.display.clear();
         if let Some(document) = self.document.take() {
             self.renderer.coordinator.abandon(document.id);
@@ -193,6 +211,7 @@ impl Session {
     /// Process everything that arrived since the last call and schedule the next one.
     pub fn tick(&mut self, cx: &mut Context<Self>) {
         self.process_worker_events();
+        self.announce_pick(cx);
         self.saves.process_results(self.document.as_mut());
         let mut delays = Vec::new();
         if let Some(document) = self.document.as_mut() {

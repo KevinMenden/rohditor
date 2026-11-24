@@ -5,14 +5,17 @@ use gpui::{
     prelude::*, px,
 };
 use rohditor_edit::{EditRecipe, RecipeSection};
+use rohditor_engine::tools::Picker;
 
 use super::DevelopPanel;
+use super::choices::Choice;
 use super::focus::Control;
 use super::row::ResetValue;
+use crate::actions::{PickMixerColor, PickWhiteBalance};
 use crate::assets::Icon;
 use crate::panels::adjustments::{Group, Section};
 use crate::theme::{RADIUS, SMALL_FONT_SIZE, theme};
-use crate::ui::button::{icon, icon_button};
+use crate::ui::button::{command_button, icon, icon_button};
 use crate::ui::test_id::TestId as _;
 
 const CONTEXT: &str = "SectionHeader";
@@ -112,16 +115,30 @@ impl DevelopPanel {
             .iter()
             .filter(|adjustment| self.shows(group, section, adjustment, recipe, defaults, cx))
             .collect();
-        let method = self.shows_highlight_method(group, section, recipe, defaults, cx);
+        let choices: Vec<_> = Choice::ALL
+            .into_iter()
+            .filter(|choice| self.shows_choice(*choice, group, section, recipe, defaults, cx))
+            .collect();
+        let wheels = self.shows_wheels(group, section, recipe, defaults, cx);
         // Also without a row for what is changed.
         let found = changed && self.finds(group, section, "", cx);
-        if shown.is_empty() && !method && !found {
+        if shown.is_empty() && choices.is_empty() && !wheels && !found {
             return None;
         }
         let open = self.is_open(section.section, cx);
         let curve = (open && section.section == RecipeSection::ToneCurve && !shown.is_empty())
             .then(|| self.tone_curve(&recipe.light.tone_curve, cx));
-        let method = (open && method).then(|| self.highlight_method(recipe, cx));
+        let mixer = open
+            && section.section == RecipeSection::ColorMixer
+            && !self.edited_only
+            && !self.searching(cx);
+        let mixer = mixer.then(|| self.mixer_channels(recipe, defaults, cx));
+        let wheels = (open && wheels).then(|| self.wheels(recipe, cx));
+        let choices: Vec<_> = choices
+            .into_iter()
+            .filter(|_| open)
+            .map(|choice| self.choice(choice, recipe, defaults, cx))
+            .collect();
         let rows: Vec<_> = if !open {
             Vec::new()
         } else {
@@ -143,7 +160,9 @@ impl DevelopPanel {
                 .pb_2()
                 .child(header)
                 .children(curve)
-                .children(method)
+                .children(choices)
+                .children(mixer)
+                .children(wheels)
                 .children(rows),
         )
     }
@@ -159,6 +178,7 @@ impl DevelopPanel {
             .items_center()
             .gap_1()
             .child(self.section_title(section, changed, cx))
+            .children(self.picker_button(section))
             .when(changed, |header| {
                 let label = format!("Reset {}", section.label());
                 let reset = icon_button(
@@ -171,6 +191,23 @@ impl DevelopPanel {
                 // By keyboard, Delete on the header does the same.
                 header.child(reset.tab_stop(false))
             })
+    }
+
+    /// Starts the section's picker, if it has one.
+    fn picker_button(&self, section: RecipeSection) -> Option<impl IntoElement + use<>> {
+        let (picker, button) = match section {
+            RecipeSection::WhiteBalance => (
+                Picker::WhiteBalance,
+                command_button("pick-white-balance", Icon::Pipette, PickWhiteBalance, true),
+            ),
+            RecipeSection::ColorMixer => (
+                Picker::ColorMixer,
+                command_button("pick-mixer-color", Icon::Pipette, PickMixerColor, true),
+            ),
+            _ => return None,
+        };
+        let active = self.model.picker == Some(picker);
+        Some(button.when(active, |button| button.bg(theme().selected)))
     }
 
     /// The title, which collapses the section.

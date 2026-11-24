@@ -181,11 +181,13 @@ impl RohditorApp {
                 }
             }
             WorkerEvent::WhiteBalanceSampleReady { ticket, sample } => {
-                if let Some(document) = self.take_white_balance_pick(ticket)
-                    && document.core.apply_white_balance_sample(sample)
-                {
-                    self.queue_preview(context, ticket.document_id);
-                }
+                self.white_balance_picked(context, ticket, Ok(sample));
+            }
+            WorkerEvent::ColorMixerSampled { ticket, channel } => {
+                let picked = self
+                    .current_document_mut(ticket.document_id)
+                    .and_then(|document| document.core.color_mixer_picked(ticket, channel));
+                self.color_mixer_channel = picked.unwrap_or(self.color_mixer_channel);
             }
             WorkerEvent::ColorRangeSampleReady {
                 ticket,
@@ -202,9 +204,7 @@ impl RohditorApp {
             } => self.install_range_overlay(context, ticket, layer, &overlay),
             WorkerEvent::MaskOverlayFailed { ticket, .. } => self.fail_range_overlay(ticket),
             WorkerEvent::WhiteBalanceSampleFailed { ticket, message } => {
-                if let Some(document) = self.take_white_balance_pick(ticket) {
-                    document.core.white_balance_sample_failed(message);
-                }
+                self.white_balance_picked(context, ticket, Err(message));
             }
             WorkerEvent::ExportReady {
                 document_id,
@@ -277,18 +277,17 @@ impl RohditorApp {
             .filter(|doc| doc.core.id == document_id)
     }
 
-    /// Settle the awaited white-balance pick when its result for `ticket`
-    /// arrives. The document is returned only if the result still applies to its
-    /// current recipe; a stale or foreign result just ends the pick.
-    fn take_white_balance_pick(&mut self, ticket: PreviewTicket) -> Option<&mut Document> {
-        if self.pending_white_balance_pick != Some(ticket) {
-            return None;
+    fn white_balance_picked(
+        &mut self,
+        context: &egui::Context,
+        ticket: PreviewTicket,
+        sample: Result<[f32; 3], String>,
+    ) {
+        if self
+            .current_document_mut(ticket.document_id)
+            .is_some_and(|document| document.core.white_balance_picked(ticket, sample))
+        {
+            self.queue_preview(context, ticket.document_id);
         }
-        self.pending_white_balance_pick = None;
-        let document = self.document.as_mut()?;
-        document
-            .core
-            .white_balance_pick_is_current(ticket)
-            .then_some(document)
     }
 }

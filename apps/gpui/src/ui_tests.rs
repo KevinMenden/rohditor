@@ -4,6 +4,7 @@
 //! photo. The photo is copied to a scratch folder first, so sidecars never end up next to the
 //! original. `ROHDITOR_SHOTS=DIR` writes a PNG per scenario.
 
+mod color;
 mod light;
 mod viewport;
 
@@ -62,7 +63,9 @@ impl Harness {
                 let session = cx.new(|cx| {
                     let workers = SessionWorkers::start().expect("the engine starts");
                     let settings = rohditor_engine::settings::AppSettings::default();
-                    Session::new(workers, settings, gpu(), cx)
+                    let profiles =
+                        rohditor_engine::camera_profiles::CameraProfileRegistry::default();
+                    Session::new(workers, settings, profiles, gpu(), cx)
                 });
                 let library = cx.new(|cx| {
                     let worker = LibraryWorker::start().expect("the catalog starts");
