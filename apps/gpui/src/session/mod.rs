@@ -9,6 +9,7 @@ mod events;
 mod export;
 mod renderer;
 mod saving;
+mod zoom;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

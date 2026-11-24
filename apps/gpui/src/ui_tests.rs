@@ -15,7 +15,7 @@ use gpui::{
 };
 use rohditor_engine::open_document::ExportActivity;
 use rohditor_engine::persistence;
-use rohditor_engine::preview::WgpuContext;
+use rohditor_engine::preview::{PreviewSource, WgpuContext};
 use rohditor_gpu::{GpuPreviewProcessor, GpuSensorProcessor, GpuSpatialProcessor};
 
 use crate::library::{Library, LibraryWorker};
@@ -428,6 +428,54 @@ fn the_palette_runs_commands_and_arrows_change_photos() {
     harness.capture("switched");
     harness.click("button:close-tab");
     assert_eq!(open(&mut harness), None);
+}
+
+#[test]
+#[ignore = "requires a wgpu adapter and ROHDITOR_RAW"]
+fn actual_pixels_renders_the_source_resolution_and_fit_returns() {
+    let Some((mut harness, ..)) = opened("source-scale") else {
+        return;
+    };
+    let shown = |harness: &mut Harness| {
+        harness.with_session(|session, _| {
+            let display = session.display().expect("a frame is shown");
+            (display.width, display.height)
+        })
+    };
+    let fitted = shown(&mut harness);
+
+    harness.keys("ctrl-1");
+    harness.wait_until("the source-resolution frame", |session| {
+        session.document().is_some_and(|document| {
+            document.preview.status.is_none()
+                && document
+                    .preview
+                    .source
+                    .is_some_and(PreviewSource::is_source_scale)
+        })
+    });
+    let source = shown(&mut harness);
+    assert!(
+        source.0 > fitted.0 && source.1 > fitted.1,
+        "{source:?} should be larger than the fitted {fitted:?}"
+    );
+    let at_100 = harness.with_session(|session, _| {
+        session
+            .document()
+            .is_some_and(|document| document.preview.view.is_actual_size())
+    });
+    assert!(at_100, "one photo pixel per device pixel");
+    harness.capture("source-scale");
+
+    harness.keys("ctrl-0");
+    harness.wait_until("the fitted frame again", settled);
+    assert_eq!(shown(&mut harness), fitted);
+    let fit = harness.with_session(|session, _| {
+        session
+            .document()
+            .is_some_and(|document| document.preview.view.is_fit())
+    });
+    assert!(fit);
 }
 
 #[test]

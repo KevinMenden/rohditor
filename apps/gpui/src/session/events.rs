@@ -76,11 +76,13 @@ impl Session {
             }
             WorkerEvent::PreviewReady {
                 ticket,
-                resolution: PreviewResolution::Fit,
+                resolution: resolution @ (PreviewResolution::Fit | PreviewResolution::SourceScale),
                 image,
                 histogram,
                 diagnostics,
             } => {
+                let source_scale = resolution == PreviewResolution::SourceScale;
+                let now = self.renderer.now();
                 let Some(document) = self
                     .document
                     .as_mut()
@@ -88,16 +90,34 @@ impl Session {
                 else {
                     return;
                 };
-                let superseded = document
-                    .preview
-                    .gpu()
-                    .is_some_and(|gpu| gpu.ticket == ticket);
-                if superseded || !document.accepts_preview(ticket, PreviewIntent::CommittedFit) {
+                // A fit frame is stale once 1:1 was asked for, and the other way round.
+                let intent = if source_scale {
+                    PreviewIntent::SourceScale
+                } else {
+                    PreviewIntent::CommittedFit
+                };
+                let superseded = !source_scale
+                    && document
+                        .preview
+                        .gpu()
+                        .is_some_and(|gpu| gpu.ticket == ticket);
+                if superseded
+                    || document.preview.source_scale_requested != source_scale
+                    || !document.accepts_preview(ticket, intent)
+                {
                     return;
                 }
                 document.preview.release_gpu();
                 let preview = &mut document.preview;
-                preview.source = Some(PreviewSource::developed(diagnostics.algorithm, false));
+                let previous_source = preview.source;
+                preview.source = Some(if source_scale {
+                    PreviewSource::OneToOneCpu
+                } else {
+                    PreviewSource::developed(diagnostics.algorithm, false)
+                });
+                if source_scale {
+                    preview.view.source_scale_frame_ready(previous_source, now);
+                }
                 preview.histogram = Some(*histogram);
                 preview.histogram_revision = Some(ticket.revision);
                 preview.status = None;
@@ -228,8 +248,7 @@ impl Session {
                     document.worker_stopped(message);
                 }
             }
-            // Features this frontend never requests: crop, 1:1, pickers, masks and the neural
-            // demosaic.
+            // Features this frontend never requests: crop, pickers, masks and the neural demosaic.
             WorkerEvent::PreviewReady { .. }
             | WorkerEvent::WhiteBalanceSampleReady { .. }
             | WorkerEvent::WhiteBalanceSampleFailed { .. }

@@ -189,13 +189,11 @@ impl Workspace {
             .on_action(cx.listener(|this, _: &PreviousPhoto, _, cx| this.open_adjacent(false, cx)))
             .on_action(cx.listener(|this, _: &OpenFile, _, cx| this.prompt(false, cx)))
             .on_action(cx.listener(|this, _: &OpenFolder, _, cx| this.prompt(true, cx)))
-            .on_action(cx.listener(|this, _: &ZoomToFit, window, cx| {
-                this.viewport
-                    .update(cx, |viewport, cx| viewport.zoom_to_fit(window, cx));
+            .on_action(cx.listener(|this, _: &ZoomToFit, _, cx| {
+                this.viewport.update(cx, Viewport::zoom_to_fit);
             }))
-            .on_action(cx.listener(|this, _: &ActualPixels, window, cx| {
-                this.viewport
-                    .update(cx, |viewport, cx| viewport.actual_pixels(window, cx));
+            .on_action(cx.listener(|this, _: &ActualPixels, _, cx| {
+                this.viewport.update(cx, Viewport::actual_pixels);
             }))
             .on_action(cx.listener(|this, _: &ToggleFiles, _, cx| {
                 this.files_open = !this.files_open;

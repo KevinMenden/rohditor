@@ -71,7 +71,7 @@ Done when a full slider edit works by keyboard alone.
 
 ## Stage 2: Viewport
 
-- [ ] 2.1 Source-resolution 1:1.
+- [x] 2.1 Source-resolution 1:1.
 - [ ] 2.2 An overlay layer with screen-to-image mapping.
 - [ ] 2.3 Clipping overlay.
 - [ ] 2.4 Measure large CPU frames (crop, CPU-fallback 1:1; about 24 MP). Upload them straight to

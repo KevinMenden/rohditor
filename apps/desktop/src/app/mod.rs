@@ -983,28 +983,14 @@ impl RohditorApp {
                 document.core.notice = None;
                 changed_document = Some(document.core.id);
             }
-            if actions.fit {
-                let changed_mode = document.core.preview.source_scale_requested;
-                document.core.preview.source_scale_requested = false;
-                document.core.preview.view.fit(now);
-                if changed_mode {
-                    view_changed_document = Some(document.core.id);
-                }
+            if actions.fit && document.core.preview.request_fit(now) {
+                view_changed_document = Some(document.core.id);
             }
-            if actions.actual_size && self.tool.crop().is_none() {
-                let changed_mode = !document.core.preview.source_scale_requested;
-                document.core.preview.source_scale_requested = true;
-                let preview_is_source_scale = document
-                    .core
-                    .preview
-                    .source
-                    .is_some_and(PreviewSource::is_source_scale);
-                if preview_is_source_scale {
-                    document.core.preview.view.actual_size(now);
-                }
-                if changed_mode {
-                    view_changed_document = Some(document.core.id);
-                }
+            if actions.actual_size
+                && self.tool.crop().is_none()
+                && document.core.preview.request_actual_size(now)
+            {
+                view_changed_document = Some(document.core.id);
             }
         }
         if actions.reset {

@@ -135,6 +135,30 @@ impl DocumentPreview {
             && gpu_supports_recipe(recipe)
     }
 
+    /// Show the whole photo in the viewport. Returns whether Source 1:1 was
+    /// on, in which case the caller must queue a fitted preview. `now` is the
+    /// frontend clock, see [`ViewState::fit`].
+    #[must_use = "leaving Source 1:1 needs a new preview"]
+    pub fn request_fit(&mut self, now: f64) -> bool {
+        let was_source_scale = std::mem::take(&mut self.source_scale_requested);
+        self.view.fit(now);
+        was_source_scale
+    }
+
+    /// Ask for Source 1:1: one photo pixel per device pixel. Returns whether
+    /// the mode changed, in which case the caller must queue a source-scale
+    /// preview. The view only jumps to 100% when a source-scale frame is
+    /// already on screen; otherwise it follows when that frame arrives (see
+    /// [`ViewState::source_scale_frame_ready`]).
+    #[must_use = "entering Source 1:1 needs a new preview"]
+    pub fn request_actual_size(&mut self, now: f64) -> bool {
+        let changed = !std::mem::replace(&mut self.source_scale_requested, true);
+        if self.source.is_some_and(PreviewSource::is_source_scale) {
+            self.view.actual_size(now);
+        }
+        changed
+    }
+
     pub const fn gpu(&self) -> Option<&GpuDocumentPreview> {
         self.gpu.as_ref()
     }
@@ -259,6 +283,59 @@ mod tests {
         let latest = preview.ticket(edits.revision());
         assert!(preview.gpu_upload_matches(edits.revision(), latest, edits.recipe()));
         assert!(!preview.gpu_upload_matches(edits.revision(), current, edits.recipe()));
+    }
+
+    #[test]
+    fn actual_size_waits_for_the_source_scale_frame_before_zooming() {
+        let mut preview = DocumentPreview::new(1);
+        preview.source = Some(PreviewSource::HighQualityCpu);
+        preview
+            .view
+            .pan_by(0.5, [800.0, 600.0], [1_000.0, 1_000.0], [12.0, 8.0]);
+
+        assert!(preview.request_actual_size(1.0), "the mode changed");
+        assert!(preview.source_scale_requested);
+        assert!(
+            !preview.view.is_actual_size(),
+            "the fitted frame is still shown"
+        );
+        assert!(
+            !preview.request_actual_size(2.0),
+            "asking again changes nothing"
+        );
+
+        // The frame arrives: the view enters 100% once.
+        let previous = preview.source.replace(PreviewSource::OneToOneCpu);
+        preview.view.source_scale_frame_ready(previous, 3.0);
+        assert!(preview.view.is_actual_size());
+    }
+
+    #[test]
+    fn actual_size_again_recentres_an_already_shown_source_scale_frame() {
+        let mut preview = DocumentPreview::new(1);
+        preview.source = Some(PreviewSource::OneToOneGpu);
+        preview.source_scale_requested = true;
+        preview
+            .view
+            .pan_by(1.0, [800.0, 600.0], [2_000.0, 1_000.0], [90.0, -40.0]);
+
+        assert!(!preview.request_actual_size(1.0));
+        assert!(preview.view.is_actual_size());
+        assert_eq!(preview.view.pan(), [0.0, 0.0]);
+    }
+
+    #[test]
+    fn fit_leaves_source_scale_and_reports_that_a_new_preview_is_needed() {
+        let mut preview = DocumentPreview::new(1);
+        assert!(
+            !preview.request_fit(1.0),
+            "already fitted: nothing to render"
+        );
+
+        preview.source_scale_requested = true;
+        assert!(preview.request_fit(2.0));
+        assert!(!preview.source_scale_requested);
+        assert!(preview.view.is_fit());
     }
 
     #[test]
