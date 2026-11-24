@@ -1,27 +1,28 @@
 //! Command palette: type to filter, Enter to run.
 
 use gpui::{
-    App, Context, DismissEvent, EventEmitter, FocusHandle, Focusable, IntoElement, KeyDownEvent,
-    Render, Window, div, prelude::*, px,
+    App, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, Render,
+    Role, Window, div, prelude::*, px,
 };
 
-use crate::actions::{Command, commands, key_label};
+use crate::actions::{Command, commands};
 use crate::assets::Icon;
 use crate::theme::{RADIUS, SMALL_FONT_SIZE, theme};
 use crate::ui::button::icon;
+use crate::ui::keys::{Confirm, SelectNext, SelectPrevious};
+use crate::ui::text_input::{Changed, TextInput};
 
 pub struct CommandPalette {
-    focus: FocusHandle,
     commands: Vec<Command>,
-    query: String,
+    query: Entity<TextInput>,
     selected: usize,
 }
 
 impl EventEmitter<DismissEvent> for CommandPalette {}
 
 impl Focusable for CommandPalette {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus.clone()
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.query.focus_handle(cx)
     }
 }
 
@@ -37,49 +38,40 @@ fn matches(name: &str, query: &str) -> bool {
 
 impl CommandPalette {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        let query = cx.new(|cx| TextInput::new("Command", "Run a command…", String::new(), cx));
+        cx.subscribe(&query, |palette, _, _: &Changed, cx| {
+            palette.selected = 0;
+            cx.notify();
+        })
+        .detach();
         Self {
-            focus: cx.focus_handle(),
             commands: commands(),
-            query: String::new(),
+            query,
             selected: 0,
         }
     }
 
-    fn visible(&self) -> Vec<usize> {
+    fn visible(&self, cx: &App) -> Vec<usize> {
+        let query = self.query.read(cx).text();
         (0..self.commands.len())
-            .filter(|&index| matches(self.commands[index].name, &self.query))
+            .filter(|&index| matches(self.commands[index].name, query))
             .collect()
     }
 
-    fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let visible = self.visible();
-        let keystroke = &event.keystroke;
-        match keystroke.key.as_str() {
-            "escape" => cx.emit(DismissEvent),
-            "enter" => {
-                if let Some(&index) = visible.get(self.selected) {
-                    self.run(index, window, cx);
-                }
-            }
-            "down" => self.selected = (self.selected + 1) % visible.len().max(1),
-            "up" => {
-                let count = visible.len().max(1);
-                self.selected = (self.selected + count - 1) % count;
-            }
-            "backspace" => {
-                self.query.pop();
-                self.selected = 0;
-            }
-            _ => {
-                let typed = keystroke.key_char.as_ref();
-                let shortcut = keystroke.modifiers.control || keystroke.modifiers.alt;
-                if let Some(typed) = typed.filter(|_| !shortcut) {
-                    self.query.push_str(typed);
-                    self.selected = 0;
-                }
-            }
+    fn confirm(&mut self, _: &Confirm, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(&index) = self.visible(cx).get(self.selected) {
+            self.run(index, window, cx);
         }
-        cx.stop_propagation();
+    }
+
+    fn select_next(&mut self, _: &SelectNext, _: &mut Window, cx: &mut Context<Self>) {
+        self.selected = (self.selected + 1) % self.visible(cx).len().max(1);
+        cx.notify();
+    }
+
+    fn select_previous(&mut self, _: &SelectPrevious, _: &mut Window, cx: &mut Context<Self>) {
+        let count = self.visible(cx).len().max(1);
+        self.selected = (self.selected + count - 1) % count;
         cx.notify();
     }
 
@@ -100,6 +92,9 @@ impl CommandPalette {
         let command = &self.commands[index];
         let entry = div()
             .id(index)
+            .role(Role::ListBoxOption)
+            .aria_label(command.name)
+            .aria_selected(selected)
             .flex()
             .items_center()
             .justify_between()
@@ -108,11 +103,11 @@ impl CommandPalette {
             .rounded(RADIUS)
             .cursor_pointer()
             .child(command.name)
-            .children(command.key.map(|key| {
+            .children(command.key_label().map(|key| {
                 div()
                     .text_size(SMALL_FONT_SIZE)
                     .text_color(theme.faint)
-                    .child(key_label(key))
+                    .child(key)
             }))
             .on_click(cx.listener(move |this, _, window, cx| this.run(index, window, cx)));
         if selected {
@@ -126,23 +121,20 @@ impl CommandPalette {
 impl Render for CommandPalette {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme();
-        let visible = self.visible();
+        let visible = self.visible(cx);
         let entries: Vec<_> = visible
             .iter()
             .enumerate()
             .map(|(row, &index)| self.entry(index, row == self.selected, cx))
             .collect();
         let empty = entries.is_empty();
-        let query = if self.query.is_empty() {
-            div().text_color(theme.faint).child("Run a command…")
-        } else {
-            div().child(self.query.clone())
-        };
         div()
-            .track_focus(&self.focus)
-            .on_key_down(cx.listener(Self::key_down))
-            .on_mouse_down_out(cx.listener(|_, _, _, cx| cx.emit(DismissEvent)))
-            .occlude()
+            .id("command-palette")
+            .role(Role::Dialog)
+            .aria_label("Command palette")
+            .on_action(cx.listener(Self::confirm))
+            .on_action(cx.listener(Self::select_next))
+            .on_action(cx.listener(Self::select_previous))
             .w(px(520.0))
             .flex()
             .flex_col()
@@ -161,11 +153,12 @@ impl Render for CommandPalette {
                     .border_b_1()
                     .border_color(theme.border)
                     .child(icon(Icon::Search, theme.muted))
-                    .child(query),
+                    .child(self.query.clone()),
             )
             .child(
                 div()
                     .id("commands")
+                    .role(Role::ListBox)
                     .p_1()
                     .max_h(px(400.0))
                     .overflow_y_scroll()

@@ -1,16 +1,17 @@
 //! The window: title bar, docks, tab, viewport and status bar.
 
 mod chrome;
+mod notifications;
 
 use gpui::{
-    App, Context, DismissEvent, Entity, FocusHandle, Focusable, IntoElement, PathPromptOptions,
-    Pixels, Render, StyleRefinement, Window, div, prelude::*, px,
+    App, Context, Div, Entity, FocusHandle, Focusable, IntoElement, PathPromptOptions, Pixels,
+    Render, Role, Stateful, StyleRefinement, Window, div, prelude::*,
 };
 
 use crate::actions::{
-    ActualPixels, AutoTone, CloseFile, Export, NextPhoto, OpenFile, OpenFolder, PreviousPhoto,
-    Quit, Redo, ResetAdjustments, Save, ToggleCommandPalette, ToggleDevelop, ToggleFiles, Undo,
-    WORKSPACE_CONTEXT, ZoomToFit,
+    ActualPixels, AutoTone, CloseFile, Export, FocusAdjustments, FocusPhoto, NextPhoto, OpenFile,
+    OpenFolder, PreviousPhoto, Quit, Redo, ResetAdjustments, Save, ToggleCommandPalette,
+    ToggleDevelop, ToggleFiles, Undo, WORKSPACE_CONTEXT, ZoomToFit,
 };
 use crate::library::Library;
 use crate::panels::command_palette::CommandPalette;
@@ -18,7 +19,11 @@ use crate::panels::develop::DevelopPanel;
 use crate::panels::files::FilesPanel;
 use crate::session::Session;
 use crate::theme::{DEVELOP_WIDTH, FILES_WIDTH, UI_FONT_SIZE, theme};
+use crate::ui::confirm::Confirm;
+use crate::ui::keys::{FocusNext, FocusPrevious};
+use crate::ui::overlays::{Overlays, ToastKind};
 use crate::viewport::Viewport;
+use notifications::Announced;
 
 pub struct Workspace {
     session: Entity<Session>,
@@ -26,7 +31,8 @@ pub struct Workspace {
     files: Entity<FilesPanel>,
     develop: Entity<DevelopPanel>,
     viewport: Entity<Viewport>,
-    palette: Option<Entity<CommandPalette>>,
+    overlays: Entity<Overlays>,
+    announced: Announced,
     files_open: bool,
     develop_open: bool,
     focus: FocusHandle,
@@ -47,7 +53,18 @@ impl Workspace {
     ) -> Self {
         let focus = cx.focus_handle();
         focus.focus(window, cx);
-        cx.observe_in(&session, window, |_, session, window, cx| {
+        // The focused control went away.
+        cx.on_focus_lost(window, |this, window, cx| this.focus.focus(window, cx))
+            .detach();
+        let this = cx.entity();
+        window.on_window_should_close(cx, move |window, cx| {
+            this.update(cx, |this, cx| this.may_quit(window, cx))
+        });
+        let overlays = cx.new(|_| Overlays::default());
+        // An open menu or dialog changes which keys work here.
+        cx.observe(&overlays, |_, _, cx| cx.notify()).detach();
+        cx.observe_in(&session, window, |this, session, window, cx| {
+            this.announce(cx);
             let title = session.read(cx).document().map_or_else(
                 || "Rohditor".to_owned(),
                 |d| format!("{} — Rohditor", d.file_name()),
@@ -58,12 +75,14 @@ impl Workspace {
         .detach();
         cx.observe(&library, |_, _, cx| cx.notify()).detach();
         Self {
-            files: cx.new(|cx| FilesPanel::new(session.clone(), library.clone(), cx)),
-            develop: cx.new(|cx| DevelopPanel::new(session.clone(), cx)),
+            files: cx
+                .new(|cx| FilesPanel::new(session.clone(), library.clone(), overlays.clone(), cx)),
+            develop: cx.new(|cx| DevelopPanel::new(session.clone(), overlays.clone(), cx)),
             viewport: cx.new(|cx| Viewport::new(session.clone(), cx)),
             session,
             library,
-            palette: None,
+            overlays,
+            announced: Announced::default(),
             files_open: true,
             develop_open: true,
             focus,
@@ -78,6 +97,7 @@ impl Workspace {
             prompt: None,
         });
         let (session, library) = (self.session.clone(), self.library.clone());
+        let overlays = self.overlays.clone();
         cx.spawn(async move |_, cx| match chosen.await {
             Ok(Ok(Some(paths))) => {
                 if let Some(path) = paths.into_iter().next() {
@@ -88,7 +108,10 @@ impl Workspace {
                     }
                 }
             }
-            Ok(Err(error)) => log::error!("the file dialog failed: {error:#}"),
+            Ok(Err(error)) => overlays.update(cx, |overlays, cx| {
+                let text = format!("The file dialog failed: {error:#}");
+                overlays.toast(ToastKind::Error, text, cx);
+            }),
             Ok(Ok(None)) | Err(_) => {}
         })
         .detach();
@@ -109,28 +132,42 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.palette.is_some() {
-            return self.close_palette(window, cx);
-        }
-        let palette = cx.new(CommandPalette::new);
-        palette.focus_handle(cx).focus(window, cx);
-        cx.subscribe_in(&palette, window, |this, _, _: &DismissEvent, window, cx| {
-            this.close_palette(window, cx);
-        })
-        .detach();
-        self.palette = Some(palette);
-        cx.notify();
+        self.overlays.update(cx, |overlays, cx| {
+            if overlays.dialog::<CommandPalette>().is_some() {
+                overlays.close(window, cx);
+            } else {
+                let palette = cx.new(CommandPalette::new);
+                overlays.show_dialog(palette, window, cx);
+            }
+        });
     }
 
-    fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.palette.take().is_some() {
-            self.focus.focus(window, cx);
-            cx.notify();
+    /// Whether nothing would be lost by quitting now. Asks the user otherwise.
+    fn may_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let exporting = self
+            .session
+            .read(cx)
+            .document()
+            .is_some_and(|document| document.export_status.is_some());
+        if exporting {
+            self.overlays.update(cx, |overlays, cx| {
+                let question = cx.new(|cx| {
+                    Confirm::new(
+                        "Quit while exporting?",
+                        "The export is not finished and would be lost.",
+                        "Quit Anyway",
+                        |_, cx| cx.quit(),
+                        cx,
+                    )
+                });
+                overlays.show_dialog(question, window, cx);
+            });
         }
+        !exporting
     }
 
     /// Attach the handler of every action the workspace performs.
-    fn with_actions(&self, root: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
+    fn with_actions(&self, root: Stateful<Div>, cx: &mut Context<Self>) -> Stateful<Div> {
         macro_rules! on_session {
             ($root:expr, $($action:ident => $call:expr),* $(,)?) => {
                 $root$(.on_action(cx.listener(|this, _: &$action, _, cx| {
@@ -169,7 +206,20 @@ impl Workspace {
                 cx.notify();
             }))
             .on_action(cx.listener(Self::toggle_palette))
-            .on_action(cx.listener(|_, _: &Quit, _, cx| cx.quit()))
+            .on_action(cx.listener(|this, _: &FocusAdjustments, window, cx| {
+                this.develop_open = true;
+                cx.notify();
+                this.develop
+                    .update(cx, |panel, cx| panel.focus_adjustments(window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &FocusPhoto, window, cx| this.focus.focus(window, cx)))
+            .on_action(cx.listener(|this, _: &Quit, window, cx| {
+                if this.may_quit(window, cx) {
+                    cx.quit();
+                }
+            }))
+            .on_action(cx.listener(|_, _: &FocusNext, window, cx| window.focus_next(cx)))
+            .on_action(cx.listener(|_, _: &FocusPrevious, window, cx| window.focus_prev(cx)))
     }
 }
 
@@ -184,7 +234,12 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme();
         let root = div()
-            .key_context(WORKSPACE_CONTEXT)
+            .id("workspace")
+            .role(Role::Application)
+            .aria_label("Rohditor")
+            .when(!self.overlays.read(cx).is_open(), |root| {
+                root.key_context(WORKSPACE_CONTEXT)
+            })
             .track_focus(&self.focus)
             .relative()
             .size_full()
@@ -217,18 +272,7 @@ impl Render for Workspace {
                     }),
             )
             .child(self.status_bar(window, cx))
-            .children(self.palette.clone().map(|palette| {
-                div()
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .size_full()
-                    .flex()
-                    .justify_center()
-                    .items_start()
-                    .pt(px(90.0))
-                    .child(palette)
-            }))
+            .child(self.overlays.clone())
             .children(chrome::resize_edges(window))
     }
 }

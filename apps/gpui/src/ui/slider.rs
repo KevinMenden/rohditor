@@ -1,4 +1,4 @@
-//! Slider arithmetic: values, formatting and relative drags.
+//! Slider arithmetic: values, formatting, typed text, steps, relative drags and coloured tracks.
 
 use rohditor_edit::ParameterRange;
 
@@ -30,6 +30,41 @@ impl Format {
         }
     }
 
+    /// The value meant by `text`, in the unit of [`Self::label`]. Clamped to the range.
+    pub fn parse(self, text: &str, range: ParameterRange) -> Option<f32> {
+        let text = text.trim().to_lowercase().replace(',', ".");
+        let number = ["ev", "k", "%"]
+            .iter()
+            .find_map(|unit| text.strip_suffix(unit))
+            .unwrap_or(&text)
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .filter(|number| number.is_finite())?;
+        let value = match self {
+            Self::Stops | Self::Kelvin => number,
+            Self::Percent => number / 100.0 + range.neutral,
+        };
+        Some(value.clamp(range.minimum, range.maximum))
+    }
+
+    /// What an arrow key changes.
+    pub const fn step(self) -> f64 {
+        match self {
+            Self::Stops => 0.05,
+            Self::Kelvin => 50.0,
+            Self::Percent => 0.01,
+        }
+    }
+
+    /// The value `steps` away, on a multiple of the step.
+    pub fn stepped(self, range: ParameterRange, value: f32, steps: i8) -> f32 {
+        let neutral = f64::from(range.neutral);
+        let position = (f64::from(value) - neutral) / self.step();
+        let next = (position + f64::from(steps)).round() * self.step() + neutral;
+        (next as f32).clamp(range.minimum, range.maximum)
+    }
+
     /// Temperature feels even in mireds, everything else is linear.
     fn track_at(self, value: f32) -> f32 {
         match self {
@@ -45,6 +80,13 @@ impl Format {
         }
     }
 }
+
+/// Colours along a track: at its start, at the neutral value and at its end.
+#[derive(Debug, Clone, Copy)]
+pub struct Ramp(pub [u32; 3]);
+
+pub const TEMPERATURE_RAMP: Ramp = Ramp([0x488fde, 0xdce0d6, 0xefb13f]);
+pub const TINT_RAMP: Ramp = Ramp([0x48b460, 0xdcdcdc, 0xcd4ba4]);
 
 /// Position of `value` on the track, 0 to 1.
 pub fn fraction(format: Format, range: ParameterRange, value: f32) -> f32 {
@@ -77,6 +119,38 @@ mod tests {
         assert_eq!(Format::Percent.label(-0.001, CONTRAST_RANGE), "0");
         assert_eq!(Format::Stops.label(-0.5, EXPOSURE_EV_RANGE), "-0.50 EV");
         assert_eq!(Format::Kelvin.label(5_200.4, TEMPERATURE_RANGE), "5200 K");
+    }
+
+    #[test]
+    fn typed_text_is_in_the_unit_of_the_label() {
+        let stops = |text| Format::Stops.parse(text, EXPOSURE_EV_RANGE);
+        assert_eq!(stops(" +0.35 EV"), Some(0.35));
+        assert_eq!(stops("-1,5"), Some(-1.5));
+        assert_eq!(stops("99"), Some(EXPOSURE_EV_RANGE.maximum));
+        assert_eq!(stops("bright"), None);
+        assert_eq!(stops("nan"), None);
+        assert_eq!(
+            Format::Kelvin.parse("5200 K", TEMPERATURE_RANGE),
+            Some(5_200.0)
+        );
+        assert_eq!(Format::Percent.parse("25", SATURATION_RANGE), Some(1.25));
+    }
+
+    #[test]
+    fn steps_stay_on_a_grid_and_in_range() {
+        let range = EXPOSURE_EV_RANGE;
+        let thrice = (0..3).fold(0.0, |value, _| Format::Stops.stepped(range, value, 1));
+        assert_eq!(thrice, 0.15);
+        assert_eq!(Format::Stops.stepped(range, 0.0, -10), -0.5);
+        assert_eq!(
+            Format::Stops.stepped(range, range.maximum, 1),
+            range.maximum
+        );
+        let percent = |value, steps| Format::Percent.stepped(SATURATION_RANGE, value, steps);
+        assert_eq!(percent(1.254, 1), 1.26);
+        let kelvin = |value, steps| Format::Kelvin.stepped(TEMPERATURE_RANGE, value, steps);
+        assert_eq!(kelvin(kelvin(5_500.0, 1), -1), 5_500.0);
+        assert!(kelvin(4_918.0, 1) > 4_918.0 && kelvin(4_918.0, -1) < 4_918.0);
     }
 
     #[test]

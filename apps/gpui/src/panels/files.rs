@@ -1,10 +1,10 @@
 //! Left dock: the photos of the open folder.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use gpui::{
-    Context, Corners, Entity, IntoElement, Render, Window, canvas, div, prelude::*, px,
-    uniform_list,
+    ClipboardItem, Context, Corners, Entity, IntoElement, MouseButton, MouseDownEvent, Pixels,
+    Point, Render, Role, Window, canvas, div, prelude::*, px, uniform_list,
 };
 
 use crate::actions::OpenFolder;
@@ -13,11 +13,14 @@ use crate::library::Library;
 use crate::session::Session;
 use crate::theme::{FILES_WIDTH, RADIUS, TAB_HEIGHT, theme};
 use crate::ui::button::icon;
+use crate::ui::menu::MenuEntry;
+use crate::ui::overlays::Overlays;
 use crate::ui::test_id::TestId as _;
 
 pub struct FilesPanel {
     session: Entity<Session>,
     library: Entity<Library>,
+    overlays: Entity<Overlays>,
     /// The open photo, which is highlighted.
     open: Option<PathBuf>,
     #[cfg(test)]
@@ -25,7 +28,12 @@ pub struct FilesPanel {
 }
 
 impl FilesPanel {
-    pub fn new(session: Entity<Session>, library: Entity<Library>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        session: Entity<Session>,
+        library: Entity<Library>,
+        overlays: Entity<Overlays>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         cx.observe(&session, |panel, session, cx| {
             let open = session.read(cx).document().map(|document| &document.path);
             if panel.open.as_ref() != open {
@@ -38,10 +46,30 @@ impl FilesPanel {
         Self {
             session,
             library,
+            overlays,
             open: None,
             #[cfg(test)]
             renders: 0,
         }
+    }
+
+    fn show_menu(
+        &self,
+        path: &Path,
+        at: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (reveal, copy) = (path.to_path_buf(), path.display().to_string());
+        let entries = vec![
+            MenuEntry::new("Show in File Manager", move |_, cx| cx.reveal_path(&reveal)),
+            MenuEntry::new("Copy Path", move |_, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
+            }),
+        ];
+        self.overlays.update(cx, |overlays, cx| {
+            overlays.show_menu(at, entries, window, cx);
+        });
     }
 
     fn row(&self, position: usize, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
@@ -84,6 +112,9 @@ impl FilesPanel {
         };
         let row = div()
             .id(position)
+            .role(Role::ListItem)
+            .aria_label(name.clone())
+            .aria_selected(open)
             .flex()
             .items_center()
             .gap_2()
@@ -96,6 +127,15 @@ impl FilesPanel {
             .child(thumbnail)
             .test_id(format!("file:{name}"))
             .child(div().min_w_0().truncate().child(name))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener({
+                    let path = path.clone();
+                    move |this, event: &MouseDownEvent, window, cx| {
+                        this.show_menu(&path, event.position, window, cx);
+                    }
+                }),
+            )
             .on_click(cx.listener(move |this, _, _, cx| {
                 let path = path.clone();
                 this.session
@@ -159,6 +199,11 @@ impl Render for FilesPanel {
             .child(
                 div()
                     .id("folder")
+                    .role(Role::Button)
+                    .aria_label("Open folder")
+                    .tab_index(0)
+                    .focus_visible(move |style| style.bg(theme.selected))
+                    .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                     .flex()
                     .flex_none()
                     .items_center()

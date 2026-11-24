@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use gpui::{
     Bounds, Context, Corners, Entity, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
-    Pixels, Point, Render, ScrollWheelEvent, Window, canvas, div, point, prelude::*, px, size,
+    Pixels, Point, Render, Role, ScrollWheelEvent, Window, canvas, div, point, prelude::*, px,
+    size,
 };
 use rohditor_engine::view::{ViewState, fit_scale};
 
@@ -153,6 +154,11 @@ impl Viewport {
         }
     }
 
+    /// How the open photo is shown.
+    pub fn view<'a>(&self, cx: &'a gpui::App) -> Option<&'a ViewState> {
+        Some(&self.session.read(cx).document()?.preview.view)
+    }
+
     /// The zoom as a share of the displayed image's pixels.
     pub fn zoom_label(&self, window: &Window, cx: &gpui::App) -> Option<String> {
         let session = self.session.read(cx);
@@ -182,6 +188,13 @@ fn welcome() -> impl IntoElement {
             };
             div()
                 .id(command.name)
+                .role(Role::Button)
+                .aria_label(title)
+                .tab_index(0)
+                .border_1()
+                .border_color(gpui::transparent_black())
+                .focus_visible(move |style| style.border_color(theme.accent))
+                .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                 .flex()
                 .justify_between()
                 .w(px(260.0))
@@ -221,6 +234,8 @@ impl Render for Viewport {
         let opening = session.display().is_none() && !empty;
         div()
             .id("viewport")
+            .role(Role::Image)
+            .aria_label("Photo")
             .relative()
             .flex_1()
             .min_h_0()

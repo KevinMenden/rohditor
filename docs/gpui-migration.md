@@ -22,7 +22,7 @@ Assumed from the recommendations unless marked open; change them here if they tu
 | Area | GPUI today | Missing |
 |---|---|---|
 | Open, folder list, autosave, undo | Done | Save status and errors, recovery checks |
-| Basic sliders | 16 | Typed values, keyboard, coloured tracks, section reset, changed markers |
+| Basic sliders | 16, typed, by keyboard | Section reset, changed markers |
 | Other adjustments | None | Curve, mixer, grading, profiles, highlights, defringe, moiré, optics, full detail controls |
 | Viewport | Fit, zoom, pan | Real 1:1, clipping overlay, tool overlays |
 | Tools | None | Crop, masks, white balance and colour pickers |
@@ -63,9 +63,9 @@ Done when CI builds `apps/gpui` and no test clicks raw pixel positions.
 
 ## Stage 1: Widget kit
 
-- [ ] 1.1 Text input, dropdown, popover, tooltip, modal, context menu, toggle, toasts.
-- [ ] 1.2 Final slider: typing, arrow keys, reset, coloured tracks.
-- [ ] 1.3 Focus order and accessible labels (AccessKit).
+- [x] 1.1 Text input, dropdown, popover, tooltip, modal, context menu, toggle, toasts.
+- [x] 1.2 Final slider: typing, arrow keys, reset, coloured tracks.
+- [x] 1.3 Focus order and accessible labels (AccessKit).
 
 Done when a full slider edit works by keyboard alone.
 

@@ -8,7 +8,7 @@ use rohditor_edit::{
     VIBRANCE_RANGE, WHITES_RANGE, WhiteBalance,
 };
 
-use crate::ui::slider::Format;
+use crate::ui::slider::{Format, Ramp, TEMPERATURE_RAMP, TINT_RAMP, fraction};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Adjustment {
@@ -123,6 +123,14 @@ impl Adjustment {
         }
     }
 
+    pub const fn ramp(self) -> Option<Ramp> {
+        match self {
+            Self::Temperature => Some(TEMPERATURE_RAMP),
+            Self::Tint => Some(TINT_RAMP),
+            _ => None,
+        }
+    }
+
     pub const fn is_white_balance(self) -> bool {
         matches!(self, Self::Temperature | Self::Tint)
     }
@@ -134,6 +142,11 @@ impl Adjustment {
             Self::Tint => coordinates(as_shot).tint,
             _ => self.range().neutral,
         }
+    }
+
+    pub fn is_edited(self, recipe: &EditRecipe, as_shot: Option<WhiteBalanceCoordinates>) -> bool {
+        let at = |value| fraction(self.format(), self.range(), value);
+        (at(self.get(recipe, as_shot)) - at(self.default_value(as_shot))).abs() > 1e-4
     }
 
     pub fn get(self, recipe: &EditRecipe, as_shot: Option<WhiteBalanceCoordinates>) -> f32 {
