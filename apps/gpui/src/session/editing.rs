@@ -2,7 +2,7 @@
 
 use gpui::Context;
 use rohditor_core::auto_tone;
-use rohditor_edit::EditRecipe;
+use rohditor_edit::{Parameter, RecipeSection, copy_sections};
 use rohditor_engine::document::EditSession;
 use rohditor_engine::open_document::OpenDocument;
 
@@ -22,20 +22,20 @@ impl Session {
         }
     }
 
-    /// Replace the recipe as part of a gesture, or as one step of its own. `white_balance` edits
-    /// are drafted on the resident GPU frame while dragging and rendered exactly at the end.
-    pub fn edit(
+    /// Change a parameter as part of a gesture, or as one step of its own. The white balance is
+    /// drafted on the resident GPU frame while dragging and rendered exactly at the end.
+    pub fn set_parameter(
         &mut self,
-        change: impl FnOnce(&mut EditRecipe),
+        parameter: Parameter,
+        value: f32,
         phase: EditPhase,
-        white_balance: bool,
         cx: &mut Context<Self>,
     ) {
         let Some(document) = self.document.as_mut() else {
             return;
         };
-        let mut next = document.edits.recipe().clone();
-        change(&mut next);
+        let defaults = document.default_recipe();
+        let next = parameter.with_value(document.edits.recipe(), &defaults, value);
         let changed = match phase {
             EditPhase::Dragging => document.edits.set_during_gesture(next),
             EditPhase::Finished => document.edits.set_discrete(next),
@@ -43,7 +43,7 @@ impl Session {
         if !changed {
             return;
         }
-        let drafted = white_balance
+        let drafted = is_drafted(parameter)
             && phase == EditPhase::Dragging
             && self.renderer.run(
                 document,
@@ -58,14 +58,25 @@ impl Session {
         self.tick(cx);
     }
 
-    pub fn finish_gesture(&mut self, white_balance: bool, cx: &mut Context<Self>) {
+    /// End the gesture that changed `parameter`.
+    pub fn finish_gesture(&mut self, parameter: Parameter, cx: &mut Context<Self>) {
         if let Some(document) = self.document.as_mut() {
             document.edits.finish_gesture();
-            if white_balance {
+            if is_drafted(parameter) {
                 self.queue_preview();
             }
         }
         self.tick(cx);
+    }
+
+    /// Restore the photo's defaults in one section.
+    pub fn reset_section(&mut self, section: RecipeSection, cx: &mut Context<Self>) {
+        let Some(document) = self.document.as_ref() else {
+            return;
+        };
+        let defaults = document.default_recipe();
+        let next = copy_sections(document.edits.recipe(), &defaults, &[section]);
+        self.change_history(|edits| edits.set_discrete(next), cx);
     }
 
     fn change_history(
@@ -107,4 +118,9 @@ impl Session {
             self.change_history(|edits| edits.set_discrete(next), cx);
         }
     }
+}
+
+/// Whether the parameter has a fast draft while it is dragged.
+fn is_drafted(parameter: Parameter) -> bool {
+    parameter.section() == RecipeSection::WhiteBalance
 }

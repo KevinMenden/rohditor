@@ -2,11 +2,12 @@ use eframe::egui;
 use rohditor_edit::{
     CAPTURE_AMOUNT_RANGE, CAPTURE_NOISE_RANGE, CAPTURE_RADIUS_RANGE, CHROMA_NOISE_REDUCTION_RANGE,
     DEFAULT_GREEN_HUE, DEFAULT_PURPLE_HUE, DEFRINGE_AMOUNT_RANGE, DEFRINGE_HUE_RANGE_DEGREES,
-    FALSE_COLOR_MAX_STEPS, LUMINANCE_DETAIL_RANGE, LUMINANCE_NOISE_REDUCTION_RANGE, ParameterRange,
+    FALSE_COLOR_MAX_STEPS, LUMINANCE_DETAIL_RANGE, LUMINANCE_NOISE_REDUCTION_RANGE, Parameter,
+    ParameterRange,
 };
 
 use super::adjustment_panel::{
-    AdjustmentPanelOutput, AdjustmentTarget, DocumentPanelModel, NoiseSuggestion, record_slider,
+    AdjustmentPanelOutput, DocumentPanelModel, NoiseSuggestion, record_slider,
 };
 use super::widgets::{AdjustmentSpec, ValueScale};
 
@@ -34,9 +35,9 @@ pub(super) fn defringe(
     for (name, amount_target, start_target, end_target, active, amount, hue, default_hue) in [
         (
             "Purple",
-            AdjustmentTarget::DefringePurpleAmount,
-            AdjustmentTarget::DefringePurpleHueStart,
-            AdjustmentTarget::DefringePurpleHueEnd,
+            Parameter::DefringePurpleAmount,
+            Parameter::DefringePurpleHueStart,
+            Parameter::DefringePurpleHueEnd,
             purple_active,
             &mut settings.purple_amount,
             &mut settings.purple_hue,
@@ -44,9 +45,9 @@ pub(super) fn defringe(
         ),
         (
             "Green",
-            AdjustmentTarget::DefringeGreenAmount,
-            AdjustmentTarget::DefringeGreenHueStart,
-            AdjustmentTarget::DefringeGreenHueEnd,
+            Parameter::DefringeGreenAmount,
+            Parameter::DefringeGreenHueStart,
+            Parameter::DefringeGreenHueEnd,
             green_active,
             &mut settings.green_amount,
             &mut settings.green_hue,
@@ -98,7 +99,7 @@ pub(super) fn false_color(
     record_slider(
         ui,
         &mut output.interactions,
-        AdjustmentTarget::FalseColorSteps,
+        Parameter::FalseColorSteps,
         &mut steps,
         AdjustmentSpec {
             label: "Steps",
@@ -135,14 +136,14 @@ pub(super) fn noise_reduction(
     record_slider(
         ui,
         &mut output.interactions,
-        AdjustmentTarget::ChromaNoiseReduction,
+        Parameter::ChromaNoiseReduction,
         &mut settings.chroma,
         slider("Colour", CHROMA_NOISE_REDUCTION_RANGE),
     );
     record_slider(
         ui,
         &mut output.interactions,
-        AdjustmentTarget::LuminanceNoiseReduction,
+        Parameter::LuminanceNoiseReduction,
         &mut settings.luminance,
         slider("Luminance", LUMINANCE_NOISE_REDUCTION_RANGE),
     );
@@ -151,7 +152,7 @@ pub(super) fn noise_reduction(
         record_slider(
             ui,
             &mut output.interactions,
-            AdjustmentTarget::LuminanceDetail,
+            Parameter::LuminanceDetail,
             &mut settings.luminance_detail,
             slider("Detail", LUMINANCE_DETAIL_RANGE),
         );
@@ -216,24 +217,30 @@ pub(super) fn capture_sharpening(
     ).changed() {
         output.capture_enabled = Some(settings.enabled);
     }
+    // Not disabled with the others: it switches sharpening on, and off at 0.
+    let mut amount = if settings.enabled {
+        settings.amount
+    } else {
+        0.0
+    };
+    record_slider(
+        ui,
+        &mut output.interactions,
+        Parameter::CaptureAmount,
+        &mut amount,
+        slider("Amount", CAPTURE_AMOUNT_RANGE),
+    );
     ui.add_enabled_ui(settings.enabled, |ui| {
         for (target, label, value, range, suffix) in [
             (
-                AdjustmentTarget::CaptureAmount,
-                "Amount",
-                &mut settings.amount,
-                CAPTURE_AMOUNT_RANGE,
-                "",
-            ),
-            (
-                AdjustmentTarget::CaptureRadius,
+                Parameter::CaptureRadius,
                 "Radius",
                 &mut settings.radius,
                 CAPTURE_RADIUS_RANGE,
                 " px",
             ),
             (
-                AdjustmentTarget::CaptureNoise,
+                Parameter::CaptureNoise,
                 "Noise protection",
                 &mut settings.noise_protection,
                 CAPTURE_NOISE_RANGE,

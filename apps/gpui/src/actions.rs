@@ -1,7 +1,9 @@
 //! Everything the user can do by key, button or command palette.
 
-use gpui::{Action, App, KeyBinding, NoAction, actions};
+use gpui::{Action, App, KeyBinding, NoAction, SharedString, actions};
+use rohditor_edit::RecipeSection;
 
+use crate::panels::adjustments::SECTIONS;
 use crate::{panels, ui};
 
 actions!(
@@ -30,23 +32,32 @@ actions!(
     ]
 );
 
+/// Restore the photo's defaults in one section.
+#[derive(Debug, Clone, PartialEq, Eq, Action)]
+#[action(namespace = rohditor, no_json)]
+pub struct ResetSection(pub RecipeSection);
+
 /// An entry of the command palette and, when it has a key, of the keymap.
 pub struct Command {
-    pub name: &'static str,
+    pub name: SharedString,
     pub key: Option<&'static str>,
     pub action: Box<dyn Action>,
 }
 
-fn command(name: &'static str, key: Option<&'static str>, action: impl Action) -> Command {
+fn command(
+    name: impl Into<SharedString>,
+    key: Option<&'static str>,
+    action: impl Action,
+) -> Command {
     Command {
-        name,
+        name: name.into(),
         key,
         action: Box::new(action),
     }
 }
 
 pub fn commands() -> Vec<Command> {
-    vec![
+    let mut commands = vec![
         command("file: open", Some("ctrl-o"), OpenFile),
         command("file: open folder", Some("ctrl-k"), OpenFolder),
         command("file: close", Some("ctrl-w"), CloseFile),
@@ -75,7 +86,13 @@ pub fn commands() -> Vec<Command> {
             ToggleCommandPalette,
         ),
         command("rohditor: quit", Some("ctrl-q"), Quit),
-    ]
+    ];
+    commands.extend(SECTIONS.iter().map(|section| {
+        let section = section.section;
+        let name = format!("develop: reset {}", section.label().to_lowercase());
+        command(name, None, ResetSection(section))
+    }));
+    commands
 }
 
 impl Command {
@@ -92,7 +109,7 @@ impl Command {
         let name = self
             .name
             .split_once(": ")
-            .map_or(self.name, |(_, name)| name);
+            .map_or(self.name.as_str(), |(_, name)| name);
         capitalized(name)
     }
 

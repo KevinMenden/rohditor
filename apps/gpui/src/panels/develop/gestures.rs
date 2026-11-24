@@ -51,25 +51,27 @@ impl DevelopPanel {
     fn value(&self, adjustment: Adjustment, cx: &Context<Self>) -> Option<f32> {
         let session = self.session.read(cx);
         let document = session.document().filter(|open| open.frame.is_some())?;
-        Some(adjustment.get(document.edits.recipe(), session.as_shot()))
+        let defaults = document.default_recipe();
+        Some(adjustment.parameter.get(document.edits.recipe(), &defaults))
     }
 
     fn set(&self, adjustment: Adjustment, value: f32, phase: EditPhase, cx: &mut Context<Self>) {
         self.session.update(cx, |session, cx| {
-            let as_shot = session.as_shot();
-            session.edit(
-                |recipe| adjustment.set(recipe, as_shot, value),
-                phase,
-                adjustment.is_white_balance(),
-                cx,
-            );
+            session.set_parameter(adjustment.parameter, value, phase, cx);
         });
     }
 
     pub(super) fn reset(&mut self, adjustment: Adjustment, cx: &mut Context<Self>) {
         self.finish_nudge(cx);
-        let value = adjustment.default_value(self.session.read(cx).as_shot());
-        self.set(adjustment, value, EditPhase::Finished, cx);
+        let defaults = self
+            .session
+            .read(cx)
+            .document()
+            .map(|document| document.default_recipe());
+        if let Some(defaults) = defaults {
+            let value = adjustment.parameter.get(&defaults, &defaults);
+            self.set(adjustment, value, EditPhase::Finished, cx);
+        }
     }
 
     pub(super) fn press(
@@ -121,7 +123,7 @@ impl DevelopPanel {
         drag.last_x = event.position.x;
         drag.moved = true;
         let adjustment = drag.adjustment;
-        drag.value = dragged(adjustment.format(), adjustment.range(), drag.value, delta);
+        drag.value = dragged(adjustment.format, adjustment.range(), drag.value, delta);
         let value = drag.value;
         self.set(adjustment, value, EditPhase::Dragging, cx);
     }
@@ -131,7 +133,7 @@ impl DevelopPanel {
             return;
         };
         self.session.update(cx, |session, cx| {
-            session.finish_gesture(drag.adjustment.is_white_balance(), cx);
+            session.finish_gesture(drag.adjustment.parameter, cx);
         });
         if drag.on_value && !drag.moved {
             self.start_typing(drag.adjustment, window, cx);
@@ -144,16 +146,14 @@ impl DevelopPanel {
 
     /// Change the value by `steps` arrow key steps.
     pub(super) fn nudge(&mut self, adjustment: Adjustment, steps: i8, cx: &mut Context<Self>) {
-        let same = |nudge: &Nudge| nudge.adjustment == adjustment;
+        let same = |nudge: &Nudge| nudge.adjustment.parameter == adjustment.parameter;
         if !self.nudge.as_ref().is_some_and(same) {
             self.finish_nudge(cx);
         }
         let Some(value) = self.value(adjustment, cx) else {
             return;
         };
-        let next = adjustment
-            .format()
-            .stepped(adjustment.range(), value, steps);
+        let next = adjustment.format.stepped(adjustment.range(), value, steps);
         self.set(adjustment, next, EditPhase::Dragging, cx);
         let pause = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(NUDGE_PAUSE).await;
@@ -166,10 +166,10 @@ impl DevelopPanel {
         });
     }
 
-    fn finish_nudge(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn finish_nudge(&mut self, cx: &mut Context<Self>) {
         if let Some(nudge) = self.nudge.take() {
             self.session.update(cx, |session, cx| {
-                session.finish_gesture(nudge.adjustment.is_white_balance(), cx);
+                session.finish_gesture(nudge.adjustment.parameter, cx);
             });
         }
     }
@@ -184,8 +184,8 @@ impl DevelopPanel {
         let Some(value) = self.value(adjustment, cx) else {
             return;
         };
-        let text = adjustment.format().label(value, adjustment.range());
-        let input = cx.new(|cx| TextInput::new(adjustment.label(), "", text, cx));
+        let text = adjustment.format.label(value, adjustment.range());
+        let input = cx.new(|cx| TextInput::new(adjustment.label, "", text, cx));
         let focus = input.read(cx).focus_handle(cx);
         let return_to = window.focused(cx);
         focus.focus(window, cx);
@@ -252,7 +252,7 @@ impl DevelopPanel {
         let Typing {
             adjustment, input, ..
         } = typing;
-        let (format, range) = (adjustment.format(), adjustment.range());
+        let (format, range) = (adjustment.format, adjustment.range());
         let text = input.read(cx).text();
         let Some(value) = format.parse(text, range) else {
             return;

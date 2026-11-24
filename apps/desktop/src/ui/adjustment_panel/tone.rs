@@ -1,11 +1,8 @@
 use eframe::egui;
 use rohditor_core::evaluate_tone_curve;
-use rohditor_edit::{HighlightMethod, ToneCurve};
+use rohditor_edit::{HighlightMethod, Parameter, ToneCurve};
 
-use super::{
-    AdjustmentInteraction, AdjustmentPanelOutput, AdjustmentTarget, DocumentPanelModel,
-    record_slider,
-};
+use super::{AdjustmentInteraction, AdjustmentPanelOutput, DocumentPanelModel, record_slider};
 use crate::ui::theme::{colors, metrics};
 use crate::ui::widgets::{self, AdjustmentSpec, ValueScale};
 
@@ -39,13 +36,15 @@ pub(super) fn show_highlight_controls(
         output.highlight_method = Some(highlight_method);
     }
     if !matches!(highlight_method, HighlightMethod::Off) {
-        let (label, tooltip, suffix) = match highlight_method {
+        let (target, label, tooltip, suffix) = match highlight_method {
             HighlightMethod::Clip => (
+                Parameter::HighlightClipThreshold,
                 "Effective threshold",
                 "Clip caps channel values using a white-balance-dependent treatment ceiling.",
                 "× white",
             ),
             HighlightMethod::Opposed => (
+                Parameter::HighlightDetectionThreshold,
                 "Detection threshold",
                 "Uses nearby opposing-channel color evidence to inpaint clipped RAW sites; unsupported sites remain unchanged.",
                 "× normalized white",
@@ -55,7 +54,7 @@ pub(super) fn show_highlight_controls(
         let threshold_response = record_slider(
             ui,
             &mut output.interactions,
-            AdjustmentTarget::HighlightThreshold,
+            target,
             &mut document.values.highlight_threshold,
             AdjustmentSpec {
                 label,
@@ -91,7 +90,7 @@ pub(super) fn show_tone_controls(
     record_slider(
         ui,
         &mut output.interactions,
-        AdjustmentTarget::Exposure,
+        Parameter::Exposure,
         &mut document.values.exposure,
         AdjustmentSpec {
             label: "Exposure",
@@ -107,7 +106,7 @@ pub(super) fn show_tone_controls(
     record_slider(
         ui,
         &mut output.interactions,
-        AdjustmentTarget::Contrast,
+        Parameter::Contrast,
         &mut document.values.contrast,
         AdjustmentSpec {
             label: "Contrast",
@@ -123,25 +122,25 @@ pub(super) fn show_tone_controls(
     for (label, target, value, range) in [
         (
             "Highlights",
-            AdjustmentTarget::Highlights,
+            Parameter::Highlights,
             &mut document.values.highlights,
             document.ranges.highlights,
         ),
         (
             "Shadows",
-            AdjustmentTarget::Shadows,
+            Parameter::Shadows,
             &mut document.values.shadows,
             document.ranges.shadows,
         ),
         (
             "Whites",
-            AdjustmentTarget::Whites,
+            Parameter::Whites,
             &mut document.values.whites,
             document.ranges.whites,
         ),
         (
             "Blacks",
-            AdjustmentTarget::Blacks,
+            Parameter::Blacks,
             &mut document.values.blacks,
             document.ranges.blacks,
         ),
@@ -221,10 +220,10 @@ pub(super) fn show_tone_curve_controls(
 
     const CONTROL_INPUTS: [f32; 4] = [0.12, 0.35, 0.65, 0.88];
     let targets = [
-        AdjustmentTarget::ToneCurveShadows,
-        AdjustmentTarget::ToneCurveDarks,
-        AdjustmentTarget::ToneCurveLights,
-        AdjustmentTarget::ToneCurveHighlights,
+        Parameter::ToneCurveShadows,
+        Parameter::ToneCurveDarks,
+        Parameter::ToneCurveLights,
+        Parameter::ToneCurveHighlights,
     ];
     for index in 0..CONTROL_INPUTS.len() {
         let input = CONTROL_INPUTS[index];
@@ -248,7 +247,7 @@ pub(super) fn show_tone_curve_controls(
         let value_changed = (values[index] - was).abs() > f32::EPSILON;
         if response.drag_started() || value_changed || response.drag_stopped() || reset {
             output.interactions.push(AdjustmentInteraction {
-                target: targets[index],
+                target: targets[index].into(),
                 value: values[index],
                 changed: value_changed,
                 drag_started: response.drag_started(),

@@ -5,10 +5,9 @@
 //! one `set_discrete` call, so one preset is one undo step.
 
 use eframe::egui;
-use rohditor_edit::changed_sections;
 use rohditor_engine::presets::{ApplyOptions, Preset};
 
-use super::{Document, RohditorApp};
+use super::RohditorApp;
 use crate::ui::presets::PresetsAction;
 
 impl RohditorApp {
@@ -60,12 +59,4 @@ impl RohditorApp {
             Err(error) => self.presets_ui.error = Some(error.to_string()),
         }
     }
-}
-
-/// The sections of `document` that differ from its defaults.
-pub(super) fn edited_sections(document: &Document) -> Vec<rohditor_edit::RecipeSection> {
-    changed_sections(
-        document.core.edits.recipe(),
-        &document.core.default_recipe(),
-    )
 }

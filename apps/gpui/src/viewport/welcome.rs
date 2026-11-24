@@ -11,16 +11,16 @@ pub fn welcome() -> impl IntoElement {
     let starters = ["file: open", "file: open folder", "view: command palette"];
     let rows = commands()
         .into_iter()
-        .filter(move |command| starters.contains(&command.name))
+        .filter(move |command| starters.contains(&command.name.as_str()))
         .map(move |command| {
             let action = command.action;
-            let title = match command.name {
+            let title = match command.name.as_str() {
                 "file: open" => "Open File",
                 "file: open folder" => "Open Folder",
                 _ => "Command Palette",
             };
             div()
-                .id(command.name)
+                .id(command.name.clone())
                 .role(Role::Button)
                 .aria_label(title)
                 .tab_index(0)

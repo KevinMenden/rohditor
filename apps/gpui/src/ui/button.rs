@@ -20,13 +20,13 @@ pub fn icon(icon: Icon, color: Hsla) -> impl IntoElement {
 }
 
 pub fn icon_button(
-    id: &'static str,
+    id: impl Into<SharedString>,
     glyph: Icon,
     label: impl Into<SharedString>,
     enabled: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> Stateful<gpui::Div> {
-    keyed_icon_button(id, glyph, label.into(), None, enabled, on_click)
+    keyed_icon_button(id.into(), glyph, label.into(), None, enabled, on_click)
 }
 
 /// An icon button that runs a command, and says which and its key.
@@ -39,7 +39,7 @@ pub fn command_button(
     let command = Command::of(&action);
     let action = action.boxed_clone();
     keyed_icon_button(
-        id,
+        id.into(),
         glyph,
         command.title().into(),
         command.key_label().map(SharedString::from),
@@ -49,7 +49,7 @@ pub fn command_button(
 }
 
 fn keyed_icon_button(
-    id: &'static str,
+    id: SharedString,
     glyph: Icon,
     label: SharedString,
     key: Option<SharedString>,
@@ -60,7 +60,7 @@ fn keyed_icon_button(
     let size: Pixels = px(24.0);
     let color = if enabled { theme.muted } else { theme.faint };
     let button = div()
-        .id(id)
+        .id(id.clone())
         .role(Role::Button)
         .aria_label(label.clone())
         .size(size)

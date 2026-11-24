@@ -7,6 +7,8 @@ use gpui::{
     Window, canvas, point, prelude::*, px,
 };
 
+use rohditor_edit::{Parameter, RecipeSection};
+
 use super::DevelopPanel;
 use crate::panels::adjustments::SECTIONS;
 use crate::ui::keys::{SelectNext, SelectPrevious};
@@ -15,11 +17,18 @@ pub(super) const CONTEXT: &str = "Adjustments";
 /// Space kept around a control that is scrolled to.
 const MARGIN: Pixels = px(8.0);
 
+/// What in the panel can have the focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) enum Control {
+    /// The header of a section.
+    Section(RecipeSection),
+    Parameter(Parameter),
+}
+
 pub(super) struct PanelFocus {
     /// Before the first control, so that the one after it is the first.
     pub entry: FocusHandle,
-    /// Of the section headers and rows, by their labels.
-    controls: HashMap<&'static str, FocusHandle>,
+    controls: HashMap<Control, FocusHandle>,
     pub scroll: ScrollHandle,
     /// The control last scrolled to, so that scrolling away from it works.
     revealed: Option<FocusHandle>,
@@ -27,14 +36,15 @@ pub(super) struct PanelFocus {
 
 impl PanelFocus {
     pub fn new(cx: &mut Context<DevelopPanel>) -> Self {
-        let labels = SECTIONS.iter().flat_map(|section| {
-            let rows = section.adjustments.iter().map(|row| row.label());
-            std::iter::once(section.title).chain(rows)
+        let controls = SECTIONS.iter().flat_map(|section| {
+            let rows = section.adjustments.iter();
+            let rows = rows.map(|row| Control::Parameter(row.parameter));
+            std::iter::once(Control::Section(section.section)).chain(rows)
         });
         Self {
             entry: cx.focus_handle(),
-            controls: labels
-                .map(|label| (label, cx.focus_handle().tab_stop(true)))
+            controls: controls
+                .map(|control| (control, cx.focus_handle().tab_stop(true)))
                 .collect(),
             scroll: ScrollHandle::new(),
             revealed: None,
@@ -54,8 +64,8 @@ impl PanelFocus {
         }
     }
 
-    pub fn control(&self, label: &str) -> &FocusHandle {
-        &self.controls[label]
+    pub fn control(&self, control: Control) -> &FocusHandle {
+        &self.controls[&control]
     }
 }
 
@@ -74,10 +84,14 @@ impl DevelopPanel {
         window.focus_next(cx);
     }
 
-    /// Covers the control with this label and scrolls to it when it gets the focus by key.
-    pub(super) fn revealer(&self, label: &str, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    /// Covers the control and scrolls to it when it gets the focus by key.
+    pub(super) fn revealer(
+        &self,
+        control: Control,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let panel: Entity<Self> = cx.entity();
-        let control = self.focus.control(label).clone();
+        let control = self.focus.control(control).clone();
         canvas(
             move |bounds, window, cx| {
                 if control.is_focused(window) && window.last_input_was_keyboard() {

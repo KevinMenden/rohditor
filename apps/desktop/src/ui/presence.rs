@@ -1,11 +1,9 @@
 //! Texture, clarity and dehaze sliders.
 
 use eframe::egui;
-use rohditor_edit::PRESENCE_RANGE;
+use rohditor_edit::{PRESENCE_RANGE, Parameter};
 
-use super::adjustment_panel::{
-    AdjustmentPanelOutput, AdjustmentTarget, DocumentPanelModel, record_slider,
-};
+use super::adjustment_panel::{AdjustmentPanelOutput, DocumentPanelModel, record_slider};
 use super::widgets::{AdjustmentSpec, ValueScale};
 
 /// Shown on the Presence section's header.
@@ -23,19 +21,19 @@ pub(super) fn presence(
     for (label, target, value, hint) in [
         (
             "Texture",
-            AdjustmentTarget::PresenceTexture,
+            Parameter::Texture,
             &mut settings.texture,
             "Fine-scale contrast: skin, bark, fabric. Below zero it smooths without softening edges.",
         ),
         (
             "Clarity",
-            AdjustmentTarget::PresenceClarity,
+            Parameter::Clarity,
             &mut settings.clarity,
             "Broad local contrast, strongest in the mid-tones. Below zero it gives a soft glow.",
         ),
         (
             "Dehaze",
-            AdjustmentTarget::PresenceDehaze,
+            Parameter::Dehaze,
             &mut settings.dehaze,
             "Removes haze and fog from distant scenes. Below zero it adds a hazy veil.",
         ),

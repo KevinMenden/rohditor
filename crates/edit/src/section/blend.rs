@@ -55,16 +55,6 @@ pub fn blend_sections(
     blended
 }
 
-/// The sections in which `recipe` differs from `defaults`, in the Edit panel's
-/// order. Saving a preset from "what I changed" starts from this list.
-#[must_use]
-pub fn changed_sections(recipe: &EditRecipe, defaults: &EditRecipe) -> Vec<RecipeSection> {
-    RecipeSection::ALL
-        .into_iter()
-        .filter(|&section| copy_sections(defaults, recipe, &[section]) != *defaults)
-        .collect()
-}
-
 /// The blend strength and the rules for combining values at that strength.
 #[derive(Clone, Copy)]
 struct Mix {
