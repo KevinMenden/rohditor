@@ -39,8 +39,8 @@ pub use presence::*;
 pub use profile::*;
 pub use raw::*;
 pub use recipe::{
-    EditError, EditRecipe, GeometryAdjustments, LIGHT_TONE_LUT_SIZE, LensProfileSelection,
-    LightToneLut, MatchedLook, NormalizedCropRect, OpticsAction, OpticsAdjustments,
+    EditError, EditRecipe, GeometryAdjustments, LIGHT_TONE_LUT_SIZE, LensCorrection,
+    LensProfileSelection, LightToneLut, MatchedLook, NormalizedCropRect, OpticsAdjustments,
     ROHDITOR_MATCHED_PROCESS_VERSION, ROHDITOR_STANDARD_PROCESS_VERSION, RenderingAdjustments,
     RenderingProfileSelection,
 };

@@ -149,9 +149,9 @@ impl OpticsService {
         crate::matching::profile_match(self, query)
     }
 
-    /// Return a bounded, deterministic list of camera-compatible profiles for
-    /// manual selection. Capture lens metadata narrows the list when it is
-    /// usable, but never removes the manual escape hatch for incorrect EXIF.
+    /// All profiles for the camera and the focal length, in a fixed order, for
+    /// manual selection: the captured lens name does not narrow the list, as it
+    /// may be wrong. Empty without a focal length, which every profile needs.
     #[must_use]
     pub fn manual_candidates(&self, query: &OpticsQuery) -> Vec<LensProfileSummary> {
         crate::matching::manual_candidates(self, query)
@@ -247,7 +247,7 @@ fn build_records(database: &Database) -> Vec<ProfileRecord> {
             .then_with(|| left.4.cmp(&right.4))
     });
 
-    candidates
+    let mut records: Vec<_> = candidates
         .into_iter()
         .map(
             |(
@@ -279,10 +279,9 @@ fn build_records(database: &Database) -> Vec<ProfileRecord> {
                     summary: LensProfileSummary {
                         id,
                         camera: format!("{} {}", camera.maker, camera.model),
-                        lens: format!(
-                            "{} {}",
-                            display_name(&lens.maker, &lens.maker_localized),
-                            display_name(&lens.model, &lens.model_localized)
+                        lens: lens_name(
+                            &display_name(&lens.maker, &lens.maker_localized),
+                            &display_name(&lens.model, &lens.model_localized),
                         ),
                         mount,
                         available,
@@ -290,7 +289,50 @@ fn build_records(database: &Database) -> Vec<ProfileRecord> {
                 }
             },
         )
-        .collect()
+        .collect();
+    keep_best_calibrations(database, &mut records);
+    records
+}
+
+/// The database lists some lenses once per sensor size they were measured on.
+/// Per camera and lens, keep the calibration with the most corrections, and of
+/// those the one measured on the most similar sensor.
+fn keep_best_calibrations(database: &Database, records: &mut Vec<ProfileRecord>) {
+    let rank = |record: &ProfileRecord| {
+        let available = record.summary.available;
+        let missing = [
+            available.distortion,
+            available.vignetting,
+            available.chromatic_aberration,
+        ]
+        .into_iter()
+        .filter(|available| !available)
+        .count();
+        let camera = database.cameras[record.camera_index].crop_factor;
+        let lens = database.lenses[record.lens_index].crop_factor;
+        (missing, (camera - lens).abs())
+    };
+    // Equal identities are neighbours. The camera is compared too: a database
+    // may list one under the same name twice.
+    records.dedup_by(|next, kept| {
+        let same = next.summary.id == kept.summary.id && next.camera_index == kept.camera_index;
+        if same && rank(next) < rank(kept) {
+            std::mem::swap(next, kept);
+        }
+        same
+    });
+}
+
+/// Maker and model, without repeating a maker the model already names.
+fn lens_name(maker: &str, model: &str) -> String {
+    let named = model
+        .get(..maker.len())
+        .is_some_and(|start| start.eq_ignore_ascii_case(maker));
+    if named {
+        model.to_owned()
+    } else {
+        format!("{maker} {model}")
+    }
 }
 
 fn stable_profile_id(
@@ -443,4 +485,88 @@ pub(crate) fn hash_text(hash: &mut u64, text: &str) {
 
 pub(crate) fn hash_f32(hash: &mut u64, value: f32) {
     hash_text(hash, &value.to_bits().to_string());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lens(crop: f32, vignetting: bool) -> String {
+        let vignetting = if vignetting {
+            r#"<vignetting model="pa" focal="50" aperture="2" distance="1000" k1="-0.2" k2="0" k3="0"/>"#
+        } else {
+            ""
+        };
+        format!(
+            r#"<lens><maker>Maker</maker><model>Maker 50mm f/2</model><mount>M</mount>
+            <cropfactor>{crop}</cropfactor><calibration>
+            <distortion model="poly3" focal="50" k1="0.0{}"/>{vignetting}
+            </calibration></lens>"#,
+            (crop * 10.0) as u32
+        )
+    }
+
+    fn service(lenses: &[String]) -> OpticsService {
+        OpticsService::from_xml(&format!(
+            r#"<lensdatabase version="1"><mount><name>M</name></mount>
+            <camera><maker>Maker</maker><model>Body</model><mount>M</mount>
+            <cropfactor>1.5</cropfactor></camera>{}</lensdatabase>"#,
+            lenses.concat()
+        ))
+        .expect("valid database")
+    }
+
+    fn crop(service: &OpticsService) -> f32 {
+        let [record] = service.records.as_slice() else {
+            panic!("{} records", service.records.len());
+        };
+        service.lens(record.lens_index).crop_factor
+    }
+
+    #[test]
+    fn a_lens_is_listed_once_with_its_best_calibration() {
+        let near = || lens(1.5, false);
+        assert_eq!(crop(&service(&[lens(1.0, false), near()])), 1.5);
+        assert_eq!(crop(&service(&[near(), lens(1.0, false)])), 1.5);
+        // More corrections win.
+        assert_eq!(crop(&service(&[near(), lens(1.0, true)])), 1.0);
+    }
+
+    #[test]
+    fn names_do_not_repeat_the_maker() {
+        assert_eq!(
+            service(&[lens(1.5, false)]).profiles()[0].lens,
+            "Maker 50mm f/2"
+        );
+        assert_eq!(lens_name("Sony", "E 50mm"), "Sony E 50mm");
+        assert_eq!(lens_name("Canon", "EF"), "Canon EF");
+    }
+
+    #[test]
+    fn manual_candidates_are_not_cut_off_and_need_a_focal_length() {
+        let service = OpticsService::load_bundled().expect("bundled database");
+        let mut query = OpticsQuery {
+            camera_make: "SONY".to_owned(),
+            camera_model: "ILCE-6400".to_owned(),
+            camera_clean_make: "Sony".to_owned(),
+            camera_clean_model: "ILCE-6400".to_owned(),
+            lens_make: None,
+            lens_model: None,
+            focal_length_mm: None,
+            aperture_f_number: None,
+            focus_distance_m: None,
+        };
+        assert!(service.manual_candidates(&query).is_empty());
+        query.focal_length_mm = Some(50.0);
+        let candidates = service.manual_candidates(&query);
+        // Late in the alphabet.
+        assert!(
+            candidates
+                .iter()
+                .any(|profile| profile.lens.starts_with("Zeiss"))
+        );
+        let ids: std::collections::HashSet<_> =
+            candidates.iter().map(|profile| &profile.id).collect();
+        assert_eq!(ids.len(), candidates.len());
+    }
 }

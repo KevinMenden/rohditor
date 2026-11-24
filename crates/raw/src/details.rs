@@ -1,20 +1,24 @@
-//! Builds the Info section's rows from the decoder's metadata.
+//! The facts about a photo that frontends list.
 
 use rohditor_image::Orientation;
-use rohditor_raw::RawFileInfo;
 
-use crate::ui::info::{InfoPanelModel, InfoRow};
+use crate::model::RawFileInfo;
 
-pub(super) fn info_panel_model(info: &RawFileInfo) -> InfoPanelModel {
-    let capture = &info.capture;
-    let row = |label, value| InfoRow { label, value };
-    InfoPanelModel {
-        capture: vec![
+/// One labelled value. `None` where the file does not provide it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InfoRow {
+    pub label: &'static str,
+    pub value: Option<String>,
+}
+
+impl RawFileInfo {
+    /// How the photo was taken.
+    #[must_use]
+    pub fn capture_rows(&self) -> Vec<InfoRow> {
+        let capture = &self.capture;
+        vec![
             row("Captured", capture.captured_at_label()),
-            row(
-                "Camera",
-                Some(info.camera_label()).filter(|camera| !camera.is_empty()),
-            ),
+            row("Camera", present(self.camera_label())),
             row("Lens", capture.lens_label()),
             row("Focal length", capture.focal_length_label()),
             row("Shutter", capture.exposure_time_label()),
@@ -27,30 +31,40 @@ pub(super) fn info_panel_model(info: &RawFileInfo) -> InfoPanelModel {
                     .map(|iso| iso.to_string()),
             ),
             row("Focus distance", capture.focus_distance_label()),
-        ],
-        file: vec![
-            row(
-                "Format",
-                Some(info.format.clone()).filter(|format| !format.is_empty()),
-            ),
+        ]
+    }
+
+    /// What the file holds.
+    #[must_use]
+    pub fn file_rows(&self) -> Vec<InfoRow> {
+        vec![
+            row("Format", present(self.format.clone())),
             row(
                 "Dimensions",
-                Some(format!("{} × {}", info.width, info.height)),
+                Some(format!("{} × {}", self.width, self.height)),
             ),
-            row("Orientation", orientation_label(info.orientation)),
+            row("Orientation", orientation_label(self.orientation)),
             row(
                 "As-shot WB",
-                white_balance_label(&info.as_shot_white_balance),
+                white_balance_label(&self.as_shot_white_balance),
             ),
             row(
                 "Bit depth",
-                info.source_bits_per_sample
+                self.source_bits_per_sample
                     .map(|bits| format!("{bits} bit")),
             ),
-            row("Compression", info.compression.clone()),
-            row("File size", Some(file_size_label(info.source_size_bytes))),
-        ],
+            row("Compression", self.compression.clone()),
+            row("File size", Some(file_size_label(self.source_size_bytes))),
+        ]
     }
+}
+
+const fn row(label: &'static str, value: Option<String>) -> InfoRow {
+    InfoRow { label, value }
+}
+
+fn present(text: String) -> Option<String> {
+    (!text.is_empty()).then_some(text)
 }
 
 fn orientation_label(orientation: Orientation) -> Option<String> {

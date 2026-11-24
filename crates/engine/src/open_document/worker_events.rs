@@ -8,10 +8,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rohditor_core::{
-    DatabaseProvenance, ExportReport, LensProfileSummary, ProfileMatch,
-    white_balance_from_camera_sample,
-};
+use rohditor_core::{ExportReport, white_balance_from_camera_sample};
 use rohditor_raw::{RawFileInfo, RawFrame};
 
 use super::{ExportActivity, OpenDocument};
@@ -58,19 +55,6 @@ impl OpenDocument {
                 self.edits.replace_clean_baseline(recipe);
             }
         }
-    }
-
-    pub fn optics_match_ready(
-        &mut self,
-        result: Option<ProfileMatch>,
-        candidates: Vec<LensProfileSummary>,
-        database: Option<DatabaseProvenance>,
-        error: Option<String>,
-    ) {
-        self.optics_match = result;
-        self.optics_candidates = candidates;
-        self.optics_database = database;
-        self.optics_error = error;
     }
 
     /// The RAW frame is decoded; the document can be rendered.

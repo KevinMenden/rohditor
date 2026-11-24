@@ -21,14 +21,16 @@ pub(super) enum Choice {
     HighlightMethod,
     Rendering,
     CameraProfile,
+    LensProfile,
 }
 
 impl Choice {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::WhiteBalance,
         Self::HighlightMethod,
         Self::Rendering,
         Self::CameraProfile,
+        Self::LensProfile,
     ];
 
     pub const fn section(self) -> RecipeSection {
@@ -36,6 +38,7 @@ impl Choice {
             Self::WhiteBalance => RecipeSection::WhiteBalance,
             Self::HighlightMethod => RecipeSection::HighlightReconstruction,
             Self::Rendering | Self::CameraProfile => RecipeSection::ColorProfile,
+            Self::LensProfile => RecipeSection::Optics,
         }
     }
 
@@ -45,6 +48,7 @@ impl Choice {
             Self::HighlightMethod => "Method",
             Self::Rendering => "Rendering",
             Self::CameraProfile => "Camera profile",
+            Self::LensProfile => "Profile",
         }
     }
 
@@ -54,6 +58,7 @@ impl Choice {
             Self::HighlightMethod => "highlight-method",
             Self::Rendering => "rendering",
             Self::CameraProfile => "camera-profile",
+            Self::LensProfile => "lens-profile",
         }
     }
 
@@ -63,17 +68,7 @@ impl Choice {
             Self::HighlightMethod => recipe.raw.highlights.method != defaults.raw.highlights.method,
             Self::Rendering => recipe.rendering.profile != defaults.rendering.profile,
             Self::CameraProfile => recipe.color.camera_profile != defaults.color.camera_profile,
-        }
-    }
-
-    fn value(self, recipe: &EditRecipe, defaults: &EditRecipe) -> SharedString {
-        match self {
-            Self::WhiteBalance => WhiteBalancePreset::of(recipe, defaults)
-                .map_or("Custom", WhiteBalancePreset::label)
-                .into(),
-            Self::HighlightMethod => method_label(recipe.raw.highlights.method).into(),
-            Self::Rendering => rendering_label(recipe.rendering.profile).into(),
-            Self::CameraProfile => profile_label(&recipe.color.camera_profile),
+            Self::LensProfile => recipe.optics.profile != defaults.optics.profile,
         }
     }
 }
@@ -105,6 +100,23 @@ impl DevelopPanel {
         self.session.update(cx, change);
     }
 
+    fn choice_value(
+        &self,
+        choice: Choice,
+        recipe: &EditRecipe,
+        defaults: &EditRecipe,
+    ) -> SharedString {
+        match choice {
+            Choice::WhiteBalance => WhiteBalancePreset::of(recipe, defaults)
+                .map_or("Custom", WhiteBalancePreset::label)
+                .into(),
+            Choice::HighlightMethod => method_label(recipe.raw.highlights.method).into(),
+            Choice::Rendering => rendering_label(recipe.rendering.profile).into(),
+            Choice::LensProfile => self.lens_profile_label(recipe),
+            Choice::CameraProfile => profile_label(&recipe.color.camera_profile),
+        }
+    }
+
     pub(super) fn choice(
         &self,
         choice: Choice,
@@ -118,7 +130,7 @@ impl DevelopPanel {
         let list = dropdown(
             choice.id(),
             choice.label(),
-            choice.value(recipe, defaults),
+            self.choice_value(choice, recipe, defaults),
             self.overlays.clone(),
             // Profiles are only looked up once the list opens.
             move |_, cx| panel.update(cx, |panel, cx| panel.entries(choice, cx)),
@@ -185,6 +197,7 @@ impl DevelopPanel {
                 });
                 renderings.collect()
             }
+            Choice::LensProfile => self.lens_entries(&recipe, cx),
             Choice::CameraProfile => {
                 let selected = &recipe.color.camera_profile;
                 let profiles = self.session.read(cx).camera_profiles();
@@ -206,7 +219,7 @@ impl DevelopPanel {
         }
     }
 
-    fn entry(
+    pub(super) fn entry(
         &self,
         label: impl Into<SharedString>,
         current: bool,

@@ -8,29 +8,35 @@ mod choices;
 mod filter;
 mod focus;
 mod gestures;
+mod info;
 mod mixer;
+mod optics;
+mod preset_form;
+mod presets;
 mod row;
 mod section;
 mod tone_curve;
 mod wheels;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use gpui::{
-    App, Context, Div, Entity, IntoElement, Render, RenderImage, Role, Window, div, prelude::*,
+    App, Context, Div, Entity, FocusHandle, IntoElement, Render, RenderImage, Role, SharedString,
+    Window, div, prelude::*,
 };
 use rohditor_core::Histogram;
 use rohditor_edit::{EditRecipe, RecipeSection};
-use rohditor_engine::open_document::NoiseSuggestion;
+use rohditor_engine::open_document::{LensProfiles, NoiseSuggestion};
 use rohditor_engine::tools::Picker;
 
-use focus::PanelFocus;
+use focus::{Control, PanelFocus};
 use gestures::{Drag, Nudge, Typing, drag_tracker};
+use info::PhotoInfo;
 
 use super::adjustments::GROUPS;
-use crate::actions::{AutoTone, ResetAdjustments};
-use crate::session::{MixerColorPicked, Session};
+use crate::actions::{ApplyPreset, AutoTone, ResetAdjustments};
+use crate::session::{MixerColorPicked, PresetEntry, Session};
 use crate::theme::{DEVELOP_WIDTH, RADIUS, TAB_HEIGHT, theme};
 use crate::ui::button::link;
 use crate::ui::histogram::histogram;
@@ -47,6 +53,15 @@ struct Model {
     histogram: Option<Histogram>,
     picker: Option<Picker>,
     noise: Option<NoiseSuggestion>,
+    lens_profiles: Arc<LensProfiles>,
+    /// The lens the photo names.
+    lens: Option<String>,
+    /// The vignetting correction lacks the focus distance.
+    infinity_vignetting: bool,
+    info: Option<Arc<PhotoInfo>>,
+    presets: Arc<[PresetEntry]>,
+    /// The name and amount of the preset that was applied last.
+    applied_preset: Option<(SharedString, f32)>,
 }
 
 impl Model {
@@ -62,12 +77,30 @@ impl Model {
             histogram: document.preview.histogram,
             picker: session.picker(),
             noise: Some(document.noise_suggestion()),
+            lens_profiles: Arc::clone(&document.lens_profiles),
+            lens: document
+                .info
+                .as_ref()
+                .and_then(|info| info.capture.lens_label()),
+            infinity_vignetting: document
+                .preview
+                .diagnostics
+                .is_some_and(|shown| shown.worker.optics_used_infinity_distance_fallback),
+            info: document
+                .info
+                .as_ref()
+                .map(|info| Arc::new(PhotoInfo::of(info))),
+            presets: session.presets(),
+            applied_preset: document
+                .applied_preset()
+                .map(|(name, amount)| (name.to_owned().into(), amount)),
         }
     }
 }
 
 pub fn bind_keys(cx: &mut App) {
     focus::bind_keys(cx);
+    presets::bind_keys(cx);
     row::bind_keys(cx);
     section::bind_keys(cx);
 }
@@ -81,13 +114,16 @@ pub struct DevelopPanel {
     drag: Option<Drag>,
     nudge: Option<Nudge>,
     typing: Option<Typing>,
-    collapsed: HashSet<RecipeSection>,
+    /// The headers of the collapsed sections.
+    collapsed: HashSet<Control>,
     search: Entity<TextInput>,
     /// Hide what is at its default.
     edited_only: bool,
     /// The colour whose mixer sliders are listed.
     mixer_channel: usize,
     wheel_picture: Arc<RenderImage>,
+    /// The focus of each listed preset.
+    preset_focus: HashMap<SharedString, FocusHandle>,
     focus: PanelFocus,
 }
 
@@ -102,6 +138,7 @@ impl DevelopPanel {
             let model = Model::of(session.read(cx));
             if panel.model != model {
                 panel.model = model;
+                panel.list_preset_focus(cx);
                 cx.notify();
             }
         })
@@ -129,18 +166,21 @@ impl DevelopPanel {
             typing: None,
             // Used less often than what follows them.
             collapsed: HashSet::from([
-                RecipeSection::ToneCurve,
-                RecipeSection::HighlightReconstruction,
-                RecipeSection::ColorMixer,
-                RecipeSection::ColorGrading,
-                RecipeSection::ColorProfile,
-                RecipeSection::FalseColor,
-                RecipeSection::Defringe,
+                Control::Section(RecipeSection::ToneCurve),
+                Control::Section(RecipeSection::HighlightReconstruction),
+                Control::Section(RecipeSection::ColorMixer),
+                Control::Section(RecipeSection::ColorGrading),
+                Control::Section(RecipeSection::ColorProfile),
+                Control::Section(RecipeSection::FalseColor),
+                Control::Section(RecipeSection::Defringe),
+                Control::Presets,
+                Control::Info,
             ]),
             search,
             edited_only: false,
             mixer_channel: 0,
             wheel_picture: wheels::wheel_picture(),
+            preset_focus: HashMap::new(),
             focus: PanelFocus::new(cx),
         }
     }
@@ -161,6 +201,7 @@ impl DevelopPanel {
                 div()
                     .flex()
                     .gap_1()
+                    .child(link("presets", "Presets", ApplyPreset, enabled))
                     .child(link("auto", "Auto", AutoTone, enabled))
                     .child(link("reset", "Reset", ResetAdjustments, enabled)),
             )
@@ -191,7 +232,9 @@ impl Render for DevelopPanel {
                     .iter()
                     .filter_map(|group| self.group(group, recipe, defaults, cx))
                     .collect();
-                let empty = groups.is_empty();
+                let presets = self.presets(cx);
+                let info = self.info(cx);
+                let empty = groups.is_empty() && presets.is_none() && info.is_none();
                 let nothing = if self.searching(cx) {
                     "Nothing found."
                 } else {
@@ -200,6 +243,8 @@ impl Render for DevelopPanel {
                 div()
                     .pt_1()
                     .children(groups)
+                    .children(presets)
+                    .children(info)
                     .when(empty, |body| body.child(hint(nothing)))
             }
             None => hint("Open a photo to adjust it."),
@@ -222,7 +267,8 @@ impl Render for DevelopPanel {
                     .p_1()
                     .rounded(RADIUS)
                     .bg(theme.editor)
-                    .child(graph),
+                    .child(graph)
+                    .children(self.exposure_summary()),
             )
             .when(recipes.is_some(), |panel| panel.child(self.filter(cx)))
             .child(

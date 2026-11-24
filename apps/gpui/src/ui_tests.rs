@@ -7,6 +7,8 @@
 mod color;
 mod detail;
 mod light;
+mod optics;
+mod presets;
 mod viewport;
 
 use std::path::{Path, PathBuf};
@@ -66,7 +68,9 @@ impl Harness {
                     let settings = rohditor_engine::settings::AppSettings::default();
                     let profiles =
                         rohditor_engine::camera_profiles::CameraProfileRegistry::default();
-                    Session::new(workers, settings, profiles, gpu(), cx)
+                    let presets =
+                        rohditor_engine::presets::PresetStore::load(Some(&scratch_config()));
+                    Session::new(workers, settings, profiles, presets, gpu(), cx)
                 });
                 let library = cx.new(|cx| {
                     let worker = LibraryWorker::start().expect("the catalog starts");
@@ -255,6 +259,15 @@ impl Drop for Harness {
     fn drop(&mut self) {
         self.with_session(|session, cx| session.shut_down(cx));
     }
+}
+
+/// A new configuration directory.
+fn scratch_config() -> PathBuf {
+    static COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let count = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let folder = std::env::temp_dir().join(format!("rohditor-gpui-config-{count}"));
+    drop(std::fs::remove_dir_all(&folder));
+    folder
 }
 
 /// A scratch folder holding copies of `ROHDITOR_RAW` under two names.
@@ -778,7 +791,7 @@ fn the_focused_slider_is_scrolled_to() {
     let Some((mut harness, ..)) = opened_in(size(px(1000.0), px(500.0)), "scroll") else {
         return;
     };
-    let last = "section:Defringe";
+    let last = "section:Info";
     let visible = px(470.0);
     assert!(
         harness.find(last).bottom() > visible,
@@ -786,17 +799,14 @@ fn the_focused_slider_is_scrolled_to() {
     );
     // Up at the first control and Down at the last one stay there.
     harness.keys("ctrl-d up up");
-    harness.keys(&["down"; 40].join(" "));
+    harness.keys(&["down"; 60].join(" "));
     harness.capture("scrolled");
     assert!(harness.find(last).bottom() < visible);
-    // Past the header above, which is collapsed too.
-    harness.keys("up up right");
-    let protection = harness.with_session(|session, _| {
-        let document = session.document().expect("a photo is open");
-        document.edits.recipe().capture_sharpening.noise_protection
-    });
-    assert_eq!(protection, 0.51, "it is the one with the focus");
-    harness.keys(&["up"; 40].join(" "));
+    harness.keys("enter");
+    // The last one has the focus: it opens.
+    harness.find("info:Camera");
+    harness.keys("enter");
+    harness.keys(&["up"; 60].join(" "));
     let top = harness.find("section:Tone").top();
     assert!(top > px(36.0) && top < px(300.0), "{top:?}");
 }

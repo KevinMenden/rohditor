@@ -87,7 +87,9 @@ impl DevelopPanel {
         let (from, to) = (at(default).min(at(value)), at(default).max(at(value)));
         let edited = parameter.is_changed(recipe, defaults);
         let effective = has_effect(parameter, recipe, defaults);
-        let active = self.drag.is_some_and(|drag| drag.parameter == parameter);
+        let active = self
+            .drag
+            .is_some_and(|drag| drag.parameter == Some(parameter));
         let panel = cx.entity();
         let typing = self
             .typing
@@ -229,7 +231,9 @@ impl DevelopPanel {
                     this.show_menu(adjustment, event.position, window, cx);
                 }),
             )
-            .when(idle, |row| row.child(press_area(panel, adjustment)))
+            .when(idle, |row| {
+                row.child(press_area(panel, Grip::Row(adjustment)))
+            })
     }
 }
 
@@ -258,7 +262,7 @@ fn track(ramp: Ramp, neutral: f32) -> impl IntoElement {
 }
 
 /// Covers a row and reports presses together with the row's width.
-fn press_area(panel: Entity<DevelopPanel>, adjustment: Adjustment) -> impl IntoElement {
+pub(super) fn press_area(panel: Entity<DevelopPanel>, grip: Grip) -> impl IntoElement {
     canvas(
         |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
         move |bounds: Bounds<Pixels>, hitbox, window, _| {
@@ -268,7 +272,7 @@ fn press_area(panel: Entity<DevelopPanel>, adjustment: Adjustment) -> impl IntoE
                     && hitbox.is_hovered(window)
                 {
                     panel.update(cx, |panel, cx| {
-                        panel.press(Grip::Row(adjustment), event, bounds, cx);
+                        panel.press(grip, event, bounds, cx);
                     });
                 }
             });

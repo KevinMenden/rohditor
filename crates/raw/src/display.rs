@@ -26,6 +26,23 @@ impl CaptureMetadata {
         }
     }
 
+    /// The exposure in one line, such as `1/250 s · f/2.8 · ISO 100 · 35 mm`,
+    /// without what is missing.
+    #[must_use]
+    pub fn exposure_summary(&self) -> Option<String> {
+        let iso = self.iso.filter(|iso| *iso > 0);
+        let parts: Vec<_> = [
+            self.exposure_time_label(),
+            self.aperture_label(),
+            iso.map(|iso| format!("ISO {iso}")),
+            self.focal_length_label(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        (!parts.is_empty()).then(|| parts.join(" · "))
+    }
+
     /// F-number such as `f/2.8` or `f/8`.
     #[must_use]
     pub fn aperture_label(&self) -> Option<String> {
@@ -174,6 +191,22 @@ mod tests {
         };
         assert_eq!(metadata.aperture_label().as_deref(), Some("f/8"));
         assert_eq!(metadata.focal_length_label().as_deref(), Some("24.5 mm"));
+    }
+
+    #[test]
+    fn the_exposure_summary_skips_what_is_missing() {
+        let mut metadata = CaptureMetadata {
+            exposure_time: rational(1, 250),
+            iso: Some(100),
+            focal_length: rational(35, 1),
+            ..CaptureMetadata::default()
+        };
+        assert_eq!(
+            metadata.exposure_summary().as_deref(),
+            Some("1/250 s · ISO 100 · 35 mm")
+        );
+        metadata = CaptureMetadata::default();
+        assert_eq!(metadata.exposure_summary(), None);
     }
 
     #[test]

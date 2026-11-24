@@ -40,17 +40,16 @@ impl RohditorApp {
                     document.core.metadata_ready(*info);
                 }
             }
-            WorkerEvent::OpticsMatchReady {
+            WorkerEvent::LensProfilesReady {
                 document_id,
-                result,
-                candidates,
-                database,
-                error,
+                profiles,
             } => {
-                if let Some(document) = self.current_document_mut(document_id) {
-                    document
-                        .core
-                        .optics_match_ready(result, candidates, database, error);
+                if let Some(document) = self
+                    .document
+                    .as_mut()
+                    .filter(|document| document.core.id == document_id)
+                {
+                    document.core.lens_profiles_ready(profiles);
                 }
             }
             WorkerEvent::PlaceholderReady { document_id, image } => {

@@ -29,6 +29,7 @@ rohditor-core = { path = "../../crates/core" }
 rohditor-edit = { path = "../../crates/edit" }
 rohditor-engine = { path = "../../crates/engine" }
 rohditor-gpu = { path = "../../crates/gpu" }
+rohditor-raw = { path = "../../crates/raw" }
 # The main workspace's pin. Cargo unifies it with the version gpui_wgpu uses.
 wgpu = { version = "=29.0.4", default-features = false }
 

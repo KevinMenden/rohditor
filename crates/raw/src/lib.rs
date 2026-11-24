@@ -4,11 +4,13 @@
 //! intentional because `rawler` does not currently promise a stable API.
 
 mod decoder;
+mod details;
 mod display;
 mod model;
 mod rawler_adapter;
 
 pub use decoder::{DecoderLimits, RawDecoder, RawError, RawSession};
+pub use details::InfoRow;
 pub use model::{
     CameraColorMatrix, CameraMatrixOrigin, CaptureMetadata, CfaPattern, EmbeddedPreviewInfo,
     EncodedPreview, EncodedPreviewFormat, ImageRect, LevelPattern, PhotometricInterpretation,

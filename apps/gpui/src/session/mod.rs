@@ -8,7 +8,9 @@ mod display;
 mod editing;
 mod events;
 mod export;
+mod optics;
 mod picking;
+mod presets;
 mod profiles;
 mod renderer;
 mod saving;
@@ -26,6 +28,7 @@ use rohditor_engine::camera_profiles::CameraProfileRegistry;
 use rohditor_engine::coordinator::RenderCoordinator;
 use rohditor_engine::open_document::OpenDocument;
 use rohditor_engine::persistence;
+use rohditor_engine::presets::PresetStore;
 use rohditor_engine::preview::WgpuContext;
 use rohditor_engine::settings::AppSettings;
 use rohditor_engine::tools::ActiveTool;
@@ -33,6 +36,8 @@ use rohditor_engine::tools::ActiveTool;
 pub use display::Display;
 use display::DisplaySlot;
 pub use editing::EditPhase;
+pub use presets::PresetEntry;
+use presets::Presets;
 use renderer::Renderer;
 use saving::Saves;
 
@@ -63,6 +68,7 @@ pub struct Session {
     display: DisplaySlot,
     saves: Saves,
     profiles: CameraProfileRegistry,
+    presets: Presets,
     tool: ActiveTool,
     /// A picked mixer colour that is not announced yet.
     picked_channel: Option<usize>,
@@ -88,6 +94,7 @@ impl Session {
         workers: SessionWorkers,
         settings: AppSettings,
         profiles: CameraProfileRegistry,
+        presets: PresetStore,
         gpu: Option<WgpuContext>,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -97,6 +104,7 @@ impl Session {
             display: DisplaySlot::default(),
             saves: workers.saves,
             profiles,
+            presets: Presets::new(presets),
             tool: ActiveTool::default(),
             picked_channel: None,
             next_document_id: 1,

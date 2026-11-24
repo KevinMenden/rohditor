@@ -9,8 +9,10 @@
 //! adds only its own presentation state (textures, overlays, panel models).
 
 mod camera_look;
+mod lens;
 mod noise;
 mod picks;
+mod presets;
 mod sections;
 mod worker_events;
 
@@ -18,8 +20,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rohditor_core::{
-    CameraCalibration, DatabaseProvenance, LensProfileSummary, ProfileMatch, ResolvedCameraColour,
-    WhiteBalanceCoordinates, default_recipe, resolve_camera_colour, with_default_noise_reduction,
+    CameraCalibration, ResolvedCameraColour, WhiteBalanceCoordinates, default_recipe,
+    resolve_camera_colour, with_default_noise_reduction,
 };
 use rohditor_edit::{
     CameraProfileSelection, EditRecipe, TEMPERATURE_RANGE, TINT_RANGE, WhiteBalance,
@@ -27,6 +29,7 @@ use rohditor_edit::{
 use rohditor_raw::{RawFileInfo, RawFrame};
 
 pub use camera_look::CameraLookState;
+pub use lens::LensProfiles;
 pub use noise::{NoisePurpose, NoiseState, NoiseSuggestion};
 
 use crate::autosave::Autosave;
@@ -53,17 +56,14 @@ pub struct OpenDocument {
     pub preview: DocumentPreview,
     pub open_status: Option<String>,
     pub export_status: Option<ExportActivity>,
-    pub optics_match: Option<ProfileMatch>,
-    pub optics_candidates: Vec<LensProfileSummary>,
-    pub optics_profile_filter: String,
-    pub optics_database: Option<DatabaseProvenance>,
-    pub optics_error: Option<String>,
+    pub lens_profiles: Arc<LensProfiles>,
     pub warning: Option<String>,
     pub error: Option<String>,
     pub notice: Option<String>,
     /// The photo has no saved edits, so its default recipe is rebuilt from the
     /// file's own metadata once that arrives.
     pub initialize_white_balance_from_metadata: bool,
+    applied_preset: Option<presets::AppliedPreset>,
     camera_look: CameraLookState,
     noise: NoiseState,
     /// A picker's sample on its way from the worker.
@@ -83,15 +83,12 @@ impl OpenDocument {
             preview: DocumentPreview::new(id),
             open_status: Some("Opening RAW file".to_owned()),
             export_status: None,
-            optics_match: None,
-            optics_candidates: Vec::new(),
-            optics_profile_filter: String::new(),
-            optics_database: None,
-            optics_error: None,
+            lens_profiles: Arc::default(),
             warning,
             error: None,
             notice: None,
             initialize_white_balance_from_metadata: false,
+            applied_preset: None,
             camera_look: CameraLookState::default(),
             noise: NoiseState::default(),
             pending_pick: None,

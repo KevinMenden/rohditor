@@ -48,15 +48,12 @@ impl Session {
                     document.metadata_ready(*info);
                 }
             }
-            WorkerEvent::OpticsMatchReady {
+            WorkerEvent::LensProfilesReady {
                 document_id,
-                result,
-                candidates,
-                database,
-                error,
+                profiles,
             } => {
                 if let Some(document) = self.current(document_id) {
-                    document.optics_match_ready(result, candidates, database, error);
+                    document.lens_profiles_ready(profiles);
                 }
             }
             WorkerEvent::PlaceholderReady { document_id, image } => {

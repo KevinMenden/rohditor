@@ -22,6 +22,7 @@ use gpui::{
 };
 
 use rohditor_engine::camera_profiles::CameraProfileRegistry;
+use rohditor_engine::presets::PresetStore;
 
 use crate::library::{Library, LibraryWorker};
 use crate::session::{Session, SessionWorkers};
@@ -78,6 +79,7 @@ fn run(open: Option<PathBuf>, workers: Workers) {
                         workers.session,
                         settings,
                         profiles,
+                        PresetStore::load(config.as_deref()),
                         device::shared_context(),
                         cx,
                     )

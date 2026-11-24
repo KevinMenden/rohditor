@@ -42,7 +42,8 @@ use crate::ui::diagnostics::{
     HighlightStatsModel, PreviewModel, QueueModel, TimingModel,
 };
 use crate::ui::export_dialog::{self, ExportDialogModel};
-use crate::ui::optics::OpticsPanelModel;
+use crate::ui::info::InfoPanelModel;
+use crate::ui::optics::{OpticsAction, OpticsPanelModel};
 use crate::ui::presets::PresetsPanelState;
 use crate::ui::settings as settings_ui;
 use crate::ui::theme;
@@ -76,7 +77,6 @@ mod derived_data;
 mod events;
 #[path = "gpu.rs"]
 mod gpu;
-mod info;
 #[path = "lifecycle.rs"]
 mod lifecycle;
 mod masks;
@@ -135,6 +135,8 @@ struct Document {
     /// The `preview` display generation `texture` was last synced to.
     synced_display_generation: u64,
     clipping: clipping::ClippingState,
+    /// What the lens profiles are searched for.
+    lens_filter: String,
 }
 
 #[derive(Debug, Clone)]
@@ -155,6 +157,7 @@ impl Document {
             gpu_texture_id: None,
             synced_display_generation: 0,
             clipping: clipping::ClippingState::default(),
+            lens_filter: String::new(),
         }
     }
 }
@@ -1117,12 +1120,17 @@ impl RohditorApp {
                 }
             }
             if let Some(action) = output.optics_action {
-                let mut next = document.core.edits.recipe().clone();
-                next.optics = action.apply(&next.optics);
-                changed |= document.core.edits.set_discrete(next);
+                changed |= match action {
+                    OpticsAction::SelectProfile(profile) => {
+                        document.core.select_lens_profile(profile)
+                    }
+                    OpticsAction::Set(correction, on) => {
+                        document.core.set_lens_correction(correction, on)
+                    }
+                };
             }
             if let Some(filter) = output.optics_filter {
-                document.core.optics_profile_filter = filter;
+                document.lens_filter = filter;
             }
             if output.auto_tone
                 && document.core.preview.histogram_revision == Some(document.core.edits.revision())
@@ -1988,7 +1996,10 @@ fn document_panel_model(
             .info
             .as_ref()
             .map(|info| (info.width, info.height)),
-        info: document.core.info.as_ref().map(info::info_panel_model),
+        info: document.core.info.as_ref().map(|info| InfoPanelModel {
+            capture: info.capture_rows(),
+            file: info.file_rows(),
+        }),
         revision: document.core.edits.revision(),
         dirty: document.core.is_dirty(),
         has_adjustments: document.core.differs_from_defaults(&defaults),
@@ -2141,6 +2152,7 @@ fn document_panel_model(
         defringe: document.core.edits.recipe().defringe,
         presence: document.core.edits.recipe().presence,
         noise_suggestion: document.core.noise_suggestion(),
+        suggested_preset_sections: document.core.suggested_preset_sections(),
         changed_sections: rohditor_edit::changed_sections(document.core.edits.recipe(), &defaults),
     }
 }
@@ -2171,20 +2183,14 @@ fn optics_panel_model(document: &Document) -> OpticsPanelModel {
             )
         });
     OpticsPanelModel {
-        profile: document.core.edits.recipe().optics.profile.clone(),
-        distortion: document.core.edits.recipe().optics.distortion,
-        vignetting: document.core.edits.recipe().optics.vignetting,
-        chromatic_aberration: document.core.edits.recipe().optics.chromatic_aberration,
+        optics: document.core.edits.recipe().optics.clone(),
         camera,
         lens,
         focal_length,
         aperture,
         focus_distance,
-        match_result: document.core.optics_match.clone(),
-        candidates: document.core.optics_candidates.clone(),
-        profile_filter: document.core.optics_profile_filter.clone(),
-        database: document.core.optics_database.clone(),
-        error: document.core.optics_error.clone(),
+        profiles: document.core.lens_profiles.clone(),
+        profile_filter: document.lens_filter.clone(),
         applied,
         used_infinity_distance_fallback,
         scale,

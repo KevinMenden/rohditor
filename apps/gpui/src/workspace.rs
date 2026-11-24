@@ -11,14 +11,15 @@ use gpui::{
 use rohditor_engine::tools::Picker;
 
 use crate::actions::{
-    ActualPixels, AutoNoiseReduction, AutoTone, CloseFile, Export, FocusAdjustments, FocusPhoto,
-    ImportCameraProfile, NextPhoto, OpenFile, OpenFolder, PickMixerColor, PickWhiteBalance,
-    PreviousPhoto, Quit, Redo, ResetAdjustments, ResetSection, Save, SearchAdjustments,
-    SetHighlightMethod, SetRendering, SetWhiteBalance, ToggleClipping, ToggleCommandPalette,
-    ToggleDevelop, ToggleFiles, Undo, WORKSPACE_CONTEXT, ZoomToFit,
+    ActualPixels, ApplyPreset, AutoNoiseReduction, AutoTone, ChooseLens, CloseFile, Export,
+    FocusAdjustments, FocusPhoto, ImportCameraProfile, NextPhoto, OpenFile, OpenFolder,
+    PickMixerColor, PickWhiteBalance, PreviousPhoto, Quit, Redo, ResetAdjustments, ResetSection,
+    Save, SavePreset, SearchAdjustments, SetHighlightMethod, SetLensProfile, SetRendering,
+    SetWhiteBalance, ToggleClipping, ToggleCommandPalette, ToggleDevelop, ToggleFiles, Undo,
+    WORKSPACE_CONTEXT, ZoomToFit,
 };
 use crate::library::Library;
-use crate::panels::command_palette::CommandPalette;
+use crate::panels::command_palette::command_palette;
 use crate::panels::develop::DevelopPanel;
 use crate::panels::files::FilesPanel;
 use crate::session::Session;
@@ -26,6 +27,7 @@ use crate::theme::{DEVELOP_WIDTH, FILES_WIDTH, UI_FONT_SIZE, theme};
 use crate::ui::confirm::Confirm;
 use crate::ui::keys::{FocusNext, FocusPrevious};
 use crate::ui::overlays::{Overlays, ToastKind};
+use crate::ui::search_list::SearchList;
 use crate::viewport::Viewport;
 use notifications::Announced;
 
@@ -137,10 +139,10 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.overlays.update(cx, |overlays, cx| {
-            if overlays.dialog::<CommandPalette>().is_some() {
+            if overlays.dialog::<SearchList>().is_some() {
                 overlays.close(window, cx);
             } else {
-                let palette = cx.new(CommandPalette::new);
+                let palette = cx.new(command_palette);
                 overlays.show_dialog(palette, window, cx);
             }
         });
@@ -229,6 +231,26 @@ impl Workspace {
                 this.develop.update(cx, |panel, cx| {
                     panel.choose(|session, cx| session.set_white_balance(action.0, cx), cx);
                 });
+            }))
+            .on_action(cx.listener(|this, action: &SetLensProfile, _, cx| {
+                this.develop.update(cx, |panel, cx| {
+                    panel.choose(
+                        |session, cx| session.set_lens_profile(action.0.clone(), cx),
+                        cx,
+                    );
+                });
+            }))
+            .on_action(cx.listener(|this, _: &ApplyPreset, window, cx| {
+                this.develop
+                    .update(cx, |panel, cx| panel.choose_preset(window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &SavePreset, window, cx| {
+                this.develop
+                    .update(cx, |panel, cx| panel.save_preset(window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &ChooseLens, window, cx| {
+                this.develop
+                    .update(cx, |panel, cx| panel.choose_lens(window, cx));
             }))
             .on_action(cx.listener(|this, action: &SetRendering, _, cx| {
                 this.develop.update(cx, |panel, cx| {

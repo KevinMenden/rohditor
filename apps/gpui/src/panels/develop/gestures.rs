@@ -30,15 +30,17 @@ pub(super) enum Grip {
     Row(Adjustment),
     Curve(ToneCurveHandle),
     Wheel(GradingTones),
+    PresetAmount,
 }
 
 impl Grip {
     /// What it changes, or the first of them.
-    fn parameter(self) -> Parameter {
+    fn parameter(self) -> Option<Parameter> {
         match self {
-            Self::Row(adjustment) => adjustment.parameter,
-            Self::Curve(handle) => handle.parameter(),
-            Self::Wheel(tones) => tones.parameter(),
+            Self::Row(adjustment) => Some(adjustment.parameter),
+            Self::Curve(handle) => Some(handle.parameter()),
+            Self::Wheel(tones) => Some(tones.parameter()),
+            Self::PresetAmount => None,
         }
     }
 }
@@ -49,11 +51,13 @@ pub(super) enum NudgeBy {
     Steps(Adjustment, i8),
     /// By parts of the radius.
     Wheel(GradingTones, f32, f32),
+    PresetAmount(f32),
 }
 
 #[derive(Clone, Copy)]
 pub(super) struct Drag {
-    pub parameter: Parameter,
+    /// `None` for the amount of a preset.
+    pub parameter: Option<Parameter>,
     grip: Grip,
     last: Point<Pixels>,
     value: f32,
@@ -65,7 +69,7 @@ pub(super) struct Drag {
 
 /// Arrow key changes that are not an undo step yet.
 pub(super) struct Nudge {
-    parameter: Parameter,
+    parameter: Option<Parameter>,
     _pause: Task<()>,
 }
 
@@ -85,6 +89,14 @@ impl DevelopPanel {
         let document = session.document().filter(|open| open.frame.is_some())?;
         let defaults = document.default_recipe();
         Some(parameter.get(document.edits.recipe(), &defaults))
+    }
+
+    /// The value of the parameter, or the amount of the preset without one.
+    fn gripped(&self, parameter: Option<Parameter>, cx: &Context<Self>) -> Option<f32> {
+        match parameter {
+            Some(parameter) => self.value(parameter, cx),
+            None => self.model.applied_preset.as_ref().map(|applied| applied.1),
+        }
     }
 
     fn set(&self, parameter: Parameter, value: f32, phase: EditPhase, cx: &mut Context<Self>) {
@@ -120,10 +132,11 @@ impl DevelopPanel {
                 Grip::Row(adjustment) => self.reset(adjustment, cx),
                 Grip::Curve(handle) => self.reset(adjustment(handle.parameter()), cx),
                 Grip::Wheel(tones) => self.reset_wheel(tones, cx),
+                Grip::PresetAmount => self.reset_preset_amount(cx),
             };
         }
         let parameter = grip.parameter();
-        let Some(value) = self.value(parameter, cx) else {
+        let Some(value) = self.gripped(parameter, cx) else {
             return;
         };
         self.session
@@ -153,7 +166,7 @@ impl DevelopPanel {
         // In widths and heights, upwards.
         let (right, up) = (moved.x / drag.size.width, -moved.y / drag.size.height);
         let still = match drag.grip {
-            Grip::Row(_) => right == 0.0,
+            Grip::Row(_) | Grip::PresetAmount => right == 0.0,
             Grip::Curve(_) => up == 0.0,
             Grip::Wheel(_) => right == 0.0 && up == 0.0,
         };
@@ -178,6 +191,11 @@ impl DevelopPanel {
                 drag.value = value;
                 value
             }
+            Grip::PresetAmount => {
+                drag.value = (drag.value + right * speed).clamp(0.0, 1.0);
+                let amount = drag.value;
+                return self.set_preset_amount(amount, cx);
+            }
             // The radius is half the size.
             Grip::Wheel(tones) => {
                 return self.move_wheel(tones, right * speed * 2.0, up * speed * 2.0, cx);
@@ -189,7 +207,9 @@ impl DevelopPanel {
                 handle.dragged(&document.edits.recipe().light.tone_curve, up * speed)
             }
         };
-        let parameter = drag.parameter;
+        let Some(parameter) = drag.parameter else {
+            return;
+        };
         self.set(parameter, value, EditPhase::Dragging, cx);
     }
 
@@ -214,21 +234,23 @@ impl DevelopPanel {
 
     pub(super) fn nudge(&mut self, by: NudgeBy, cx: &mut Context<Self>) {
         let parameter = match by {
-            NudgeBy::Steps(adjustment, _) => adjustment.parameter,
-            NudgeBy::Wheel(tones, ..) => tones.parameter(),
+            NudgeBy::Steps(adjustment, _) => Some(adjustment.parameter),
+            NudgeBy::Wheel(tones, ..) => Some(tones.parameter()),
+            NudgeBy::PresetAmount(_) => None,
         };
         let same = |nudge: &Nudge| nudge.parameter == parameter;
         if !self.nudge.as_ref().is_some_and(same) {
             self.finish_nudge(cx);
         }
-        let Some(value) = self.value(parameter, cx) else {
+        let Some(value) = self.gripped(parameter, cx) else {
             return;
         };
         match by {
             NudgeBy::Steps(adjustment, steps) => {
                 let next = adjustment.format.stepped(adjustment.range(), value, steps);
-                self.set(parameter, next, EditPhase::Dragging, cx);
+                self.set(adjustment.parameter, next, EditPhase::Dragging, cx);
             }
+            NudgeBy::PresetAmount(change) => self.set_preset_amount(value + change, cx),
             NudgeBy::Wheel(tones, x, y) => self.move_wheel(tones, x, y, cx),
         }
         let pause = cx.spawn(async move |this, cx| {

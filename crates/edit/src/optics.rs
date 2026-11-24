@@ -40,50 +40,65 @@ const fn default_enabled() -> bool {
     true
 }
 
-/// A user-level change to the optics section of a recipe.
-#[derive(Debug, Clone)]
-pub enum OpticsAction {
-    SelectProfile(LensProfileSelection),
-    SetDistortion(bool),
-    SetVignetting(bool),
-    SetChromaticAberration(bool),
-    Reset,
+/// One of the corrections a lens profile drives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LensCorrection {
+    Distortion,
+    Vignetting,
+    ChromaticAberration,
 }
 
-impl OpticsAction {
-    /// The optics settings after this action.
+impl LensCorrection {
+    pub const ALL: [Self; 3] = [
+        Self::Distortion,
+        Self::Vignetting,
+        Self::ChromaticAberration,
+    ];
+
     #[must_use]
-    pub fn apply(self, optics: &OpticsAdjustments) -> OpticsAdjustments {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Distortion => "Distortion",
+            Self::Vignetting => "Vignetting",
+            Self::ChromaticAberration => "Chromatic aberration",
+        }
+    }
+
+    /// Whether it is wanted, as far as the profile has it.
+    #[must_use]
+    pub const fn is_on(self, optics: &OpticsAdjustments) -> bool {
+        match self {
+            Self::Distortion => optics.distortion,
+            Self::Vignetting => optics.vignetting,
+            Self::ChromaticAberration => optics.chromatic_aberration,
+        }
+    }
+
+    #[must_use]
+    pub fn with(self, optics: &OpticsAdjustments, on: bool) -> OpticsAdjustments {
         let mut next = optics.clone();
         match self {
-            Self::SelectProfile(profile) => next.profile = profile,
-            Self::SetDistortion(value) => next.distortion = value,
-            Self::SetVignetting(value) => next.vignetting = value,
-            Self::SetChromaticAberration(value) => next.chromatic_aberration = value,
-            Self::Reset => next = OpticsAdjustments::default(),
+            Self::Distortion => next.distortion = on,
+            Self::Vignetting => next.vignetting = on,
+            Self::ChromaticAberration => next.chromatic_aberration = on,
         }
         next
     }
 }
 
 #[cfg(test)]
-mod action_tests {
+mod tests {
     use super::*;
 
     #[test]
-    fn actions_change_only_their_own_setting_and_reset_restores_defaults() {
-        let base = OpticsAdjustments::default();
-        let profile = LensProfileSelection::Lensfun {
-            profile_id: "test".to_owned(),
-        };
-        let selected = OpticsAction::SelectProfile(profile.clone()).apply(&base);
-        assert_eq!(selected.profile, profile);
-        assert_eq!(selected.distortion, base.distortion);
-
-        let toggled = OpticsAction::SetVignetting(!base.vignetting).apply(&selected);
-        assert_eq!(toggled.vignetting, !base.vignetting);
-        assert_eq!(toggled.profile, profile);
-
-        assert_eq!(OpticsAction::Reset.apply(&toggled), base);
+    fn a_correction_is_switched_alone() {
+        let on = OpticsAdjustments::default();
+        for correction in LensCorrection::ALL {
+            let off = correction.with(&on, false);
+            for other in LensCorrection::ALL {
+                assert_eq!(other.is_on(&off), other != correction);
+            }
+            assert_eq!(correction.with(&off, true), on);
+        }
     }
 }

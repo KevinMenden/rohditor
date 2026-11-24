@@ -2,7 +2,8 @@
 
 use gpui::{Action, App, KeyBinding, NoAction, SharedString, actions};
 use rohditor_edit::{
-    HighlightMethod, RecipeSection, RenderingProfileSelection, WhiteBalancePreset,
+    HighlightMethod, LensProfileSelection, RecipeSection, RenderingProfileSelection,
+    WhiteBalancePreset,
 };
 
 use crate::panels::adjustments::{
@@ -26,6 +27,9 @@ actions!(
         AutoTone,
         AutoNoiseReduction,
         ImportCameraProfile,
+        ChooseLens,
+        ApplyPreset,
+        SavePreset,
         PickWhiteBalance,
         PickMixerColor,
         ZoomToFit,
@@ -58,6 +62,10 @@ pub struct SetWhiteBalance(pub WhiteBalancePreset);
 #[derive(Debug, Clone, PartialEq, Eq, Action)]
 #[action(namespace = rohditor, no_json)]
 pub struct SetRendering(pub RenderingProfileSelection);
+
+#[derive(Debug, Clone, PartialEq, Eq, Action)]
+#[action(namespace = rohditor, no_json)]
+pub struct SetLensProfile(pub LensProfileSelection);
 
 /// An entry of the command palette and, when it has a key, of the keymap.
 pub struct Command {
@@ -100,6 +108,19 @@ pub fn commands() -> Vec<Command> {
             "develop: import camera profile (DCP)",
             None,
             ImportCameraProfile,
+        ),
+        command("develop: apply preset", Some("p"), ApplyPreset),
+        command("develop: save as preset", None, SavePreset),
+        command("develop: choose lens profile", None, ChooseLens),
+        command(
+            "develop: lens profile automatic",
+            None,
+            SetLensProfile(LensProfileSelection::Automatic),
+        ),
+        command(
+            "develop: lens profile off",
+            None,
+            SetLensProfile(LensProfileSelection::Off),
         ),
         command("develop: pick white balance", Some("w"), PickWhiteBalance),
         command("develop: pick mixer color", None, PickMixerColor),

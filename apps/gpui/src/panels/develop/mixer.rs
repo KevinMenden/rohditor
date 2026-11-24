@@ -33,7 +33,8 @@ impl DevelopPanel {
         cx: &mut Context<Self>,
     ) {
         // What would hide the colours.
-        self.collapsed.remove(&RecipeSection::ColorMixer);
+        self.collapsed
+            .remove(&Control::Section(RecipeSection::ColorMixer));
         self.edited_only = false;
         self.search.update(cx, |search, cx| search.clear(cx));
         self.scroll_to(Control::MixerChannels, window, cx);

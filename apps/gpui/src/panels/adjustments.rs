@@ -61,7 +61,7 @@ impl Adjustment {
     }
 }
 
-pub const GROUPS: [Group; 3] = [
+pub const GROUPS: [Group; 4] = [
     Group {
         title: "Light",
         sections: &[
@@ -184,6 +184,16 @@ pub const GROUPS: [Group; 3] = [
             },
         ],
     },
+    Group {
+        title: "Lens",
+        sections: &[
+            // A choice and switches.
+            Section {
+                section: RecipeSection::Optics,
+                adjustments: &[],
+            },
+        ],
+    },
 ];
 
 pub fn sections() -> impl Iterator<Item = &'static Section> {
@@ -208,6 +218,9 @@ pub const fn section_hint(section: RecipeSection) -> Option<&'static str> {
             "Takes the color out of fringes along high-contrast edges whose hue is in the range. \
              Best judged at 1:1.",
         ),
+        RecipeSection::Optics => {
+            Some("Corrects what the lens does to the photo, as measured by the Lensfun project.")
+        }
         _ => None,
     }
 }

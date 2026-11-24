@@ -1,11 +1,11 @@
 //! Presets wiring: turns the Presets section's actions into engine calls and
 //! an edit on the open photo.
 //!
-//! Storage and the apply math live in `rohditor_engine::presets`; applying is
-//! one `set_discrete` call, so one preset is one undo step.
+//! Storage and the apply math live in `rohditor_engine::presets`; one preset
+//! is one undo step.
 
 use eframe::egui;
-use rohditor_engine::presets::{ApplyOptions, Preset};
+use rohditor_engine::presets::Preset;
 
 use super::RohditorApp;
 use crate::ui::presets::PresetsAction;
@@ -32,13 +32,10 @@ impl RohditorApp {
         let Some(document) = self.document.as_mut() else {
             return;
         };
-        let options = ApplyOptions {
-            amount,
-            ..ApplyOptions::default()
-        };
-        let next = preset.apply(document.core.edits.recipe(), &options);
-        if document.core.edits.set_discrete(next) {
-            document.core.notice = Some(format!("Applied preset \"{}\"", preset.name()));
+        document.core.notice = None;
+        if document.core.apply_preset(preset, amount) {
+            let applied = || format!("Applied preset \"{}\"", preset.name());
+            document.core.notice.get_or_insert_with(applied);
             let id = document.core.id;
             self.queue_preview(context, id);
         }

@@ -12,20 +12,12 @@ use crate::panels::adjustments::{Adjustment, Group, Section};
 use crate::theme::{RADIUS, theme};
 use crate::ui::button::{icon, icon_button};
 use crate::ui::keys::{Cancel, Confirm, SelectNext};
+use crate::ui::matching;
 use crate::ui::test_id::TestId as _;
 use crate::ui::toggle::toggle;
 
-/// Whether `text` contains every word of `query`, ignoring case and the accent of "Moiré".
-fn matches(text: &str, query: &str) -> bool {
-    let folded = |text: &str| text.to_lowercase().replace('é', "e");
-    let text = folded(text);
-    query
-        .split_whitespace()
-        .all(|word| text.contains(&folded(word)))
-}
-
 impl DevelopPanel {
-    fn query(&self, cx: &Context<Self>) -> SharedString {
+    pub(super) fn query(&self, cx: &Context<Self>) -> SharedString {
         self.search.read(cx).text().to_owned().into()
     }
 
@@ -42,7 +34,7 @@ impl DevelopPanel {
         cx: &Context<Self>,
     ) -> bool {
         let text = format!("{} {} {label}", group.title, section.section.label());
-        matches(&text, &self.query(cx))
+        matching::words(&text, &self.query(cx))
     }
 
     /// Whether the panel shows this adjustment.
@@ -61,7 +53,7 @@ impl DevelopPanel {
         }
         // A slider must not vanish while it is changed.
         let active = [
-            self.drag.as_ref().map(|drag| drag.parameter),
+            self.drag.as_ref().and_then(|drag| drag.parameter),
             self.typing
                 .as_ref()
                 .map(|typing| typing.adjustment.parameter),
@@ -202,15 +194,6 @@ pub(super) fn has_effect(parameter: Parameter, recipe: &EditRecipe, defaults: &E
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn every_word_of_a_search_must_match() {
-        let text = "Light Tone curve Shadows";
-        assert!(matches(text, ""));
-        assert!(matches(text, "shad CURVE"));
-        assert!(!matches(text, "curve whites"));
-        assert!(matches("Moiré", "moire") && matches("Moiré", "MOIRÉ"));
-    }
 
     #[test]
     fn details_need_their_amount() {

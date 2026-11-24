@@ -4,10 +4,7 @@ use rohditor_image::{LinearRgbImage, LinearRgbSpace};
 
 use super::*;
 use crate::resample::cubic_sample;
-use crate::{
-    CorrectionComponents, LensCorrectionPlan, OpticsQuery, OpticsService, ProfileMatch,
-    ProfileRequest,
-};
+use crate::{CorrectionComponents, LensCorrectionPlan, OpticsQuery, OpticsService, ProfileRequest};
 
 /// Per-pixel parity grid from the review (same size the gates were set at).
 const GRID_WIDTH: usize = 1_024;
@@ -25,9 +22,6 @@ struct MatrixProfile {
     lens_make: &'static str,
     lens_model: &'static str,
     focal: f32,
-    /// Resolve via the first automatic-match candidate id: the E 10-18 is
-    /// the widest Ptlens on the mount but auto-matches as Ambiguous(2).
-    explicit: bool,
     /// Poly3-tele freeze class: also gate against the converged oracle.
     freeze_class: bool,
     /// `false` when the freeze-ambiguity guard refuses the table and the
@@ -45,7 +39,6 @@ fn base_profile(name: &'static str) -> MatrixProfile {
         lens_make: "Tamron",
         lens_model: "Tamron 17-70mm F/2.8 Di III-A VC RXD",
         focal: 35.0,
-        explicit: false,
         freeze_class: false,
         expects_lut: true,
     }
@@ -83,11 +76,10 @@ fn matrix() -> Vec<MatrixProfile> {
             ..base_profile("unused")
         },
         MatrixProfile {
-            name: "Sony E 10-18 @10 via Explicit (widest Ptlens, Ambiguous(2) automatic)",
+            name: "Sony E 10-18 @10 (widest Ptlens, calibrated for two sensor sizes)",
             lens_make: "Sony",
             lens_model: "E 10-18mm f/4 OSS",
             focal: 10.0,
-            explicit: true,
             ..base_profile("unused")
         },
         MatrixProfile {
@@ -127,20 +119,10 @@ fn resolve(
     width: usize,
     height: usize,
 ) -> LensCorrectionPlan {
-    let request = if profile.explicit {
-        let ProfileMatch::Ambiguous(candidates) = service.profile_match(&query(profile)) else {
-            panic!("{} must auto-match as ambiguous", profile.name);
-        };
-        ProfileRequest::Explicit {
-            profile_id: candidates[0].id.clone(),
-        }
-    } else {
-        ProfileRequest::Automatic
-    };
     service
         .resolve_plan(
             &query(profile),
-            request,
+            ProfileRequest::Automatic,
             CorrectionComponents {
                 distortion: true,
                 vignetting: false,

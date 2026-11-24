@@ -17,7 +17,7 @@ mod rendering;
 
 pub use geometry::{GeometryAdjustments, NormalizedCropRect};
 pub use light::{LIGHT_TONE_LUT_SIZE, LightToneLut};
-pub use optics::{LensProfileSelection, OpticsAction, OpticsAdjustments};
+pub use optics::{LensCorrection, LensProfileSelection, OpticsAdjustments};
 pub use rendering::{
     MatchedLook, ROHDITOR_MATCHED_PROCESS_VERSION, ROHDITOR_STANDARD_PROCESS_VERSION,
     RenderingAdjustments, RenderingProfileSelection,
