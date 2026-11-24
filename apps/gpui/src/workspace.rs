@@ -10,8 +10,8 @@ use gpui::{
 
 use crate::actions::{
     ActualPixels, AutoTone, CloseFile, Export, FocusAdjustments, FocusPhoto, NextPhoto, OpenFile,
-    OpenFolder, PreviousPhoto, Quit, Redo, ResetAdjustments, Save, ToggleCommandPalette,
-    ToggleDevelop, ToggleFiles, Undo, WORKSPACE_CONTEXT, ZoomToFit,
+    OpenFolder, PreviousPhoto, Quit, Redo, ResetAdjustments, Save, ToggleClipping,
+    ToggleCommandPalette, ToggleDevelop, ToggleFiles, Undo, WORKSPACE_CONTEXT, ZoomToFit,
 };
 use crate::library::Library;
 use crate::panels::command_palette::CommandPalette;
@@ -184,6 +184,7 @@ impl Workspace {
             Redo => |session, cx| session.redo(cx),
             ResetAdjustments => |session, cx| session.reset(cx),
             AutoTone => |session, cx| session.auto_tone(cx),
+            ToggleClipping => |session, cx| session.toggle_clipping(cx),
         );
         root.on_action(cx.listener(|this, _: &NextPhoto, _, cx| this.open_adjacent(true, cx)))
             .on_action(cx.listener(|this, _: &PreviousPhoto, _, cx| this.open_adjacent(false, cx)))
@@ -277,6 +278,10 @@ impl Render for Workspace {
 
 #[cfg(test)]
 impl Workspace {
+    pub fn viewport(&self) -> &Entity<Viewport> {
+        &self.viewport
+    }
+
     pub fn panel_renders(&self, cx: &App) -> (usize, usize) {
         (self.files.read(cx).renders, self.develop.read(cx).renders)
     }

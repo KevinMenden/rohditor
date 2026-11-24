@@ -3,7 +3,7 @@ use std::time::Duration;
 use eframe::egui;
 use rohditor_engine::preview::PreviewSource;
 use rohditor_engine::tools::Picker;
-use rohditor_engine::view::{ViewState, fit_scale};
+use rohditor_engine::view::{ImagePlacement, ViewState, fit_scale};
 
 use super::crop::{CropOverlayModel, CropOverlayOutput, interact_and_paint};
 use super::mask_overlay::{self, MaskOverlayModel, MaskOverlayOutput};
@@ -92,9 +92,7 @@ pub(crate) fn show(
             // A mask gesture owns the drag it starts on a handle; any other drag pans. The grab
             // is judged against the image as it is on screen before this frame's pan.
             let masks_capture = model.masks.as_ref().is_some_and(|masks| {
-                let size = image_size * view.scale(fit_scale);
-                let rect =
-                    egui::Rect::from_center_size(viewport.center() + from_pair(view.pan()), size);
+                let rect = image_rect(view, fit_scale, viewport, image_size);
                 mask_overlay::captures_drag(ui, &response, rect, masks)
             });
             if model.picker_mode.is_none()
@@ -127,9 +125,7 @@ pub(crate) fn show(
             }
 
             let scale = view.scale(fit_scale);
-            let size = image_size * scale;
-            let image_rect =
-                egui::Rect::from_center_size(viewport.center() + from_pair(view.pan()), size);
+            let image_rect = image_rect(view, fit_scale, viewport, image_size);
             if let Some(picker_mode) = model.picker_mode {
                 if response
                     .hover_pos()
@@ -141,13 +137,8 @@ pub(crate) fn show(
                     && let Some(pointer) = response.interact_pointer_pos()
                     && image_rect.contains(pointer)
                 {
-                    output.picker_sample = Some((
-                        picker_mode,
-                        egui::pos2(
-                            ((pointer.x - image_rect.left()) / image_rect.width()).clamp(0.0, 1.0),
-                            ((pointer.y - image_rect.top()) / image_rect.height()).clamp(0.0, 1.0),
-                        ),
-                    ));
+                    let (x, y) = placement(image_rect).to_image_clamped(to_pair(pointer.to_vec2()));
+                    output.picker_sample = Some((picker_mode, egui::pos2(x as f32, y as f32)));
                 }
             }
             ui.painter().rect_filled(
@@ -266,6 +257,22 @@ fn to_pair(vector: egui::Vec2) -> [f32; 2] {
     [vector.x, vector.y]
 }
 
-fn from_pair(pair: [f32; 2]) -> egui::Vec2 {
-    egui::vec2(pair[0], pair[1])
+/// The engine's screen-to-image mapping of an image drawn at `rect`.
+pub(super) fn placement(rect: egui::Rect) -> ImagePlacement {
+    ImagePlacement {
+        origin: to_pair(rect.min.to_vec2()),
+        size: to_pair(rect.size()),
+    }
+}
+
+/// Where the image is on screen.
+fn image_rect(
+    view: &ViewState,
+    fit_scale: f32,
+    viewport: egui::Rect,
+    image_size: egui::Vec2,
+) -> egui::Rect {
+    let center = to_pair(viewport.center().to_vec2());
+    let placement = view.placement(fit_scale, center, to_pair(image_size));
+    egui::Rect::from_min_size(placement.origin.into(), placement.size.into())
 }

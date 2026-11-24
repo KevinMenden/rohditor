@@ -1,6 +1,6 @@
 //! Everything the user can do by key, button or command palette.
 
-use gpui::{Action, App, KeyBinding, actions};
+use gpui::{Action, App, KeyBinding, NoAction, actions};
 
 use crate::{panels, ui};
 
@@ -20,6 +20,7 @@ actions!(
         AutoTone,
         ZoomToFit,
         ActualPixels,
+        ToggleClipping,
         ToggleFiles,
         ToggleDevelop,
         FocusAdjustments,
@@ -63,6 +64,7 @@ pub fn commands() -> Vec<Command> {
         ),
         command("view: zoom to fit", Some("ctrl-0"), ZoomToFit),
         command("view: actual pixels (1:1)", Some("ctrl-1"), ActualPixels),
+        command("view: toggle clipping overlay", Some("j"), ToggleClipping),
         command("view: toggle files panel", Some("ctrl-b"), ToggleFiles),
         command("view: toggle develop panel", Some("ctrl-r"), ToggleDevelop),
         command("view: focus adjustments", Some("ctrl-d"), FocusAdjustments),
@@ -132,8 +134,18 @@ pub fn bind_keys(cx: &mut App) {
     });
     let bindings: Vec<_> = bindings.collect();
     cx.bind_keys(bindings);
+    cx.bind_keys(letters_to_type());
     ui::keys::bind(cx);
     panels::develop::bind_keys(cx);
+}
+
+/// Commands with a plain letter as their key leave it alone in text inputs.
+fn letters_to_type() -> Vec<KeyBinding> {
+    let letters = commands().into_iter().filter_map(|command| command.key);
+    letters
+        .filter(|key| key.len() == 1)
+        .map(|key| KeyBinding::new(key, NoAction, Some(ui::text_input::CONTEXT)))
+        .collect()
 }
 
 pub const WORKSPACE_CONTEXT: &str = "Workspace";

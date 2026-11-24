@@ -3,6 +3,7 @@ use rohditor_edit::NormalizedCropRect;
 use rohditor_engine::tools::{CropAspect, CropHandle};
 
 use super::theme::colors;
+use super::viewport::placement;
 
 const HANDLE_RADIUS: f32 = 5.0;
 const HIT_RADIUS: f32 = 12.0;
@@ -213,10 +214,7 @@ fn normalized_rect(image: egui::Rect, crop: NormalizedCropRect) -> egui::Rect {
 }
 
 fn normalized(image: egui::Rect, point: egui::Pos2) -> (f64, f64) {
-    (
-        ((point.x - image.left()) / image.width()).clamp(0.0, 1.0) as f64,
-        ((point.y - image.top()) / image.height()).clamp(0.0, 1.0) as f64,
-    )
+    placement(image).to_image_clamped(point.into())
 }
 
 fn handles(rect: egui::Rect) -> [(CropHandle, egui::Pos2); 8] {

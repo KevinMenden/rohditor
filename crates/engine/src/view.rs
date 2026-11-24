@@ -27,6 +27,45 @@ pub fn fit_scale(viewport: Pair, image: Pair) -> f32 {
         .max(MIN_FIT_SCALE)
 }
 
+/// Where the image is on screen: maps pointer positions to image positions and back.
+///
+/// Screen positions are logical pixels in whatever system the frontend placed the image in.
+/// Image positions are normalized, `0..1` over the image as displayed (oriented and cropped),
+/// which is what the editing tools work in. They may lie outside that range.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ImagePlacement {
+    /// Top-left corner.
+    pub origin: Pair,
+    pub size: Pair,
+}
+
+impl ImagePlacement {
+    pub fn to_image(self, screen: Pair) -> (f64, f64) {
+        let along = |axis: usize| f64::from((screen[axis] - self.origin[axis]) / self.size[axis]);
+        (along(0), along(1))
+    }
+
+    /// Like [`Self::to_image`], for the nearest position on the image.
+    pub fn to_image_clamped(self, screen: Pair) -> (f64, f64) {
+        let (x, y) = self.to_image(screen);
+        (x.clamp(0.0, 1.0), y.clamp(0.0, 1.0))
+    }
+
+    pub fn to_screen(self, image: (f64, f64)) -> Pair {
+        [
+            self.origin[0] + image.0 as f32 * self.size[0],
+            self.origin[1] + image.1 as f32 * self.size[1],
+        ]
+    }
+
+    pub fn contains(self, screen: Pair) -> bool {
+        (0..2).all(|axis| {
+            let offset = screen[axis] - self.origin[axis];
+            (0.0..=self.size[axis]).contains(&offset)
+        })
+    }
+}
+
 /// Whether the viewport fits the image or shows it at an explicit zoom, plus
 /// the pan offset of the image center from the viewport center.
 #[derive(Debug)]
@@ -99,6 +138,20 @@ impl ViewState {
     /// Offset of the image center from the viewport center.
     pub const fn pan(&self) -> Pair {
         self.pan
+    }
+
+    /// Where an image of `image_size` pixels is in a viewport centered at `viewport_center`.
+    pub fn placement(
+        &self,
+        fit_scale: f32,
+        viewport_center: Pair,
+        image_size: Pair,
+    ) -> ImagePlacement {
+        let size = image_size.map(|extent| extent * self.scale(fit_scale));
+        ImagePlacement {
+            origin: [0, 1].map(|axis| viewport_center[axis] + self.pan[axis] - size[axis] * 0.5),
+            size,
+        }
     }
 
     /// Whether the transient zoom percentage should still be shown at `now`.
@@ -200,6 +253,36 @@ mod tests {
         assert_eq!(fit_scale([600.0, 800.0], [900.0, 1600.0]), 0.5);
         assert_eq!(fit_scale([0.0, 0.0], [100.0, 100.0]), 0.01);
         assert_eq!(fit_scale([800.0, 600.0], [0.0, 100.0]), 1.0);
+    }
+
+    #[test]
+    fn screen_and_image_positions_round_trip() {
+        let placement = ImagePlacement {
+            origin: [40.0, 20.0],
+            size: [300.0, 200.0],
+        };
+        assert_eq!(placement.to_image([190.0, 70.0]), (0.5, 0.25));
+        assert_eq!(placement.to_screen((0.5, 0.25)), [190.0, 70.0]);
+
+        let beside = [-20.0, 320.0];
+        assert_eq!(placement.to_image(beside), (f64::from(-0.2_f32), 1.5));
+        assert_eq!(placement.to_image_clamped(beside), (0.0, 1.0));
+        assert!(!placement.contains(beside));
+        assert!(!placement.contains([39.0, 70.0]));
+        assert!(placement.contains([40.0, 20.0]) && placement.contains([340.0, 220.0]));
+    }
+
+    #[test]
+    fn the_placement_follows_fit_zoom_and_pan() {
+        let fitted = ViewState::default().placement(0.5, [400.0, 300.0], [1_000.0, 600.0]);
+        assert_eq!(fitted.origin, [150.0, 150.0]);
+        assert_eq!(fitted.size, [500.0, 300.0]);
+
+        let zoomed = state(false, 2.0, [30.0, -10.0]);
+        let zoomed = zoomed.placement(0.5, [400.0, 300.0], [1_000.0, 600.0]);
+        assert_eq!(zoomed.size, [2_000.0, 1_200.0]);
+        // The image center is off the viewport center by the pan.
+        assert_eq!(zoomed.to_screen((0.5, 0.5)), [430.0, 290.0]);
     }
 
     #[test]
