@@ -201,6 +201,20 @@ mod tests {
     }
 
     #[test]
+    fn ranges_of_an_input_method_are_cut_to_the_text() {
+        let mut buffer = Buffer::new("a😀".to_owned());
+        // Past the end, and inside the emoji's two UTF-16 units.
+        assert_eq!(buffer.range_from_utf16(&(1..9)), 1..5);
+        assert_eq!(buffer.range_from_utf16(&(2..2)), 5..5);
+        let range = buffer.range_from_utf16(&(8..9));
+        buffer.replace(Some(range), "b");
+        assert_eq!(buffer.text(), "a😀b");
+        buffer.compose(Some(0..0), "😀", Some(1..7));
+        assert_eq!(buffer.text(), "😀a😀b");
+        assert!(buffer.text().get(buffer.selection()).is_some());
+    }
+
+    #[test]
     fn composed_text_is_replaced_by_its_result() {
         let mut buffer = Buffer::new("a".to_owned());
         buffer.move_to(1);

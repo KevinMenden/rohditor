@@ -42,6 +42,8 @@ pub(super) struct Typing {
     pub adjustment: Adjustment,
     pub input: Entity<TextInput>,
     return_to: Option<FocusHandle>,
+    /// The last press was the click that opened it, so that one more makes a double click.
+    just_clicked: bool,
     _blurred: Subscription,
 }
 
@@ -133,6 +135,9 @@ impl DevelopPanel {
         });
         if drag.on_value && !drag.moved {
             self.start_typing(drag.adjustment, window, cx);
+            if let Some(typing) = self.typing.as_mut() {
+                typing.just_clicked = true;
+            }
         }
         cx.notify();
     }
@@ -189,9 +194,31 @@ impl DevelopPanel {
             adjustment,
             input,
             return_to,
+            just_clicked: false,
             _blurred: blurred,
         });
         cx.notify();
+    }
+
+    /// A press on the row of the value being typed, before its input gets it. The second click of
+    /// a double click on the value resets it, as anywhere on the row.
+    pub(super) fn press_while_typing(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(typing) = self.typing.as_mut() else {
+            return;
+        };
+        let just_clicked = std::mem::take(&mut typing.just_clicked);
+        if just_clicked && event.button == MouseButton::Left && event.click_count == 2 {
+            let adjustment = typing.adjustment;
+            window.prevent_default();
+            cx.stop_propagation();
+            self.stop_typing(false, window, cx);
+            self.reset(adjustment, cx);
+        }
     }
 
     /// Stop typing and give the focus back.

@@ -131,6 +131,9 @@ impl DevelopPanel {
                 row.on_action(cx.listener(|this, _: &Cancel, window, cx| {
                     this.stop_typing(false, window, cx);
                 }))
+                .capture_any_mouse_down(cx.listener(|this, event, window, cx| {
+                    this.press_while_typing(event, window, cx);
+                }))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _, window, cx| {

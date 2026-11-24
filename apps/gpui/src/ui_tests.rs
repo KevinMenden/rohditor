@@ -64,6 +64,10 @@ impl Harness {
                 cx.new(|cx| Workspace::new(session, library, window, cx))
             })
             .expect("headless window");
+        // Only an active window tells elements that they lost the focus.
+        cx.update_window(window.into(), |_, window, _| window.activate_window())
+            .expect("window is open");
+        cx.run_until_parked();
         let (session, library) = created.expect("the window was built");
         Self {
             cx,
@@ -558,6 +562,38 @@ fn values_are_typed_and_stepped() {
     assert_eq!(harness.exposure(), 1.5);
     harness.keys("ctrl-z");
     assert_eq!(harness.exposure(), 0.0, "each typed value is one undo step");
+
+    // A press outside the panel only takes the focus away.
+    click(&mut harness, value);
+    harness.keys("1");
+    let viewport = harness.find("viewport").center();
+    click(&mut harness, viewport);
+    harness.draw();
+    assert_eq!(harness.exposure(), 1.0, "losing the focus keeps it too");
+
+    let double_click = |harness: &mut Harness| {
+        click(harness, value);
+        // The frame between the clicks shows the input.
+        harness.draw();
+        harness.press(value, 2);
+        harness.release(value);
+        harness.draw();
+    };
+    double_click(&mut harness);
+    assert_eq!(
+        harness.exposure(),
+        0.0,
+        "a double click on the value resets"
+    );
+    harness.keys("right");
+    assert_eq!(harness.exposure(), 0.05, "and leaves no input open");
+
+    // While typing, a double click selects the text as usual.
+    click(&mut harness, value);
+    harness.keys("1 . 5");
+    double_click(&mut harness);
+    harness.keys("2 enter");
+    assert_eq!(harness.exposure(), 2.0);
 }
 
 #[test]
