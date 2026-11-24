@@ -32,8 +32,10 @@ impl RohditorApp {
         let Some(document) = self.document.as_mut() else {
             return;
         };
+        document.core.notice = None;
         if document.core.apply_preset(preset, amount) {
-            document.core.notice = Some(format!("Applied preset \"{}\"", preset.name()));
+            let applied = || format!("Applied preset \"{}\"", preset.name());
+            document.core.notice.get_or_insert_with(applied);
             let id = document.core.id;
             self.queue_preview(context, id);
         }

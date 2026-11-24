@@ -19,11 +19,24 @@ impl OpenDocument {
     /// Apply a preset as one undo step. Returns whether the recipe changed, and
     /// says so if not.
     pub fn apply_preset(&mut self, preset: &Preset, amount: f32) -> bool {
+        let amount = amount.clamp(0.0, 1.0);
         let base = self.edits.recipe().clone();
-        let result = self.with_preset(preset, &base, amount);
+        let (result, lens_left_out) = self.with_preset(preset, &base, amount);
+        let problem = lens_left_out.then(|| {
+            let problem = self.lens_profiles.problem();
+            let problem =
+                problem.unwrap_or_else(|| "The photo does not have its lens profile".to_owned());
+            format!(
+                "\"{}\" was applied without its optics. {problem}",
+                preset.name()
+            )
+        });
         if !self.edits.set_discrete(result.clone()) {
             self.notice = Some(format!("\"{}\" changes nothing here", preset.name()));
             return false;
+        }
+        if problem.is_some() {
+            self.notice = problem;
         }
         self.applied_preset = Some(AppliedPreset {
             preset: preset.clone(),
@@ -52,13 +65,14 @@ impl OpenDocument {
             return false;
         };
         applied.amount = amount.clamp(0.0, 1.0);
-        applied.result = self.with_preset(&applied.preset, &applied.base, applied.amount);
+        (applied.result, _) = self.with_preset(&applied.preset, &applied.base, applied.amount);
         let changed = self.edits.set_during_gesture(applied.result.clone());
         self.applied_preset = Some(applied);
         changed
     }
 
-    fn with_preset(&self, preset: &Preset, base: &EditRecipe, amount: f32) -> EditRecipe {
+    /// `base` with the preset, and whether its optics were left out.
+    fn with_preset(&self, preset: &Preset, base: &EditRecipe, amount: f32) -> (EditRecipe, bool) {
         let mut options = ApplyOptions {
             amount,
             ..ApplyOptions::default()
@@ -73,7 +87,8 @@ impl OpenDocument {
             options.unavailable.push(RecipeSection::Optics);
             next = preset.apply(base, &options);
         }
-        self.follow_camera_profile(base, next)
+        let left_out = !options.unavailable.is_empty();
+        (self.follow_camera_profile(base, next), left_out)
     }
 
     /// What a new preset should hold: the edited sections, except for those that
@@ -144,6 +159,13 @@ mod tests {
     }
 
     #[test]
+    fn the_amount_is_at_most_all_of_the_preset() {
+        let mut document = document();
+        assert!(document.apply_preset(&brighter(), 2.0));
+        assert_eq!(document.applied_preset(), Some(("Brighter", 1.0)));
+    }
+
+    #[test]
     fn another_edit_ends_changing_the_amount() {
         let mut document = document();
         assert!(document.apply_preset(&brighter(), 1.0));
@@ -174,6 +196,7 @@ mod tests {
         let mut document = document();
         assert!(document.apply_preset(&preset, 1.0));
         assert_eq!(exposure(&document), 1.0);
+        assert!(document.notice.is_some(), "it says so");
         assert_eq!(
             document.edits.recipe().optics.profile,
             LensProfileSelection::Off
