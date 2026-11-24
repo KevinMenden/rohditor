@@ -126,7 +126,6 @@ pub(crate) fn interact_and_paint(
 pub(crate) struct CropPanelModel {
     pub aspect: CropAspect,
     pub locked: bool,
-    pub portrait: bool,
     pub dimensions: (usize, usize),
     pub ready: bool,
 }
@@ -135,7 +134,7 @@ pub(crate) struct CropPanelModel {
 pub(crate) struct CropPanelOutput {
     pub aspect: Option<CropAspect>,
     pub locked: Option<bool>,
-    pub toggle_orientation: bool,
+    pub flip_ratio: bool,
     pub reset: bool,
     pub cancel: bool,
 }
@@ -165,14 +164,10 @@ pub(crate) fn show_controls(ui: &mut egui::Ui, model: &CropPanelModel) -> CropPa
         output.locked = Some(locked);
     }
     if ui
-        .button(if model.portrait {
-            "Landscape ratio"
-        } else {
-            "Portrait ratio"
-        })
+        .add_enabled(model.locked, egui::Button::new("Flip ratio"))
         .clicked()
     {
-        output.toggle_orientation = true;
+        output.flip_ratio = true;
     }
     ui.label(
         egui::RichText::new(format!(

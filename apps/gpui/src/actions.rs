@@ -5,6 +5,7 @@ use rohditor_edit::{
     HighlightMethod, LensProfileSelection, RecipeSection, RenderingProfileSelection,
     WhiteBalancePreset,
 };
+use rohditor_engine::tools::CropAspect;
 
 use crate::panels::adjustments::{
     HIGHLIGHT_METHODS, RENDERINGS, method_label, rendering_label, sections,
@@ -34,6 +35,9 @@ actions!(
         PickMixerColor,
         EditTool,
         CropTool,
+        LockCrop,
+        FlipCrop,
+        ResetCrop,
         ApplyTool,
         CancelTool,
         ZoomToFit,
@@ -70,6 +74,10 @@ pub struct SetRendering(pub RenderingProfileSelection);
 #[derive(Debug, Clone, PartialEq, Eq, Action)]
 #[action(namespace = rohditor, no_json)]
 pub struct SetLensProfile(pub LensProfileSelection);
+
+#[derive(Debug, Clone, PartialEq, Eq, Action)]
+#[action(namespace = rohditor, no_json)]
+pub struct SetCropAspect(pub CropAspect);
 
 /// An entry of the command palette and, when it has a key, of the keymap.
 pub struct Command {
@@ -130,6 +138,9 @@ pub fn commands() -> Vec<Command> {
         command("develop: pick mixer color", None, PickMixerColor),
         command("tool: edit", Some("e"), EditTool),
         command("tool: crop", Some("c"), CropTool),
+        command("crop: lock ratio", None, LockCrop),
+        command("crop: flip ratio", Some("x"), FlipCrop),
+        command("crop: reset", None, ResetCrop),
         command("tool: apply", Some("enter"), ApplyTool),
         command("view: zoom to fit", Some("ctrl-0"), ZoomToFit),
         command("view: actual pixels (1:1)", Some("ctrl-1"), ActualPixels),
@@ -167,6 +178,10 @@ pub fn commands() -> Vec<Command> {
     commands.extend(WhiteBalancePreset::ALL.into_iter().map(|preset| {
         let name = format!("develop: white balance {}", preset.label().to_lowercase());
         command(name, None, SetWhiteBalance(preset))
+    }));
+    commands.extend(CropAspect::ALL.into_iter().map(|aspect| {
+        let name = format!("crop: aspect {}", aspect.label().to_lowercase());
+        command(name, None, SetCropAspect(aspect))
     }));
     commands.extend(RENDERINGS.into_iter().map(|rendering| {
         let name = format!(

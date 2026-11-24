@@ -126,7 +126,6 @@ impl RohditorApp {
         let model = CropPanelModel {
             aspect: session.aspect(),
             locked: session.locked(),
-            portrait: session.portrait(),
             dimensions: session.output_dimensions(),
             ready: self
                 .document
@@ -142,8 +141,8 @@ impl RohditorApp {
             if let Some(locked) = output.locked {
                 session.set_locked(locked);
             }
-            if output.toggle_orientation {
-                session.toggle_orientation();
+            if output.flip_ratio {
+                session.flip_ratio();
             }
             if output.reset {
                 session.reset();

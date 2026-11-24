@@ -187,7 +187,7 @@ mod tests {
         let mut document = document();
         let mut tool = cropping(&mut document);
         draft(&mut tool, CropAspect::Square);
-        draft(&mut tool, CropAspect::ThreeTwo);
+        draft(&mut tool, CropAspect::FourThree);
         let policy = RawCropPolicy::default();
         assert!(tool.switch_to(ToolKind::Masks, &mut document, policy, 0.0));
         assert_eq!(tool.kind(), ToolKind::Masks);

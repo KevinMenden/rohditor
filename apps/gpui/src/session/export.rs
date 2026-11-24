@@ -60,7 +60,7 @@ impl Session {
         }
     }
 
-    fn export_to(&mut self, document_id: u64, mut destination: PathBuf) {
+    pub fn export_to(&mut self, document_id: u64, mut destination: PathBuf) {
         // The photo may have changed while the dialog was open.
         if !self.export_ready() || self.document.as_ref().is_none_or(|d| d.id != document_id) {
             return;

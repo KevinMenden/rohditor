@@ -254,3 +254,159 @@ fn dragging_beside_the_rectangle_pans() {
     assert_draft(&mut harness, [0.5, 0.5, 1.0, 1.0]);
     assert_ne!(pan(&mut harness), Some([0.0, 0.0]));
 }
+
+/// The size of the photo that the panel promises.
+fn promised(harness: &mut Harness) -> (u32, u32) {
+    let (width, height) = harness.with_session(|session, _| {
+        let crop = session.tool().crop().expect("drafting");
+        crop.output_dimensions()
+    });
+    (width as u32, height as u32)
+}
+
+fn ratio((width, height): (u32, u32)) -> f64 {
+    f64::from(width) / f64::from(height)
+}
+
+#[test]
+#[ignore = "requires a wgpu adapter and ROHDITOR_RAW"]
+fn ratios_are_chosen_locked_flipped_and_reset() {
+    let Some((mut harness, ..)) = opened("crop-ratio") else {
+        return;
+    };
+    enter(&mut harness);
+    let full = promised(&mut harness);
+    harness.click("button:crop-flip");
+    assert_eq!(promised(&mut harness), full, "there is no ratio to flip");
+    harness.click("dropdown:crop-aspect");
+    harness.capture("crop-aspects");
+    harness.click("menu:4:5");
+    assert!((ratio(promised(&mut harness)) - 0.8).abs() < 1.0e-3);
+    harness.click("button:crop-flip");
+    assert!((ratio(promised(&mut harness)) - 1.25).abs() < 1.0e-3);
+    let photo = photo(&mut harness);
+    let draft = harness.with_session(|session, _| session.crop_draft().expect("drafting").draft());
+    let corner = photo.origin
+        + point(
+            photo.size.width * draft.right as f32,
+            photo.size.height * draft.bottom as f32,
+        );
+    harness.press(corner, 1);
+    harness.drag_to(corner - point(px(200.0), px(50.0)));
+    harness.release(corner);
+    assert!(promised(&mut harness) < full);
+    assert!((ratio(promised(&mut harness)) - 1.25).abs() < 1.0e-3);
+    harness.capture("crop-ratio");
+
+    let at_ratio = promised(&mut harness);
+    harness.click("toggle:crop-lock");
+    assert_eq!(promised(&mut harness), at_ratio, "unlocking keeps it");
+    let locked = |harness: &mut Harness| {
+        harness.with_session(|session, _| session.tool().crop().is_some_and(|c| c.locked()))
+    };
+    assert!(!locked(&mut harness));
+    harness.click("toggle:crop-lock");
+    assert!(locked(&mut harness));
+    harness.click("button:crop-reset");
+    assert_eq!(
+        (promised(&mut harness), locked(&mut harness)),
+        (full, false)
+    );
+    harness.click("button:cancel-tool");
+    assert_eq!(
+        (tool(&mut harness), crop(&mut harness)),
+        (ToolKind::Edit, None)
+    );
+}
+
+#[test]
+#[ignore = "requires a wgpu adapter and ROHDITOR_RAW"]
+fn the_crop_tool_is_used_by_keyboard_alone() {
+    let Some((mut harness, ..)) = opened("crop-keys") else {
+        return;
+    };
+    enter(&mut harness);
+    harness.keys("ctrl-shift-p");
+    for key in "a s p e c t space 1 6 : 9".split(' ') {
+        harness.keys(key);
+    }
+    harness.keys("enter");
+    assert!((ratio(promised(&mut harness)) - 16.0 / 9.0).abs() < 1.0e-3);
+    harness.keys("x");
+    assert!((ratio(promised(&mut harness)) - 9.0 / 16.0).abs() < 1.0e-3);
+    harness.keys("enter");
+    assert!(crop(&mut harness).is_some());
+    // Without the tool its commands do nothing.
+    harness.keys("x");
+    assert_eq!(tool(&mut harness), ToolKind::Edit);
+    harness.keys("ctrl-z");
+    assert_eq!(crop(&mut harness), None);
+}
+
+#[test]
+#[ignore = "requires a wgpu adapter and ROHDITOR_RAW"]
+fn the_exported_photo_has_the_promised_size() {
+    let Some((mut harness, first, _)) = opened("crop-export") else {
+        return;
+    };
+    enter(&mut harness);
+    harness.with_session(|session, cx| {
+        session.edit_crop(|crop| crop.set_aspect(CropAspect::FourFive), cx);
+    });
+    drag(&mut harness, (0.5, 0.5), (0.47, 0.5), px(0.0));
+    let size = promised(&mut harness);
+    // Exporting applies the crop.
+    harness.keys("ctrl-e");
+    assert_eq!(tool(&mut harness), ToolKind::Edit);
+    assert!(crop(&mut harness).is_some());
+    let exported = first.with_extension("jpg");
+    let destination = exported.clone();
+    harness.with_session(|session, _| {
+        let id = session.document().expect("a photo is open").id;
+        session.export_to(id, destination);
+    });
+    harness.wait_until("the export", |session| {
+        session
+            .document()
+            .is_some_and(|document| document.export_status.is_none())
+    });
+    let written = image::image_dimensions(exported).expect("the photo was exported");
+    assert_eq!(written, size);
+}
+
+#[test]
+#[ignore = "requires a wgpu adapter and ROHDITOR_RAW"]
+fn cropping_works_without_a_gpu() {
+    let Some((first, _)) = scratch_photos("crop-cpu") else {
+        return;
+    };
+    let mut harness = Harness::start(WINDOW, || None);
+    harness.with_session(|session, cx| session.open_file(first, cx));
+    let rendered = |session: &Session| {
+        session.document().is_some_and(|document| {
+            document.preview.status.is_none()
+                && document.edits.recipe().rendering.camera_tone.is_some()
+                && document.preview.histogram_revision == Some(document.edits.revision())
+        })
+    };
+    harness.wait_until("the developed preview", rendered);
+    let full = shown(&mut harness);
+    enter(&mut harness);
+    harness.with_session(|session, cx| {
+        session.edit_crop(|crop| crop.set_aspect(CropAspect::Square), cx);
+    });
+    harness.keys("enter");
+    harness.wait_until("the cropped preview", rendered);
+    let cropped = shown(&mut harness);
+    assert!(cropped.0.abs_diff(cropped.1) <= 1, "{cropped:?}");
+    enter(&mut harness);
+    assert_eq!(shown(&mut harness), full);
+    harness.keys("escape");
+    harness.wait_until("the cropped preview again", |session| {
+        rendered(session)
+            && session
+                .document()
+                .is_some_and(|document| !document.preview.full_frame_shown())
+    });
+    assert_eq!(shown(&mut harness), cropped);
+}

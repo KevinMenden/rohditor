@@ -9,15 +9,16 @@ use gpui::{
     Pixels, Render, Role, Stateful, StyleRefinement, Window, div, prelude::*,
 };
 
-use rohditor_engine::tools::{Picker, ToolKind};
+use rohditor_engine::tools::{CropToolSession, Picker, ToolKind};
 
 use crate::actions::{
     ActualPixels, ApplyPreset, ApplyTool, AutoNoiseReduction, AutoTone, CancelTool, ChooseLens,
-    CloseFile, CropTool, EditTool, Export, FocusAdjustments, FocusPhoto, ImportCameraProfile,
-    NextPhoto, OpenFile, OpenFolder, PHOTO_CONTEXT, PickMixerColor, PickWhiteBalance,
-    PreviousPhoto, Quit, Redo, ResetAdjustments, ResetSection, Save, SavePreset, SearchAdjustments,
-    SetHighlightMethod, SetLensProfile, SetRendering, SetWhiteBalance, ToggleClipping,
-    ToggleCommandPalette, ToggleDevelop, ToggleFiles, Undo, WORKSPACE_CONTEXT, ZoomToFit,
+    CloseFile, CropTool, EditTool, Export, FlipCrop, FocusAdjustments, FocusPhoto,
+    ImportCameraProfile, LockCrop, NextPhoto, OpenFile, OpenFolder, PHOTO_CONTEXT, PickMixerColor,
+    PickWhiteBalance, PreviousPhoto, Quit, Redo, ResetAdjustments, ResetCrop, ResetSection, Save,
+    SavePreset, SearchAdjustments, SetCropAspect, SetHighlightMethod, SetLensProfile, SetRendering,
+    SetWhiteBalance, ToggleClipping, ToggleCommandPalette, ToggleDevelop, ToggleFiles, Undo,
+    WORKSPACE_CONTEXT, ZoomToFit,
 };
 use crate::library::Library;
 use crate::panels::command_palette::command_palette;
@@ -87,7 +88,7 @@ impl Workspace {
             files: cx
                 .new(|cx| FilesPanel::new(session.clone(), library.clone(), overlays.clone(), cx)),
             develop: cx.new(|cx| DevelopPanel::new(session.clone(), overlays.clone(), window, cx)),
-            crop: cx.new(|cx| CropPanel::new(session.clone(), cx)),
+            crop: cx.new(|cx| CropPanel::new(session.clone(), overlays.clone(), cx)),
             viewport: cx.new(|cx| Viewport::new(session.clone(), cx)),
             session,
             library,
@@ -194,6 +195,9 @@ impl Workspace {
             Redo => |session, cx| session.redo(cx),
             ResetAdjustments => |session, cx| session.reset(cx),
             AutoTone => |session, cx| session.auto_tone(cx),
+            LockCrop => |session, cx| session.edit_crop(|crop| crop.set_locked(!crop.locked()), cx),
+            FlipCrop => |session, cx| session.edit_crop(CropToolSession::flip_ratio, cx),
+            ResetCrop => |session, cx| session.edit_crop(CropToolSession::reset, cx),
             ApplyTool => |session, cx| if session.drafting() { session.apply_tool(cx) },
             PickWhiteBalance => |session, cx| session.toggle_picker(Picker::WhiteBalance, cx),
             PickMixerColor => |session, cx| session.toggle_picker(Picker::ColorMixer, cx),
@@ -230,6 +234,11 @@ impl Workspace {
             .on_action(cx.listener(|this, action: &SetHighlightMethod, _, cx| {
                 this.develop.update(cx, |panel, cx| {
                     panel.choose(|session, cx| session.set_highlight_method(action.0, cx), cx);
+                });
+            }))
+            .on_action(cx.listener(|this, action: &SetCropAspect, _, cx| {
+                this.session.update(cx, |session, cx| {
+                    session.edit_crop(|crop| crop.set_aspect(action.0), cx);
                 });
             }))
             .on_action(cx.listener(|this, action: &SetWhiteBalance, _, cx| {

@@ -24,13 +24,11 @@ pub struct CropToolSession {
     /// The recipe's crop.
     committed: Option<NormalizedCropRect>,
     draft: NormalizedCropRect,
+    /// The draft as last drawn by hand. Ratios are fitted into it, so that trying one after the
+    /// other does not shrink the draft.
+    drawn: NormalizedCropRect,
     aspect: CropAspect,
-    locked: bool,
-    /// Ratio captured when the lock is ticked while the preset is `Free`,
-    /// stored in pixel units in landscape base form (the effective ratio is
-    /// `1.0 / locked_ratio` while portrait), mirroring how `CropAspect::ratio`
-    /// keeps preset ratios in pixel space before the normalized conversion.
-    /// Preset-locked drags never consult this.
+    /// The ratio locked while the aspect is `Free`, in pixels and before it was flipped.
     locked_ratio: Option<f64>,
     portrait: bool,
     full_width: usize,
@@ -48,8 +46,8 @@ impl CropToolSession {
         Self {
             committed,
             draft: committed.unwrap_or(NormalizedCropRect::FULL_FRAME),
+            drawn: committed.unwrap_or(NormalizedCropRect::FULL_FRAME),
             aspect: CropAspect::Free,
-            locked: false,
             locked_ratio: None,
             portrait: false,
             full_width: full_width.max(1),
@@ -66,58 +64,74 @@ impl CropToolSession {
         self.aspect
     }
 
-    pub const fn locked(&self) -> bool {
-        self.locked
+    /// Whether the draft is constrained to a ratio: a preset's, or the one it was locked at.
+    pub fn locked(&self) -> bool {
+        self.aspect != CropAspect::Free || self.locked_ratio.is_some()
     }
 
+    /// Whether the ratio is flipped.
     pub const fn portrait(&self) -> bool {
         self.portrait
     }
 
+    /// Choose a ratio and lock it. `Free` unlocks and keeps the draft.
     pub fn set_aspect(&mut self, aspect: CropAspect) {
+        // Flipped ratios stay flipped from one preset to the next.
+        let portrait = self.portrait;
+        self.clear_ratio();
+        if aspect == CropAspect::Free {
+            return;
+        }
         self.aspect = aspect;
-        self.locked = aspect != CropAspect::Free;
-        // The ratio derives from the preset from here on; a Free switch also
-        // unlocks, so the preset row and the checkbox can never disagree.
-        self.locked_ratio = None;
+        self.portrait = portrait;
         self.constrain_draft();
     }
 
-    /// Ticking the lock on the `Free` preset captures the draft's current
-    /// ratio (portrait-aware, so the effective ratio equals the draft ratio
-    /// at tick time and the capture causes no snap); unticking clears it.
+    /// Lock the draft's current ratio, or stop constraining it.
     pub fn set_locked(&mut self, locked: bool) {
-        self.locked = locked;
-        self.locked_ratio = if locked && self.aspect == CropAspect::Free {
-            // Dragged rects keep both edges at a minimum length and presets
-            // are fit-to-frame, so this division can't produce inf/NaN.
+        if locked == self.locked() {
+            return;
+        }
+        self.clear_ratio();
+        if locked {
+            // Both edges have a minimum length, so this is a finite ratio.
             let pixel_ratio = ((self.draft.right - self.draft.left) * self.full_width as f64)
                 / ((self.draft.bottom - self.draft.top) * self.full_height as f64);
-            Some(if self.portrait {
-                1.0 / pixel_ratio
-            } else {
-                pixel_ratio
-            })
-        } else {
-            None
-        };
-        self.constrain_draft();
+            self.locked_ratio = Some(pixel_ratio);
+        }
     }
 
-    pub fn toggle_orientation(&mut self) {
-        self.portrait = !self.portrait;
-        self.constrain_draft();
+    /// Swap the sides of the ratio. Without one there is nothing to flip.
+    pub fn flip_ratio(&mut self) {
+        if self.locked() {
+            self.portrait = !self.portrait;
+            self.constrain_draft();
+        }
     }
 
+    /// Back to the whole photo, at any ratio.
     pub fn reset(&mut self) {
-        self.draft = NormalizedCropRect::FULL_FRAME;
+        self.set_rect(NormalizedCropRect::FULL_FRAME);
+        self.clear_ratio();
+    }
+
+    fn set_rect(&mut self, rect: NormalizedCropRect) {
+        self.draft = rect;
+        self.drawn = rect;
         self.drag = None;
     }
 
-    /// The recipe value to commit. Full frame is canonicalized to `None`.
+    fn clear_ratio(&mut self) {
+        self.aspect = CropAspect::Free;
+        self.locked_ratio = None;
+        self.portrait = false;
+    }
+
+    /// The recipe value to commit: `None` if the draft keeps every pixel, as it may lie a
+    /// rounding error inside the photo after fitting a ratio.
     #[must_use]
     pub fn committed_crop(&self) -> Option<NormalizedCropRect> {
-        self.draft.canonicalized()
+        (self.output_dimensions() != (self.full_width, self.full_height)).then_some(self.draft)
     }
 
     #[must_use]
@@ -141,12 +155,9 @@ impl CropToolSession {
 
     fn load(&mut self, committed: Option<NormalizedCropRect>) {
         self.committed = committed;
-        self.draft = committed.unwrap_or(NormalizedCropRect::FULL_FRAME);
-        self.drag = None;
+        self.set_rect(committed.unwrap_or(NormalizedCropRect::FULL_FRAME));
         // A ratio that the loaded crop may not have.
-        self.aspect = CropAspect::Free;
-        self.locked = false;
-        self.locked_ratio = None;
+        self.clear_ratio();
     }
 
     /// The size of the cropped photo: its edges fall on the same pixels as when it is rendered.
@@ -179,13 +190,15 @@ impl CropToolSession {
         let dy = point.1 - drag.start.1;
         let Some((x, y)) = drag.handle.position(drag.rect) else {
             self.draft = translate(drag.rect, dx, dy);
+            self.drawn = self.draft;
             return;
         };
         let point = (x + dx, y + dy);
-        self.draft = match self.normalized_ratio().filter(|_| self.locked) {
+        self.draft = match self.normalized_ratio() {
             Some(ratio) => resize_locked(drag.rect, drag.handle, point, ratio),
             None => resize_free(drag.rect, drag.handle, point),
         };
+        self.drawn = self.draft;
     }
 
     pub fn finish_drag(&mut self) {
@@ -218,10 +231,10 @@ impl CropToolSession {
         let Some(ratio) = self.normalized_ratio() else {
             return;
         };
-        let center_x = (self.draft.left + self.draft.right) * 0.5;
-        let center_y = (self.draft.top + self.draft.bottom) * 0.5;
-        let mut width = self.draft.right - self.draft.left;
-        let mut height = self.draft.bottom - self.draft.top;
+        let center_x = (self.drawn.left + self.drawn.right) * 0.5;
+        let center_y = (self.drawn.top + self.drawn.bottom) * 0.5;
+        let mut width = self.drawn.right - self.drawn.left;
+        let mut height = self.drawn.bottom - self.drawn.top;
         if width / height > ratio {
             width = height * ratio;
         } else {
@@ -368,38 +381,20 @@ mod tests {
     }
 
     #[test]
-    fn captured_ratio_flips_with_orientation() {
+    fn captured_ratio_flips() {
         // Orientation flips happen in pixel space, as with presets. Storing
         // the capture in normalized units would yield 1.2 here, not 0.5333.
         let mut session = session_resized_to_1875();
         session.set_locked(true);
-        session.toggle_orientation();
+        session.flip_ratio();
         let flipped = 1.0 / 1.875;
         assert!((pixel_ratio(&session, 6000, 4000) - flipped).abs() < 1.0e-9);
         session.begin_drag(CropHandle::NorthWest, (session.draft().left, 0.0));
         session.drag_to((0.05, 0.05));
         session.finish_drag();
         assert!((pixel_ratio(&session, 6000, 4000) - flipped).abs() < 1.0e-9);
-        session.toggle_orientation();
+        session.flip_ratio();
         assert!((pixel_ratio(&session, 6000, 4000) - 1.875).abs() < 1.0e-9);
-    }
-
-    #[test]
-    fn lock_captured_while_portrait_keeps_screen_ratio() {
-        let mut session = CropToolSession::new(None, 6000, 4000);
-        session.toggle_orientation();
-        session.begin_drag(CropHandle::SouthEast, (1.0, 1.0));
-        session.drag_to((0.5, 0.4));
-        session.finish_drag();
-        // The portrait capture arm stores 1/1.875 so the effective ratio
-        // stays the on-screen 1.875: locking causes no snap.
-        session.set_locked(true);
-        session.begin_drag(CropHandle::NorthWest, (0.0, 0.0));
-        session.drag_to((0.1, 0.2));
-        session.finish_drag();
-        assert!((pixel_ratio(&session, 6000, 4000) - 1.875).abs() < 1.0e-9);
-        session.toggle_orientation();
-        assert!((pixel_ratio(&session, 6000, 4000) - 1.0 / 1.875).abs() < 1.0e-9);
     }
 
     #[test]
@@ -493,7 +488,55 @@ mod tests {
 
         let mut session = CropToolSession::new(None, 6000, 4000);
         session.set_aspect(CropAspect::Original);
-        session.toggle_orientation();
+        session.flip_ratio();
         assert!((pixel_ratio(&session, 6000, 4000) - 2.0 / 3.0).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn trying_ratios_does_not_shrink_the_crop() {
+        let mut session = session_resized_to_1875();
+        session.set_aspect(CropAspect::Square);
+        let square = session.draft();
+        session.set_aspect(CropAspect::SixteenNine);
+        session.flip_ratio();
+        session.flip_ratio();
+        session.set_aspect(CropAspect::Square);
+        assert_eq!(session.draft(), square);
+        assert_eq!(session.output_dimensions(), (1600, 1600));
+        // A crop drawn at a ratio is what the next one is fitted into.
+        session.begin_drag(CropHandle::SouthEast, (square.right, square.bottom));
+        session.drag_to((square.right - 0.1, square.bottom - 0.15));
+        session.finish_drag();
+        session.set_aspect(CropAspect::Original);
+        assert_eq!(session.output_dimensions(), (1000, 666));
+    }
+
+    #[test]
+    fn unlocking_keeps_the_crop_and_resetting_clears_the_ratio() {
+        let mut session = CropToolSession::new(None, 6000, 4000);
+        session.set_aspect(CropAspect::FourFive);
+        session.flip_ratio();
+        let draft = session.draft();
+        session.set_locked(false);
+        assert_eq!(
+            (session.draft(), session.aspect()),
+            (draft, CropAspect::Free)
+        );
+        session.flip_ratio();
+        assert_eq!(session.draft(), draft, "there is no ratio to flip");
+        session.set_locked(true);
+        assert_eq!(session.draft(), draft);
+        session.reset();
+        assert!(!session.locked() && !session.portrait() && !session.is_modified());
+        assert_eq!(session.output_dimensions(), (6000, 4000));
+    }
+
+    #[test]
+    fn fitting_the_photos_own_ratio_is_no_crop() {
+        for (width, height) in [(6000, 4000), (6048, 4024), (4672, 7008), (6001, 3999)] {
+            let mut session = CropToolSession::new(None, width, height);
+            session.set_aspect(CropAspect::Original);
+            assert_eq!(session.committed_crop(), None, "{width} × {height}");
+        }
     }
 }
