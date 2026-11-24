@@ -671,7 +671,10 @@ pub(super) mod adjustments {
         if !input.is_finite() || !(0.0..=1.0).contains(&input) {
             return input;
         }
-        const INPUTS: [f32; 6] = [0.0, 0.12, 0.35, 0.65, 0.88, 1.0];
+        const INPUTS: [f32; 6] = {
+            let [shadows, darks, lights, highlights] = ToneCurve::INPUTS;
+            [0.0, shadows, darks, lights, highlights, 1.0]
+        };
         let mut outputs = [
             0.0,
             INPUTS[1] + curve.shadows,

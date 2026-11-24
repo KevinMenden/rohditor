@@ -11,6 +11,8 @@ pub enum Format {
     Kelvin,
     /// Distance from neutral in percent, signed.
     Percent,
+    /// `1.05×`
+    Factor,
 }
 
 impl Format {
@@ -18,6 +20,7 @@ impl Format {
         match self {
             Self::Stops => format!("{value:+.2} EV"),
             Self::Kelvin => format!("{value:.0} K"),
+            Self::Factor => format!("{value:.2}×"),
             Self::Percent => {
                 let percent = ((value - range.neutral) * 100.0).round();
                 // Avoid "-0".
@@ -33,7 +36,7 @@ impl Format {
     /// The value meant by `text`, in the unit of [`Self::label`]. Clamped to the range.
     pub fn parse(self, text: &str, range: ParameterRange) -> Option<f32> {
         let text = text.trim().to_lowercase().replace(',', ".");
-        let number = ["ev", "k", "%"]
+        let number = ["ev", "k", "%", "×", "x"]
             .iter()
             .find_map(|unit| text.strip_suffix(unit))
             .unwrap_or(&text)
@@ -42,7 +45,7 @@ impl Format {
             .ok()
             .filter(|number| number.is_finite())?;
         let value = match self {
-            Self::Stops | Self::Kelvin => number,
+            Self::Stops | Self::Kelvin | Self::Factor => number,
             Self::Percent => number / 100.0 + range.neutral,
         };
         Some(value.clamp(range.minimum, range.maximum))
@@ -53,7 +56,7 @@ impl Format {
         match self {
             Self::Stops => 0.05,
             Self::Kelvin => 50.0,
-            Self::Percent => 0.01,
+            Self::Percent | Self::Factor => 0.01,
         }
     }
 
@@ -69,14 +72,14 @@ impl Format {
     fn track_at(self, value: f32) -> f32 {
         match self {
             Self::Kelvin => -1.0 / value,
-            Self::Stops | Self::Percent => value,
+            Self::Stops | Self::Percent | Self::Factor => value,
         }
     }
 
     fn value_at(self, track: f32) -> f32 {
         match self {
             Self::Kelvin => -1.0 / track,
-            Self::Stops | Self::Percent => track,
+            Self::Stops | Self::Percent | Self::Factor => track,
         }
     }
 }
@@ -109,7 +112,10 @@ pub fn dragged(format: Format, range: ParameterRange, start: f32, delta: f32) ->
 
 #[cfg(test)]
 mod tests {
-    use rohditor_edit::{CONTRAST_RANGE, EXPOSURE_EV_RANGE, SATURATION_RANGE, TEMPERATURE_RANGE};
+    use rohditor_edit::{
+        CONTRAST_RANGE, EXPOSURE_EV_RANGE, HIGHLIGHT_THRESHOLD_RANGE, SATURATION_RANGE,
+        TEMPERATURE_RANGE,
+    };
 
     use super::*;
 
@@ -118,6 +124,10 @@ mod tests {
         assert_eq!(Format::Percent.label(1.25, SATURATION_RANGE), "+25");
         assert_eq!(Format::Percent.label(-0.001, CONTRAST_RANGE), "0");
         assert_eq!(Format::Stops.label(-0.5, EXPOSURE_EV_RANGE), "-0.50 EV");
+        assert_eq!(
+            Format::Factor.label(0.95, HIGHLIGHT_THRESHOLD_RANGE),
+            "0.95×"
+        );
         assert_eq!(Format::Kelvin.label(5_200.4, TEMPERATURE_RANGE), "5200 K");
     }
 
@@ -133,6 +143,9 @@ mod tests {
             Format::Kelvin.parse("5200 K", TEMPERATURE_RANGE),
             Some(5_200.0)
         );
+        let factor = |text| Format::Factor.parse(text, HIGHLIGHT_THRESHOLD_RANGE);
+        assert_eq!(factor("1.2×"), Some(1.2));
+        assert_eq!(factor("1.2 x"), Some(1.2));
         assert_eq!(Format::Percent.parse("25", SATURATION_RANGE), Some(1.25));
     }
 

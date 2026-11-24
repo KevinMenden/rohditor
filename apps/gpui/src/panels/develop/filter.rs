@@ -1,0 +1,188 @@
+//! Which adjustments the panel lists: a search and "Edited only".
+
+use gpui::{Context, Focusable as _, IntoElement, SharedString, Window, div, prelude::*, px};
+use rohditor_edit::{EditRecipe, HighlightMethod, Parameter, RecipeSection};
+
+use super::DevelopPanel;
+use crate::actions::FocusPhoto;
+use crate::assets::Icon;
+use crate::panels::adjustments::{Adjustment, Group, Section};
+use crate::theme::{RADIUS, theme};
+use crate::ui::button::{icon, icon_button};
+use crate::ui::keys::{Cancel, Confirm, SelectNext};
+use crate::ui::test_id::TestId as _;
+use crate::ui::toggle::toggle;
+
+/// Whether `text` contains every word of `query`, ignoring case.
+fn matches(text: &str, query: &str) -> bool {
+    let text = text.to_lowercase();
+    query
+        .split_whitespace()
+        .all(|word| text.contains(&word.to_lowercase()))
+}
+
+impl DevelopPanel {
+    fn query(&self, cx: &Context<Self>) -> SharedString {
+        self.search.read(cx).text().to_owned().into()
+    }
+
+    pub(super) fn searching(&self, cx: &Context<Self>) -> bool {
+        !self.query(cx).trim().is_empty()
+    }
+
+    /// Whether the search finds the control `label`, or a section as such when it is empty.
+    pub(super) fn finds(
+        &self,
+        group: &Group,
+        section: &Section,
+        label: &str,
+        cx: &Context<Self>,
+    ) -> bool {
+        let text = format!("{} {} {label}", group.title, section.section.label());
+        matches(&text, &self.query(cx))
+    }
+
+    /// Whether the panel shows this adjustment.
+    pub(super) fn shows(
+        &self,
+        group: &Group,
+        section: &Section,
+        adjustment: &Adjustment,
+        recipe: &EditRecipe,
+        defaults: &EditRecipe,
+        cx: &Context<Self>,
+    ) -> bool {
+        let parameter = adjustment.parameter;
+        if !applies(parameter, recipe) {
+            return false;
+        }
+        // A slider must not vanish while it is changed.
+        let active = [
+            self.drag.as_ref().map(|drag| drag.adjustment.parameter),
+            self.typing
+                .as_ref()
+                .map(|typing| typing.adjustment.parameter),
+        ]
+        .contains(&Some(parameter));
+        let passes = !self.edited_only || parameter.is_changed(recipe, defaults);
+        active || (passes && self.finds(group, section, adjustment.label, cx))
+    }
+
+    pub(super) fn shows_highlight_method(
+        &self,
+        group: &Group,
+        section: &Section,
+        recipe: &EditRecipe,
+        defaults: &EditRecipe,
+        cx: &Context<Self>,
+    ) -> bool {
+        let changed = recipe.raw.highlights.method != defaults.raw.highlights.method;
+        section.section == RecipeSection::HighlightReconstruction
+            && (!self.edited_only || changed)
+            && self.finds(group, section, "Method", cx)
+    }
+
+    pub fn focus_search(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search.focus_handle(cx).focus(window, cx);
+    }
+
+    pub(super) fn filter(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let theme = theme();
+        let search = div()
+            .test_id("search")
+            .relative()
+            .flex()
+            .flex_1()
+            .min_w_0()
+            .items_center()
+            .gap_1()
+            .px_1p5()
+            .h(px(26.0))
+            .rounded(RADIUS)
+            .bg(theme.editor)
+            .child(icon(Icon::Search, theme.faint))
+            .child(div().flex_1().min_w_0().child(self.search.clone()))
+            .when(self.searching(cx), |search| {
+                search.child(icon_button(
+                    "clear-search",
+                    Icon::Close,
+                    "Clear Search",
+                    true,
+                    cx.listener(|this, _, _, cx| {
+                        this.search.update(cx, |search, cx| search.clear(cx));
+                    }),
+                ))
+            })
+            .on_action(cx.listener(|this, _: &Cancel, window, cx| {
+                if this.search.read(cx).text().is_empty() {
+                    window.dispatch_action(Box::new(FocusPhoto), cx);
+                } else {
+                    this.search.update(cx, |search, cx| search.clear(cx));
+                }
+            }))
+            .on_action(cx.listener(|this, _: &Confirm, window, cx| {
+                this.focus_adjustments(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectNext, window, cx| {
+                this.focus_adjustments(window, cx);
+            }));
+        let panel = cx.entity();
+        let edited_only = toggle(
+            "edited-only",
+            "Edited only",
+            self.edited_only,
+            move |_, cx| {
+                panel.update(cx, |panel, cx| {
+                    panel.edited_only = !panel.edited_only;
+                    cx.notify();
+                });
+            },
+        );
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .child(search)
+            .child(edited_only)
+    }
+}
+
+/// Whether the parameter does something with the choices made in `recipe`.
+fn applies(parameter: Parameter, recipe: &EditRecipe) -> bool {
+    let method = recipe.raw.highlights.method;
+    match parameter {
+        Parameter::HighlightClipThreshold => method == HighlightMethod::Clip,
+        Parameter::HighlightDetectionThreshold => method == HighlightMethod::Opposed,
+        _ => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_word_of_a_search_must_match() {
+        let text = "Light Tone curve Shadows";
+        assert!(matches(text, ""));
+        assert!(matches(text, "shad CURVE"));
+        assert!(!matches(text, "curve whites"));
+    }
+
+    #[test]
+    fn only_the_threshold_of_the_chosen_method_applies() {
+        let clip = Parameter::HighlightClipThreshold;
+        let detection = Parameter::HighlightDetectionThreshold;
+        for (method, applying) in [
+            (HighlightMethod::Off, [false, false]),
+            (HighlightMethod::Clip, [true, false]),
+            (HighlightMethod::Opposed, [false, true]),
+        ] {
+            let mut recipe = EditRecipe::default();
+            recipe.raw.highlights.method = method;
+            assert_eq!([clip, detection].map(|p| applies(p, &recipe)), applying);
+        }
+    }
+}

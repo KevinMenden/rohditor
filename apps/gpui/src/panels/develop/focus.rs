@@ -10,7 +10,7 @@ use gpui::{
 use rohditor_edit::{Parameter, RecipeSection};
 
 use super::DevelopPanel;
-use crate::panels::adjustments::SECTIONS;
+use crate::panels::adjustments::sections;
 use crate::ui::keys::{SelectNext, SelectPrevious};
 
 pub(super) const CONTEXT: &str = "Adjustments";
@@ -23,6 +23,7 @@ pub(super) enum Control {
     /// The header of a section.
     Section(RecipeSection),
     Parameter(Parameter),
+    HighlightMethod,
 }
 
 pub(super) struct PanelFocus {
@@ -36,7 +37,7 @@ pub(super) struct PanelFocus {
 
 impl PanelFocus {
     pub fn new(cx: &mut Context<DevelopPanel>) -> Self {
-        let controls = SECTIONS.iter().flat_map(|section| {
+        let controls = sections().flat_map(|section| {
             let rows = section.adjustments.iter();
             let rows = rows.map(|row| Control::Parameter(row.parameter));
             std::iter::once(Control::Section(section.section)).chain(rows)
@@ -44,6 +45,7 @@ impl PanelFocus {
         Self {
             entry: cx.focus_handle(),
             controls: controls
+                .chain([Control::HighlightMethod])
                 .map(|control| (control, cx.focus_handle().tab_stop(true)))
                 .collect(),
             scroll: ScrollHandle::new(),

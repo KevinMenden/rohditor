@@ -22,8 +22,9 @@ Assumed from the recommendations unless marked open; change them here if they tu
 | Area | GPUI today | Missing |
 |---|---|---|
 | Open, folder list, autosave, undo | Done | Save status and errors, recovery checks |
-| Basic sliders | 16, typed, by keyboard, with section reset and changed markers | |
-| Other adjustments | None | Curve, mixer, grading, profiles, highlights, defringe, moiré, optics, full detail controls |
+| Basic sliders | Typed, by keyboard, grouped and searchable, with section reset and changed markers | |
+| Light | Tone, parametric curve, presence, highlight reconstruction | |
+| Other adjustments | None | Mixer, grading, profiles, defringe, moiré, optics, full detail controls |
 | Viewport | Fit, zoom, pan, 1:1, clipping overlay | Tool overlays |
 | Tools | None | Crop, masks, white balance and colour pickers |
 | Presets, info | None | All |
@@ -82,7 +83,7 @@ Done when 1:1 and clipping match egui on GPU and CPU.
 ## Stage 3: All adjustments
 
 - [x] 3.1 Move the slider-to-recipe mapping down; section reset and changed markers.
-- [ ] 3.2 Light, tone curve, highlight reconstruction.
+- [x] 3.2 Light, tone curve, highlight reconstruction.
 - [ ] 3.3 Color: mixer, wheels, profiles, DCP import, white balance and mixer pickers.
 - [ ] 3.4 Detail: noise reduction with Auto, sharpening, moiré, defringe.
 - [ ] 3.5 Optics with lens search.

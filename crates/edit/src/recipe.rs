@@ -420,6 +420,12 @@ pub(super) mod light_settings {
         pub highlights: f32,
     }
 
+    impl ToneCurve {
+        /// The linear luminances the offsets apply at, in field order. The GPU
+        /// preview shader repeats them.
+        pub const INPUTS: [f32; 4] = [0.12, 0.35, 0.65, 0.88];
+    }
+
     impl Default for ToneCurve {
         fn default() -> Self {
             Self {
