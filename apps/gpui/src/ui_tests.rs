@@ -2,10 +2,12 @@
 //!
 //! Ignored by default: they need a wgpu adapter, and `ROHDITOR_RAW` for the ones that open a
 //! photo. The photo is copied to a scratch folder first, so sidecars never end up next to the
-//! original. `ROHDITOR_SHOTS=DIR` writes a PNG per scenario.
+//! original. `ROHDITOR_SHOTS=DIR` writes a PNG per scenario. `driver` runs a text script
+//! instead of a compiled scenario.
 
 mod color;
 mod detail;
+mod driver;
 mod light;
 mod optics;
 mod presets;
@@ -17,8 +19,8 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     AppContext, Bounds, Entity, HeadlessAppContext, KeyUpEvent, Keystroke, Modifiers, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, PlatformInput, Point, Size, WindowHandle,
-    point, px, size,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, PlatformInput, Point, ScrollDelta,
+    ScrollWheelEvent, Size, TouchPhase, WindowHandle, point, px, size,
 };
 use rohditor_engine::open_document::ExportActivity;
 use rohditor_engine::persistence;
@@ -37,6 +39,7 @@ const EXPOSURE: &str = "adjustment:Exposure";
 struct Harness {
     cx: HeadlessAppContext,
     window: WindowHandle<Workspace>,
+    size: Size<Pixels>,
     session: Entity<Session>,
     library: Entity<Library>,
 }
@@ -61,8 +64,9 @@ impl Harness {
         cx.allow_parking();
         cx.update(actions::bind_keys);
         let mut created = None;
+        let size = window;
         let window = cx
-            .open_window(window, |window, cx| {
+            .open_window(size, |window, cx| {
                 let session = cx.new(|cx| {
                     let workers = SessionWorkers::start().expect("the engine starts");
                     let settings = rohditor_engine::settings::AppSettings::default();
@@ -88,6 +92,7 @@ impl Harness {
         Self {
             cx,
             window,
+            size,
             session,
             library,
         }
@@ -154,6 +159,18 @@ impl Harness {
         recorded::get(name)
     }
 
+    /// Every named element that is laid out inside the window, by name.
+    fn visible(&mut self) -> Vec<(String, Bounds<Pixels>)> {
+        self.lookup("");
+        let window = Bounds::new(point(px(0.0), px(0.0)), self.size);
+        let mut all: Vec<_> = recorded::all()
+            .into_iter()
+            .filter(|(_, bounds)| bounds.intersects(&window))
+            .collect();
+        all.sort_by(|a, b| a.0.cmp(&b.0));
+        all
+    }
+
     fn find(&mut self, name: &str) -> Bounds<Pixels> {
         self.lookup(name)
             .unwrap_or_else(|| panic!("{name} is not shown"))
@@ -199,6 +216,25 @@ impl Harness {
         }));
     }
 
+    /// Move the pointer without a button held.
+    fn hover(&mut self, position: Point<Pixels>) {
+        self.send(PlatformInput::MouseMove(MouseMoveEvent {
+            position,
+            pressed_button: None,
+            modifiers: Modifiers::default(),
+        }));
+    }
+
+    /// Turn the wheel at `position`; `delta` is in pixels, positive y scrolls up.
+    fn scroll(&mut self, position: Point<Pixels>, delta: Point<Pixels>) {
+        self.send(PlatformInput::ScrollWheel(ScrollWheelEvent {
+            position,
+            delta: ScrollDelta::Pixels(delta),
+            modifiers: Modifiers::default(),
+            touch_phase: TouchPhase::Moved,
+        }));
+    }
+
     fn drag_to(&mut self, position: Point<Pixels>) {
         self.send(PlatformInput::MouseMove(MouseMoveEvent {
             position,
@@ -234,17 +270,32 @@ impl Harness {
         }
     }
 
-    fn capture(&mut self, name: &str) -> image::RgbaImage {
+    fn screenshot(&mut self) -> image::RgbaImage {
         self.cx.run_until_parked();
-        let shot = self
-            .cx
+        self.cx
             .capture_screenshot(self.window.into())
-            .expect("screenshot");
+            .expect("screenshot")
+    }
+
+    fn capture(&mut self, name: &str) -> image::RgbaImage {
+        let shot = self.screenshot();
         if let Some(directory) = std::env::var_os("ROHDITOR_SHOTS") {
             shot.save(Path::new(&directory).join(format!("{name}.png")))
                 .expect("screenshot is written");
         }
         shot
+    }
+
+    /// Open a photo and wait for its first complete preview.
+    fn open(&mut self, path: PathBuf) {
+        self.with_session(|session, cx| session.open_file(path, cx));
+        // The camera look is fitted in the background and changes the picture once it is ready.
+        self.wait_until("the developed preview with its camera look", |session| {
+            settled(session)
+                && session
+                    .document()
+                    .is_some_and(|document| document.edits.recipe().rendering.camera_tone.is_some())
+        });
     }
 
     fn exposure(&mut self) -> f32 {
@@ -291,15 +342,7 @@ fn opened(name: &str) -> Option<(Harness, PathBuf, PathBuf)> {
 fn opened_in(window: Size<Pixels>, name: &str) -> Option<(Harness, PathBuf, PathBuf)> {
     let (first, second) = scratch_photos(name)?;
     let mut harness = Harness::sized(window);
-    let path = first.clone();
-    harness.with_session(|session, cx| session.open_file(path, cx));
-    // The camera look is fitted in the background and changes the picture once it is ready.
-    harness.wait_until("the developed preview with its camera look", |session| {
-        settled(session)
-            && session
-                .document()
-                .is_some_and(|document| document.edits.recipe().rendering.camera_tone.is_some())
-    });
+    harness.open(first.clone());
     Some((harness, first, second))
 }
 
