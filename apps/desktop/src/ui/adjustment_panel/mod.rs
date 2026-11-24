@@ -10,8 +10,7 @@ pub(crate) use histogram::{histogram_canvas, histogram_panel};
 use eframe::egui;
 use rohditor_core::{HSL_CHANNEL_CENTERS, WhiteBalanceMode};
 use rohditor_edit::{
-    CameraProfileSelection, HighlightMethod, OpticsAction, Parameter, RecipeSection,
-    RenderingProfileSelection,
+    CameraProfileSelection, HighlightMethod, Parameter, RecipeSection, RenderingProfileSelection,
 };
 use rohditor_engine::presets::Preset;
 use rohditor_engine::tools::Picker;
@@ -23,7 +22,7 @@ use self::color::{
 use self::tone::{show_highlight_controls, show_tone_controls, show_tone_curve_controls};
 use super::detail;
 use super::info::{self, InfoPanelModel};
-use super::optics::{self, OpticsPanelModel};
+use super::optics::{self, OpticsAction, OpticsPanelModel};
 use super::presence;
 use super::presets::{self, PresetsAction, PresetsPanelState};
 use super::theme::{self, colors};

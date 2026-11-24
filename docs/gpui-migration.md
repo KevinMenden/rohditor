@@ -88,7 +88,7 @@ Done when 1:1 and clipping match egui on GPU and CPU.
 - [x] 3.3a Color: white balance presets, mixer, wheels, profiles, DCP import.
 - [x] 3.3b White balance and mixer pickers.
 - [x] 3.4 Detail: noise reduction with Auto, sharpening, moiré, defringe.
-- [ ] 3.5 Optics with lens search.
+- [x] 3.5 Optics with lens search.
 - [ ] 3.6 Info and presets.
 
 Done when every global recipe control is editable, apart from the omissions above.

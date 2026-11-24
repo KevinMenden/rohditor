@@ -9,6 +9,7 @@ mod filter;
 mod focus;
 mod gestures;
 mod mixer;
+mod optics;
 mod row;
 mod section;
 mod tone_curve;
@@ -22,7 +23,7 @@ use gpui::{
 };
 use rohditor_core::Histogram;
 use rohditor_edit::{EditRecipe, RecipeSection};
-use rohditor_engine::open_document::NoiseSuggestion;
+use rohditor_engine::open_document::{LensProfiles, NoiseSuggestion};
 use rohditor_engine::tools::Picker;
 
 use focus::PanelFocus;
@@ -47,6 +48,11 @@ struct Model {
     histogram: Option<Histogram>,
     picker: Option<Picker>,
     noise: Option<NoiseSuggestion>,
+    lens_profiles: Arc<LensProfiles>,
+    /// The lens the photo names.
+    lens: Option<String>,
+    /// The vignetting correction lacks the focus distance.
+    infinity_vignetting: bool,
 }
 
 impl Model {
@@ -62,6 +68,15 @@ impl Model {
             histogram: document.preview.histogram,
             picker: session.picker(),
             noise: Some(document.noise_suggestion()),
+            lens_profiles: Arc::clone(&document.lens_profiles),
+            lens: document
+                .info
+                .as_ref()
+                .and_then(|info| info.capture.lens_label()),
+            infinity_vignetting: document
+                .preview
+                .diagnostics
+                .is_some_and(|shown| shown.worker.optics_used_infinity_distance_fallback),
         }
     }
 }

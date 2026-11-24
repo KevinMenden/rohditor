@@ -8,6 +8,7 @@ mod display;
 mod editing;
 mod events;
 mod export;
+mod optics;
 mod picking;
 mod profiles;
 mod renderer;

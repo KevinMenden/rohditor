@@ -10,10 +10,10 @@ use std::time::{Duration, Instant};
 
 use image::RgbImage;
 use rohditor_core::{
-    CancellationToken, CorrectionComponents, CpuPipeline, DatabaseProvenance, ExportReport,
-    ExportSettings, GamutMappingDiagnostics, HighlightDiagnostics, Histogram, MemoryEstimate,
-    OpticsProvenance, OpticsService, PipelineError, PreviewOptions, ProfileMatch, RenderOptions,
-    StageTimings, export_image, optics_query_from_info,
+    CancellationToken, CorrectionComponents, CpuPipeline, ExportReport, ExportSettings,
+    GamutMappingDiagnostics, HighlightDiagnostics, Histogram, MemoryEstimate, OpticsProvenance,
+    OpticsService, PipelineError, PreviewOptions, RenderOptions, StageTimings, export_image,
+    optics_query_from_info,
 };
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_edit::EditRecipe;
@@ -23,6 +23,7 @@ use rohditor_raw::{RawDecoder, RawFileInfo, RawFrame, RawSession, RawlerDecoder}
 use tracing::{info, info_span};
 
 use crate::document::PreviewTicket;
+use crate::open_document::LensProfiles;
 use crate::preview_cache::{PreviewCache, PreviewCacheHits, PreviewCacheKeys};
 use crate::wake::WakeFn;
 
@@ -217,12 +218,9 @@ pub enum WorkerEvent {
         document_id: u64,
         info: Box<RawFileInfo>,
     },
-    OpticsMatchReady {
+    LensProfilesReady {
         document_id: u64,
-        result: Option<ProfileMatch>,
-        candidates: Vec<rohditor_core::LensProfileSummary>,
-        database: Option<DatabaseProvenance>,
-        error: Option<String>,
+        profiles: LensProfiles,
     },
     PlaceholderReady {
         document_id: u64,
@@ -1082,31 +1080,27 @@ fn process_open(
             info: Box::new(info.clone()),
         },
     );
-    let (result, candidates, database, error) = if let Some(optics) = optics {
-        let query = optics_query_from_info(&info);
-        (
-            Some(optics.profile_match(&query)),
-            optics.manual_candidates(&query),
-            Some(optics.database_provenance().clone()),
-            None,
-        )
-    } else {
-        (
-            None,
-            Vec::new(),
-            None,
-            Some("The bundled Lensfun database is unavailable".to_owned()),
-        )
+    let profiles = match optics {
+        Some(optics) => {
+            let query = optics_query_from_info(&info);
+            LensProfiles {
+                matched: Some(optics.profile_match(&query)),
+                choices: optics.manual_candidates(&query),
+                database: Some(optics.database_provenance().clone()),
+                error: None,
+            }
+        }
+        None => LensProfiles {
+            error: Some("The bundled Lensfun database is unavailable".to_owned()),
+            ..LensProfiles::default()
+        },
     };
     send_event(
         sender,
         wake,
-        WorkerEvent::OpticsMatchReady {
+        WorkerEvent::LensProfilesReady {
             document_id,
-            result,
-            candidates,
-            database,
-            error,
+            profiles,
         },
     );
 

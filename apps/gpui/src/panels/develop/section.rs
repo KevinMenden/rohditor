@@ -4,7 +4,7 @@ use gpui::{
     App, Context, IntoElement, KeyBinding, MouseButton, Role, SharedString, Window, div,
     prelude::*, px,
 };
-use rohditor_edit::{EditRecipe, RecipeSection};
+use rohditor_edit::{EditRecipe, LensCorrection, RecipeSection};
 use rohditor_engine::open_document::NoiseSuggestion;
 use rohditor_engine::tools::Picker;
 
@@ -122,9 +122,13 @@ impl DevelopPanel {
             .filter(|choice| self.shows_choice(*choice, group, section, recipe, defaults, cx))
             .collect();
         let wheels = self.shows_wheels(group, section, recipe, defaults, cx);
+        let corrections: Vec<_> = LensCorrection::ALL
+            .into_iter()
+            .filter(|one| self.shows_correction(*one, group, section, recipe, defaults, cx))
+            .collect();
         // Also without a row for what is changed.
         let found = changed && self.finds(group, section, "", cx);
-        if shown.is_empty() && choices.is_empty() && !wheels && !found {
+        if shown.is_empty() && choices.is_empty() && corrections.is_empty() && !wheels && !found {
             return None;
         }
         let open = self.is_open(section.section, cx);
@@ -149,6 +153,13 @@ impl DevelopPanel {
                 .map(|adjustment| self.row(*adjustment, recipe, defaults, cx))
                 .collect()
         };
+        let notes =
+            (open && section.section == RecipeSection::Optics).then(|| self.lens_notes(recipe));
+        let corrections: Vec<_> = corrections
+            .into_iter()
+            .filter(|_| open)
+            .map(|correction| self.correction(correction, recipe, cx))
+            .collect();
         let header = self.section_header(section.section, changed, cx);
         Some(
             div()
@@ -163,6 +174,8 @@ impl DevelopPanel {
                 .child(header)
                 .children(curve)
                 .children(choices)
+                .children(notes)
+                .children(corrections)
                 .children(mixer)
                 .children(wheels)
                 .children(rows),

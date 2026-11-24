@@ -1,23 +1,24 @@
 //! An on/off switch with its label.
 
-use gpui::{App, IntoElement, Role, Toggled, Window, div, prelude::*, px};
+use gpui::{App, Div, Role, SharedString, Stateful, Toggled, Window, div, prelude::*, px};
 
 use crate::theme::{RADIUS, SMALL_FONT_SIZE, theme};
 use crate::ui::test_id::TestId as _;
 
 pub fn toggle(
     id: &'static str,
-    label: &'static str,
+    label: impl Into<SharedString>,
     on: bool,
     on_click: impl Fn(&mut Window, &mut App) + 'static,
-) -> impl IntoElement {
+) -> Stateful<Div> {
     let theme = theme();
+    let label = label.into();
     let track = if on { theme.accent } else { theme.selected };
     let knob = if on { px(11.0) } else { px(1.0) };
     div()
         .id(id)
         .role(Role::Switch)
-        .aria_label(label)
+        .aria_label(label.clone())
         .aria_toggled(if on { Toggled::True } else { Toggled::False })
         .test_id(format!("toggle:{id}"))
         .tab_index(0)

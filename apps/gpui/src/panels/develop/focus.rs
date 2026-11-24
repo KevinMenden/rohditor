@@ -7,7 +7,7 @@ use gpui::{
     Window, canvas, point, prelude::*, px,
 };
 
-use rohditor_edit::{GradingTones, Parameter, RecipeSection};
+use rohditor_edit::{GradingTones, LensCorrection, Parameter, RecipeSection};
 
 use super::DevelopPanel;
 use super::choices::Choice;
@@ -27,6 +27,7 @@ pub(super) enum Control {
     Choice(Choice),
     MixerChannels,
     Wheel(GradingTones),
+    Correction(LensCorrection),
 }
 
 pub(super) struct PanelFocus {
@@ -53,6 +54,7 @@ impl PanelFocus {
                 .chain(Choice::ALL.map(Control::Choice))
                 .chain([Control::MixerChannels])
                 .chain(GradingTones::ALL.map(Control::Wheel))
+                .chain(LensCorrection::ALL.map(Control::Correction))
                 .map(|control| (control, cx.focus_handle().tab_stop(true)))
                 .collect(),
             scroll: ScrollHandle::new(),

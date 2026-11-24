@@ -1,8 +1,6 @@
 use crate::catalog::{OpticsService, ProfileRecord, normalized};
 use crate::{LensProfileSummary, MetadataField, OpticsError, OpticsQuery, ProfileMatch};
 
-const MANUAL_CANDIDATE_LIMIT: usize = 128;
-
 pub(crate) fn profile_match(service: &OpticsService, query: &OpticsQuery) -> ProfileMatch {
     match candidate_records(service, query) {
         CandidateRecords::Missing(fields) => ProfileMatch::MissingMetadata { fields },
@@ -29,17 +27,18 @@ pub(crate) fn manual_candidates(
     if cameras.is_empty() {
         return Vec::new();
     }
-    let focal = query
+    // No profile can be applied without it.
+    let Some(focal) = query
         .focal_length_mm
-        .filter(|value| value.is_finite() && *value > 0.0);
+        .filter(|value| value.is_finite() && *value > 0.0)
+    else {
+        return Vec::new();
+    };
     service
         .records
         .iter()
         .filter(|record| cameras.contains(&record.camera_index))
-        .filter(|record| {
-            focal.is_none_or(|value| focal_in_range(service.lens(record.lens_index), value))
-        })
-        .take(MANUAL_CANDIDATE_LIMIT)
+        .filter(|record| focal_in_range(service.lens(record.lens_index), focal))
         .map(|record| record.summary.clone())
         .collect()
 }

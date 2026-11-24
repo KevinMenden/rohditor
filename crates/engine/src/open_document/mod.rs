@@ -9,6 +9,7 @@
 //! adds only its own presentation state (textures, overlays, panel models).
 
 mod camera_look;
+mod lens;
 mod noise;
 mod picks;
 mod sections;
@@ -18,8 +19,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rohditor_core::{
-    CameraCalibration, DatabaseProvenance, LensProfileSummary, ProfileMatch, ResolvedCameraColour,
-    WhiteBalanceCoordinates, default_recipe, resolve_camera_colour, with_default_noise_reduction,
+    CameraCalibration, ResolvedCameraColour, WhiteBalanceCoordinates, default_recipe,
+    resolve_camera_colour, with_default_noise_reduction,
 };
 use rohditor_edit::{
     CameraProfileSelection, EditRecipe, TEMPERATURE_RANGE, TINT_RANGE, WhiteBalance,
@@ -27,6 +28,7 @@ use rohditor_edit::{
 use rohditor_raw::{RawFileInfo, RawFrame};
 
 pub use camera_look::CameraLookState;
+pub use lens::LensProfiles;
 pub use noise::{NoisePurpose, NoiseState, NoiseSuggestion};
 
 use crate::autosave::Autosave;
@@ -53,11 +55,7 @@ pub struct OpenDocument {
     pub preview: DocumentPreview,
     pub open_status: Option<String>,
     pub export_status: Option<ExportActivity>,
-    pub optics_match: Option<ProfileMatch>,
-    pub optics_candidates: Vec<LensProfileSummary>,
-    pub optics_profile_filter: String,
-    pub optics_database: Option<DatabaseProvenance>,
-    pub optics_error: Option<String>,
+    pub lens_profiles: Arc<LensProfiles>,
     pub warning: Option<String>,
     pub error: Option<String>,
     pub notice: Option<String>,
@@ -83,11 +81,7 @@ impl OpenDocument {
             preview: DocumentPreview::new(id),
             open_status: Some("Opening RAW file".to_owned()),
             export_status: None,
-            optics_match: None,
-            optics_candidates: Vec::new(),
-            optics_profile_filter: String::new(),
-            optics_database: None,
-            optics_error: None,
+            lens_profiles: Arc::default(),
             warning,
             error: None,
             notice: None,

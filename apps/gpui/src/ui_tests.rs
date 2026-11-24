@@ -7,6 +7,7 @@
 mod color;
 mod detail;
 mod light;
+mod optics;
 mod viewport;
 
 use std::path::{Path, PathBuf};
@@ -778,7 +779,7 @@ fn the_focused_slider_is_scrolled_to() {
     let Some((mut harness, ..)) = opened_in(size(px(1000.0), px(500.0)), "scroll") else {
         return;
     };
-    let last = "section:Defringe";
+    let last = "toggle:lens-chromatic-aberration";
     let visible = px(470.0);
     assert!(
         harness.find(last).bottom() > visible,
@@ -789,13 +790,12 @@ fn the_focused_slider_is_scrolled_to() {
     harness.keys(&["down"; 40].join(" "));
     harness.capture("scrolled");
     assert!(harness.find(last).bottom() < visible);
-    // Past the header above, which is collapsed too.
-    harness.keys("up up right");
-    let protection = harness.with_session(|session, _| {
+    harness.keys("enter");
+    let on = harness.with_session(|session, _| {
         let document = session.document().expect("a photo is open");
-        document.edits.recipe().capture_sharpening.noise_protection
+        document.edits.recipe().optics.chromatic_aberration
     });
-    assert_eq!(protection, 0.51, "it is the one with the focus");
+    assert!(!on, "it is the one with the focus");
     harness.keys(&["up"; 40].join(" "));
     let top = harness.find("section:Tone").top();
     assert!(top > px(36.0) && top < px(300.0), "{top:?}");
