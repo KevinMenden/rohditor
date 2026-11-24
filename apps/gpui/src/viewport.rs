@@ -83,18 +83,19 @@ impl Viewport {
         });
     }
 
-    pub fn zoom_to_fit(&mut self, window: &Window, cx: &mut Context<Self>) {
-        self.change_view(window, cx, |view, _, now| view.fit(now));
+    pub fn zoom_to_fit(&mut self, cx: &mut Context<Self>) {
+        self.session.update(cx, Session::show_fit);
     }
 
-    pub fn actual_pixels(&mut self, window: &Window, cx: &mut Context<Self>) {
-        self.change_view(window, cx, |view, _, now| view.actual_size(now));
+    /// Source resolution: the photo is rendered again at its full size.
+    pub fn actual_pixels(&mut self, cx: &mut Context<Self>) {
+        self.session.update(cx, Session::show_actual_size);
     }
 
-    fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn mouse_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.drag_from = Some(event.position);
         if event.click_count == 2 {
-            self.zoom_to_fit(window, cx);
+            self.zoom_to_fit(cx);
         }
     }
 
