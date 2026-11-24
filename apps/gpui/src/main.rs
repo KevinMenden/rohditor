@@ -54,7 +54,7 @@ fn run(open: Option<PathBuf>, workers: Workers) {
         .with_assets(assets::Assets)
         .run(move |cx: &mut App| {
             actions::bind_keys(cx);
-            let bounds = Bounds::centered(None, size(px(1440.0), px(900.0)), cx);
+            let bounds = Bounds::centered(None, size(px(1800.0), px(1200.0)), cx);
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions {
