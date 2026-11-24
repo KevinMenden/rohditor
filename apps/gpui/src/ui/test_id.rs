@@ -51,6 +51,14 @@ pub mod recorded {
         BOUNDS.with_borrow_mut(HashMap::clear);
     }
 
+    pub fn all() -> Vec<(String, Bounds<Pixels>)> {
+        BOUNDS.with_borrow(|all| {
+            all.iter()
+                .map(|(name, bounds)| (name.to_string(), *bounds))
+                .collect()
+        })
+    }
+
     pub fn get(name: &str) -> Option<Bounds<Pixels>> {
         BOUNDS.with_borrow(|all| all.get(name).copied())
     }

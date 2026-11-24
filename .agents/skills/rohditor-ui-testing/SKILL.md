@@ -1,11 +1,75 @@
 ---
 name: rohditor-ui-testing
-description: See and drive the Rohditor desktop UI headlessly to verify UI changes - render screenshots, click widgets by label, and diff snapshots. Use when changing anything under apps/desktop/src/ui or app/, or when asked to look at, test, or iterate on the UI.
+description: See and drive the Rohditor UI headlessly to verify UI changes - render screenshots, click and drag widgets, run UI scripts. Covers the GPUI app (apps/gpui, scripted driver) and the egui app (apps/desktop, kittest snapshots). Use when changing anything under apps/gpui/src or apps/desktop/src/ui or app/, or when asked to look at, test, or iterate on the UI.
 ---
 
 # Rohditor UI testing (closing the loop)
 
-Two tools, both in `apps/desktop`. Prefer the first; use the second to confirm the final
+New UI work goes in `apps/gpui`; see the GPUI section first. The egui app (`apps/desktop`)
+only gets fixes, and has two tools of its own.
+
+## GPUI (`apps/gpui`)
+
+Headless tests drive the real `Workspace` with GPUI's headless renderer and a wgpu adapter.
+Code: `apps/gpui/src/ui_tests.rs` (the `Harness`) and `ui_tests/` (scenarios). Elements are
+found by **test id** (`.test_id("section:Defringe")` in the UI code, recorded in test builds
+only): `adjustment:<Parameter>`, `section:<Name>`, `button:<id>`, `viewport`, and so on.
+`grep -rn 'test_id(' apps/gpui/src` lists them, and the driver writes the visible ones.
+
+Environment variables (all tests are `#[ignore]`d):
+- `ROHDITOR_RAW`: a RAW file. Tests copy it to a scratch folder as `A.ARW` and `B.ARW`, so
+  sidecars never land next to the original. Without it, photo tests silently pass.
+- `ROHDITOR_DCP`: a camera profile for that photo's camera (only the color-profile test).
+- `ROHDITOR_SHOTS`: a directory; every `capture` writes a PNG there.
+- `ROHDITOR_SCRIPT`: a script for the driver, below.
+
+### The scripted driver: explore without compiling a test
+
+Prefer this to writing a Rust test when trying something out or taking screenshots. Write a
+script (`apps/gpui/src/ui_tests/driver.rs` documents every command) and run:
+
+```sh
+cd apps/gpui
+ROHDITOR_RAW=/path/photo.ARW ROHDITOR_SCRIPT=/tmp/s.txt ROHDITOR_SHOTS=/tmp/out \
+  cargo test --locked run_the_script -- --ignored --nocapture
+```
+
+```
+window 1440 1800
+open A.ARW
+click section:Defringe
+drag adjustment:CaptureAmount 100 0
+hover section:Defringe
+shot defringe
+```
+
+`shot NAME` waits for the preview, then writes `NAME.png` (Read it to look) and `NAME.txt`:
+one line per visible selector with its bounds, `selector x= y= w= h=` in logical pixels.
+Use that list to pick selectors and offsets for the next script. Commands: `open`, `click`,
+`rightclick`, `hover`, `drag`, `press`/`move`/`release` (shots mid-drag), `scroll`, `keys`,
+`window`, `shot`. A failing step (selector not shown) stops the script and writes
+`error.png`/`error.txt`. Edit the script and re-run: only the first run compiles. Each run
+loads and develops the photo again (about 30 s), so put several shots in one script.
+
+The list can include elements scrolled out of a panel but still laid out; check the PNG.
+
+### Compiled scenarios
+
+Add one to `ui_tests/` when behaviour should stay covered: build with `opened(name)`, act
+with `click`, `drag_to`, `hover`, `scroll`, `keys`, assert on the session, `capture` a shot.
+Run `cargo test --locked -- --ignored` in `apps/gpui` (slow; filter by test name).
+
+### When to take screenshots
+
+After any change to what a panel, overlay or the viewport draws, and for drag interactions
+(crop, masks) while the button is held. Look at the PNG; do not trust assertions alone.
+Not covered, so check by hand: native file dialogs, window moving/resizing, fractional
+scaling, the real compositor. Screenshots are not compared pixel by pixel.
+
+# egui app (`apps/desktop`)
+
+Two tools. Prefer the first; use the second to confirm the final
+look in the real window. Prefer the first; use the second to confirm the final
 look in the real window.
 
 ## 1. Headless scenarios (`egui_kittest`) - primary loop
@@ -65,5 +129,5 @@ scenarios for interaction.
 
 ## Always
 
-Run `./scripts/check.sh` before handing off; the ignored UI scenarios are not part of it,
-so run them yourself when you touched UI code.
+Run `./scripts/check.sh` (and `./scripts/check-gpui.sh` for `apps/gpui`) before handing off;
+the ignored UI scenarios are not part of them, so run them yourself when you touched UI code.
