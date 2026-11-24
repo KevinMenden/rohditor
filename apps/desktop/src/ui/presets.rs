@@ -61,32 +61,23 @@ struct SaveForm {
 }
 
 impl SaveForm {
-    /// Starts with the sections the photo has edits in, minus the ones that
-    /// describe this one photo (white balance, lens, crop, masks, ...), which
-    /// rarely belong in a preset.
-    fn new(changed: &[RecipeSection]) -> Self {
+    fn new(suggested: &[RecipeSection]) -> Self {
         Self {
             name: String::new(),
             sections: RecipeSection::ALL
                 .into_iter()
-                .map(|section| {
-                    (
-                        section,
-                        changed.contains(&section) && !section.is_photo_specific(),
-                    )
-                })
+                .map(|section| (section, suggested.contains(&section)))
                 .collect(),
         }
     }
 }
 
-/// Draws the section body. `changed` is the list of sections the open photo
-/// has edits in, which the save form starts from.
+/// Draws the section body. The save form starts from the `suggested` sections.
 pub(crate) fn show(
     ui: &mut egui::Ui,
     state: &mut PresetsPanelState,
     presets: &[Preset],
-    changed: &[RecipeSection],
+    suggested: &[RecipeSection],
 ) -> Option<PresetsAction> {
     let mut action = None;
 
@@ -134,7 +125,7 @@ pub(crate) fn show(
     match &mut state.save_form {
         None => {
             if ui.button("Save current edits as preset…").clicked() {
-                state.save_form = Some(SaveForm::new(changed));
+                state.save_form = Some(SaveForm::new(suggested));
                 state.error = None;
             }
         }
@@ -208,23 +199,6 @@ fn save_form(ui: &mut egui::Ui, form: &mut SaveForm) -> Option<FormResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_save_form_starts_with_edited_sections_that_are_not_photo_specific() {
-        let form = SaveForm::new(&[
-            RecipeSection::Tone,
-            RecipeSection::WhiteBalance,
-            RecipeSection::Presence,
-        ]);
-        let included: Vec<_> = form
-            .sections
-            .iter()
-            .filter(|(_, included)| *included)
-            .map(|(section, _)| *section)
-            .collect();
-        assert_eq!(included, [RecipeSection::Tone, RecipeSection::Presence]);
-        assert_eq!(form.sections.len(), RecipeSection::ALL.len());
-    }
 
     /// Runs the section in a headless harness (no GPU needed) and returns the
     /// harness plus the cell the last reported action lands in.

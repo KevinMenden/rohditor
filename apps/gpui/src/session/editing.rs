@@ -83,11 +83,11 @@ impl Session {
         self.tick(cx);
     }
 
-    /// End the gesture that changed `parameter`.
-    pub fn finish_gesture(&mut self, parameter: Parameter, cx: &mut Context<Self>) {
+    /// End a gesture. `parameter` is what it changed, if it was one.
+    pub fn finish_gesture(&mut self, parameter: Option<Parameter>, cx: &mut Context<Self>) {
         if let Some(document) = self.document.as_mut() {
             document.edits.finish_gesture();
-            if is_drafted(parameter) {
+            if parameter.is_some_and(is_drafted) {
                 self.queue_preview();
             }
         }

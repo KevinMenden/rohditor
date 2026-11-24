@@ -17,7 +17,7 @@ use crate::ui::test_id::TestId as _;
 use crate::ui::toggle::toggle;
 
 impl DevelopPanel {
-    fn query(&self, cx: &Context<Self>) -> SharedString {
+    pub(super) fn query(&self, cx: &Context<Self>) -> SharedString {
         self.search.read(cx).text().to_owned().into()
     }
 
@@ -53,7 +53,7 @@ impl DevelopPanel {
         }
         // A slider must not vanish while it is changed.
         let active = [
-            self.drag.as_ref().map(|drag| drag.parameter),
+            self.drag.as_ref().and_then(|drag| drag.parameter),
             self.typing
                 .as_ref()
                 .map(|typing| typing.adjustment.parameter),

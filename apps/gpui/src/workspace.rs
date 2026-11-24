@@ -11,12 +11,12 @@ use gpui::{
 use rohditor_engine::tools::Picker;
 
 use crate::actions::{
-    ActualPixels, AutoNoiseReduction, AutoTone, ChooseLens, CloseFile, Export, FocusAdjustments,
-    FocusPhoto, ImportCameraProfile, NextPhoto, OpenFile, OpenFolder, PickMixerColor,
-    PickWhiteBalance, PreviousPhoto, Quit, Redo, ResetAdjustments, ResetSection, Save,
-    SearchAdjustments, SetHighlightMethod, SetLensProfile, SetRendering, SetWhiteBalance,
-    ToggleClipping, ToggleCommandPalette, ToggleDevelop, ToggleFiles, Undo, WORKSPACE_CONTEXT,
-    ZoomToFit,
+    ActualPixels, ApplyPreset, AutoNoiseReduction, AutoTone, ChooseLens, CloseFile, Export,
+    FocusAdjustments, FocusPhoto, ImportCameraProfile, NextPhoto, OpenFile, OpenFolder,
+    PickMixerColor, PickWhiteBalance, PreviousPhoto, Quit, Redo, ResetAdjustments, ResetSection,
+    Save, SavePreset, SearchAdjustments, SetHighlightMethod, SetLensProfile, SetRendering,
+    SetWhiteBalance, ToggleClipping, ToggleCommandPalette, ToggleDevelop, ToggleFiles, Undo,
+    WORKSPACE_CONTEXT, ZoomToFit,
 };
 use crate::library::Library;
 use crate::panels::command_palette::command_palette;
@@ -239,6 +239,14 @@ impl Workspace {
                         cx,
                     );
                 });
+            }))
+            .on_action(cx.listener(|this, _: &ApplyPreset, window, cx| {
+                this.develop
+                    .update(cx, |panel, cx| panel.choose_preset(window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &SavePreset, window, cx| {
+                this.develop
+                    .update(cx, |panel, cx| panel.save_preset(window, cx));
             }))
             .on_action(cx.listener(|this, _: &ChooseLens, window, cx| {
                 this.develop

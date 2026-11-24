@@ -5143,6 +5143,7 @@ dependencies = [
  "rohditor-edit",
  "rohditor-engine",
  "rohditor-gpu",
+ "rohditor-raw",
  "unicode-segmentation",
  "wgpu",
 ]

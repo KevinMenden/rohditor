@@ -12,6 +12,7 @@ mod camera_look;
 mod lens;
 mod noise;
 mod picks;
+mod presets;
 mod sections;
 mod worker_events;
 
@@ -62,6 +63,7 @@ pub struct OpenDocument {
     /// The photo has no saved edits, so its default recipe is rebuilt from the
     /// file's own metadata once that arrives.
     pub initialize_white_balance_from_metadata: bool,
+    applied_preset: Option<presets::AppliedPreset>,
     camera_look: CameraLookState,
     noise: NoiseState,
     /// A picker's sample on its way from the worker.
@@ -86,6 +88,7 @@ impl OpenDocument {
             error: None,
             notice: None,
             initialize_white_balance_from_metadata: false,
+            applied_preset: None,
             camera_look: CameraLookState::default(),
             noise: NoiseState::default(),
             pending_pick: None,

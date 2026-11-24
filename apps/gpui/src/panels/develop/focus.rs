@@ -28,6 +28,10 @@ pub(super) enum Control {
     MixerChannels,
     Wheel(GradingTones),
     Correction(LensCorrection),
+    /// The headers below the sections.
+    Presets,
+    Info,
+    PresetAmount,
 }
 
 pub(super) struct PanelFocus {
@@ -52,7 +56,12 @@ impl PanelFocus {
             entry: cx.focus_handle(),
             controls: controls
                 .chain(Choice::ALL.map(Control::Choice))
-                .chain([Control::MixerChannels])
+                .chain([
+                    Control::MixerChannels,
+                    Control::Presets,
+                    Control::Info,
+                    Control::PresetAmount,
+                ])
                 .chain(GradingTones::ALL.map(Control::Wheel))
                 .chain(LensCorrection::ALL.map(Control::Correction))
                 .map(|control| (control, cx.focus_handle().tab_stop(true)))
@@ -114,9 +123,18 @@ impl DevelopPanel {
         control: Control,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let panel: Entity<Self> = cx.entity();
         let wanted = self.focus.wanted == Some(control);
-        let control = self.focus.control(control).clone();
+        self.focus_revealer(self.focus.control(control).clone(), wanted, cx)
+    }
+
+    /// As [`Self::revealer`]; also scrolls to it now if it is `wanted`.
+    pub(super) fn focus_revealer(
+        &self,
+        control: FocusHandle,
+        wanted: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let panel: Entity<Self> = cx.entity();
         canvas(
             move |bounds, window, cx| {
                 if wanted {

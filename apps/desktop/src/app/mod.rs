@@ -42,6 +42,7 @@ use crate::ui::diagnostics::{
     HighlightStatsModel, PreviewModel, QueueModel, TimingModel,
 };
 use crate::ui::export_dialog::{self, ExportDialogModel};
+use crate::ui::info::InfoPanelModel;
 use crate::ui::optics::{OpticsAction, OpticsPanelModel};
 use crate::ui::presets::PresetsPanelState;
 use crate::ui::settings as settings_ui;
@@ -76,7 +77,6 @@ mod derived_data;
 mod events;
 #[path = "gpu.rs"]
 mod gpu;
-mod info;
 #[path = "lifecycle.rs"]
 mod lifecycle;
 mod masks;
@@ -1996,7 +1996,10 @@ fn document_panel_model(
             .info
             .as_ref()
             .map(|info| (info.width, info.height)),
-        info: document.core.info.as_ref().map(info::info_panel_model),
+        info: document.core.info.as_ref().map(|info| InfoPanelModel {
+            capture: info.capture_rows(),
+            file: info.file_rows(),
+        }),
         revision: document.core.edits.revision(),
         dirty: document.core.is_dirty(),
         has_adjustments: document.core.differs_from_defaults(&defaults),
@@ -2149,6 +2152,7 @@ fn document_panel_model(
         defringe: document.core.edits.recipe().defringe,
         presence: document.core.edits.recipe().presence,
         noise_suggestion: document.core.noise_suggestion(),
+        suggested_preset_sections: document.core.suggested_preset_sections(),
         changed_sections: rohditor_edit::changed_sections(document.core.edits.recipe(), &defaults),
     }
 }

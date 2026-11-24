@@ -20,17 +20,28 @@ impl OpenDocument {
         self.set_with_camera_profile(next)
     }
 
-    /// The coordinates of the as-shot white balance depend on the camera profile,
-    /// so a balance left as shot follows a change of profile.
-    fn set_with_camera_profile(&mut self, mut next: EditRecipe) -> bool {
-        let current = self.edits.recipe();
-        let as_shot = self.default_recipe().color.white_balance;
-        if next.color.camera_profile != current.color.camera_profile
-            && next.color.white_balance == as_shot
-        {
-            let coordinates = self.as_shot_coordinates_for(&next.color.camera_profile);
-            next.color.white_balance = default_recipe(coordinates).color.white_balance;
-        }
+    fn set_with_camera_profile(&mut self, next: EditRecipe) -> bool {
+        let next = self.follow_camera_profile(self.edits.recipe(), next);
         self.edits.set_discrete(next)
+    }
+
+    /// `next`, made from `base`. The coordinates of the as-shot white balance
+    /// depend on the camera profile, so a balance left as shot follows a change of
+    /// profile.
+    pub(super) fn follow_camera_profile(
+        &self,
+        base: &EditRecipe,
+        mut next: EditRecipe,
+    ) -> EditRecipe {
+        let as_shot = |recipe: &EditRecipe| {
+            let coordinates = self.as_shot_coordinates_for(&recipe.color.camera_profile);
+            default_recipe(coordinates).color.white_balance
+        };
+        if next.color.camera_profile != base.color.camera_profile
+            && next.color.white_balance == as_shot(base)
+        {
+            next.color.white_balance = as_shot(&next);
+        }
+        next
     }
 }

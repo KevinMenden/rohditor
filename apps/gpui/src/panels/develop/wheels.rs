@@ -68,7 +68,7 @@ impl DevelopPanel {
         };
         let active = self
             .drag
-            .is_some_and(|drag| drag.parameter == tones.parameter());
+            .is_some_and(|drag| drag.parameter == Some(tones.parameter()));
         let disc = div()
             .test_id(format!("wheel:{tones:?}"))
             .relative()

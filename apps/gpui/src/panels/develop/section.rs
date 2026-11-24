@@ -1,8 +1,8 @@
 //! A section of the panel: its header and its rows.
 
 use gpui::{
-    App, Context, IntoElement, KeyBinding, MouseButton, Role, SharedString, Window, div,
-    prelude::*, px,
+    App, Context, Div, IntoElement, KeyBinding, MouseButton, Role, SharedString, Stateful, Window,
+    div, prelude::*, px,
 };
 use rohditor_edit::{EditRecipe, LensCorrection, RecipeSection};
 use rohditor_engine::open_document::NoiseSuggestion;
@@ -51,16 +51,16 @@ impl DevelopPanel {
             .update(cx, |session, cx| session.reset_section(section, cx));
     }
 
-    fn toggle_section(&mut self, section: RecipeSection, cx: &mut Context<Self>) {
-        if !self.collapsed.remove(&section) {
-            self.collapsed.insert(section);
+    fn toggle_section(&mut self, header: Control, cx: &mut Context<Self>) {
+        if !self.collapsed.remove(&header) {
+            self.collapsed.insert(header);
         }
         cx.notify();
     }
 
     /// Whether the rows of the section are shown. Always while searching.
-    fn is_open(&self, section: RecipeSection, cx: &Context<Self>) -> bool {
-        self.searching(cx) || !self.collapsed.contains(&section)
+    pub(super) fn is_open(&self, header: Control, cx: &Context<Self>) -> bool {
+        self.searching(cx) || !self.collapsed.contains(&header)
     }
 
     /// The group's title and sections, or `None` when the filter hides all of them.
@@ -131,7 +131,7 @@ impl DevelopPanel {
         if shown.is_empty() && choices.is_empty() && corrections.is_empty() && !wheels && !found {
             return None;
         }
-        let open = self.is_open(section.section, cx);
+        let open = self.is_open(Control::Section(section.section), cx);
         let curve = (open && section.section == RecipeSection::ToneCurve && !shown.is_empty())
             .then(|| self.tone_curve(&recipe.light.tone_curve, cx));
         let mixer = open
@@ -251,23 +251,57 @@ impl DevelopPanel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let theme = theme();
-        let collapsed = !self.is_open(section, cx);
-        let chevron = if collapsed {
-            Icon::ChevronRight
-        } else {
-            Icon::ChevronDown
-        };
         let title = section.label();
+        let dot = changed.then(|| {
+            div()
+                .test_id(format!("changed:{section:?}"))
+                .relative()
+                .ml_1()
+                .size(px(5.0))
+                .rounded_full()
+                .bg(theme.accent)
+        });
         let described = if changed {
             format!("{title}, edited")
         } else {
             title.to_owned()
         };
-        let control = Control::Section(section);
+        self.title(
+            Control::Section(section),
+            title,
+            &format!("{section:?}"),
+            cx,
+        )
+        .aria_label(described)
+        .when(changed, |header| header.text_color(theme.text))
+        .when_some(section_hint(section), |header, hint| {
+            header.tooltip(tooltip(hint, None))
+        })
+        .children(dot)
+        .on_action(cx.listener(move |this, _: &ResetValue, window, cx| {
+            this.reset_section(section, window, cx);
+        }))
+    }
+
+    /// A title that collapses what is below it.
+    pub(super) fn title(
+        &self,
+        control: Control,
+        title: &'static str,
+        test_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let theme = theme();
+        let collapsed = !self.is_open(control, cx);
+        let chevron = if collapsed {
+            Icon::ChevronRight
+        } else {
+            Icon::ChevronDown
+        };
         div()
             .id(title)
             .role(Role::Button)
-            .aria_label(described)
+            .aria_label(title)
             .aria_expanded(!collapsed)
             .key_context(CONTEXT)
             .track_focus(self.focus.control(control))
@@ -278,34 +312,17 @@ impl DevelopPanel {
             .border_color(gpui::transparent_black())
             .focus_visible(move |style| style.border_color(theme.accent))
             .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-            .test_id(format!("section:{section:?}"))
+            .test_id(format!("section:{test_id}"))
             .flex()
             .flex_1()
             .items_center()
             .gap_1()
             .h(px(28.0))
             .cursor_pointer()
-            .when_some(section_hint(section), |header, hint| {
-                header.tooltip(tooltip(hint, None))
-            })
             .text_size(SMALL_FONT_SIZE)
-            .text_color(if changed { theme.text } else { theme.muted })
+            .text_color(theme.muted)
             .child(icon(chevron, theme.faint))
             .child(title)
-            .when(changed, |header| {
-                header.child(
-                    div()
-                        .test_id(format!("changed:{section:?}"))
-                        .relative()
-                        .ml_1()
-                        .size(px(5.0))
-                        .rounded_full()
-                        .bg(theme.accent),
-                )
-            })
-            .on_action(cx.listener(move |this, _: &ResetValue, window, cx| {
-                this.reset_section(section, window, cx);
-            }))
-            .on_click(cx.listener(move |this, _, _, cx| this.toggle_section(section, cx)))
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle_section(control, cx)))
     }
 }

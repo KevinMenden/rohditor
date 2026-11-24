@@ -135,6 +135,7 @@ pub(crate) struct DocumentPanelModel {
     pub noise_suggestion: NoiseSuggestion,
     /// Sections with edits: flagged in their header, and where saving a preset starts.
     pub changed_sections: Vec<RecipeSection>,
+    pub suggested_preset_sections: Vec<RecipeSection>,
 }
 
 /// The saved presets and the Presets section's own state.
@@ -219,7 +220,7 @@ pub(crate) fn show_body(
                 ui,
                 presets.state,
                 presets.presets,
-                &document.changed_sections,
+                &document.suggested_preset_sections,
             )
         })
         .body

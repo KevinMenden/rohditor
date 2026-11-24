@@ -28,6 +28,8 @@ actions!(
         AutoNoiseReduction,
         ImportCameraProfile,
         ChooseLens,
+        ApplyPreset,
+        SavePreset,
         PickWhiteBalance,
         PickMixerColor,
         ZoomToFit,
@@ -107,6 +109,8 @@ pub fn commands() -> Vec<Command> {
             None,
             ImportCameraProfile,
         ),
+        command("develop: apply preset", Some("p"), ApplyPreset),
+        command("develop: save as preset", None, SavePreset),
         command("develop: choose lens profile", None, ChooseLens),
         command(
             "develop: lens profile automatic",

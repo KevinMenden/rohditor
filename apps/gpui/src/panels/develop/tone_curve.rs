@@ -27,7 +27,7 @@ impl DevelopPanel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let theme = theme();
-        let grabbed = self.drag.as_ref().map(|drag| drag.parameter);
+        let grabbed = self.drag.as_ref().and_then(|drag| drag.parameter);
         let handles = ToneCurveHandle::ALL.map(|handle| {
             let active = grabbed == Some(handle.parameter());
             div()
