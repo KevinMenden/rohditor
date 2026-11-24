@@ -31,7 +31,7 @@ script (`apps/gpui/src/ui_tests/driver.rs` documents every command) and run:
 ```sh
 cd apps/gpui
 ROHDITOR_RAW=/path/photo.ARW ROHDITOR_SCRIPT=/tmp/s.txt ROHDITOR_SHOTS=/tmp/out \
-  cargo test --locked run_the_script -- --ignored --nocapture
+  cargo test --release --locked run_the_script -- --ignored --nocapture
 ```
 
 ```
@@ -49,7 +49,8 @@ Use that list to pick selectors and offsets for the next script. Commands: `open
 `rightclick`, `hover`, `drag`, `press`/`move`/`release` (shots mid-drag), `scroll`, `keys`,
 `window`, `shot`. A failing step (selector not shown) stops the script and writes
 `error.png`/`error.txt`. Edit the script and re-run: only the first run compiles. Each run
-loads and develops the photo again (about 30 s), so put several shots in one script.
+loads and develops the photo again (about 10 s in a release build, 30 s in debug), so put
+several shots in one script.
 
 The list can include elements scrolled out of a panel but still laid out; check the PNG.
 
@@ -57,7 +58,11 @@ The list can include elements scrolled out of a panel but still laid out; check 
 
 Add one to `ui_tests/` when behaviour should stay covered: build with `opened(name)`, act
 with `click`, `drag_to`, `hover`, `scroll`, `keys`, assert on the session, `capture` a shot.
-Run `cargo test --locked -- --ignored` in `apps/gpui` (slow; filter by test name).
+Run `cargo test --release --locked -- --ignored` in `apps/gpui`, filtered by test name when
+you can. Each test opens a full RAW: about 9 s in a release build against about 30 s in
+debug (all 33 photo tests: roughly 20 min in debug). `[profile.test] opt-level = 3` is not
+worth it: it rebuilds every dependency (about 9 min) and still runs slower than `--release`.
+`color::profiles_are_chosen_and_imported` also needs `ROHDITOR_DCP`.
 
 ### When to take screenshots
 
