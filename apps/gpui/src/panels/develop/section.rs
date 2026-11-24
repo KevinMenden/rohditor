@@ -7,6 +7,7 @@ use gpui::{
 use rohditor_edit::{EditRecipe, RecipeSection};
 
 use super::DevelopPanel;
+use super::choices::Choice;
 use super::focus::Control;
 use super::row::ResetValue;
 use crate::assets::Icon;
@@ -112,16 +113,30 @@ impl DevelopPanel {
             .iter()
             .filter(|adjustment| self.shows(group, section, adjustment, recipe, defaults, cx))
             .collect();
-        let method = self.shows_highlight_method(group, section, recipe, defaults, cx);
+        let choices: Vec<_> = Choice::ALL
+            .into_iter()
+            .filter(|choice| self.shows_choice(*choice, group, section, recipe, defaults, cx))
+            .collect();
+        let wheels = self.shows_wheels(group, section, recipe, defaults, cx);
         // Also without a row for what is changed.
         let found = changed && self.finds(group, section, "", cx);
-        if shown.is_empty() && !method && !found {
+        if shown.is_empty() && choices.is_empty() && !wheels && !found {
             return None;
         }
         let open = self.is_open(section.section, cx);
         let curve = (open && section.section == RecipeSection::ToneCurve && !shown.is_empty())
             .then(|| self.tone_curve(&recipe.light.tone_curve, cx));
-        let method = (open && method).then(|| self.highlight_method(recipe, cx));
+        let mixer = open
+            && section.section == RecipeSection::ColorMixer
+            && !self.edited_only
+            && !self.searching(cx);
+        let mixer = mixer.then(|| self.mixer_channels(recipe, defaults, cx));
+        let wheels = (open && wheels).then(|| self.wheels(recipe, cx));
+        let choices: Vec<_> = choices
+            .into_iter()
+            .filter(|_| open)
+            .map(|choice| self.choice(choice, recipe, defaults, cx))
+            .collect();
         let rows: Vec<_> = if !open {
             Vec::new()
         } else {
@@ -143,7 +158,9 @@ impl DevelopPanel {
                 .pb_2()
                 .child(header)
                 .children(curve)
-                .children(method)
+                .children(choices)
+                .children(mixer)
+                .children(wheels)
                 .children(rows),
         )
     }

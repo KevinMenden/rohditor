@@ -1,9 +1,13 @@
 //! Everything the user can do by key, button or command palette.
 
 use gpui::{Action, App, KeyBinding, NoAction, SharedString, actions};
-use rohditor_edit::{HighlightMethod, RecipeSection};
+use rohditor_edit::{
+    HighlightMethod, RecipeSection, RenderingProfileSelection, WhiteBalancePreset,
+};
 
-use crate::panels::adjustments::{HIGHLIGHT_METHODS, method_label, sections};
+use crate::panels::adjustments::{
+    HIGHLIGHT_METHODS, RENDERINGS, method_label, rendering_label, sections,
+};
 use crate::{panels, ui};
 
 actions!(
@@ -20,6 +24,7 @@ actions!(
         Redo,
         ResetAdjustments,
         AutoTone,
+        ImportCameraProfile,
         ZoomToFit,
         ActualPixels,
         ToggleClipping,
@@ -42,6 +47,14 @@ pub struct ResetSection(pub RecipeSection);
 #[derive(Debug, Clone, PartialEq, Eq, Action)]
 #[action(namespace = rohditor, no_json)]
 pub struct SetHighlightMethod(pub HighlightMethod);
+
+#[derive(Debug, Clone, PartialEq, Eq, Action)]
+#[action(namespace = rohditor, no_json)]
+pub struct SetWhiteBalance(pub WhiteBalancePreset);
+
+#[derive(Debug, Clone, PartialEq, Eq, Action)]
+#[action(namespace = rohditor, no_json)]
+pub struct SetRendering(pub RenderingProfileSelection);
 
 /// An entry of the command palette and, when it has a key, of the keymap.
 pub struct Command {
@@ -79,6 +92,11 @@ pub fn commands() -> Vec<Command> {
             Some("ctrl-shift-r"),
             ResetAdjustments,
         ),
+        command(
+            "develop: import camera profile (DCP)",
+            None,
+            ImportCameraProfile,
+        ),
         command("view: zoom to fit", Some("ctrl-0"), ZoomToFit),
         command("view: actual pixels (1:1)", Some("ctrl-1"), ActualPixels),
         command("view: toggle clipping overlay", Some("j"), ToggleClipping),
@@ -109,6 +127,17 @@ pub fn commands() -> Vec<Command> {
             method_label(method).to_lowercase()
         );
         command(name, None, SetHighlightMethod(method))
+    }));
+    commands.extend(WhiteBalancePreset::ALL.into_iter().map(|preset| {
+        let name = format!("develop: white balance {}", preset.label().to_lowercase());
+        command(name, None, SetWhiteBalance(preset))
+    }));
+    commands.extend(RENDERINGS.into_iter().map(|rendering| {
+        let name = format!(
+            "develop: rendering {}",
+            rendering_label(rendering).to_lowercase()
+        );
+        command(name, None, SetRendering(rendering))
     }));
     commands
 }

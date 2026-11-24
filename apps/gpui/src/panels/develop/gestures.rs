@@ -9,10 +9,11 @@ use gpui::{
 };
 
 use rohditor_core::ToneCurveHandle;
+use rohditor_edit::{GradingTones, Parameter};
 
 use super::DevelopPanel;
 use crate::actions::FocusPhoto;
-use crate::panels::adjustments::Adjustment;
+use crate::panels::adjustments::{Adjustment, adjustment};
 use crate::session::EditPhase;
 use crate::ui::slider::dragged;
 use crate::ui::text_input::TextInput;
@@ -26,13 +27,33 @@ const NUDGE_PAUSE: Duration = Duration::from_millis(600);
 /// What a drag holds.
 #[derive(Clone, Copy)]
 pub(super) enum Grip {
-    Row,
+    Row(Adjustment),
     Curve(ToneCurveHandle),
+    Wheel(GradingTones),
+}
+
+impl Grip {
+    /// What it changes, or the first of them.
+    fn parameter(self) -> Parameter {
+        match self {
+            Self::Row(adjustment) => adjustment.parameter,
+            Self::Curve(handle) => handle.parameter(),
+            Self::Wheel(tones) => tones.parameter(),
+        }
+    }
+}
+
+/// What an arrow key changes.
+#[derive(Clone, Copy)]
+pub(super) enum NudgeBy {
+    Steps(Adjustment, i8),
+    /// By parts of the radius.
+    Wheel(GradingTones, f32, f32),
 }
 
 #[derive(Clone, Copy)]
 pub(super) struct Drag {
-    pub adjustment: Adjustment,
+    pub parameter: Parameter,
     grip: Grip,
     last: Point<Pixels>,
     value: f32,
@@ -44,7 +65,7 @@ pub(super) struct Drag {
 
 /// Arrow key changes that are not an undo step yet.
 pub(super) struct Nudge {
-    adjustment: Adjustment,
+    parameter: Parameter,
     _pause: Task<()>,
 }
 
@@ -59,16 +80,16 @@ pub(super) struct Typing {
 }
 
 impl DevelopPanel {
-    fn value(&self, adjustment: Adjustment, cx: &Context<Self>) -> Option<f32> {
+    fn value(&self, parameter: Parameter, cx: &Context<Self>) -> Option<f32> {
         let session = self.session.read(cx);
         let document = session.document().filter(|open| open.frame.is_some())?;
         let defaults = document.default_recipe();
-        Some(adjustment.parameter.get(document.edits.recipe(), &defaults))
+        Some(parameter.get(document.edits.recipe(), &defaults))
     }
 
-    fn set(&self, adjustment: Adjustment, value: f32, phase: EditPhase, cx: &mut Context<Self>) {
+    fn set(&self, parameter: Parameter, value: f32, phase: EditPhase, cx: &mut Context<Self>) {
         self.session.update(cx, |session, cx| {
-            session.set_parameter(adjustment.parameter, value, phase, cx);
+            session.set_parameter(parameter, value, phase, cx);
         });
     }
 
@@ -81,13 +102,12 @@ impl DevelopPanel {
             .map(|document| document.default_recipe());
         if let Some(defaults) = defaults {
             let value = adjustment.parameter.get(&defaults, &defaults);
-            self.set(adjustment, value, EditPhase::Finished, cx);
+            self.set(adjustment.parameter, value, EditPhase::Finished, cx);
         }
     }
 
     pub(super) fn press(
         &mut self,
-        adjustment: Adjustment,
         grip: Grip,
         event: &MouseDownEvent,
         area: gpui::Bounds<Pixels>,
@@ -96,21 +116,26 @@ impl DevelopPanel {
         self.finish_nudge(cx);
         if event.click_count == 2 {
             self.drag = None;
-            return self.reset(adjustment, cx);
+            return match grip {
+                Grip::Row(adjustment) => self.reset(adjustment, cx),
+                Grip::Curve(handle) => self.reset(adjustment(handle.parameter()), cx),
+                Grip::Wheel(tones) => self.reset_wheel(tones, cx),
+            };
         }
-        let Some(value) = self.value(adjustment, cx) else {
+        let parameter = grip.parameter();
+        let Some(value) = self.value(parameter, cx) else {
             return;
         };
         self.session
             .update(cx, |session, _| session.begin_gesture());
         self.drag = Some(Drag {
-            adjustment,
+            parameter,
             grip,
             last: event.position,
             value,
             size: area.size,
             moved: false,
-            on_value: matches!(grip, Grip::Row) && area.right() - event.position.x < VALUE_WIDTH,
+            on_value: matches!(grip, Grip::Row(_)) && area.right() - event.position.x < VALUE_WIDTH,
         });
         cx.notify();
     }
@@ -125,11 +150,14 @@ impl DevelopPanel {
             return self.release(window, cx);
         }
         let moved = event.position - drag.last;
-        let delta = match drag.grip {
-            Grip::Row => moved.x / drag.size.width,
-            Grip::Curve(_) => -moved.y / drag.size.height,
+        // In widths and heights, upwards.
+        let (right, up) = (moved.x / drag.size.width, -moved.y / drag.size.height);
+        let still = match drag.grip {
+            Grip::Row(_) => right == 0.0,
+            Grip::Curve(_) => up == 0.0,
+            Grip::Wheel(_) => right == 0.0 && up == 0.0,
         };
-        if delta == 0.0 {
+        if still {
             return;
         }
         let speed = if event.modifiers.shift {
@@ -137,21 +165,32 @@ impl DevelopPanel {
         } else {
             1.0
         };
-        let delta = delta * speed;
         drag.last = event.position;
         drag.moved = true;
-        let adjustment = drag.adjustment;
-        drag.value = match drag.grip {
-            Grip::Row => dragged(adjustment.format, adjustment.range(), drag.value, delta),
+        let value = match drag.grip {
+            Grip::Row(adjustment) => {
+                let value = dragged(
+                    adjustment.format,
+                    adjustment.range(),
+                    drag.value,
+                    right * speed,
+                );
+                drag.value = value;
+                value
+            }
+            // The radius is half the size.
+            Grip::Wheel(tones) => {
+                return self.move_wheel(tones, right * speed * 2.0, up * speed * 2.0, cx);
+            }
             Grip::Curve(handle) => {
                 let Some(document) = self.session.read(cx).document() else {
                     return;
                 };
-                handle.dragged(&document.edits.recipe().light.tone_curve, delta)
+                handle.dragged(&document.edits.recipe().light.tone_curve, up * speed)
             }
         };
-        let value = drag.value;
-        self.set(adjustment, value, EditPhase::Dragging, cx);
+        let parameter = drag.parameter;
+        self.set(parameter, value, EditPhase::Dragging, cx);
     }
 
     fn release(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -159,10 +198,13 @@ impl DevelopPanel {
             return;
         };
         self.session.update(cx, |session, cx| {
-            session.finish_gesture(drag.adjustment.parameter, cx);
+            session.finish_gesture(drag.parameter, cx);
         });
-        if drag.on_value && !drag.moved {
-            self.start_typing(drag.adjustment, window, cx);
+        if let Grip::Row(adjustment) = drag.grip
+            && drag.on_value
+            && !drag.moved
+        {
+            self.start_typing(adjustment, window, cx);
             if let Some(typing) = self.typing.as_mut() {
                 typing.just_clicked = true;
             }
@@ -170,24 +212,32 @@ impl DevelopPanel {
         cx.notify();
     }
 
-    /// Change the value by `steps` arrow key steps.
-    pub(super) fn nudge(&mut self, adjustment: Adjustment, steps: i8, cx: &mut Context<Self>) {
-        let same = |nudge: &Nudge| nudge.adjustment.parameter == adjustment.parameter;
+    pub(super) fn nudge(&mut self, by: NudgeBy, cx: &mut Context<Self>) {
+        let parameter = match by {
+            NudgeBy::Steps(adjustment, _) => adjustment.parameter,
+            NudgeBy::Wheel(tones, ..) => tones.parameter(),
+        };
+        let same = |nudge: &Nudge| nudge.parameter == parameter;
         if !self.nudge.as_ref().is_some_and(same) {
             self.finish_nudge(cx);
         }
-        let Some(value) = self.value(adjustment, cx) else {
+        let Some(value) = self.value(parameter, cx) else {
             return;
         };
-        let next = adjustment.format.stepped(adjustment.range(), value, steps);
-        self.set(adjustment, next, EditPhase::Dragging, cx);
+        match by {
+            NudgeBy::Steps(adjustment, steps) => {
+                let next = adjustment.format.stepped(adjustment.range(), value, steps);
+                self.set(parameter, next, EditPhase::Dragging, cx);
+            }
+            NudgeBy::Wheel(tones, x, y) => self.move_wheel(tones, x, y, cx),
+        }
         let pause = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(NUDGE_PAUSE).await;
             // Gone only while the application quits.
             let _ = this.update(cx, Self::finish_nudge);
         });
         self.nudge = Some(Nudge {
-            adjustment,
+            parameter,
             _pause: pause,
         });
     }
@@ -195,7 +245,7 @@ impl DevelopPanel {
     pub(super) fn finish_nudge(&mut self, cx: &mut Context<Self>) {
         if let Some(nudge) = self.nudge.take() {
             self.session.update(cx, |session, cx| {
-                session.finish_gesture(nudge.adjustment.parameter, cx);
+                session.finish_gesture(nudge.parameter, cx);
             });
         }
     }
@@ -207,7 +257,7 @@ impl DevelopPanel {
         cx: &mut Context<Self>,
     ) {
         self.finish_nudge(cx);
-        let Some(value) = self.value(adjustment, cx) else {
+        let Some(value) = self.value(adjustment.parameter, cx) else {
             return;
         };
         let text = adjustment.format.label(value, adjustment.range());
@@ -285,10 +335,10 @@ impl DevelopPanel {
         };
         // The label is rounded: confirming it must not change the value.
         let shown = self
-            .value(adjustment, cx)
+            .value(adjustment.parameter, cx)
             .map(|value| format.label(value, range));
         if shown != Some(format.label(value, range)) {
-            self.set(adjustment, value, EditPhase::Finished, cx);
+            self.set(adjustment.parameter, value, EditPhase::Finished, cx);
         }
     }
 }

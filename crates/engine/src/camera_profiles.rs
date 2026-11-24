@@ -5,6 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use rohditor_camera_profile::{DCP_MAX_FILE_BYTES, MatrixCameraProfile, parse_dcp_bytes};
+use rohditor_edit::CameraProfileSelection;
 use rohditor_raw::RawFileInfo;
 use tracing::warn;
 
@@ -126,6 +127,22 @@ impl CameraProfileRegistry {
             })
             .cloned()
             .collect()
+    }
+
+    /// The profiles to offer for a photo: the compatible ones, and the selected
+    /// one when only the recipe has it.
+    pub fn choices(
+        &self,
+        info: Option<&RawFileInfo>,
+        selected: &CameraProfileSelection,
+    ) -> Vec<MatrixCameraProfile> {
+        let mut choices = info.map_or_else(Vec::new, |info| self.compatible_profiles(info));
+        if let CameraProfileSelection::Matrix(profile) = selected
+            && !choices.contains(profile)
+        {
+            choices.push(profile.clone());
+        }
+        choices
     }
 
     /// Parse and, when possible, install a profile. A write failure is a

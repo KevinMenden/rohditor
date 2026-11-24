@@ -2,7 +2,10 @@
 
 use gpui::Context;
 use rohditor_core::auto_tone;
-use rohditor_edit::{HighlightMethod, Parameter, RecipeSection, copy_sections};
+use rohditor_edit::{
+    EditRecipe, GradingTint, GradingTones, HighlightMethod, Parameter, RecipeSection,
+    RenderingProfileSelection, WhiteBalancePreset,
+};
 use rohditor_engine::document::EditSession;
 use rohditor_engine::open_document::OpenDocument;
 
@@ -36,6 +39,28 @@ impl Session {
         };
         let defaults = document.default_recipe();
         let next = parameter.with_value(document.edits.recipe(), &defaults, value);
+        self.edit(next, phase, is_drafted(parameter), cx);
+    }
+
+    /// Move a colour grading wheel, as [`Self::set_parameter`].
+    pub fn set_grading(
+        &mut self,
+        tones: GradingTones,
+        tint: GradingTint,
+        phase: EditPhase,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(document) = self.document.as_ref() {
+            let mut next = document.edits.recipe().clone();
+            next.color.grading = tones.with(next.color.grading, tint);
+            self.edit(next, phase, false, cx);
+        }
+    }
+
+    fn edit(&mut self, next: EditRecipe, phase: EditPhase, draft: bool, cx: &mut Context<Self>) {
+        let Some(document) = self.document.as_mut() else {
+            return;
+        };
         let changed = match phase {
             EditPhase::Dragging => document.edits.set_during_gesture(next),
             EditPhase::Finished => document.edits.set_discrete(next),
@@ -43,7 +68,7 @@ impl Session {
         if !changed {
             return;
         }
-        let drafted = is_drafted(parameter)
+        let drafted = draft
             && phase == EditPhase::Dragging
             && self.renderer.run(
                 document,
@@ -71,21 +96,52 @@ impl Session {
 
     /// Restore the photo's defaults in one section.
     pub fn reset_section(&mut self, section: RecipeSection, cx: &mut Context<Self>) {
-        let Some(document) = self.document.as_ref() else {
-            return;
-        };
-        let defaults = document.default_recipe();
-        let next = copy_sections(document.edits.recipe(), &defaults, &[section]);
-        self.change_history(|edits| edits.set_discrete(next), cx);
+        if self
+            .document
+            .as_mut()
+            .is_some_and(|document| document.reset_section(section))
+        {
+            self.queue_preview();
+            self.tick(cx);
+        }
+    }
+
+    pub fn set_white_balance(&mut self, preset: WhiteBalancePreset, cx: &mut Context<Self>) {
+        self.change_recipe(|recipe, defaults| preset.apply(recipe, defaults), cx);
     }
 
     pub fn set_highlight_method(&mut self, method: HighlightMethod, cx: &mut Context<Self>) {
-        let Some(document) = self.document.as_ref() else {
-            return;
-        };
-        let mut next = document.edits.recipe().clone();
-        next.raw.highlights.method = method;
-        self.change_history(|edits| edits.set_discrete(next), cx);
+        self.change_recipe(
+            |recipe, _| {
+                let mut next = recipe.clone();
+                next.raw.highlights.method = method;
+                next
+            },
+            cx,
+        );
+    }
+
+    pub fn set_rendering(&mut self, rendering: RenderingProfileSelection, cx: &mut Context<Self>) {
+        self.change_recipe(
+            |recipe, _| {
+                let mut next = recipe.clone();
+                next.rendering.profile = rendering;
+                next
+            },
+            cx,
+        );
+    }
+
+    /// One undo step, made from the recipe and its defaults.
+    fn change_recipe(
+        &mut self,
+        change: impl FnOnce(&EditRecipe, &EditRecipe) -> EditRecipe,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(document) = self.document.as_ref() {
+            let next = change(document.edits.recipe(), &document.default_recipe());
+            self.change_history(|edits| edits.set_discrete(next), cx);
+        }
     }
 
     fn change_history(

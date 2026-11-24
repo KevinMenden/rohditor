@@ -386,10 +386,9 @@ impl RohditorApp {
         match result {
             Ok(profile) => {
                 let changed_document = self.document.as_mut().and_then(|document| {
-                    let mut next = document.core.edits.recipe().clone();
-                    next.color.camera_profile =
-                        rohditor_edit::CameraProfileSelection::Matrix(profile);
-                    let changed = document.core.edits.set_discrete(next);
+                    let changed = document.core.select_camera_profile(
+                        rohditor_edit::CameraProfileSelection::Matrix(profile),
+                    );
                     document.core.error = None;
                     if self.camera_profiles.warning().is_some() {
                         document.core.warning = self.camera_profiles.warning().map(str::to_owned);
@@ -1086,9 +1085,7 @@ impl RohditorApp {
             let mut changed = false;
             let mut auto_tone_applied = false;
             if let Some(selection) = output.camera_profile {
-                let mut next = document.core.edits.recipe().clone();
-                next.color.camera_profile = selection;
-                changed |= document.core.edits.set_discrete(next);
+                changed |= document.core.select_camera_profile(selection);
             }
             if let Some(selection) = output.rendering_profile {
                 let mut next = document.core.edits.recipe().clone();
@@ -1162,13 +1159,7 @@ impl RohditorApp {
                 white_balance_memory = WhiteBalanceModeMemory::default();
             }
             if let Some(section) = output.reset_section {
-                let defaults = document.core.default_recipe();
-                let next = rohditor_edit::copy_sections(
-                    document.core.edits.recipe(),
-                    &defaults,
-                    &[section],
-                );
-                changed |= document.core.edits.set_discrete(next);
+                changed |= document.core.reset_section(section);
                 if section == RecipeSection::WhiteBalance {
                     // Same reason as reset-all: forget the hidden manual choice.
                     white_balance_memory = WhiteBalanceModeMemory::default();
@@ -2059,18 +2050,8 @@ fn document_panel_model(
         ),
         tooltip: "Use the existing decoder-derived camera calibration".to_owned(),
     }];
-    if let Some(info) = &document.core.info {
-        for profile in camera_profiles.compatible_profiles(info) {
-            camera_profile_choices.push(camera_profile_choice(profile));
-        }
-    }
-    if let rohditor_edit::CameraProfileSelection::Matrix(profile) = &camera_profile
-        && !camera_profile_choices
-            .iter()
-            .any(|choice| choice.selection == camera_profile)
-    {
-        camera_profile_choices.push(camera_profile_choice(profile.clone()));
-    }
+    let profiles = camera_profiles.choices(document.core.info.as_ref(), &camera_profile);
+    camera_profile_choices.extend(profiles.into_iter().map(camera_profile_choice));
     let as_shot_coordinates =
         document
             .core

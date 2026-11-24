@@ -4,18 +4,22 @@
 //! relative to where it was, Shift drags finer, and a double click resets it. A click on the value
 //! types it. With the focus, the arrow keys change it.
 
+mod choices;
 mod filter;
 mod focus;
 mod gestures;
-mod highlights;
+mod mixer;
 mod row;
 mod section;
 mod tone_curve;
+mod wheels;
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use gpui::{
-    App, Context, Div, Entity, IntoElement, MouseButton, Render, Role, Window, div, prelude::*,
+    App, Context, Div, Entity, IntoElement, MouseButton, Render, RenderImage, Role, Window, div,
+    prelude::*,
 };
 use rohditor_core::Histogram;
 use rohditor_edit::{EditRecipe, RecipeSection};
@@ -76,6 +80,9 @@ pub struct DevelopPanel {
     search: Entity<TextInput>,
     /// Hide what is at its default.
     edited_only: bool,
+    /// The colour whose mixer sliders are listed.
+    mixer_channel: usize,
+    wheel_picture: Arc<RenderImage>,
     focus: PanelFocus,
 }
 
@@ -110,9 +117,14 @@ impl DevelopPanel {
             collapsed: HashSet::from([
                 RecipeSection::ToneCurve,
                 RecipeSection::HighlightReconstruction,
+                RecipeSection::ColorMixer,
+                RecipeSection::ColorGrading,
+                RecipeSection::ColorProfile,
             ]),
             search,
             edited_only: false,
+            mixer_channel: 0,
+            wheel_picture: wheels::wheel_picture(),
             focus: PanelFocus::new(cx),
         }
     }

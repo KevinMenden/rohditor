@@ -21,6 +21,8 @@ use gpui::{
     size,
 };
 
+use rohditor_engine::camera_profiles::CameraProfileRegistry;
+
 use crate::library::{Library, LibraryWorker};
 use crate::session::{Session, SessionWorkers};
 use crate::workspace::Workspace;
@@ -71,7 +73,14 @@ fn run(open: Option<PathBuf>, workers: Workers) {
                 let config = config_directory();
                 let settings = rohditor_engine::settings::load(config.as_deref()).settings;
                 let session = cx.new(|cx| {
-                    Session::new(workers.session, settings, device::shared_context(), cx)
+                    let profiles = CameraProfileRegistry::load(config.as_deref());
+                    Session::new(
+                        workers.session,
+                        settings,
+                        profiles,
+                        device::shared_context(),
+                        cx,
+                    )
                 });
                 let library = cx.new(|cx| Library::new(workers.library, config, &session, cx));
                 match open {

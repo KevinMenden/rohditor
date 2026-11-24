@@ -9,7 +9,7 @@ use rohditor_edit::EditRecipe;
 
 use super::DevelopPanel;
 use super::focus::Control;
-use super::gestures::Grip;
+use super::gestures::{Grip, NudgeBy};
 use crate::panels::adjustments::Adjustment;
 use crate::theme::{RADIUS, SMALL_FONT_SIZE, theme};
 use crate::ui::keys::{Cancel, Confirm};
@@ -22,7 +22,7 @@ actions!(
     [Decrease, Increase, DecreaseMore, IncreaseMore, ResetValue]
 );
 
-const CONTEXT: &str = "Slider";
+pub(super) const CONTEXT: &str = "Slider";
 /// Steps of Page Up and Page Down.
 const MANY_STEPS: i8 = 10;
 
@@ -85,9 +85,7 @@ impl DevelopPanel {
         let at = |value| fraction(format, range, value);
         let (from, to) = (at(default).min(at(value)), at(default).max(at(value)));
         let edited = parameter.is_changed(recipe, defaults);
-        let active = self
-            .drag
-            .is_some_and(|drag| drag.adjustment.parameter == parameter);
+        let active = self.drag.is_some_and(|drag| drag.parameter == parameter);
         let panel = cx.entity();
         let typing = self
             .typing
@@ -107,11 +105,19 @@ impl DevelopPanel {
             .aria_numeric_value_step(format.step())
             .on_a11y_action(AccessibleAction::Increment, {
                 let panel = cx.entity();
-                move |_, _, cx| panel.update(cx, |panel, cx| panel.nudge(adjustment, 1, cx))
+                move |_, _, cx| {
+                    panel.update(cx, |panel, cx| {
+                        panel.nudge(NudgeBy::Steps(adjustment, 1), cx)
+                    })
+                }
             })
             .on_a11y_action(AccessibleAction::Decrement, {
                 let panel = cx.entity();
-                move |_, _, cx| panel.update(cx, |panel, cx| panel.nudge(adjustment, -1, cx))
+                move |_, _, cx| {
+                    panel.update(cx, |panel, cx| {
+                        panel.nudge(NudgeBy::Steps(adjustment, -1), cx)
+                    })
+                }
             })
             .when(idle, |row| row.key_context(CONTEXT))
             .track_focus(self.focus.control(control))
@@ -120,13 +126,17 @@ impl DevelopPanel {
             .border_color(gpui::transparent_black())
             // Also after a press, as it shows what the arrow keys change.
             .focus(move |style| style.border_color(theme.accent))
-            .on_action(cx.listener(move |this, _: &Decrease, _, cx| this.nudge(adjustment, -1, cx)))
-            .on_action(cx.listener(move |this, _: &Increase, _, cx| this.nudge(adjustment, 1, cx)))
+            .on_action(cx.listener(move |this, _: &Decrease, _, cx| {
+                this.nudge(NudgeBy::Steps(adjustment, -1), cx)
+            }))
+            .on_action(cx.listener(move |this, _: &Increase, _, cx| {
+                this.nudge(NudgeBy::Steps(adjustment, 1), cx)
+            }))
             .on_action(cx.listener(move |this, _: &DecreaseMore, _, cx| {
-                this.nudge(adjustment, -MANY_STEPS, cx);
+                this.nudge(NudgeBy::Steps(adjustment, -MANY_STEPS), cx);
             }))
             .on_action(cx.listener(move |this, _: &IncreaseMore, _, cx| {
-                this.nudge(adjustment, MANY_STEPS, cx);
+                this.nudge(NudgeBy::Steps(adjustment, MANY_STEPS), cx);
             }))
             .on_action(cx.listener(move |this, _: &ResetValue, _, cx| this.reset(adjustment, cx)))
             // Enter on the slider starts typing, Enter in its input ends it.
@@ -252,7 +262,7 @@ fn press_area(panel: Entity<DevelopPanel>, adjustment: Adjustment) -> impl IntoE
                     && hitbox.is_hovered(window)
                 {
                     panel.update(cx, |panel, cx| {
-                        panel.press(adjustment, Grip::Row, event, bounds, cx);
+                        panel.press(Grip::Row(adjustment), event, bounds, cx);
                     });
                 }
             });

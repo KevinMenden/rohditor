@@ -87,7 +87,7 @@ impl RecipeSection {
             Self::WhiteBalance => "White balance",
             Self::Saturation => "Saturation & vibrance",
             Self::ColorMixer => "Color mixer",
-            Self::ColorGrading => "Three-way RGB tint",
+            Self::ColorGrading => "Color grading",
             Self::ColorProfile => "Color profile",
             Self::CameraLook => "Camera look",
             Self::HighlightReconstruction => "Highlight reconstruction",

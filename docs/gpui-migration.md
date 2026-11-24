@@ -24,7 +24,8 @@ Assumed from the recommendations unless marked open; change them here if they tu
 | Open, folder list, autosave, undo | Done | Save status and errors, recovery checks |
 | Basic sliders | Typed, by keyboard, grouped and searchable, with section reset and changed markers | |
 | Light | Tone, parametric curve, presence, highlight reconstruction | |
-| Other adjustments | None | Mixer, grading, profiles, defringe, moiré, optics, full detail controls |
+| Color | White balance, mixer, grading wheels, profiles | Pickers |
+| Other adjustments | None | Defringe, moiré, optics, full detail controls |
 | Viewport | Fit, zoom, pan, 1:1, clipping overlay | Tool overlays |
 | Tools | None | Crop, masks, white balance and colour pickers |
 | Presets, info | None | All |
@@ -84,7 +85,8 @@ Done when 1:1 and clipping match egui on GPU and CPU.
 
 - [x] 3.1 Move the slider-to-recipe mapping down; section reset and changed markers.
 - [x] 3.2 Light, tone curve, highlight reconstruction.
-- [ ] 3.3 Color: mixer, wheels, profiles, DCP import, white balance and mixer pickers.
+- [x] 3.3a Color: white balance presets, mixer, wheels, profiles, DCP import.
+- [ ] 3.3b White balance and mixer pickers.
 - [ ] 3.4 Detail: noise reduction with Auto, sharpening, moiré, defringe.
 - [ ] 3.5 Optics with lens search.
 - [ ] 3.6 Info and presets.

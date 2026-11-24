@@ -7,9 +7,10 @@ use gpui::{
     Window, canvas, point, prelude::*, px,
 };
 
-use rohditor_edit::{Parameter, RecipeSection};
+use rohditor_edit::{GradingTones, Parameter, RecipeSection};
 
 use super::DevelopPanel;
+use super::choices::Choice;
 use crate::panels::adjustments::sections;
 use crate::ui::keys::{SelectNext, SelectPrevious};
 
@@ -23,7 +24,9 @@ pub(super) enum Control {
     /// The header of a section.
     Section(RecipeSection),
     Parameter(Parameter),
-    HighlightMethod,
+    Choice(Choice),
+    MixerChannels,
+    Wheel(GradingTones),
 }
 
 pub(super) struct PanelFocus {
@@ -45,7 +48,9 @@ impl PanelFocus {
         Self {
             entry: cx.focus_handle(),
             controls: controls
-                .chain([Control::HighlightMethod])
+                .chain(Choice::ALL.map(Control::Choice))
+                .chain([Control::MixerChannels])
+                .chain(GradingTones::ALL.map(Control::Wheel))
                 .map(|control| (control, cx.focus_handle().tab_stop(true)))
                 .collect(),
             scroll: ScrollHandle::new(),

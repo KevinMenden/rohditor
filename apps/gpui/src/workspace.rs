@@ -9,10 +9,10 @@ use gpui::{
 };
 
 use crate::actions::{
-    ActualPixels, AutoTone, CloseFile, Export, FocusAdjustments, FocusPhoto, NextPhoto, OpenFile,
-    OpenFolder, PreviousPhoto, Quit, Redo, ResetAdjustments, ResetSection, Save, SearchAdjustments,
-    SetHighlightMethod, ToggleClipping, ToggleCommandPalette, ToggleDevelop, ToggleFiles, Undo,
-    WORKSPACE_CONTEXT, ZoomToFit,
+    ActualPixels, AutoTone, CloseFile, Export, FocusAdjustments, FocusPhoto, ImportCameraProfile,
+    NextPhoto, OpenFile, OpenFolder, PreviousPhoto, Quit, Redo, ResetAdjustments, ResetSection,
+    Save, SearchAdjustments, SetHighlightMethod, SetRendering, SetWhiteBalance, ToggleClipping,
+    ToggleCommandPalette, ToggleDevelop, ToggleFiles, Undo, WORKSPACE_CONTEXT, ZoomToFit,
 };
 use crate::library::Library;
 use crate::panels::command_palette::CommandPalette;
@@ -185,6 +185,7 @@ impl Workspace {
             Redo => |session, cx| session.redo(cx),
             ResetAdjustments => |session, cx| session.reset(cx),
             AutoTone => |session, cx| session.auto_tone(cx),
+            ImportCameraProfile => |session, cx| session.prompt_camera_profile(cx),
             ToggleClipping => |session, cx| session.toggle_clipping(cx),
         );
         root.on_action(cx.listener(|this, _: &NextPhoto, _, cx| this.open_adjacent(true, cx)))
@@ -210,8 +211,19 @@ impl Workspace {
                     .update(cx, |panel, cx| panel.reset_section(action.0, window, cx));
             }))
             .on_action(cx.listener(|this, action: &SetHighlightMethod, _, cx| {
-                this.develop
-                    .update(cx, |panel, cx| panel.set_highlight_method(action.0, cx));
+                this.develop.update(cx, |panel, cx| {
+                    panel.choose(|session, cx| session.set_highlight_method(action.0, cx), cx);
+                });
+            }))
+            .on_action(cx.listener(|this, action: &SetWhiteBalance, _, cx| {
+                this.develop.update(cx, |panel, cx| {
+                    panel.choose(|session, cx| session.set_white_balance(action.0, cx), cx);
+                });
+            }))
+            .on_action(cx.listener(|this, action: &SetRendering, _, cx| {
+                this.develop.update(cx, |panel, cx| {
+                    panel.choose(|session, cx| session.set_rendering(action.0, cx), cx);
+                });
             }))
             .on_action(cx.listener(|this, _: &SearchAdjustments, window, cx| {
                 this.develop_open = true;

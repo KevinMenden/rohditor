@@ -1,9 +1,11 @@
 //! Which adjustments the panel lists: a search and "Edited only".
 
 use gpui::{Context, Focusable as _, IntoElement, SharedString, Window, div, prelude::*, px};
-use rohditor_edit::{EditRecipe, HighlightMethod, Parameter, RecipeSection};
+use rohditor_edit::{EditRecipe, GradingTones, HighlightMethod, Parameter, RecipeSection};
 
 use super::DevelopPanel;
+use super::choices::Choice;
+use super::mixer::channel_of;
 use crate::actions::FocusPhoto;
 use crate::assets::Icon;
 use crate::panels::adjustments::{Adjustment, Group, Section};
@@ -58,17 +60,35 @@ impl DevelopPanel {
         }
         // A slider must not vanish while it is changed.
         let active = [
-            self.drag.as_ref().map(|drag| drag.adjustment.parameter),
+            self.drag.as_ref().map(|drag| drag.parameter),
             self.typing
                 .as_ref()
                 .map(|typing| typing.adjustment.parameter),
         ]
         .contains(&Some(parameter));
         let passes = !self.edited_only || parameter.is_changed(recipe, defaults);
-        active || (passes && self.finds(group, section, adjustment.label, cx))
+        // Searches and the filter list the sliders of all colours.
+        let listed = self.edited_only
+            || self.searching(cx)
+            || channel_of(parameter).is_none_or(|channel| channel == self.mixer_channel);
+        active || (listed && passes && self.finds(group, section, adjustment.label, cx))
     }
 
-    pub(super) fn shows_highlight_method(
+    pub(super) fn shows_choice(
+        &self,
+        choice: Choice,
+        group: &Group,
+        section: &Section,
+        recipe: &EditRecipe,
+        defaults: &EditRecipe,
+        cx: &Context<Self>,
+    ) -> bool {
+        choice.section() == section.section
+            && (!self.edited_only || choice.is_changed(recipe, defaults))
+            && self.finds(group, section, choice.label(), cx)
+    }
+
+    pub(super) fn shows_wheels(
         &self,
         group: &Group,
         section: &Section,
@@ -76,10 +96,12 @@ impl DevelopPanel {
         defaults: &EditRecipe,
         cx: &Context<Self>,
     ) -> bool {
-        let changed = recipe.raw.highlights.method != defaults.raw.highlights.method;
-        section.section == RecipeSection::HighlightReconstruction
-            && (!self.edited_only || changed)
-            && self.finds(group, section, "Method", cx)
+        let grading = RecipeSection::ColorGrading;
+        section.section == grading
+            && (!self.edited_only || grading.is_changed(recipe, defaults))
+            && GradingTones::ALL
+                .iter()
+                .any(|tones| self.finds(group, section, tones.label(), cx))
     }
 
     pub fn focus_search(&self, window: &mut Window, cx: &mut Context<Self>) {

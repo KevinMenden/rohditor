@@ -8,6 +8,7 @@ mod display;
 mod editing;
 mod events;
 mod export;
+mod profiles;
 mod renderer;
 mod saving;
 mod upload;
@@ -20,6 +21,7 @@ use anyhow::{Result, anyhow};
 use gpui::{Context, EventEmitter, Task};
 use rohditor_core::default_recipe;
 use rohditor_edit::EditRecipe;
+use rohditor_engine::camera_profiles::CameraProfileRegistry;
 use rohditor_engine::coordinator::RenderCoordinator;
 use rohditor_engine::open_document::OpenDocument;
 use rohditor_engine::persistence;
@@ -58,6 +60,7 @@ pub struct Session {
     document: Option<OpenDocument>,
     display: DisplaySlot,
     saves: Saves,
+    profiles: CameraProfileRegistry,
     next_document_id: u64,
     next_export_id: u64,
     _wake: Task<()>,
@@ -74,6 +77,7 @@ impl Session {
     pub fn new(
         workers: SessionWorkers,
         settings: AppSettings,
+        profiles: CameraProfileRegistry,
         gpu: Option<WgpuContext>,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -82,6 +86,7 @@ impl Session {
             document: None,
             display: DisplaySlot::default(),
             saves: workers.saves,
+            profiles,
             next_document_id: 1,
             next_export_id: 1,
             _wake: workers.woken.run(cx, Self::tick),

@@ -5,6 +5,7 @@ mod camera_tone;
 mod color;
 mod defringe;
 mod false_color;
+mod grading_wheel;
 mod light_settings;
 mod local;
 mod local_detail;
@@ -20,12 +21,14 @@ mod sharpening;
 #[cfg(test)]
 mod test_support;
 mod validation;
+mod white_balance_preset;
 
 pub use camera_chroma::*;
 pub use camera_tone::*;
 pub use color::*;
 pub use defringe::*;
 pub use false_color::*;
+pub use grading_wheel::*;
 pub use light_settings::*;
 pub use local::*;
 pub use local_detail::*;
@@ -44,3 +47,4 @@ pub use recipe::{
 pub use section::{RecipeSection, blend_sections, changed_sections, copy_sections};
 pub use sharpening::*;
 pub use validation::*;
+pub use white_balance_preset::*;
