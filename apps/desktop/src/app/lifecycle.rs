@@ -71,6 +71,7 @@ impl RohditorApp {
     }
 
     pub(super) fn open_path(&mut self, context: &egui::Context, path: PathBuf) {
+        self.leave_tool(context, true);
         let _ = self.schedule_recipe_save(true);
         self.open_path_now(context, path);
     }
@@ -123,6 +124,7 @@ impl RohditorApp {
     }
 
     pub(super) fn request_close_document(&mut self, context: &egui::Context) {
+        self.leave_tool(context, true);
         let _ = self.schedule_recipe_save(true);
         self.close_document_now(context);
     }
@@ -271,6 +273,10 @@ impl RohditorApp {
 
 impl Drop for RohditorApp {
     fn drop(&mut self) {
+        if let Some(document) = self.document.as_mut() {
+            // Nothing is rendered any more.
+            let _ = self.tool.apply(&mut document.core, 0.0);
+        }
         // The worker drains all queued snapshots before joining, so closing
         // the native window cannot discard the current recipe.
         let _ = self.schedule_recipe_save(true);

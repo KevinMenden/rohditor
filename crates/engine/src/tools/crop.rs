@@ -82,7 +82,8 @@ struct CropDrag {
 /// tool is left with a commit (see `ActiveTool::leave`).
 #[derive(Debug, Clone)]
 pub struct CropToolSession {
-    original: Option<NormalizedCropRect>,
+    /// The recipe's crop.
+    committed: Option<NormalizedCropRect>,
     draft: NormalizedCropRect,
     aspect: CropAspect,
     locked: bool,
@@ -95,26 +96,25 @@ pub struct CropToolSession {
     portrait: bool,
     full_width: usize,
     full_height: usize,
-    full_frame_ready: bool,
     drag: Option<CropDrag>,
 }
 
 impl CropToolSession {
+    /// `full_width` and `full_height` are the photo's size without the crop.
     pub fn new(
         committed: Option<NormalizedCropRect>,
         full_width: usize,
         full_height: usize,
     ) -> Self {
         Self {
-            original: committed,
+            committed,
             draft: committed.unwrap_or(NormalizedCropRect::FULL_FRAME),
             aspect: CropAspect::Free,
             locked: false,
             locked_ratio: None,
             portrait: false,
-            full_width,
-            full_height,
-            full_frame_ready: false,
+            full_width: full_width.max(1),
+            full_height: full_height.max(1),
             drag: None,
         }
     }
@@ -133,17 +133,6 @@ impl CropToolSession {
 
     pub const fn portrait(&self) -> bool {
         self.portrait
-    }
-
-    pub const fn full_frame_ready(&self) -> bool {
-        self.full_frame_ready
-    }
-
-    pub fn set_full_dimensions(&mut self, width: usize, height: usize) {
-        self.full_width = width.max(1);
-        self.full_height = height.max(1);
-        self.constrain_draft();
-        self.full_frame_ready = true;
     }
 
     pub fn set_aspect(&mut self, aspect: CropAspect) {
@@ -194,13 +183,43 @@ impl CropToolSession {
 
     #[must_use]
     pub fn is_modified(&self) -> bool {
-        self.committed_crop() != self.original
+        self.committed_crop() != self.committed
     }
 
+    /// Drop the changes to the draft. Returns whether there were any.
+    pub fn discard_changes(&mut self) -> bool {
+        let modified = self.is_modified();
+        self.load(self.committed);
+        modified
+    }
+
+    /// Follow a recipe whose crop was changed by something else than this tool.
+    pub fn sync(&mut self, committed: Option<NormalizedCropRect>) {
+        if committed != self.committed {
+            self.load(committed);
+        }
+    }
+
+    fn load(&mut self, committed: Option<NormalizedCropRect>) {
+        self.committed = committed;
+        self.draft = committed.unwrap_or(NormalizedCropRect::FULL_FRAME);
+        self.drag = None;
+        // A ratio that the loaded crop may not have.
+        self.aspect = CropAspect::Free;
+        self.locked = false;
+        self.locked_ratio = None;
+    }
+
+    /// The size of the cropped photo: its edges fall on the same pixels as when it is rendered.
     pub fn output_dimensions(&self) -> (usize, usize) {
-        let width = ((self.draft.right - self.draft.left) * self.full_width as f64).round();
-        let height = ((self.draft.bottom - self.draft.top) * self.full_height as f64).round();
-        (width.max(1.0) as usize, height.max(1.0) as usize)
+        let length = |from: f64, to: f64, full: usize| {
+            let full = full as f64;
+            ((to * full).round() - (from * full).round()).max(1.0) as usize
+        };
+        (
+            length(self.draft.left, self.draft.right, self.full_width),
+            length(self.draft.top, self.draft.bottom, self.full_height),
+        )
     }
 
     pub fn begin_drag(&mut self, handle: CropHandle, point: (f64, f64)) {
@@ -427,6 +446,41 @@ mod tests {
         assert!(session.committed_crop().is_some());
         session.reset();
         assert_eq!(session.committed_crop(), None);
+    }
+
+    #[test]
+    fn the_draft_follows_the_recipe_only_when_its_crop_changed() {
+        let mut session = session_resized_to_1875();
+        let draft = session.draft();
+        session.sync(None);
+        assert_eq!(session.draft(), draft, "an edit elsewhere keeps the draft");
+        session.sync(Some(draft));
+        assert!(!session.is_modified());
+        session.set_aspect(CropAspect::Square);
+        assert!(session.discard_changes());
+        assert_eq!((session.draft(), session.locked()), (draft, false));
+        assert!(!session.discard_changes());
+    }
+
+    #[test]
+    fn the_size_is_that_of_the_rendered_crop() {
+        let crop = rohditor_edit::NormalizedCropRect {
+            left: 0.25,
+            top: 0.1,
+            right: 0.75,
+            bottom: 0.9,
+        };
+        // 2.5 to 7.5 and 0.7 to 6.3 pixels.
+        let session = CropToolSession::new(Some(crop), 10, 7);
+        let rendered = rohditor_core::OutputGeometry::new(
+            10,
+            7,
+            rohditor_image::Orientation::Normal,
+            Some(crop),
+        )
+        .expect("valid crop");
+        assert_eq!(session.output_dimensions(), rendered.output_dimensions());
+        assert_eq!(session.output_dimensions(), (5, 5));
     }
 
     #[test]

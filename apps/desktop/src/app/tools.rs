@@ -3,17 +3,13 @@
 //! The tool state machine lives in `rohditor_engine::tools`; this module only
 //! connects it to egui input, the edit history and preview scheduling.
 
-use std::sync::Arc;
-
 use eframe::egui;
-use rohditor_engine::document::PreviewIntent;
-use rohditor_engine::tools::{ActiveTool, CropToolSession, ToolKind};
+use rohditor_engine::tools::{ActiveTool, ToolKind};
 
 use super::{Document, RohditorApp};
 use crate::ui::crop::{self, CropPanelModel};
 use crate::ui::tool_panel::{self, ToolPanelModel};
 use crate::ui::tool_rail::{self, ToolRailModel};
-use crate::ui::viewport::PreviewTexture;
 
 /// Heading, histogram and document presence for the tool panel chrome.
 pub(super) fn tool_panel_model(document: Option<&Document>, tool: ToolKind) -> ToolPanelModel<'_> {
@@ -59,23 +55,21 @@ impl RohditorApp {
     }
 
     /// Rail or shortcut request. The active tool's own button returns to Edit;
-    /// leaving Crop commits its draft, and leaving Masks has nothing to commit.
+    /// changing tools applies what the old one drafted.
     fn select_tool(&mut self, context: &egui::Context, requested: ToolKind) {
         let target = self.tool.toggle_target(requested);
-        if target == self.tool.kind() {
+        let policy = self.settings.render_options().raw_crop_policy;
+        let now = context.input(|input| input.time);
+        let Some(document) = self.document.as_mut() else {
             return;
+        };
+        let changed = self.tool.switch_to(target, &mut document.core, policy, now);
+        if self.tool.masks().is_none() {
+            document.mask_overlay = None;
         }
-        // The switch swaps the panel and unmounts any dragged slider, so the
-        // switch itself is the commit boundary for an open drag gesture.
-        if let Some(document) = self.document.as_mut() {
-            document.core.edits.finish_gesture();
-        }
-        self.leave_tool(context, true);
-        self.exit_masks_tool();
-        match target {
-            ToolKind::Crop => self.enter_crop_tool(context),
-            ToolKind::Masks => self.enter_masks_tool(),
-            ToolKind::Edit => {}
+        let id = document.core.id;
+        if changed {
+            self.queue_preview(context, id);
         }
     }
 
@@ -103,75 +97,24 @@ impl RohditorApp {
         }
     }
 
-    fn enter_crop_tool(&mut self, context: &egui::Context) {
-        if self.tool.crop().is_some() {
-            return;
-        }
-        let request = self.document.as_mut().and_then(|document| {
-            let frame = document.core.frame.as_ref().map(Arc::clone)?;
-            document.core.preview.source_scale_requested = false;
-            document
-                .core
-                .preview
-                .view
-                .fit(context.input(|input| input.time));
-            let (width, height) = document
-                .texture
-                .as_ref()
-                .map(PreviewTexture::dimensions)
-                .unwrap_or((frame.info.width, frame.info.height));
-            let session =
-                CropToolSession::new(document.core.edits.recipe().geometry.crop, width, height);
-            let ticket = document
-                .core
-                .begin_preview_request(PreviewIntent::CropToolFullFrame);
-            let recipe = document.core.edits.recipe().clone();
-            document.core.preview.status =
-                Some((ticket.revision, "Preparing full image for crop".to_owned()));
-            Some((document.core.id, ticket, frame, recipe, session))
-        });
-        let Some((document_id, ticket, frame, recipe, session)) = request else {
-            return;
-        };
-        self.cancel_pick();
-        // Entering Crop drops any active picker.
-        self.tool.enter_crop(session);
-        let options = self.preview_options();
-        if let Err(error) = self
-            .coordinator
-            .crop_tool_preview(ticket, frame, recipe, options)
-        {
-            self.tool = ActiveTool::default();
-            if let Some(document) = self
-                .document
-                .as_mut()
-                .filter(|document| document.core.id == document_id)
-            {
-                document.core.preview.status = None;
-                document.core.error = Some(error);
-            }
-        }
-    }
-
     /// Leaves the Crop tool for Edit. With `commit` the draft becomes one undo
     /// step; without it the draft is discarded. No-op in other tools.
     pub(super) fn leave_tool(&mut self, context: &egui::Context, commit: bool) {
         if self.tool.crop().is_none() {
             return;
         }
-        let tool = std::mem::take(&mut self.tool);
-        let mut changed_document = None;
-        if let Some(document) = self.document.as_mut()
-            && let Some(next) = tool.leave(document.core.edits.recipe(), commit)
-            && document.core.edits.set_discrete(next)
-        {
-            document.core.notice = None;
-            changed_document = Some(document.core.id);
-        }
-        let document_id =
-            changed_document.or_else(|| self.document.as_ref().map(|document| document.core.id));
-        if let Some(document_id) = document_id {
-            self.queue_preview(context, document_id);
+        let now = context.input(|input| input.time);
+        let Some(document) = self.document.as_mut() else {
+            return;
+        };
+        let changed = if commit {
+            self.tool.apply(&mut document.core, now)
+        } else {
+            self.tool.cancel(&mut document.core, now)
+        };
+        let id = document.core.id;
+        if changed {
+            self.queue_preview(context, id);
         }
     }
 
@@ -185,7 +128,10 @@ impl RohditorApp {
             locked: session.locked(),
             portrait: session.portrait(),
             dimensions: session.output_dimensions(),
-            ready: session.full_frame_ready(),
+            ready: self
+                .document
+                .as_ref()
+                .is_some_and(|document| document.core.preview.full_frame_shown()),
         };
         let panel = tool_panel_model(self.document.as_ref(), ToolKind::Crop);
         let output = tool_panel::show(root, &panel, |ui| crop::show_controls(ui, &model));
@@ -211,9 +157,6 @@ impl RohditorApp {
 
 #[cfg(test)]
 mod tests {
-    use rohditor_edit::EditRecipe;
-    use rohditor_engine::document::EditSession;
-
     use super::*;
 
     #[test]
@@ -222,24 +165,5 @@ mod tests {
         assert!(!rail_model(false, &tool).enabled);
         assert!(rail_model(true, &tool).enabled);
         assert_eq!(rail_model(true, &tool).active, ToolKind::Edit);
-    }
-
-    #[test]
-    fn a_committed_crop_session_is_one_undo_step() {
-        let mut edits = EditSession::from_saved(EditRecipe::default());
-        let mut session = CropToolSession::new(None, 6000, 4000);
-        session.set_full_dimensions(6000, 4000);
-        // Several draft changes before leaving the tool.
-        session.set_aspect(rohditor_engine::tools::CropAspect::Square);
-        session.set_aspect(rohditor_engine::tools::CropAspect::ThreeTwo);
-
-        let next = ActiveTool::Crop(session)
-            .leave(edits.recipe(), true)
-            .expect("modified crop commits");
-        assert!(edits.set_discrete(next));
-        assert!(edits.recipe().geometry.crop.is_some());
-        assert!(edits.undo());
-        assert_eq!(edits.recipe().geometry.crop, None);
-        assert!(!edits.can_undo());
     }
 }

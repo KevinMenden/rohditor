@@ -57,7 +57,7 @@ use rohditor_engine::coordinator::{
     PreparedGpuSource, PreviewBackend, PreviewResolution, RenderCoordinator, WorkerImage,
     WorkerPreviewDiagnostics,
 };
-use rohditor_engine::document::{EditSession, PreviewIntent, PreviewTicket};
+use rohditor_engine::document::{EditSession, PreviewTicket};
 use rohditor_engine::export_options::{ExportKind, ExportOptions};
 use rohditor_engine::open_document::{ExportActivity, OpenDocument};
 use rohditor_engine::presets::PresetStore;
@@ -509,47 +509,6 @@ impl RohditorApp {
         );
     }
 
-    /// Rebuild the presentation currently requested by the viewport. A
-    /// settings change is not an edit, so this advances only the presentation
-    /// sequence and deliberately leaves the recipe history untouched.
-    fn refresh_current_presentation(&mut self, context: &egui::Context) {
-        let Some(document_id) = self.document.as_ref().map(|document| document.core.id) else {
-            return;
-        };
-        if self.tool.crop().is_none() {
-            self.queue_preview(context, document_id);
-            return;
-        }
-
-        let options = self.preview_options();
-        let request = self.document.as_mut().and_then(|document| {
-            let frame = document.core.frame.as_ref().map(Arc::clone)?;
-            let ticket = document
-                .core
-                .begin_preview_request(PreviewIntent::CropToolFullFrame);
-            let recipe = document.core.edits.recipe().clone();
-            document.core.preview.histogram_revision = None;
-            document.core.preview.diagnostics = None;
-            document.core.preview.status = Some((
-                ticket.revision,
-                "Rebuilding full image for crop with the selected demosaic algorithm".to_owned(),
-            ));
-            Some((ticket, frame, recipe))
-        });
-        let Some((ticket, frame, recipe)) = request else {
-            return;
-        };
-        self.cancel_pick();
-        if let Err(error) = self
-            .coordinator
-            .crop_tool_preview(ticket, frame, recipe, options)
-            && let Some(document) = self.document.as_mut()
-        {
-            document.core.preview.status = None;
-            document.core.error = Some(error);
-        }
-    }
-
     fn open_settings(&mut self) {
         if self.settings_dialog.is_none() {
             self.settings_dialog = Some(SettingsDialog {
@@ -620,7 +579,9 @@ impl RohditorApp {
         self.settings = next;
         if changes_pixels {
             self.cancel_pick();
-            self.refresh_current_presentation(context);
+            if let Some(id) = self.document.as_ref().map(|document| document.core.id) {
+                self.queue_preview(context, id);
+            }
         }
         match settings::save(self.config_dir.as_deref(), next) {
             Ok(()) => {
@@ -895,7 +856,8 @@ impl RohditorApp {
             can_undo: self
                 .document
                 .as_ref()
-                .is_some_and(|document| document.core.edits.can_undo()),
+                .is_some_and(|document| document.core.edits.can_undo())
+                || self.tool.is_modified(),
             can_redo: self
                 .document
                 .as_ref()
@@ -931,6 +893,7 @@ impl RohditorApp {
             }
             if mode == ViewMode::Library {
                 // The crop overlay and pickers belong to the develop viewport.
+                self.leave_tool(context, true);
                 self.tool = ActiveTool::default();
                 self.cancel_pick();
             }
@@ -956,25 +919,20 @@ impl RohditorApp {
         if actions.open_folder {
             self.open_folder_dialog();
         }
-        if actions.undo || actions.redo || actions.reset {
-            // History moves under the draft, so the draft is discarded first.
-            self.leave_tool(context, false);
-        }
-
         let now = context.input(|input| input.time);
         let mut changed_document = None;
         let mut view_changed_document = None;
         if let Some(document) = self.document.as_mut() {
             let mut changed = false;
             if actions.undo {
-                changed |= document.core.edits.undo();
+                changed |= self.tool.undo(&mut document.core.edits);
             }
             if actions.redo {
-                changed |= document.core.edits.redo();
+                changed |= self.tool.redo(&mut document.core.edits);
             }
             if actions.reset {
                 let recipe = document.core.default_recipe();
-                changed |= document.core.edits.reset_to(recipe);
+                changed |= self.tool.reset(&mut document.core.edits, recipe);
             }
             if changed {
                 document.core.notice = None;
@@ -983,10 +941,7 @@ impl RohditorApp {
             if actions.fit && document.core.preview.request_fit(now) {
                 view_changed_document = Some(document.core.id);
             }
-            if actions.actual_size
-                && self.tool.crop().is_none()
-                && document.core.preview.request_actual_size(now)
-            {
+            if actions.actual_size && document.core.preview.request_actual_size(now) {
                 view_changed_document = Some(document.core.id);
             }
         }
@@ -999,6 +954,7 @@ impl RohditorApp {
             self.queue_preview(context, document_id);
         }
         if actions.export {
+            self.leave_tool(context, true);
             self.export_dialog_open = true;
         }
     }
@@ -1214,7 +1170,11 @@ impl RohditorApp {
         let crop_overlay = self
             .tool
             .crop()
-            .filter(|session| session.full_frame_ready())
+            .filter(|_| {
+                self.document
+                    .as_ref()
+                    .is_some_and(|document| document.core.preview.full_frame_shown())
+            })
             .map(|session| CropOverlayModel {
                 crop: session.draft(),
                 active_handle: session.active_handle(),
@@ -1719,7 +1679,6 @@ impl RohditorApp {
                         .map(output_gamut_statistics),
                     source_state: match preview.worker.resolution {
                         PreviewResolution::SourceScale => "1:1",
-                        PreviewResolution::CropToolFullFrame => "crop authoring",
                         PreviewResolution::Fit => match preview.worker.algorithm {
                             DemosaicAlgorithm::Bilinear => "fast",
                             DemosaicAlgorithm::MalvarHeCutler => "high-quality",

@@ -2,28 +2,30 @@
 
 mod chrome;
 mod notifications;
+mod tools;
 
 use gpui::{
-    App, Context, Div, Entity, FocusHandle, Focusable, IntoElement, PathPromptOptions, Pixels,
-    Render, Role, Stateful, StyleRefinement, Window, div, prelude::*,
+    App, Context, Div, Entity, FocusHandle, Focusable, IntoElement, KeyContext, PathPromptOptions,
+    Pixels, Render, Role, Stateful, StyleRefinement, Window, div, prelude::*,
 };
 
-use rohditor_engine::tools::Picker;
+use rohditor_engine::tools::{Picker, ToolKind};
 
 use crate::actions::{
-    ActualPixels, ApplyPreset, AutoNoiseReduction, AutoTone, ChooseLens, CloseFile, Export,
-    FocusAdjustments, FocusPhoto, ImportCameraProfile, NextPhoto, OpenFile, OpenFolder,
-    PickMixerColor, PickWhiteBalance, PreviousPhoto, Quit, Redo, ResetAdjustments, ResetSection,
-    Save, SavePreset, SearchAdjustments, SetHighlightMethod, SetLensProfile, SetRendering,
-    SetWhiteBalance, ToggleClipping, ToggleCommandPalette, ToggleDevelop, ToggleFiles, Undo,
-    WORKSPACE_CONTEXT, ZoomToFit,
+    ActualPixels, ApplyPreset, ApplyTool, AutoNoiseReduction, AutoTone, CancelTool, ChooseLens,
+    CloseFile, CropTool, EditTool, Export, FocusAdjustments, FocusPhoto, ImportCameraProfile,
+    NextPhoto, OpenFile, OpenFolder, PHOTO_CONTEXT, PickMixerColor, PickWhiteBalance,
+    PreviousPhoto, Quit, Redo, ResetAdjustments, ResetSection, Save, SavePreset, SearchAdjustments,
+    SetHighlightMethod, SetLensProfile, SetRendering, SetWhiteBalance, ToggleClipping,
+    ToggleCommandPalette, ToggleDevelop, ToggleFiles, Undo, WORKSPACE_CONTEXT, ZoomToFit,
 };
 use crate::library::Library;
 use crate::panels::command_palette::command_palette;
+use crate::panels::crop::CropPanel;
 use crate::panels::develop::DevelopPanel;
 use crate::panels::files::FilesPanel;
 use crate::session::Session;
-use crate::theme::{DEVELOP_WIDTH, FILES_WIDTH, UI_FONT_SIZE, theme};
+use crate::theme::{FILES_WIDTH, UI_FONT_SIZE, theme};
 use crate::ui::confirm::Confirm;
 use crate::ui::keys::{FocusNext, FocusPrevious};
 use crate::ui::overlays::{Overlays, ToastKind};
@@ -36,6 +38,7 @@ pub struct Workspace {
     library: Entity<Library>,
     files: Entity<FilesPanel>,
     develop: Entity<DevelopPanel>,
+    crop: Entity<CropPanel>,
     viewport: Entity<Viewport>,
     overlays: Entity<Overlays>,
     announced: Announced,
@@ -84,6 +87,7 @@ impl Workspace {
             files: cx
                 .new(|cx| FilesPanel::new(session.clone(), library.clone(), overlays.clone(), cx)),
             develop: cx.new(|cx| DevelopPanel::new(session.clone(), overlays.clone(), window, cx)),
+            crop: cx.new(|cx| CropPanel::new(session.clone(), cx)),
             viewport: cx.new(|cx| Viewport::new(session.clone(), cx)),
             session,
             library,
@@ -190,6 +194,7 @@ impl Workspace {
             Redo => |session, cx| session.redo(cx),
             ResetAdjustments => |session, cx| session.reset(cx),
             AutoTone => |session, cx| session.auto_tone(cx),
+            ApplyTool => |session, cx| if session.drafting() { session.apply_tool(cx) },
             PickWhiteBalance => |session, cx| session.toggle_picker(Picker::WhiteBalance, cx),
             PickMixerColor => |session, cx| session.toggle_picker(Picker::ColorMixer, cx),
             ImportCameraProfile => |session, cx| session.prompt_camera_profile(cx),
@@ -258,17 +263,27 @@ impl Workspace {
                 });
             }))
             .on_action(cx.listener(|this, _: &SearchAdjustments, window, cx| {
-                this.develop_open = true;
-                cx.notify();
+                this.show_tool(ToolKind::Edit, cx);
                 this.develop
                     .update(cx, |panel, cx| panel.focus_search(window, cx));
             }))
             .on_action(cx.listener(Self::toggle_palette))
             .on_action(cx.listener(|this, _: &FocusAdjustments, window, cx| {
-                this.develop_open = true;
-                cx.notify();
+                this.show_tool(ToolKind::Edit, cx);
                 this.develop
                     .update(cx, |panel, cx| panel.focus_adjustments(window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &EditTool, _, cx| this.show_tool(ToolKind::Edit, cx)))
+            .on_action(
+                cx.listener(|this, _: &CropTool, _, cx| this.toggle_tool(ToolKind::Crop, cx)),
+            )
+            .on_action(cx.listener(|this, _: &CancelTool, _, cx| {
+                if this.session.read(cx).drafting() {
+                    this.session.update(cx, Session::cancel_tool);
+                } else {
+                    // The key has another meaning too.
+                    cx.propagate();
+                }
             }))
             .on_action(cx.listener(|this, _: &FocusPhoto, window, cx| {
                 this.session.update(cx, Session::stop_picking);
@@ -299,7 +314,13 @@ impl Render for Workspace {
             .role(Role::Application)
             .aria_label("Rohditor")
             .when(!self.overlays.read(cx).is_open(), |root| {
-                root.key_context(WORKSPACE_CONTEXT)
+                let mut context = KeyContext::new_with_defaults();
+                context.add(WORKSPACE_CONTEXT);
+                // No button or other control has the focus.
+                if self.focus.is_focused(window) {
+                    context.add(PHOTO_CONTEXT);
+                }
+                root.key_context(context)
             })
             .track_focus(&self.focus)
             .relative()
@@ -328,9 +349,7 @@ impl Render for Workspace {
                             .children(self.tab(cx))
                             .child(self.viewport.clone()),
                     )
-                    .when(self.develop_open, |body| {
-                        body.child(dock(&self.develop, DEVELOP_WIDTH))
-                    }),
+                    .when(self.develop_open, |body| body.child(self.tool_dock(cx))),
             )
             .child(self.status_bar(window, cx))
             .child(self.overlays.clone())

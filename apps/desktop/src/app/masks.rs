@@ -12,7 +12,6 @@ use rohditor_engine::document::{EditSession, PreviewTicket};
 use rohditor_engine::tools::{
     ColorPick, LayerEdit, MaskEditMode, MaskToolSession, MaskView, ToolKind,
 };
-use rohditor_image::Orientation;
 use rohditor_raw::{RawFileInfo, RawFrame};
 
 use super::tools::tool_panel_model;
@@ -31,27 +30,6 @@ fn developed_size(info: &RawFileInfo, policy: RawCropPolicy) -> Option<(usize, u
     rohditor_core::raw_crop_dimensions(info, policy).ok()
 }
 
-/// Orientation and crop of the displayed image over the developed frame.
-fn output_geometry(
-    info: &RawFileInfo,
-    policy: RawCropPolicy,
-    recipe: &EditRecipe,
-) -> Option<OutputGeometry> {
-    geometry_for(developed_size(info, policy)?, info.orientation, recipe)
-}
-
-fn geometry_for(
-    (width, height): (usize, usize),
-    source_orientation: Orientation,
-    recipe: &EditRecipe,
-) -> Option<OutputGeometry> {
-    let orientation = recipe
-        .geometry
-        .orientation_override
-        .unwrap_or(source_orientation);
-    OutputGeometry::new(width, height, orientation, recipe.geometry.crop).ok()
-}
-
 /// What the viewport needs to draw and drive the Masks tool, or `None` while the photo has
 /// no frame to map pointer positions onto.
 pub(super) fn overlay_model<'a>(
@@ -62,7 +40,7 @@ pub(super) fn overlay_model<'a>(
     mask_overlay: Option<&'a MaskTint>,
 ) -> Option<MaskOverlayModel<'a>> {
     let recipe = edits.recipe();
-    let geometry = output_geometry(&frame?.info, policy, recipe)?;
+    let geometry = OutputGeometry::of_photo(&frame?.info, policy, &recipe.geometry).ok()?;
     Some(MaskOverlayModel {
         session,
         recipe,
@@ -674,35 +652,6 @@ impl RohditorApp {
         }
         used
     }
-
-    /// Enters the Masks tool, selecting the first mask so there is something to show.
-    pub(super) fn enter_masks_tool(&mut self) {
-        if self.tool.masks().is_some() {
-            return;
-        }
-        let Some(document) = self.document.as_ref() else {
-            return;
-        };
-        let mut session = MaskToolSession::default();
-        if let Some(first) = document.core.edits.recipe().local.layers.first() {
-            session.select_layer(document.core.edits.recipe(), first.id);
-        }
-        self.cancel_pick();
-        // Entering Masks drops any active picker.
-        self.tool.enter_masks(session);
-    }
-
-    /// Leaves the Masks tool for another tool. Nothing to commit.
-    pub(super) fn exit_masks_tool(&mut self) -> bool {
-        if self.tool.masks().is_none() {
-            return false;
-        }
-        self.tool = rohditor_engine::tools::ActiveTool::default();
-        if let Some(document) = self.document.as_mut() {
-            document.mask_overlay = None;
-        }
-        true
-    }
 }
 
 #[cfg(test)]
@@ -710,6 +659,7 @@ mod tests {
     use super::*;
     use rohditor_edit::{LinearGradient, MaskPoint, MaskShape};
     use rohditor_engine::tools::{LocalSlider, RangeSlider};
+    use rohditor_image::Orientation;
 
     fn recipe_with_layer() -> EditRecipe {
         let mut recipe = EditRecipe::default();
@@ -817,16 +767,6 @@ mod tests {
         assert!(apply_slider(&mut edits, next, typed));
         assert!(edits.undo());
         assert_eq!(edits.recipe().local.layers[0].opacity, 1.0);
-    }
-
-    #[test]
-    fn geometry_follows_the_orientation_override_and_the_crop() {
-        let mut recipe = EditRecipe::default();
-        let upright = geometry_for((600, 400), Orientation::Normal, &recipe).expect("geometry");
-        assert_eq!(upright.output_dimensions(), (600, 400));
-        recipe.geometry.orientation_override = Some(Orientation::Rotate90);
-        let turned = geometry_for((600, 400), Orientation::Normal, &recipe).expect("geometry");
-        assert_eq!(turned.output_dimensions(), (400, 600));
     }
 
     fn view() -> MaskView {

@@ -113,6 +113,7 @@ impl PreviewOutcome {
 
 /// The document inputs of one preview operation. Owned, so the operation can
 /// borrow the document's [`DocumentPreview`] mutably at the same time.
+#[derive(Clone)]
 pub struct PreviewRequest {
     /// The decoded RAW; `None` while the file is still opening.
     pub frame: Option<Arc<RawFrame>>,
@@ -234,6 +235,7 @@ impl PreviewRuntime {
         preview: &mut DocumentPreview,
         request: &PreviewRequest,
     ) -> PreviewOutcome {
+        let request = &*preview.presented(request);
         if self.gpu_required_but_unavailable() {
             preview.status = None;
             return PreviewOutcome {
@@ -367,6 +369,7 @@ impl PreviewRuntime {
         preview: &mut DocumentPreview,
         request: &PreviewRequest,
     ) -> (bool, PreviewOutcome) {
+        let request = &*preview.presented(request);
         let supported = preview.gpu.as_ref().is_some_and(|resident| {
             gpu_supports_recipe(&request.recipe)
                 && resident
@@ -539,6 +542,7 @@ impl PreviewRuntime {
         request: &PreviewRequest,
         upload: GpuUpload,
     ) -> PreviewOutcome {
+        let request = &*preview.presented(request);
         let GpuUpload {
             ticket,
             prepared,

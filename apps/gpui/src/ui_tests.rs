@@ -5,6 +5,7 @@
 //! original. `ROHDITOR_SHOTS=DIR` writes a PNG per scenario.
 
 mod color;
+mod crop;
 mod detail;
 mod light;
 mod optics;

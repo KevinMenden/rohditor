@@ -1,11 +1,12 @@
 //! Frontend-agnostic editing-tool state.
 //!
 //! One tool is active at a time; it decides what the tool panel shows and what
-//! pointer gestures on the image mean. Everything here is pure state: the
-//! caller owns undo (via `EditSession::set_discrete`) and preview scheduling.
+//! pointer gestures on the image mean. The caller schedules previews; changing
+//! tools, and what that does to the open photo, is in `switching`.
 
 mod crop;
 mod masks;
+mod switching;
 
 pub use crop::{CropAspect, CropHandle, CropToolSession};
 pub use masks::{
@@ -98,12 +99,12 @@ impl ActiveTool {
     }
 
     /// Switches to the Crop tool; an active picker is dropped.
-    pub fn enter_crop(&mut self, session: CropToolSession) {
+    pub(crate) fn enter_crop(&mut self, session: CropToolSession) {
         *self = Self::Crop(session);
     }
 
     /// Switches to the Masks tool; an active picker is dropped.
-    pub fn enter_masks(&mut self, session: MaskToolSession) {
+    pub(crate) fn enter_masks(&mut self, session: MaskToolSession) {
         *self = Self::Masks(session);
     }
 
@@ -119,15 +120,12 @@ impl ActiveTool {
     /// Leaves the current tool; returns the recipe to commit, if any.
     ///
     /// Pure over `EditRecipe`: the caller owns undo and revisions. A crop is
-    /// only committed when the full frame was available to author against and
-    /// the draft differs from the recipe's crop. Masks have nothing to commit:
+    /// only committed when the draft differs from the recipe's crop. Masks have nothing to commit:
     /// every mask edit already went into the recipe as it happened.
     #[must_use]
-    pub fn leave(self, recipe: &EditRecipe, commit: bool) -> Option<EditRecipe> {
+    pub(crate) fn leave(self, recipe: &EditRecipe, commit: bool) -> Option<EditRecipe> {
         match self {
-            Self::Crop(session)
-                if commit && session.full_frame_ready() && session.is_modified() =>
-            {
+            Self::Crop(session) if commit && session.is_modified() => {
                 let mut next = recipe.clone();
                 next.geometry.crop = session.committed_crop();
                 Some(next)
@@ -141,11 +139,8 @@ impl ActiveTool {
 mod tests {
     use super::*;
 
-    fn modified_session(ready: bool) -> CropToolSession {
+    fn modified_session() -> CropToolSession {
         let mut session = CropToolSession::new(None, 6000, 4000);
-        if ready {
-            session.set_full_dimensions(6000, 4000);
-        }
         session.set_aspect(CropAspect::Square);
         session
     }
@@ -153,22 +148,17 @@ mod tests {
     #[test]
     fn leaving_a_modified_crop_commits_only_when_asked() {
         let recipe = EditRecipe::default();
-        let tool = ActiveTool::Crop(modified_session(true));
+        let tool = ActiveTool::Crop(modified_session());
         let committed = tool.clone().leave(&recipe, true).expect("commit");
         assert!(committed.geometry.crop.is_some());
         assert_eq!(tool.leave(&recipe, false), None);
     }
 
     #[test]
-    fn leaving_an_unmodified_or_unready_crop_commits_nothing() {
+    fn leaving_an_unmodified_crop_commits_nothing() {
         let recipe = EditRecipe::default();
-        let mut untouched = CropToolSession::new(None, 6000, 4000);
-        untouched.set_full_dimensions(6000, 4000);
+        let untouched = CropToolSession::new(None, 6000, 4000);
         assert_eq!(ActiveTool::Crop(untouched).leave(&recipe, true), None);
-        assert_eq!(
-            ActiveTool::Crop(modified_session(false)).leave(&recipe, true),
-            None
-        );
         assert_eq!(ActiveTool::default().leave(&recipe, true), None);
     }
 
@@ -177,7 +167,7 @@ mod tests {
         let edit = ActiveTool::default();
         assert_eq!(edit.toggle_target(ToolKind::Crop), ToolKind::Crop);
         assert_eq!(edit.toggle_target(ToolKind::Edit), ToolKind::Edit);
-        let crop = ActiveTool::Crop(modified_session(true));
+        let crop = ActiveTool::Crop(modified_session());
         assert_eq!(crop.toggle_target(ToolKind::Crop), ToolKind::Edit);
         assert_eq!(crop.toggle_target(ToolKind::Edit), ToolKind::Edit);
     }
@@ -226,7 +216,7 @@ mod tests {
         let mut tool = ActiveTool::Edit {
             picker: Some(Picker::WhiteBalance),
         };
-        tool.enter_crop(modified_session(true));
+        tool.enter_crop(modified_session());
         assert_eq!(tool.kind(), ToolKind::Crop);
         assert_eq!(tool.picker(), None);
         tool.set_picker(Some(Picker::ColorMixer));

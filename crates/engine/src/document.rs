@@ -9,7 +9,7 @@ const HISTORY_LIMIT: usize = 100;
 pub struct PreviewTicket {
     pub document_id: u64,
     pub revision: u64,
-    /// Monotonic presentation identity. A crop-tool full-frame request may
+    /// Monotonic presentation identity. A request without the crop may
     /// share a recipe revision with a committed fit request, so revision alone
     /// is not sufficient to reject stale results.
     pub sequence: u64,
@@ -26,7 +26,6 @@ impl PreviewTicket {
 pub enum PreviewIntent {
     #[default]
     CommittedFit,
-    CropToolFullFrame,
     SourceScale,
 }
 

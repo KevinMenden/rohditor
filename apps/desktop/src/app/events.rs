@@ -83,9 +83,6 @@ impl RohditorApp {
                     PreviewResolution::Fit => {
                         rohditor_engine::document::PreviewIntent::CommittedFit
                     }
-                    PreviewResolution::CropToolFullFrame => {
-                        rohditor_engine::document::PreviewIntent::CropToolFullFrame
-                    }
                     PreviewResolution::SourceScale => {
                         rohditor_engine::document::PreviewIntent::SourceScale
                     }
@@ -93,34 +90,23 @@ impl RohditorApp {
                 let should_install = self.document.as_ref().is_some_and(|document| {
                     document.core.accepts_preview(ticket, intent)
                         && match resolution {
-                            PreviewResolution::Fit => {
-                                !document.core.preview.source_scale_requested
-                                    && self.tool.crop().is_none()
-                            }
-                            PreviewResolution::CropToolFullFrame => self.tool.crop().is_some(),
+                            PreviewResolution::Fit => !document.core.preview.source_scale_requested,
                             PreviewResolution::SourceScale => {
                                 document.core.preview.source_scale_requested
                             }
                         }
-                        && (matches!(
-                            resolution,
-                            PreviewResolution::SourceScale | PreviewResolution::CropToolFullFrame
-                        ) || document
-                            .core
-                            .preview
-                            .gpu()
-                            .is_none_or(|preview| preview.ticket != ticket))
+                        && (resolution == PreviewResolution::SourceScale
+                            || document
+                                .core
+                                .preview
+                                .gpu()
+                                .is_none_or(|preview| preview.ticket != ticket))
                 });
                 if should_install {
                     // Swap directly from the retained GPU frame to the ready
                     // CPU frame during one update, so an unsupported edit such
                     // as HSL never exposes an empty viewport between backends.
-                    // A crop-tool frame is a temporary CPU presentation. Keep
-                    // the resident uncropped GPU source so leaving the crop tool can
-                    // return to an interactive GPU crop without another upload.
-                    if resolution != PreviewResolution::CropToolFullFrame {
-                        self.release_document_gpu_preview(ticket.document_id);
-                    }
+                    self.release_document_gpu_preview(ticket.document_id);
                     let Some(document) = self.document.as_mut() else {
                         return;
                     };
@@ -131,10 +117,10 @@ impl RohditorApp {
                         PreviewSource::developed(diagnostics.algorithm, false)
                     };
                     install_texture(context, document, image, source);
-                    if resolution != PreviewResolution::CropToolFullFrame {
-                        document.core.preview.histogram = Some(*histogram);
-                        document.core.preview.histogram_revision = Some(ticket.revision);
-                    }
+                    document
+                        .core
+                        .preview
+                        .cpu_frame_installed(*histogram, ticket.revision);
                     if resolution == PreviewResolution::SourceScale {
                         document.core.preview.view.source_scale_frame_ready(
                             previous_source,
@@ -146,20 +132,6 @@ impl RohditorApp {
                     document.core.preview.diagnostics =
                         Some(DocumentPreviewDiagnostics::cpu(diagnostics));
                     document.core.error = None;
-                    if resolution == PreviewResolution::CropToolFullFrame
-                        && let Some(session) = self.tool.crop_mut()
-                    {
-                        session.set_full_dimensions(
-                            document
-                                .texture
-                                .as_ref()
-                                .map_or(1, |texture| texture.dimensions().0),
-                            document
-                                .texture
-                                .as_ref()
-                                .map_or(1, |texture| texture.dimensions().1),
-                        );
-                    }
                 }
             }
             WorkerEvent::GpuUploadReady {
@@ -239,7 +211,7 @@ impl RohditorApp {
                     .filter(|doc| doc.core.id == document_id)
                 {
                     document.core.preview.neural_ready = true;
-                    self.refresh_current_presentation(context);
+                    self.queue_preview(context, document_id);
                 }
             }
             WorkerEvent::Warning {

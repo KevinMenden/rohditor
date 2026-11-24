@@ -5,6 +5,7 @@
 //! source and frame, and the histogram, so every frontend applies the same
 //! revision rules. Rendering is driven through [`super::PreviewRuntime`].
 
+use std::borrow::Cow;
 use std::time::{Duration, Instant};
 
 use rohditor_core::Histogram;
@@ -13,7 +14,7 @@ use rohditor_edit::EditRecipe;
 use super::gpu::GpuDocumentPreview;
 use super::histogram::PendingGpuHistogram;
 use super::routing::{gpu_supports_recipe, preview_intent_matches_resolution};
-use super::{DocumentPreviewDiagnostics, PreviewSource};
+use super::{DocumentPreviewDiagnostics, PreviewRequest, PreviewSource};
 use crate::coordinator::PreviewResolution;
 use crate::document::{PreviewIntent, PreviewTicket};
 use crate::view::ViewState;
@@ -44,6 +45,10 @@ pub struct DocumentPreview {
     pub(super) histogram_started: Option<Instant>,
     /// Source 1:1 inspection is requested instead of the fitted preview.
     pub source_scale_requested: bool,
+    /// The photo is to be shown without its crop, for a tool that frames it.
+    full_frame_requested: bool,
+    /// The displayed frame was rendered that way.
+    full_frame_shown: bool,
     /// The background neural demosaic has finished, so a classic stand-in
     /// base no longer counts as current.
     pub neural_ready: bool,
@@ -73,6 +78,8 @@ impl DocumentPreview {
             histogram_due: None,
             histogram_started: None,
             source_scale_requested: false,
+            full_frame_requested: false,
+            full_frame_shown: false,
             neural_ready: false,
             histogram: None,
             histogram_revision: None,
@@ -145,13 +152,53 @@ impl DocumentPreview {
         was_source_scale
     }
 
+    /// Show the photo without its crop, whatever the recipe says, or stop doing
+    /// so. The caller must queue a preview when it changes; until that arrives
+    /// [`Self::full_frame_shown`] does not follow.
+    pub fn request_full_frame(&mut self, full_frame: bool, now: f64) {
+        self.full_frame_requested = full_frame;
+        if full_frame {
+            self.source_scale_requested = false;
+            self.view.fit(now);
+        }
+    }
+
+    /// Whether the displayed frame is the whole photo, without its crop.
+    pub const fn full_frame_shown(&self) -> bool {
+        self.full_frame_shown
+    }
+
+    /// The request as it is to be rendered.
+    pub(super) fn presented<'a>(&self, request: &'a PreviewRequest) -> Cow<'a, PreviewRequest> {
+        if !self.full_frame_requested || request.recipe.geometry.crop.is_none() {
+            return Cow::Borrowed(request);
+        }
+        let mut request = request.clone();
+        request.recipe.geometry.crop = None;
+        Cow::Owned(request)
+    }
+
+    /// The frontend shows a CPU frame that answers the current request.
+    pub fn cpu_frame_installed(&mut self, histogram: Histogram, revision: u64) {
+        self.full_frame_shown = self.full_frame_requested;
+        // Auto Tone and the graph are about the cropped photo.
+        if !self.full_frame_shown {
+            self.histogram = Some(histogram);
+            self.histogram_revision = Some(revision);
+        }
+    }
+
     /// Ask for Source 1:1: one photo pixel per device pixel. Returns whether
     /// the mode changed, in which case the caller must queue a source-scale
     /// preview. The view only jumps to 100% when a source-scale frame is
     /// already on screen; otherwise it follows when that frame arrives (see
-    /// [`ViewState::source_scale_frame_ready`]).
+    /// [`ViewState::source_scale_frame_ready`]). Not while the whole photo is
+    /// being framed.
     #[must_use = "entering Source 1:1 needs a new preview"]
     pub fn request_actual_size(&mut self, now: f64) -> bool {
+        if self.full_frame_requested {
+            return false;
+        }
         let changed = !std::mem::replace(&mut self.source_scale_requested, true);
         if self.source.is_some_and(PreviewSource::is_source_scale) {
             self.view.actual_size(now);
@@ -190,6 +237,7 @@ impl DocumentPreview {
         let had_gpu_frame = self.gpu.take().is_some();
         let displayed_gpu = self.source.is_some_and(PreviewSource::is_gpu);
         if displayed_gpu {
+            self.full_frame_shown = false;
             self.source = None;
         }
         // A GPU frame that was on screen needs its texture released, even when
@@ -241,8 +289,9 @@ impl DocumentPreview {
         self.gpu = Some(preview);
         self.mark_display_changed();
         let due = next_histogram(Instant::now(), self.histogram_started);
-        self.histogram_due =
-            (resolution == PreviewResolution::Fit || histogram_always).then_some((ticket, due));
+        self.full_frame_shown = self.full_frame_requested;
+        let wanted = resolution == PreviewResolution::Fit && !self.full_frame_shown;
+        self.histogram_due = (wanted || histogram_always).then_some((ticket, due));
         self.source = Some(if resolution == PreviewResolution::SourceScale {
             PreviewSource::OneToOneGpu
         } else {
@@ -345,12 +394,55 @@ mod tests {
         assert!(preview.accepts(5, first, PreviewIntent::CommittedFit));
         assert!(!preview.accepts(5, first, PreviewIntent::SourceScale));
 
-        // Same revision, new presentation: the crop tool's frame must not be
-        // answered by the earlier fit result.
-        let second = preview.begin_request(5, PreviewIntent::CropToolFullFrame);
+        // Same revision, new presentation: a full frame must not be answered
+        // by the earlier, cropped result.
+        preview.request_full_frame(true, 0.0);
+        let second = preview.begin_request(5, PreviewIntent::CommittedFit);
         assert!(!preview.accepts(5, first, PreviewIntent::CommittedFit));
-        assert!(preview.accepts(5, second, PreviewIntent::CropToolFullFrame));
-        assert!(!preview.accepts(6, second, PreviewIntent::CropToolFullFrame));
+        assert!(preview.accepts(5, second, PreviewIntent::CommittedFit));
+        assert!(!preview.accepts(6, second, PreviewIntent::CommittedFit));
+    }
+
+    #[test]
+    fn a_full_frame_request_drops_the_crop_and_excludes_source_scale() {
+        let mut recipe = EditRecipe::default();
+        recipe.geometry.crop = Some(rohditor_edit::NormalizedCropRect {
+            left: 0.1,
+            top: 0.2,
+            right: 0.7,
+            bottom: 0.9,
+        });
+        let request = PreviewRequest {
+            frame: None,
+            recipe,
+            revision: 4,
+            options: Default::default(),
+            histogram_always: false,
+            now: 0.0,
+        };
+        let mut preview = DocumentPreview::new(1);
+        preview.source_scale_requested = true;
+        assert_eq!(preview.presented(&request).recipe, request.recipe);
+
+        preview.request_full_frame(true, 1.0);
+        assert!(!preview.source_scale_requested && preview.view.is_fit());
+        assert!(!preview.request_actual_size(2.0));
+        assert!(!preview.source_scale_requested);
+        assert_eq!(preview.presented(&request).recipe.geometry.crop, None);
+        assert!(!preview.full_frame_shown(), "the old frame is still shown");
+        preview.cpu_frame_installed(Histogram::default(), 4);
+        assert!(preview.full_frame_shown());
+        assert_eq!(preview.histogram_revision, None);
+
+        preview.request_full_frame(false, 3.0);
+        assert_eq!(preview.presented(&request).recipe, request.recipe);
+        assert!(
+            preview.full_frame_shown(),
+            "until the cropped frame arrives"
+        );
+        preview.cpu_frame_installed(Histogram::default(), 4);
+        assert!(!preview.full_frame_shown());
+        assert_eq!(preview.histogram_revision, Some(4));
     }
 
     #[test]

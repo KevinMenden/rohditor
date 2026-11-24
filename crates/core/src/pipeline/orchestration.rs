@@ -1762,16 +1762,8 @@ fn output_geometry(
     source_orientation: Orientation,
     recipe: &EditRecipe,
 ) -> Result<OutputGeometry, PipelineError> {
-    let orientation = recipe
-        .geometry
-        .orientation_override
-        .unwrap_or(source_orientation);
-    OutputGeometry::new(
-        image.width(),
-        image.height(),
-        orientation,
-        recipe.geometry.crop,
-    )
+    let developed = (image.width(), image.height());
+    OutputGeometry::adjusted(developed, source_orientation, &recipe.geometry)
 }
 
 fn validate_base_working_set(

@@ -27,6 +27,7 @@ impl Session {
         if !self.export_ready() {
             return;
         }
+        self.apply_tool(cx);
         let Some(document) = self.document.as_ref() else {
             return;
         };

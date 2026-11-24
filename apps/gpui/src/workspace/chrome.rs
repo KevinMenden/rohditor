@@ -29,8 +29,8 @@ impl Workspace {
         let session = self.session.read(cx);
         let folder = self.library.read(cx).folder_name();
         let edits = session.document().map(|document| &document.edits);
-        let can_undo = edits.is_some_and(|edits| edits.can_undo());
-        let can_redo = edits.is_some_and(|edits| edits.can_redo());
+        let can_undo = edits.is_some_and(|edits| edits.can_undo()) || session.tool().is_modified();
+        let can_redo = edits.is_some_and(|edits| edits.can_redo()) && !session.tool().is_modified();
         let own_controls = matches!(window.window_decorations(), Decorations::Client { .. });
         div()
             .id("title-bar")
