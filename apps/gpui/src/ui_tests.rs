@@ -6,6 +6,7 @@
 //! instead of a compiled scenario.
 
 mod color;
+mod crop;
 mod detail;
 mod driver;
 mod light;

@@ -87,7 +87,7 @@ impl Session {
             }
             WorkerEvent::PreviewReady {
                 ticket,
-                resolution: resolution @ (PreviewResolution::Fit | PreviewResolution::SourceScale),
+                resolution,
                 image,
                 histogram,
                 diagnostics,
@@ -129,8 +129,7 @@ impl Session {
                 if source_scale {
                     preview.view.source_scale_frame_ready(previous_source, now);
                 }
-                preview.histogram = Some(*histogram);
-                preview.histogram_revision = Some(ticket.revision);
+                preview.cpu_frame_installed(*histogram, ticket.revision);
                 preview.status = None;
                 preview.last_time = Some(diagnostics.timings.total);
                 preview.diagnostics = Some(DocumentPreviewDiagnostics::cpu(diagnostics));
@@ -274,9 +273,8 @@ impl Session {
                     .current(ticket.document_id)
                     .and_then(|document| document.color_mixer_picked(ticket, channel));
             }
-            // Features this frontend never requests: crop, masks and the neural demosaic.
-            WorkerEvent::PreviewReady { .. }
-            | WorkerEvent::ColorRangeSampleReady { .. }
+            // Features this frontend never requests: masks and the neural demosaic.
+            WorkerEvent::ColorRangeSampleReady { .. }
             | WorkerEvent::ColorRangeSampleFailed { .. }
             | WorkerEvent::MaskOverlayReady { .. }
             | WorkerEvent::MaskOverlayFailed { .. }

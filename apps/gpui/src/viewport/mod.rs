@@ -2,6 +2,7 @@
 //! zooms at the pointer, and a double click returns to fit.
 
 mod clipping;
+mod crop;
 pub mod overlay;
 mod picker;
 mod welcome;
@@ -19,6 +20,7 @@ use crate::session::{Display, Session};
 use crate::theme::theme;
 use crate::ui::test_id::TestId as _;
 use clipping::ClippingOverlay;
+use crop::CropOverlay;
 use overlay::{Overlay, pair};
 use picker::PickerOverlay;
 use welcome::welcome;
@@ -64,6 +66,7 @@ impl Viewport {
         Self {
             overlays: vec![
                 Box::new(ClippingOverlay(session.clone())),
+                Box::new(CropOverlay(session.clone())),
                 Box::new(PickerOverlay(session.clone())),
             ],
             session,

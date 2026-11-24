@@ -232,11 +232,16 @@ fn install(
             .gpu
             .as_ref()
             .is_some_and(|resident| resident.ticket == ticket);
-    preview.histogram = Some(histogram);
+    // Auto Tone and the graph are about the cropped photo.
+    if !preview.full_frame_shown() {
+        preview.histogram = Some(histogram);
+    }
     if !current {
         return poll;
     }
-    preview.histogram_revision = Some(ticket.revision);
+    if !preview.full_frame_shown() {
+        preview.histogram_revision = Some(ticket.revision);
+    }
     if let Some(diagnostics) = preview.diagnostics.as_mut() {
         diagnostics.gpu_histogram_readback = Some(latency);
     }

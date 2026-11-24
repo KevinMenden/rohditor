@@ -1,7 +1,7 @@
 //! The pickers: the next click on the photo samples it.
 
 use gpui::Context;
-use rohditor_engine::tools::Picker;
+use rohditor_engine::tools::{Picker, ToolKind};
 
 use super::{MixerColorPicked, Session};
 
@@ -12,6 +12,8 @@ impl Session {
 
     /// Start this picker, or stop it.
     pub fn toggle_picker(&mut self, picker: Picker, cx: &mut Context<Self>) {
+        // The other tools have no pickers.
+        self.select_tool(ToolKind::Edit, cx);
         let ready = self.document.as_ref().is_some_and(|d| d.frame.is_some());
         let next = (ready && self.picker() != Some(picker)).then_some(picker);
         self.tool.set_picker(next);

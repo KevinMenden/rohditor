@@ -8,6 +8,7 @@ use rohditor_edit::{
 };
 use rohditor_engine::document::EditSession;
 use rohditor_engine::open_document::OpenDocument;
+use rohditor_engine::tools::ActiveTool;
 
 use super::Session;
 
@@ -140,34 +141,36 @@ impl Session {
     ) {
         if let Some(document) = self.document.as_ref() {
             let next = change(document.edits.recipe(), &document.default_recipe());
-            self.change_history(|edits| edits.set_discrete(next), cx);
+            self.change_history(|_, edits| edits.set_discrete(next), cx);
         }
     }
 
     fn change_history(
         &mut self,
-        change: impl FnOnce(&mut EditSession) -> bool,
+        change: impl FnOnce(&mut ActiveTool, &mut EditSession) -> bool,
         cx: &mut Context<Self>,
     ) {
-        if self.document.as_mut().is_some_and(|d| change(&mut d.edits)) {
+        if let Some(document) = self.document.as_mut()
+            && change(&mut self.tool, &mut document.edits)
+        {
             self.queue_preview();
-            self.tick(cx);
         }
+        self.tick(cx);
     }
 
     pub fn undo(&mut self, cx: &mut Context<Self>) {
-        self.change_history(EditSession::undo, cx);
+        self.change_history(ActiveTool::undo, cx);
     }
 
     pub fn redo(&mut self, cx: &mut Context<Self>) {
-        self.change_history(EditSession::redo, cx);
+        self.change_history(ActiveTool::redo, cx);
     }
 
     pub fn reset(&mut self, cx: &mut Context<Self>) {
         let Some(defaults) = self.document.as_ref().map(OpenDocument::default_recipe) else {
             return;
         };
-        self.change_history(|edits| edits.reset_to(defaults), cx);
+        self.change_history(|tool, edits| tool.reset(edits, defaults), cx);
     }
 
     /// Auto Tone needs the histogram of exactly the recipe it starts from.
@@ -180,7 +183,7 @@ impl Session {
             auto_tone(document.edits.recipe(), preview.histogram.as_ref()?)
         });
         if let Some(next) = next {
-            self.change_history(|edits| edits.set_discrete(next), cx);
+            self.change_history(|_, edits| edits.set_discrete(next), cx);
         }
     }
 

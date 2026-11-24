@@ -1,7 +1,8 @@
-use rohditor_edit::NormalizedCropRect;
+use rohditor_edit::{GeometryAdjustments, NormalizedCropRect};
 use rohditor_image::{Orientation, OrientationMap};
+use rohditor_raw::RawFileInfo;
 
-use crate::PipelineError;
+use crate::{PipelineError, RawCropPolicy, raw_crop_dimensions};
 
 /// Integer crop edges in the fully oriented developed canvas.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +70,32 @@ impl OutputGeometry {
             }
         };
         Ok(Self { orientation, crop })
+    }
+
+    /// The geometry of a photo at its full size.
+    ///
+    /// The developed frame is not the RAW's full sensor size: masked borders are cut off, which
+    /// changes the aspect and with it every long-edge length.
+    pub fn of_photo(
+        info: &RawFileInfo,
+        policy: RawCropPolicy,
+        adjustments: &GeometryAdjustments,
+    ) -> Result<Self, PipelineError> {
+        let developed = raw_crop_dimensions(info, policy)?;
+        Self::adjusted(developed, info.orientation, adjustments)
+    }
+
+    /// The geometry of a developed frame with the user's adjustments, which may override the
+    /// orientation of the source.
+    pub fn adjusted(
+        (width, height): (usize, usize),
+        source_orientation: Orientation,
+        adjustments: &GeometryAdjustments,
+    ) -> Result<Self, PipelineError> {
+        let orientation = adjustments
+            .orientation_override
+            .unwrap_or(source_orientation);
+        Self::new(width, height, orientation, adjustments.crop)
     }
 
     #[must_use]
@@ -158,10 +185,30 @@ fn resolve_edge(normalized: f64, dimension: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use rohditor_edit::NormalizedCropRect;
+    use rohditor_edit::{GeometryAdjustments, NormalizedCropRect};
     use rohditor_image::Orientation;
 
     use super::{OutputGeometry, ResolvedCropRect};
+
+    #[test]
+    fn adjusted_geometry_follows_the_orientation_override_and_the_crop() {
+        let dimensions = |adjustments: &GeometryAdjustments| {
+            OutputGeometry::adjusted((600, 400), Orientation::Normal, adjustments)
+                .expect("geometry")
+                .output_dimensions()
+        };
+        let mut adjustments = GeometryAdjustments::default();
+        assert_eq!(dimensions(&adjustments), (600, 400));
+        adjustments.orientation_override = Some(Orientation::Rotate90);
+        assert_eq!(dimensions(&adjustments), (400, 600));
+        adjustments.crop = Some(NormalizedCropRect {
+            left: 0.0,
+            top: 0.0,
+            right: 0.5,
+            bottom: 1.0,
+        });
+        assert_eq!(dimensions(&adjustments), (200, 600));
+    }
 
     #[test]
     fn crop_resolves_edges_in_oriented_canvas_before_mapping_to_source() {

@@ -5,6 +5,7 @@ use rohditor_edit::{
     HighlightMethod, LensProfileSelection, RecipeSection, RenderingProfileSelection,
     WhiteBalancePreset,
 };
+use rohditor_engine::tools::CropAspect;
 
 use crate::panels::adjustments::{
     HIGHLIGHT_METHODS, RENDERINGS, method_label, rendering_label, sections,
@@ -32,6 +33,13 @@ actions!(
         SavePreset,
         PickWhiteBalance,
         PickMixerColor,
+        EditTool,
+        CropTool,
+        LockCrop,
+        FlipCrop,
+        ResetCrop,
+        ApplyTool,
+        CancelTool,
         ZoomToFit,
         ActualPixels,
         ToggleClipping,
@@ -66,6 +74,10 @@ pub struct SetRendering(pub RenderingProfileSelection);
 #[derive(Debug, Clone, PartialEq, Eq, Action)]
 #[action(namespace = rohditor, no_json)]
 pub struct SetLensProfile(pub LensProfileSelection);
+
+#[derive(Debug, Clone, PartialEq, Eq, Action)]
+#[action(namespace = rohditor, no_json)]
+pub struct SetCropAspect(pub CropAspect);
 
 /// An entry of the command palette and, when it has a key, of the keymap.
 pub struct Command {
@@ -124,6 +136,12 @@ pub fn commands() -> Vec<Command> {
         ),
         command("develop: pick white balance", Some("w"), PickWhiteBalance),
         command("develop: pick mixer color", None, PickMixerColor),
+        command("tool: edit", Some("e"), EditTool),
+        command("tool: crop", Some("c"), CropTool),
+        command("crop: lock ratio", None, LockCrop),
+        command("crop: flip ratio", Some("x"), FlipCrop),
+        command("crop: reset", None, ResetCrop),
+        command("tool: apply", Some("enter"), ApplyTool),
         command("view: zoom to fit", Some("ctrl-0"), ZoomToFit),
         command("view: actual pixels (1:1)", Some("ctrl-1"), ActualPixels),
         command("view: toggle clipping overlay", Some("j"), ToggleClipping),
@@ -136,6 +154,8 @@ pub fn commands() -> Vec<Command> {
             SearchAdjustments,
         ),
         command("view: focus photo", Some("escape"), FocusPhoto),
+        // After what else the key does, so that it comes first.
+        command("tool: cancel", Some("escape"), CancelTool),
         command(
             "view: command palette",
             Some("ctrl-shift-p"),
@@ -158,6 +178,10 @@ pub fn commands() -> Vec<Command> {
     commands.extend(WhiteBalancePreset::ALL.into_iter().map(|preset| {
         let name = format!("develop: white balance {}", preset.label().to_lowercase());
         command(name, None, SetWhiteBalance(preset))
+    }));
+    commands.extend(CropAspect::ALL.into_iter().map(|aspect| {
+        let name = format!("crop: aspect {}", aspect.label().to_lowercase());
+        command(name, None, SetCropAspect(aspect))
     }));
     commands.extend(RENDERINGS.into_iter().map(|rendering| {
         let name = format!(
@@ -212,7 +236,14 @@ pub fn bind_keys(cx: &mut App) {
     let bindings = commands().into_iter().filter_map(|command| {
         // The workspace context, so that menus and dialogs get the keys while they are open.
         // Quitting always works.
-        let context = (!command.action.partial_eq(&Quit)).then(workspace_context);
+        let context = if command.action.partial_eq(&Quit) {
+            None
+        } else if command.action.partial_eq(&ApplyTool) {
+            // Enter also presses the focused control.
+            Some(context(PHOTO_CONTEXT))
+        } else {
+            Some(context(WORKSPACE_CONTEXT))
+        };
         KeyBinding::load(
             command.key?,
             command.action,
@@ -240,9 +271,9 @@ fn letters_to_type() -> Vec<KeyBinding> {
 }
 
 pub const WORKSPACE_CONTEXT: &str = "Workspace";
+/// Added while the photo has the focus.
+pub const PHOTO_CONTEXT: &str = "Photo";
 
-fn workspace_context() -> std::rc::Rc<gpui::KeyBindingContextPredicate> {
-    std::rc::Rc::new(gpui::KeyBindingContextPredicate::Identifier(
-        WORKSPACE_CONTEXT.into(),
-    ))
+fn context(name: &'static str) -> std::rc::Rc<gpui::KeyBindingContextPredicate> {
+    std::rc::Rc::new(gpui::KeyBindingContextPredicate::Identifier(name.into()))
 }

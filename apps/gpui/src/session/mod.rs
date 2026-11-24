@@ -14,6 +14,7 @@ mod presets;
 mod profiles;
 mod renderer;
 mod saving;
+mod tools;
 mod upload;
 mod zoom;
 
@@ -186,8 +187,12 @@ impl Session {
     }
 
     pub fn close_document(&mut self, cx: &mut Context<Self>) {
+        if let Some(document) = self.document.as_mut() {
+            // Nothing is shown any more, so nothing has to be rendered.
+            let _ = self.tool.apply(document, self.renderer.now());
+        }
+        self.tool = ActiveTool::default();
         self.save_now();
-        self.tool.set_picker(None);
         self.display.clear();
         if let Some(document) = self.document.take() {
             self.renderer.coordinator.abandon(document.id);
@@ -223,6 +228,7 @@ impl Session {
         self.saves.process_results(self.document.as_mut());
         let mut delays = Vec::new();
         if let Some(document) = self.document.as_mut() {
+            self.tool.sync(document.edits.recipe());
             if document.sync_camera_look(&self.renderer.coordinator) {
                 self.renderer.queue_preview(document, &mut self.display);
             }

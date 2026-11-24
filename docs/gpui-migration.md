@@ -95,9 +95,9 @@ Done when every global recipe control is editable, apart from the omissions abov
 
 ## Stage 4: Crop
 
-- [ ] 4.1 Tool switching and lifecycle.
-- [ ] 4.2 Overlay with handles.
-- [ ] 4.3 Aspect, lock, orientation, commit, cancel.
+- [x] 4.1 Tool switching and lifecycle.
+- [x] 4.2 Overlay with handles.
+- [x] 4.3 Aspect, lock, orientation, commit, cancel.
 
 Done when each crop is one undo step.
 

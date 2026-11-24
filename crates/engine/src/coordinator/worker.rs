@@ -69,7 +69,6 @@ pub enum PreviewBackend {
 pub enum PreviewResolution {
     #[default]
     Fit,
-    CropToolFullFrame,
     SourceScale,
 }
 
@@ -514,30 +513,6 @@ impl RenderCoordinator {
                     PreviewBackend::Cpu
                 },
                 resolution: PreviewResolution::SourceScale,
-            },
-            &self.requests,
-        )
-    }
-
-    /// Develop a temporary uncropped fit preview for the crop authoring tool.
-    /// The caller retains the committed recipe and filters this result by its
-    /// presentation state, so it can never become an undoable edit itself.
-    pub fn crop_tool_preview(
-        &self,
-        ticket: PreviewTicket,
-        frame: Arc<RawFrame>,
-        mut recipe: EditRecipe,
-        options: PreviewOptions,
-    ) -> Result<(), String> {
-        recipe.geometry.crop = None;
-        self.previews.queue(
-            PreviewJob {
-                ticket,
-                frame,
-                recipe,
-                options,
-                backend: PreviewBackend::Cpu,
-                resolution: PreviewResolution::CropToolFullFrame,
             },
             &self.requests,
         )
