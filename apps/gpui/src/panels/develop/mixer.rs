@@ -1,7 +1,7 @@
 //! The colours of the mixer. One is selected, and its sliders are listed below.
 
-use gpui::{Context, IntoElement, MouseButton, Role, div, prelude::*, px, rgb};
-use rohditor_edit::{EditRecipe, HSL_CHANNEL_COUNT, Parameter};
+use gpui::{Context, IntoElement, MouseButton, Role, Window, div, prelude::*, px, rgb};
+use rohditor_edit::{EditRecipe, HSL_CHANNEL_COUNT, Parameter, RecipeSection};
 
 use super::DevelopPanel;
 use super::focus::Control;
@@ -25,6 +25,21 @@ pub(super) const fn channel_of(parameter: Parameter) -> Option<usize> {
 }
 
 impl DevelopPanel {
+    /// Show the sliders of a colour picked on the photo.
+    pub(super) fn show_mixer_channel(
+        &mut self,
+        channel: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // What would hide the colours.
+        self.collapsed.remove(&RecipeSection::ColorMixer);
+        self.edited_only = false;
+        self.search.update(cx, |search, cx| search.clear(cx));
+        self.scroll_to(Control::MixerChannels, window, cx);
+        self.select_mixer_channel(channel, cx);
+    }
+
     pub fn select_mixer_channel(&mut self, channel: usize, cx: &mut Context<Self>) {
         self.mixer_channel = channel;
         cx.notify();

@@ -10,6 +10,7 @@
 
 mod camera_look;
 mod noise;
+mod picks;
 mod sections;
 mod worker_events;
 
@@ -65,6 +66,8 @@ pub struct OpenDocument {
     pub initialize_white_balance_from_metadata: bool,
     camera_look: CameraLookState,
     noise: NoiseState,
+    /// A picker's sample on its way from the worker.
+    pending_pick: Option<PreviewTicket>,
 }
 
 impl OpenDocument {
@@ -91,6 +94,7 @@ impl OpenDocument {
             initialize_white_balance_from_metadata: false,
             camera_look: CameraLookState::default(),
             noise: NoiseState::default(),
+            pending_pick: None,
         }
     }
 

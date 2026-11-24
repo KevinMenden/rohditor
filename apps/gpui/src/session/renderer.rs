@@ -70,6 +70,13 @@ impl Renderer {
         self.runtime.preference() != ProcessorPreference::Cpu
     }
 
+    pub fn preview_options(&self) -> PreviewOptions {
+        PreviewOptions {
+            render: self.settings.render_options(),
+            ..PreviewOptions::default()
+        }
+    }
+
     pub fn queue_preview(&mut self, document: &mut OpenDocument, display: &mut DisplaySlot) {
         self.run(
             document,
@@ -96,10 +103,7 @@ impl Renderer {
             frame: document.frame.clone(),
             recipe: document.edits.recipe().clone(),
             revision: document.edits.revision(),
-            options: PreviewOptions {
-                render: self.settings.render_options(),
-                ..PreviewOptions::default()
-            },
+            options: self.preview_options(),
             histogram_always: false,
             now: self.now(),
         };

@@ -219,7 +219,7 @@ pub(super) fn process_mask_overlay(
 /// Runs `read` on the preview base for `recipe`, preparing it first if the cache lacks it.
 /// `cancellation` stops the preparation (the document was closed).
 #[allow(clippy::too_many_arguments)]
-fn with_base<T>(
+pub(super) fn with_base<T>(
     ticket: PreviewTicket,
     frame: &Arc<RawFrame>,
     recipe: &EditRecipe,

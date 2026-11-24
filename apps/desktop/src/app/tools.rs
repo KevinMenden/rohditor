@@ -133,7 +133,7 @@ impl RohditorApp {
         let Some((document_id, ticket, frame, recipe, session)) = request else {
             return;
         };
-        self.pending_white_balance_pick = None;
+        self.cancel_pick();
         // Entering Crop drops any active picker.
         self.tool.enter_crop(session);
         let options = self.preview_options();

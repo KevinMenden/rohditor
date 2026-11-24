@@ -36,6 +36,8 @@ mod camera_look_worker;
 mod export_worker;
 #[path = "local_detail.rs"]
 mod local_detail;
+#[path = "mixer_sample.rs"]
+mod mixer_sample;
 #[path = "neural_worker.rs"]
 mod neural_worker;
 #[path = "noise_worker.rs"]
@@ -44,6 +46,7 @@ mod noise_worker;
 mod range_jobs;
 
 pub use camera_look_worker::CameraLookJob;
+pub use mixer_sample::MixerSampleJob;
 pub use neural_worker::NeuralResult;
 pub use noise_worker::NoiseProfileJob;
 pub use range_jobs::{ColorSampleJob, MaskOverlayJob};
@@ -254,6 +257,11 @@ pub enum WorkerEvent {
         ticket: PreviewTicket,
         message: String,
     },
+    /// The colour mixer's channel under a click of its picker.
+    ColorMixerSampled {
+        ticket: PreviewTicket,
+        channel: Result<usize, String>,
+    },
     /// The colour under a click of the colour-range picker.
     ColorRangeSampleReady {
         ticket: PreviewTicket,
@@ -347,7 +355,7 @@ pub struct WhiteBalanceSampleJob {
     ticket: PreviewTicket,
     frame: Arc<RawFrame>,
     recipe: EditRecipe,
-    coordinate: (f32, f32),
+    coordinate: (f64, f64),
     options: PreviewOptions,
 }
 
@@ -365,6 +373,7 @@ pub enum WorkerRequest {
     },
     PreviewAvailable,
     SampleWhiteBalance(Box<WhiteBalanceSampleJob>),
+    SampleColorMixer(Box<MixerSampleJob>),
     SampleColorRange(Box<ColorSampleJob>),
     RenderMaskOverlay(Box<MaskOverlayJob>),
     FitCameraLook(Box<CameraLookJob>),
@@ -561,7 +570,7 @@ impl RenderCoordinator {
         ticket: PreviewTicket,
         frame: Arc<RawFrame>,
         recipe: EditRecipe,
-        coordinate: (f32, f32),
+        coordinate: (f64, f64),
         options: PreviewOptions,
     ) -> Result<(), String> {
         self.send(WorkerRequest::SampleWhiteBalance(Box::new(
@@ -573,6 +582,25 @@ impl RenderCoordinator {
                 options,
             },
         )))
+    }
+
+    /// Find the colour mixer's channel under `position` (`0..1` over the image as shown). The
+    /// result arrives as [`WorkerEvent::ColorMixerSampled`].
+    pub fn sample_color_mixer(
+        &self,
+        ticket: PreviewTicket,
+        frame: Arc<RawFrame>,
+        recipe: EditRecipe,
+        position: (f64, f64),
+        options: PreviewOptions,
+    ) -> Result<(), String> {
+        self.send(WorkerRequest::SampleColorMixer(Box::new(MixerSampleJob {
+            ticket,
+            frame,
+            recipe,
+            position,
+            options,
+        })))
     }
 
     /// Sample the colour under `position` (`0..1` over the image as shown) for a colour range.
@@ -851,6 +879,23 @@ fn worker_loop(
                     );
                 }
             }
+            WorkerRequest::SampleColorMixer(mut job) => {
+                job.options = neural.route(
+                    job.ticket.document_id,
+                    &job.frame,
+                    &job.recipe,
+                    job.options,
+                    &preview_cache,
+                    false,
+                );
+                if !abandoned.contains(&job.ticket.document_id) {
+                    let event = WorkerEvent::ColorMixerSampled {
+                        ticket: job.ticket,
+                        channel: mixer_sample::mixer_channel(&job, &pipeline, &mut preview_cache),
+                    };
+                    send_event(&sender, &wake, event);
+                }
+            }
             WorkerRequest::SampleColorRange(mut job) => {
                 job.options = neural.route(
                     job.ticket.document_id,
@@ -970,6 +1015,7 @@ impl WorkerRequest {
             Self::FitCameraLook(job) => Some(job.document_id),
             Self::EstimateNoise(job) => Some(job.document_id),
             Self::SampleWhiteBalance(job) => Some(job.ticket.document_id),
+            Self::SampleColorMixer(job) => Some(job.ticket.document_id),
             Self::SampleColorRange(job) => Some(job.ticket.document_id),
             Self::RenderMaskOverlay(job) => Some(job.ticket.document_id),
             Self::NeuralFinished(result) => Some(result.document_id()),
@@ -1782,13 +1828,6 @@ fn sample_white_balance_patch(
     pipeline: &CpuPipeline,
     preview_cache: &mut PreviewCache,
 ) -> Result<[f32; 3], String> {
-    if !job.coordinate.0.is_finite()
-        || !job.coordinate.1.is_finite()
-        || !(0.0..=1.0).contains(&job.coordinate.0)
-        || !(0.0..=1.0).contains(&job.coordinate.1)
-    {
-        return Err("The white-balance sample coordinate was invalid".to_owned());
-    }
     job.recipe
         .validate()
         .map_err(|error| format!("The current edit recipe is invalid: {error}"))?;
@@ -1824,46 +1863,29 @@ fn sample_white_balance_patch(
         "The reconstructed preview was unavailable for white-balance sampling".to_owned()
     })?;
 
-    sample_camera_native_patch(
-        reconstructed,
-        job.recipe.geometry.orientation_override,
-        job.coordinate,
-    )
+    sample_camera_native_patch(reconstructed, &job.recipe.geometry, job.coordinate)
 }
 
+/// The median camera colour around a position `0..1` over the image as shown. Lens
+/// corrections are not followed.
 fn sample_camera_native_patch(
     reconstructed: &rohditor_core::ReconstructedPreview,
-    orientation_override: Option<Orientation>,
-    coordinate: (f32, f32),
+    geometry: &rohditor_edit::GeometryAdjustments,
+    coordinate: (f64, f64),
 ) -> Result<[f32; 3], String> {
     let image = reconstructed.image();
-    let orientation = orientation_override.unwrap_or(reconstructed.source_orientation());
-    let orientation_map = OrientationMap::new(image.width(), image.height(), orientation)
-        .map_err(|error| format!("Could not map the white-balance sample: {error}"))?;
-    let (output_width, output_height) = orientation_map.output_dimensions();
-    let center_x = (coordinate.0 * output_width.saturating_sub(1) as f32)
-        .round()
-        .clamp(0.0, output_width.saturating_sub(1) as f32) as usize;
-    let center_y = (coordinate.1 * output_height.saturating_sub(1) as f32)
-        .round()
-        .clamp(0.0, output_height.saturating_sub(1) as f32) as usize;
-    const RADIUS: usize = 2;
-    let x_start = center_x.saturating_sub(RADIUS);
-    let x_end = center_x
-        .saturating_add(RADIUS)
-        .min(output_width.saturating_sub(1));
-    let y_start = center_y.saturating_sub(RADIUS);
-    let y_end = center_y
-        .saturating_add(RADIUS)
-        .min(output_height.saturating_sub(1));
+    let (columns, rows) = rohditor_core::developed_patch(
+        (image.width(), image.height()),
+        reconstructed.source_orientation(),
+        geometry,
+        coordinate,
+    )
+    .ok_or_else(|| "The white-balance sample is outside the photo".to_owned())?;
     let mut samples = [Vec::new(), Vec::new(), Vec::new()];
 
-    for output_y in y_start..=y_end {
-        for output_x in x_start..=x_end {
-            let (source_x, source_y) = orientation_map
-                .source_coordinate(output_x, output_y)
-                .ok_or_else(|| "The white-balance sample mapped outside the image".to_owned())?;
-            let Some(pixel) = image.pixel(source_x, source_y) else {
+    for row in rows {
+        for column in columns.clone() {
+            let Some(pixel) = image.pixel(column, row) else {
                 continue;
             };
             if pixel
@@ -2677,7 +2699,7 @@ mod tests {
         let reconstructed = CpuPipeline::default()
             .prepare_preview_reconstruction(&frame, &recipe, PreviewOptions::default())
             .expect("fixture reconstruction should succeed");
-        let sample = sample_camera_native_patch(&reconstructed, None, (0.5, 0.5))
+        let sample = sample_camera_native_patch(&reconstructed, &Default::default(), (0.5, 0.5))
             .expect("unclipped fixture patch should be sampleable");
         assert!(sample.iter().all(|value| value.is_finite() && *value > 0.0));
 
@@ -2694,7 +2716,44 @@ mod tests {
         let reconstructed = CpuPipeline::default()
             .prepare_preview_reconstruction(&clipped, &clip_off_recipe, PreviewOptions::default())
             .expect("clipped fixture reconstruction should succeed");
-        assert!(sample_camera_native_patch(&reconstructed, None, (0.5, 0.5)).is_err());
+        assert!(
+            sample_camera_native_patch(&reconstructed, &Default::default(), (0.5, 0.5)).is_err()
+        );
+    }
+
+    #[test]
+    fn white_balance_picker_follows_the_crop() {
+        let mut frame = fake_frame();
+        let width = frame.info.width;
+        // Darker to the left.
+        let ramp = frame.mosaic.iter().enumerate().map(|(index, value)| {
+            let x = (index % width) as f32 / width as f32;
+            (f32::from(*value) * (0.7 + 0.3 * x)) as u16
+        });
+        frame.mosaic = ramp.collect::<Vec<_>>().into();
+        let reconstructed = CpuPipeline::default()
+            .prepare_preview_reconstruction(
+                &frame,
+                &EditRecipe::default(),
+                PreviewOptions::default(),
+            )
+            .expect("fixture reconstruction should succeed");
+        // A position is over the cropped image: the middle of the right half.
+        let cropped = rohditor_edit::GeometryAdjustments {
+            crop: Some(rohditor_edit::NormalizedCropRect {
+                left: 0.5,
+                top: 0.0,
+                right: 1.0,
+                bottom: 1.0,
+            }),
+            ..Default::default()
+        };
+        let in_crop = sample_camera_native_patch(&reconstructed, &cropped, (0.5, 0.5));
+        let in_full = sample_camera_native_patch(&reconstructed, &Default::default(), (0.75, 0.5));
+        assert_eq!(in_crop, in_full);
+        assert!(in_crop.is_ok());
+        let centre = sample_camera_native_patch(&reconstructed, &Default::default(), (0.5, 0.5));
+        assert_ne!(in_crop, centre);
     }
 
     #[test]

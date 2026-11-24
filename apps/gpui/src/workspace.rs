@@ -8,11 +8,14 @@ use gpui::{
     Render, Role, Stateful, StyleRefinement, Window, div, prelude::*,
 };
 
+use rohditor_engine::tools::Picker;
+
 use crate::actions::{
     ActualPixels, AutoTone, CloseFile, Export, FocusAdjustments, FocusPhoto, ImportCameraProfile,
-    NextPhoto, OpenFile, OpenFolder, PreviousPhoto, Quit, Redo, ResetAdjustments, ResetSection,
-    Save, SearchAdjustments, SetHighlightMethod, SetRendering, SetWhiteBalance, ToggleClipping,
-    ToggleCommandPalette, ToggleDevelop, ToggleFiles, Undo, WORKSPACE_CONTEXT, ZoomToFit,
+    NextPhoto, OpenFile, OpenFolder, PickMixerColor, PickWhiteBalance, PreviousPhoto, Quit, Redo,
+    ResetAdjustments, ResetSection, Save, SearchAdjustments, SetHighlightMethod, SetRendering,
+    SetWhiteBalance, ToggleClipping, ToggleCommandPalette, ToggleDevelop, ToggleFiles, Undo,
+    WORKSPACE_CONTEXT, ZoomToFit,
 };
 use crate::library::Library;
 use crate::panels::command_palette::CommandPalette;
@@ -78,7 +81,7 @@ impl Workspace {
         Self {
             files: cx
                 .new(|cx| FilesPanel::new(session.clone(), library.clone(), overlays.clone(), cx)),
-            develop: cx.new(|cx| DevelopPanel::new(session.clone(), overlays.clone(), cx)),
+            develop: cx.new(|cx| DevelopPanel::new(session.clone(), overlays.clone(), window, cx)),
             viewport: cx.new(|cx| Viewport::new(session.clone(), cx)),
             session,
             library,
@@ -185,6 +188,8 @@ impl Workspace {
             Redo => |session, cx| session.redo(cx),
             ResetAdjustments => |session, cx| session.reset(cx),
             AutoTone => |session, cx| session.auto_tone(cx),
+            PickWhiteBalance => |session, cx| session.toggle_picker(Picker::WhiteBalance, cx),
+            PickMixerColor => |session, cx| session.toggle_picker(Picker::ColorMixer, cx),
             ImportCameraProfile => |session, cx| session.prompt_camera_profile(cx),
             ToggleClipping => |session, cx| session.toggle_clipping(cx),
         );
@@ -238,7 +243,10 @@ impl Workspace {
                 this.develop
                     .update(cx, |panel, cx| panel.focus_adjustments(window, cx));
             }))
-            .on_action(cx.listener(|this, _: &FocusPhoto, window, cx| this.focus.focus(window, cx)))
+            .on_action(cx.listener(|this, _: &FocusPhoto, window, cx| {
+                this.session.update(cx, Session::stop_picking);
+                this.focus.focus(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &Quit, window, cx| {
                 if this.may_quit(window, cx) {
                     cx.quit();

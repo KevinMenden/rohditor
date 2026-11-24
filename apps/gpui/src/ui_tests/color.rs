@@ -187,3 +187,81 @@ fn profiles_are_chosen_and_imported() {
     harness.click("button:reset-ColorProfile");
     assert_eq!(recipe(&mut harness).color, original);
 }
+
+/// Press on the photo at a position 0 to 1 over the viewport.
+fn press_photo(harness: &mut Harness, x: f32, y: f32) {
+    let area = harness.find("viewport");
+    let position = area.origin + point(area.size.width * x, area.size.height * y);
+    harness.press(position, 1);
+    harness.release(position);
+}
+
+#[test]
+#[ignore = "requires a wgpu adapter and ROHDITOR_RAW"]
+fn the_white_balance_is_picked_from_the_photo() {
+    let Some(mut harness) = opened_tall("pick-balance") else {
+        return;
+    };
+    let picking = |session: &Session| session.document().is_some_and(|d| d.is_picking());
+    let original = recipe(&mut harness);
+    harness.keys("w");
+    assert!(harness.with_session(|session, _| session.picker().is_some()));
+    harness.capture("picking");
+    harness.keys("escape");
+    assert!(harness.with_session(|session, _| session.picker().is_none()));
+    press_photo(&mut harness, 0.5, 0.5);
+    assert!(!harness.with_session(|session, _| picking(session)));
+
+    harness.click("button:pick-white-balance");
+    press_photo(&mut harness, 0.5, 0.5);
+    assert!(harness.with_session(|session, _| session.picker().is_none()));
+    // The worker rejects patches that are too varied, so look for one that is not.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut x = 0.3;
+    while recipe(&mut harness) == original {
+        assert!(Instant::now() < deadline, "no patch could be sampled");
+        harness.with_session(|session, cx| session.tick(cx));
+        harness.cx.run_until_parked();
+        if !harness.with_session(|session, _| picking(session)) && recipe(&mut harness) == original
+        {
+            harness.keys("w");
+            press_photo(&mut harness, x, 0.4);
+            x = if x > 0.7 { 0.3 } else { x + 0.03 };
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let picked = recipe(&mut harness);
+    assert_ne!(picked.color.white_balance, original.color.white_balance);
+    assert_eq!(picked.light, original.light);
+    harness.wait_until("the picked balance", settled);
+    harness.capture("picked-balance");
+    harness.keys("ctrl-z");
+    assert_eq!(recipe(&mut harness), original, "a pick is one undo step");
+}
+
+#[test]
+#[ignore = "requires a wgpu adapter and ROHDITOR_RAW"]
+fn a_mixer_color_is_picked_from_the_photo() {
+    let Some(mut harness) = opened_tall("pick-color") else {
+        return;
+    };
+    let original = recipe(&mut harness);
+    // What would hide the result is reset.
+    harness.keys("ctrl-f x y z");
+    harness.with_session(|session, cx| {
+        session.toggle_picker(rohditor_engine::tools::Picker::ColorMixer, cx);
+    });
+    press_photo(&mut harness, 0.25, 0.5);
+    harness.wait_until("the sample", |session| {
+        session.document().is_some_and(|d| !d.is_picking())
+    });
+    harness.draw();
+    let channel = (0..8).find(|channel| {
+        let row = format!("adjustment:HslHue({channel})");
+        harness.lookup(&row).is_some()
+    });
+    let channel = channel.expect("a color is selected");
+    println!("picked channel {channel}");
+    harness.capture("picked-color");
+    assert_eq!(recipe(&mut harness), original, "a pick only selects");
+}

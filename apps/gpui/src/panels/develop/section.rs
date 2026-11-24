@@ -5,15 +5,17 @@ use gpui::{
     prelude::*, px,
 };
 use rohditor_edit::{EditRecipe, RecipeSection};
+use rohditor_engine::tools::Picker;
 
 use super::DevelopPanel;
 use super::choices::Choice;
 use super::focus::Control;
 use super::row::ResetValue;
+use crate::actions::{PickMixerColor, PickWhiteBalance};
 use crate::assets::Icon;
 use crate::panels::adjustments::{Group, Section};
 use crate::theme::{RADIUS, SMALL_FONT_SIZE, theme};
-use crate::ui::button::{icon, icon_button};
+use crate::ui::button::{command_button, icon, icon_button};
 use crate::ui::test_id::TestId as _;
 
 const CONTEXT: &str = "SectionHeader";
@@ -176,6 +178,7 @@ impl DevelopPanel {
             .items_center()
             .gap_1()
             .child(self.section_title(section, changed, cx))
+            .children(self.picker_button(section))
             .when(changed, |header| {
                 let label = format!("Reset {}", section.label());
                 let reset = icon_button(
@@ -188,6 +191,23 @@ impl DevelopPanel {
                 // By keyboard, Delete on the header does the same.
                 header.child(reset.tab_stop(false))
             })
+    }
+
+    /// Starts the section's picker, if it has one.
+    fn picker_button(&self, section: RecipeSection) -> Option<impl IntoElement + use<>> {
+        let (picker, button) = match section {
+            RecipeSection::WhiteBalance => (
+                Picker::WhiteBalance,
+                command_button("pick-white-balance", Icon::Pipette, PickWhiteBalance, true),
+            ),
+            RecipeSection::ColorMixer => (
+                Picker::ColorMixer,
+                command_button("pick-mixer-color", Icon::Pipette, PickMixerColor, true),
+            ),
+            _ => return None,
+        };
+        let active = self.model.picker == Some(picker);
+        Some(button.when(active, |button| button.bg(theme().selected)))
     }
 
     /// The title, which collapses the section.

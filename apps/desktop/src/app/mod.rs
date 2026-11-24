@@ -11,8 +11,7 @@ use rohditor_core::NEURAL_FALLBACK_DEMOSAIC;
 use rohditor_core::{
     CameraCalibration, HighlightDiagnostics, JPEG_QUALITY_DEFAULT, OutputPolicy, PreviewOptions,
     WhiteBalanceCoordinates, WhiteBalanceMode, WhiteBalanceModeMemory, auto_tone,
-    camera_color_transform, hsl_channel_weights_from_display_rgb, paths_refer_to_same_file,
-    resolve_camera_colour, sample_rgb_patch,
+    camera_color_transform, paths_refer_to_same_file, resolve_camera_colour,
 };
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_edit::{
@@ -199,7 +198,6 @@ pub(crate) struct RohditorApp {
     /// The active tool and its transient state (pickers, crop draft).
     tool: ActiveTool,
     color_mixer_channel: usize,
-    pending_white_balance_pick: Option<PreviewTicket>,
     /// A click of the color-range picker waiting for its sample from the worker.
     pending_color_pick: Option<PreviewTicket>,
     white_balance_memory: WhiteBalanceModeMemory,
@@ -342,7 +340,6 @@ impl RohditorApp {
             show_clipping: false,
             tool: ActiveTool::default(),
             color_mixer_channel: 0,
-            pending_white_balance_pick: None,
             pending_color_pick: None,
             white_balance_memory: WhiteBalanceModeMemory::default(),
             view_mode,
@@ -439,7 +436,7 @@ impl RohditorApp {
             document.core.open_status.is_some()
                 || document.core.preview.status.is_some()
                 || document.core.export_status.is_some()
-        }) || self.pending_white_balance_pick.is_some()
+        }) || self.is_picking()
     }
 
     fn preview_options(&self) -> PreviewOptions {
@@ -539,7 +536,7 @@ impl RohditorApp {
         let Some((ticket, frame, recipe)) = request else {
             return;
         };
-        self.pending_white_balance_pick = None;
+        self.cancel_pick();
         if let Err(error) = self
             .coordinator
             .crop_tool_preview(ticket, frame, recipe, options)
@@ -619,7 +616,7 @@ impl RohditorApp {
             || next.output_policy() != self.settings.output_policy();
         self.settings = next;
         if changes_pixels {
-            self.pending_white_balance_pick = None;
+            self.cancel_pick();
             self.refresh_current_presentation(context);
         }
         match settings::save(self.config_dir.as_deref(), next) {
@@ -932,7 +929,7 @@ impl RohditorApp {
             if mode == ViewMode::Library {
                 // The crop overlay and pickers belong to the develop viewport.
                 self.tool = ActiveTool::default();
-                self.pending_white_balance_pick = None;
+                self.cancel_pick();
             }
             self.view_mode = mode;
         }
@@ -1276,10 +1273,7 @@ impl RohditorApp {
             )
         };
         if let Some((mode, normalized)) = output.picker_sample {
-            match mode {
-                Picker::WhiteBalance => self.apply_white_balance_pick(context, normalized),
-                Picker::ColorMixer => self.apply_color_mixer_pick(normalized),
-            }
+            self.pick(context, mode, normalized);
         }
         if let Some((handle, point)) = output.crop.drag_started
             && let Some(session) = self.tool.crop_mut()
@@ -1299,137 +1293,28 @@ impl RohditorApp {
         self.apply_mask_pointer(context, &output.masks);
     }
 
-    fn apply_white_balance_pick(&mut self, context: &egui::Context, normalized: egui::Pos2) {
+    fn pick(&mut self, context: &egui::Context, picker: Picker, position: egui::Pos2) {
         self.tool.set_picker(None);
-        if self.pending_white_balance_pick.is_some() {
-            return;
-        }
-        let Some((ticket, frame, recipe)) = self.document.as_ref().and_then(|document| {
-            let source_ready = matches!(
-                document.core.preview.source,
-                Some(
-                    PreviewSource::FastCpu
-                        | PreviewSource::FastGpu
-                        | PreviewSource::HighQualityCpu
-                        | PreviewSource::HighQualityGpu
-                )
-            );
-            if !source_ready || document.core.preview.source_scale_requested {
-                return None;
-            }
-            document.core.frame.as_ref().map(|frame| {
-                (
-                    document.core.ticket(),
-                    Arc::clone(frame),
-                    document.core.edits.recipe().clone(),
-                )
-            })
-        }) else {
-            if let Some(document) = self.document.as_mut() {
-                document.core.error = Some(
-                    "Fit a developed RAW preview before using the white-balance picker".to_owned(),
-                );
-            }
-            return;
-        };
         let options = self.preview_options();
-        match self.coordinator.sample_white_balance(
-            ticket,
-            frame,
-            recipe,
-            (normalized.x, normalized.y),
-            options,
-        ) {
-            Ok(()) => {
-                self.pending_white_balance_pick = Some(ticket);
-                if let Some(document) = self
-                    .document
-                    .as_mut()
-                    .filter(|document| document.core.ticket() == ticket)
-                {
-                    document.core.preview.status = Some((
-                        ticket.revision,
-                        "Sampling a camera-native white-balance patch".to_owned(),
-                    ));
-                    document.core.error = None;
-                }
-                context.request_repaint();
-            }
-            Err(error) => {
-                if let Some(document) = self.document.as_mut() {
-                    document.core.error = Some(error);
-                }
-            }
-        }
-    }
-
-    fn apply_color_mixer_pick(&mut self, normalized: egui::Pos2) {
-        self.tool.set_picker(None);
-        let sample = self.sample_display_pixel(normalized);
-        let Some(sample) = sample else {
-            if let Some(document) = self.document.as_mut() {
-                document.core.error = Some(
-                    "A current developed preview is required to pick a Color Mixer band".to_owned(),
-                );
-            }
-            return;
-        };
-        let Some(weights) = hsl_channel_weights_from_display_rgb(sample) else {
-            if let Some(document) = self.document.as_mut() {
-                document.core.error =
-                    Some("That sample is too neutral to identify a Color Mixer band".to_owned());
-            }
-            return;
-        };
-        let selected = weights
-            .into_iter()
-            .enumerate()
-            .max_by(|(_, left), (_, right)| left.total_cmp(right))
-            .map(|(index, _)| index)
-            .unwrap_or(0);
-        self.color_mixer_channel = selected;
         if let Some(document) = self.document.as_mut() {
-            document.core.notice = None;
-            document.core.error = None;
+            let position = (f64::from(position.x), f64::from(position.y));
+            document
+                .core
+                .pick(&self.coordinator, picker, position, options);
+            context.request_repaint();
         }
     }
 
-    fn sample_display_pixel(&self, normalized: egui::Pos2) -> Option<[u8; 3]> {
-        if !normalized.x.is_finite()
-            || !normalized.y.is_finite()
-            || !(0.0..=1.0).contains(&normalized.x)
-            || !(0.0..=1.0).contains(&normalized.y)
-        {
-            return None;
+    fn is_picking(&self) -> bool {
+        self.document
+            .as_ref()
+            .is_some_and(|document| document.core.is_picking())
+    }
+
+    fn cancel_pick(&mut self) {
+        if let Some(document) = self.document.as_mut() {
+            document.core.cancel_pick();
         }
-        let document = self.document.as_ref()?;
-        if !document
-            .core
-            .preview
-            .source
-            .is_some_and(PreviewSource::is_developed)
-        {
-            return None;
-        }
-        if let Some(preview) = document.preview_pixels.as_ref() {
-            return sample_rgb_patch(
-                preview.width,
-                preview.height,
-                3,
-                &preview.rgb,
-                [normalized.x, normalized.y],
-            );
-        }
-        let readback = self
-            .preview_runtime
-            .readback_display(&document.core.preview)?;
-        sample_rgb_patch(
-            usize::try_from(readback.width).ok()?,
-            usize::try_from(readback.height).ok()?,
-            4,
-            &readback.rgba,
-            [normalized.x, normalized.y],
-        )
     }
 
     fn refresh_recipe_save_status(&mut self, context: &egui::Context) {
@@ -1726,7 +1611,7 @@ impl RohditorApp {
                 || document.core.preview.status.is_some()
                 || document.core.export_status.is_some()
                 || document.core.preview.has_pending_histogram()
-        }) || self.pending_white_balance_pick.is_some()
+        }) || self.is_picking()
             || self.catalog.scanning()
             || self.catalog.pending_count() > 0
             || self.library.decode_pending()

@@ -23,13 +23,14 @@ use gpui::{
 };
 use rohditor_core::Histogram;
 use rohditor_edit::{EditRecipe, RecipeSection};
+use rohditor_engine::tools::Picker;
 
 use focus::PanelFocus;
 use gestures::{Drag, Nudge, Typing, drag_tracker};
 
 use super::adjustments::GROUPS;
 use crate::actions::{AutoTone, ResetAdjustments};
-use crate::session::Session;
+use crate::session::{MixerColorPicked, Session};
 use crate::theme::{DEVELOP_WIDTH, RADIUS, SMALL_FONT_SIZE, TAB_HEIGHT, theme};
 use crate::ui::histogram::histogram;
 use crate::ui::keys::{SelectNext, SelectPrevious};
@@ -44,6 +45,7 @@ struct Model {
     /// The recipe of the open photo and its defaults, once it can be edited.
     recipes: Option<(EditRecipe, EditRecipe)>,
     histogram: Option<Histogram>,
+    picker: Option<Picker>,
 }
 
 impl Model {
@@ -57,6 +59,7 @@ impl Model {
         Self {
             recipes: Some((document.edits.recipe().clone(), document.default_recipe())),
             histogram: document.preview.histogram,
+            picker: session.picker(),
         }
     }
 }
@@ -90,6 +93,7 @@ impl DevelopPanel {
     pub fn new(
         session: Entity<Session>,
         overlays: Entity<Overlays>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&session, |panel, session, cx| {
@@ -99,6 +103,14 @@ impl DevelopPanel {
                 cx.notify();
             }
         })
+        .detach();
+        cx.subscribe_in(
+            &session,
+            window,
+            |panel, _, picked: &MixerColorPicked, window, cx| {
+                panel.show_mixer_channel(picked.0, window, cx);
+            },
+        )
         .detach();
         let search =
             cx.new(|cx| TextInput::new("Search adjustments", "Search…", String::new(), cx));
@@ -190,6 +202,7 @@ impl Render for DevelopPanel {
         let Model {
             recipes,
             histogram: bins,
+            ..
         } = self.model.clone();
         let graph = histogram(bins.as_ref());
         let body = match &recipes {

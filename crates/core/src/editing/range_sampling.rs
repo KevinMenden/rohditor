@@ -2,11 +2,8 @@ use rohditor_color::rec2020_to_oklab;
 use rohditor_edit::{COLOR_SAMPLE_AB_RANGE, COLOR_SAMPLE_LIGHTNESS_RANGE, ColorSample, EditRecipe};
 use rohditor_image::{LinearRgbImage, Orientation};
 
-use crate::OutputGeometry;
+use super::patch::developed_patch;
 use crate::cpu::ReferenceChain;
-
-/// Half-width of the sampled patch: the patch is `2 * RADIUS + 1` pixels wide.
-const PATCH_RADIUS: usize = 2;
 
 /// The colour a colour-range mask should select at a point of the displayed image.
 ///
@@ -25,26 +22,17 @@ pub fn sample_color_range(
     recipe: &EditRecipe,
     display_position: (f64, f64),
 ) -> Option<ColorSample> {
-    if !(0.0..=1.0).contains(&display_position.0) || !(0.0..=1.0).contains(&display_position.1) {
-        return None;
-    }
-    let (width, height) = (image.width(), image.height());
-    let orientation = recipe
-        .geometry
-        .orientation_override
-        .unwrap_or(source_orientation);
-    let geometry = OutputGeometry::new(width, height, orientation, recipe.geometry.crop).ok()?;
-    let (x, y) = geometry.display_to_developed(display_position);
-    let centre_x = ((x * width as f64) as usize).min(width - 1);
-    let centre_y = ((y * height as f64) as usize).min(height - 1);
-
+    let (columns, rows) = developed_patch(
+        (image.width(), image.height()),
+        source_orientation,
+        &recipe.geometry,
+        display_position,
+    )?;
     let chain = ReferenceChain::new(recipe);
     let mut total = [0.0f32; 3];
     let mut count = 0u32;
-    for row in centre_y.saturating_sub(PATCH_RADIUS)..=(centre_y + PATCH_RADIUS).min(height - 1) {
-        for column in
-            centre_x.saturating_sub(PATCH_RADIUS)..=(centre_x + PATCH_RADIUS).min(width - 1)
-        {
+    for row in rows {
+        for column in columns.clone() {
             let Some(&[red, green, blue]) = image.pixel(column, row) else {
                 continue;
             };

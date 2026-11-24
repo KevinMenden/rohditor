@@ -129,7 +129,7 @@ impl RohditorApp {
 
     fn close_document_now(&mut self, context: &egui::Context) {
         self.color_mixer_channel = 0;
-        self.pending_white_balance_pick = None;
+        self.cancel_pick();
         self.pending_color_pick = None;
         self.white_balance_memory = rohditor_core::WhiteBalanceModeMemory::default();
         self.tool = ActiveTool::default();
