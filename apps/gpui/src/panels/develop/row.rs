@@ -8,6 +8,7 @@ use gpui::{
 use rohditor_edit::EditRecipe;
 
 use super::DevelopPanel;
+use super::filter::has_effect;
 use super::focus::Control;
 use super::gestures::{Grip, NudgeBy};
 use crate::panels::adjustments::Adjustment;
@@ -85,6 +86,7 @@ impl DevelopPanel {
         let at = |value| fraction(format, range, value);
         let (from, to) = (at(default).min(at(value)), at(default).max(at(value)));
         let edited = parameter.is_changed(recipe, defaults);
+        let effective = has_effect(parameter, recipe, defaults);
         let active = self.drag.is_some_and(|drag| drag.parameter == parameter);
         let panel = cx.entity();
         let typing = self
@@ -171,6 +173,7 @@ impl DevelopPanel {
             .px_2()
             .rounded(RADIUS)
             .overflow_hidden()
+            .when(!effective, |row| row.opacity(0.5))
             .bg(if active { theme.hover } else { theme.element })
             .hover(move |style| style.bg(theme.hover))
             .cursor(CursorStyle::ResizeLeftRight)
@@ -232,14 +235,18 @@ impl DevelopPanel {
 
 /// The colours a value leads to, along the bottom of its row.
 fn track(ramp: Ramp, neutral: f32) -> impl IntoElement {
-    let [start, middle, end] = ramp.0.map(rgb);
-    let half = |from: gpui::Rgba, to: gpui::Rgba, width| {
-        div().h_full().w(relative(width)).bg(linear_gradient(
-            90.0,
-            linear_color_stop(from, 0.0),
-            linear_color_stop(to, 1.0),
-        ))
-    };
+    let stops = ramp.stops(neutral);
+    let parts: Vec<_> = stops
+        .windows(2)
+        .map(|ends| {
+            let [(from, start), (to, end)] = [ends[0], ends[1]];
+            div().h_full().w(relative(to - from)).bg(linear_gradient(
+                90.0,
+                linear_color_stop(rgb(start), 0.0),
+                linear_color_stop(rgb(end), 1.0),
+            ))
+        })
+        .collect();
     div()
         .absolute()
         .bottom_0()
@@ -247,8 +254,7 @@ fn track(ramp: Ramp, neutral: f32) -> impl IntoElement {
         .w_full()
         .h(px(2.0))
         .flex()
-        .child(half(start, middle, neutral))
-        .child(half(middle, end, 1.0 - neutral))
+        .children(parts)
 }
 
 /// Covers a row and reports presses together with the row's width.

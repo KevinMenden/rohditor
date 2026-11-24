@@ -13,6 +13,14 @@ pub enum Format {
     Percent,
     /// `1.05×`
     Factor,
+    /// Percent from zero: `40`
+    Amount,
+    /// `0.60 px`
+    Pixels,
+    /// `270°`
+    Degrees,
+    /// `2`
+    Count,
 }
 
 impl Format {
@@ -21,6 +29,10 @@ impl Format {
             Self::Stops => format!("{value:+.2} EV"),
             Self::Kelvin => format!("{value:.0} K"),
             Self::Factor => format!("{value:.2}×"),
+            Self::Amount => format!("{:.0}", value * 100.0),
+            Self::Pixels => format!("{value:.2} px"),
+            Self::Degrees => format!("{value:.0}°"),
+            Self::Count => format!("{value:.0}"),
             Self::Percent => {
                 let percent = ((value - range.neutral) * 100.0).round();
                 // Avoid "-0".
@@ -36,7 +48,7 @@ impl Format {
     /// The value meant by `text`, in the unit of [`Self::label`]. Clamped to the range.
     pub fn parse(self, text: &str, range: ParameterRange) -> Option<f32> {
         let text = text.trim().to_lowercase().replace(',', ".");
-        let number = ["ev", "k", "%", "×", "x"]
+        let number = ["ev", "k", "%", "°", "px", "×", "x"]
             .iter()
             .find_map(|unit| text.strip_suffix(unit))
             .unwrap_or(&text)
@@ -45,7 +57,9 @@ impl Format {
             .ok()
             .filter(|number| number.is_finite())?;
         let value = match self {
-            Self::Stops | Self::Kelvin | Self::Factor => number,
+            Self::Stops | Self::Kelvin | Self::Factor | Self::Pixels | Self::Degrees => number,
+            Self::Count => number.round(),
+            Self::Amount => number / 100.0,
             Self::Percent => number / 100.0 + range.neutral,
         };
         Some(value.clamp(range.minimum, range.maximum))
@@ -56,7 +70,8 @@ impl Format {
         match self {
             Self::Stops => 0.05,
             Self::Kelvin => 50.0,
-            Self::Percent | Self::Factor => 0.01,
+            Self::Percent | Self::Amount | Self::Factor | Self::Pixels => 0.01,
+            Self::Degrees | Self::Count => 1.0,
         }
     }
 
@@ -72,24 +87,50 @@ impl Format {
     fn track_at(self, value: f32) -> f32 {
         match self {
             Self::Kelvin => -1.0 / value,
-            Self::Stops | Self::Percent | Self::Factor => value,
+            _ => value,
         }
     }
 
     fn value_at(self, track: f32) -> f32 {
         match self {
             Self::Kelvin => -1.0 / track,
-            Self::Stops | Self::Percent | Self::Factor => track,
+            _ => track,
         }
     }
 }
 
-/// Colours along a track: at its start, at the neutral value and at its end.
+/// Colours along a track.
 #[derive(Debug, Clone, Copy)]
-pub struct Ramp(pub [u32; 3]);
+pub enum Ramp {
+    /// At its start, at the neutral value and at its end.
+    Through([u32; 3]),
+    /// All hues, from 0 to 360 degrees.
+    Hues,
+}
 
-pub const TEMPERATURE_RAMP: Ramp = Ramp([0x488fde, 0xdce0d6, 0xefb13f]);
-pub const TINT_RAMP: Ramp = Ramp([0x48b460, 0xdcdcdc, 0xcd4ba4]);
+impl Ramp {
+    /// Positions and colours, with the neutral value at `neutral`.
+    pub fn stops(self, neutral: f32) -> Vec<(f32, u32)> {
+        match self {
+            Self::Through([start, middle, end]) => {
+                vec![(0.0, start), (neutral, middle), (1.0, end)]
+            }
+            Self::Hues => HUES
+                .into_iter()
+                .enumerate()
+                .map(|(index, color)| (index as f32 / (HUES.len() - 1) as f32, color))
+                .collect(),
+        }
+    }
+}
+
+/// Every 60 degrees.
+const HUES: [u32; 7] = [
+    0xd46a6a, 0xd4d46a, 0x6ad46a, 0x6ad4d4, 0x6a6ad4, 0xd46ad4, 0xd46a6a,
+];
+
+pub const TEMPERATURE_RAMP: Ramp = Ramp::Through([0x488fde, 0xdce0d6, 0xefb13f]);
+pub const TINT_RAMP: Ramp = Ramp::Through([0x48b460, 0xdcdcdc, 0xcd4ba4]);
 
 /// Position of `value` on the track, 0 to 1.
 pub fn fraction(format: Format, range: ParameterRange, value: f32) -> f32 {
@@ -147,6 +188,23 @@ mod tests {
         assert_eq!(factor("1.2×"), Some(1.2));
         assert_eq!(factor("1.2 x"), Some(1.2));
         assert_eq!(Format::Percent.parse("25", SATURATION_RANGE), Some(1.25));
+    }
+
+    #[test]
+    fn detail_values_have_their_units() {
+        use rohditor_edit::{CAPTURE_NOISE_RANGE, CAPTURE_RADIUS_RANGE, Parameter};
+        let noise = CAPTURE_NOISE_RANGE;
+        assert_eq!(Format::Amount.label(0.5, noise), "50");
+        assert_eq!(Format::Amount.parse("45 %", noise), Some(0.45));
+        let radius = CAPTURE_RADIUS_RANGE;
+        assert_eq!(Format::Pixels.label(0.6, radius), "0.60 px");
+        assert_eq!(Format::Pixels.parse("0.75 px", radius), Some(0.75));
+        let hue = Parameter::DefringeGreenHueEnd.range();
+        assert_eq!(Format::Degrees.label(150.0, hue), "150°");
+        assert_eq!(Format::Degrees.parse("400°", hue), Some(360.0));
+        let steps = Parameter::FalseColorSteps.range();
+        assert_eq!(Format::Count.parse("2.6", steps), Some(3.0));
+        assert_eq!(Format::Count.stepped(steps, 5.0, 1), 5.0);
     }
 
     #[test]

@@ -11,11 +11,11 @@ use gpui::{
 use rohditor_engine::tools::Picker;
 
 use crate::actions::{
-    ActualPixels, AutoTone, CloseFile, Export, FocusAdjustments, FocusPhoto, ImportCameraProfile,
-    NextPhoto, OpenFile, OpenFolder, PickMixerColor, PickWhiteBalance, PreviousPhoto, Quit, Redo,
-    ResetAdjustments, ResetSection, Save, SearchAdjustments, SetHighlightMethod, SetRendering,
-    SetWhiteBalance, ToggleClipping, ToggleCommandPalette, ToggleDevelop, ToggleFiles, Undo,
-    WORKSPACE_CONTEXT, ZoomToFit,
+    ActualPixels, AutoNoiseReduction, AutoTone, CloseFile, Export, FocusAdjustments, FocusPhoto,
+    ImportCameraProfile, NextPhoto, OpenFile, OpenFolder, PickMixerColor, PickWhiteBalance,
+    PreviousPhoto, Quit, Redo, ResetAdjustments, ResetSection, Save, SearchAdjustments,
+    SetHighlightMethod, SetRendering, SetWhiteBalance, ToggleClipping, ToggleCommandPalette,
+    ToggleDevelop, ToggleFiles, Undo, WORKSPACE_CONTEXT, ZoomToFit,
 };
 use crate::library::Library;
 use crate::panels::command_palette::CommandPalette;
@@ -214,6 +214,11 @@ impl Workspace {
             .on_action(cx.listener(|this, action: &ResetSection, window, cx| {
                 this.develop
                     .update(cx, |panel, cx| panel.reset_section(action.0, window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &AutoNoiseReduction, _, cx| {
+                this.develop.update(cx, |panel, cx| {
+                    panel.choose(Session::auto_noise_reduction, cx);
+                });
             }))
             .on_action(cx.listener(|this, action: &SetHighlightMethod, _, cx| {
                 this.develop.update(cx, |panel, cx| {

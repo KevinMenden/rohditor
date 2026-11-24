@@ -183,6 +183,18 @@ impl Session {
             self.change_history(|edits| edits.set_discrete(next), cx);
         }
     }
+
+    /// Auto noise reduction estimates the photo's noise first when needed.
+    pub fn auto_noise_reduction(&mut self, cx: &mut Context<Self>) {
+        let options = self.renderer.settings.render_options();
+        let changed = self.document.as_mut().is_some_and(|document| {
+            document.apply_noise_suggestion(&self.renderer.coordinator, options)
+        });
+        if changed {
+            self.queue_preview();
+        }
+        self.tick(cx);
+    }
 }
 
 /// Whether the parameter has a fast draft while it is dragged.

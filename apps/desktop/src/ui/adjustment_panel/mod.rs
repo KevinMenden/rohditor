@@ -331,7 +331,7 @@ fn show_sections(
         output,
         P::FalseColor,
         &changed,
-        CollapsibleSection::new("Moiré / false colour"),
+        CollapsibleSection::new("Moiré & false color"),
         |ui, output| detail::false_color(ui, document, output),
     );
     section(

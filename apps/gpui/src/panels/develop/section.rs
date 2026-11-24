@@ -5,18 +5,20 @@ use gpui::{
     prelude::*, px,
 };
 use rohditor_edit::{EditRecipe, RecipeSection};
+use rohditor_engine::open_document::NoiseSuggestion;
 use rohditor_engine::tools::Picker;
 
 use super::DevelopPanel;
 use super::choices::Choice;
 use super::focus::Control;
 use super::row::ResetValue;
-use crate::actions::{PickMixerColor, PickWhiteBalance};
+use crate::actions::{AutoNoiseReduction, PickMixerColor, PickWhiteBalance};
 use crate::assets::Icon;
-use crate::panels::adjustments::{Group, Section};
+use crate::panels::adjustments::{Group, Section, section_hint};
 use crate::theme::{RADIUS, SMALL_FONT_SIZE, theme};
-use crate::ui::button::{command_button, icon, icon_button};
+use crate::ui::button::{command_button, icon, icon_button, link};
 use crate::ui::test_id::TestId as _;
+use crate::ui::tooltip::tooltip;
 
 const CONTEXT: &str = "SectionHeader";
 
@@ -179,6 +181,7 @@ impl DevelopPanel {
             .gap_1()
             .child(self.section_title(section, changed, cx))
             .children(self.picker_button(section))
+            .children(self.auto_button(section))
             .when(changed, |header| {
                 let label = format!("Reset {}", section.label());
                 let reset = icon_button(
@@ -208,6 +211,23 @@ impl DevelopPanel {
         };
         let active = self.model.picker == Some(picker);
         Some(button.when(active, |button| button.bg(theme().selected)))
+    }
+
+    /// Sets the color noise reduction from the photo's noise.
+    fn auto_button(&self, section: RecipeSection) -> Option<impl IntoElement + use<>> {
+        if section != RecipeSection::NoiseReduction {
+            return None;
+        }
+        let suggestion = self.model.noise?;
+        let label = match suggestion {
+            NoiseSuggestion::Estimating => "Estimating…",
+            _ => "Auto",
+        };
+        let enabled = !matches!(
+            suggestion,
+            NoiseSuggestion::Estimating | NoiseSuggestion::Unavailable
+        );
+        Some(link("auto-noise", label, AutoNoiseReduction, enabled))
     }
 
     /// The title, which collapses the section.
@@ -252,6 +272,9 @@ impl DevelopPanel {
             .gap_1()
             .h(px(28.0))
             .cursor_pointer()
+            .when_some(section_hint(section), |header, hint| {
+                header.tooltip(tooltip(hint, None))
+            })
             .text_size(SMALL_FONT_SIZE)
             .text_color(if changed { theme.text } else { theme.muted })
             .child(icon(chevron, theme.faint))

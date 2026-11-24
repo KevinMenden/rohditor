@@ -24,6 +24,7 @@ actions!(
         Redo,
         ResetAdjustments,
         AutoTone,
+        AutoNoiseReduction,
         ImportCameraProfile,
         PickWhiteBalance,
         PickMixerColor,
@@ -89,6 +90,7 @@ pub fn commands() -> Vec<Command> {
         command("edit: undo", Some("ctrl-z"), Undo),
         command("edit: redo", Some("ctrl-shift-z"), Redo),
         command("develop: auto tone", Some("ctrl-u"), AutoTone),
+        command("develop: auto noise reduction", None, AutoNoiseReduction),
         command(
             "develop: reset adjustments",
             Some("ctrl-shift-r"),
