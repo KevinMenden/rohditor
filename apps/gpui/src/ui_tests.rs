@@ -5,6 +5,7 @@
 //! original. `ROHDITOR_SHOTS=DIR` writes a PNG per scenario.
 
 mod color;
+mod detail;
 mod light;
 mod viewport;
 
@@ -777,7 +778,7 @@ fn the_focused_slider_is_scrolled_to() {
     let Some((mut harness, ..)) = opened_in(size(px(1000.0), px(500.0)), "scroll") else {
         return;
     };
-    let last = "adjustment:ChromaNoiseReduction";
+    let last = "section:Defringe";
     let visible = px(470.0);
     assert!(
         harness.find(last).bottom() > visible,
@@ -788,12 +789,13 @@ fn the_focused_slider_is_scrolled_to() {
     harness.keys(&["down"; 40].join(" "));
     harness.capture("scrolled");
     assert!(harness.find(last).bottom() < visible);
-    harness.keys("right");
-    let noise = harness.with_session(|session, _| {
+    // Past the header above, which is collapsed too.
+    harness.keys("up up right");
+    let protection = harness.with_session(|session, _| {
         let document = session.document().expect("a photo is open");
-        document.edits.recipe().noise_reduction.chroma
+        document.edits.recipe().capture_sharpening.noise_protection
     });
-    assert_eq!(noise, 0.01, "it is the one with the focus");
+    assert_eq!(protection, 0.51, "it is the one with the focus");
     harness.keys(&["up"; 40].join(" "));
     let top = harness.find("section:Tone").top();
     assert!(top > px(36.0) && top < px(300.0), "{top:?}");

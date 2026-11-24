@@ -155,6 +155,13 @@ impl EditSession {
         true
     }
 
+    /// As [`Self::apply_derived`], for data that does not depend on the edits: the
+    /// recipes to undo and redo to get it too.
+    pub fn apply_derived_throughout(&mut self, update: impl Fn(&mut EditRecipe)) -> bool {
+        self.undo.iter_mut().chain(&mut self.redo).for_each(&update);
+        self.apply_derived(update)
+    }
+
     pub fn reset_to(&mut self, recipe: EditRecipe) -> bool {
         self.set_discrete(recipe)
     }

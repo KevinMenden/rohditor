@@ -13,14 +13,12 @@ use super::widgets::{AdjustmentSpec, ValueScale};
 
 /// Shown on the Noise reduction section's header.
 pub(super) const NOISE_REDUCTION_HINT: &str = "Removes colour noise, then luminance (grain) noise, at source resolution and before \
-     sharpening. Inspect at Source 1:1. Runs on the CPU, so the preview and export use the CPU \
-     path while it is on.";
+     sharpening. Inspect at Source 1:1.";
 
 /// Shown on the Defringe section's header.
 pub(super) const DEFRINGE_HINT: &str = "Removes purple and green colour fringes along high-contrast edges (branches against sky, \
      bright highlights). Only pixels next to strong edges whose hue falls in the range are \
-     touched; they lose colour but keep their brightness. Inspect at Source 1:1. Runs on the \
-     CPU, so the preview and export use the CPU path while it is on.";
+     touched; they lose colour but keep their brightness. Inspect at Source 1:1.";
 
 /// Purple and green fringe removal, each with an amount and a hue range
 /// (two sliders: the range ends).
@@ -115,8 +113,7 @@ pub(super) fn false_color(
     .on_hover_text(
         "Removes rainbow-coloured bands that fine patterns (fabric, screens, distant buildings) \
          cause in demosaicing. Each step smooths colour further and can wash out tiny colour \
-         details. Does not touch luminance. Inspect at Source 1:1. Runs on the CPU, so the \
-         preview and export use the CPU path while it is on.",
+         details. Does not touch luminance. Inspect at Source 1:1.",
     );
     document.false_color.steps = steps.round() as u8;
 }

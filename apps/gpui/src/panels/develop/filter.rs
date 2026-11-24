@@ -15,12 +15,13 @@ use crate::ui::keys::{Cancel, Confirm, SelectNext};
 use crate::ui::test_id::TestId as _;
 use crate::ui::toggle::toggle;
 
-/// Whether `text` contains every word of `query`, ignoring case.
+/// Whether `text` contains every word of `query`, ignoring case and the accent of "Moiré".
 fn matches(text: &str, query: &str) -> bool {
-    let text = text.to_lowercase();
+    let folded = |text: &str| text.to_lowercase().replace('é', "e");
+    let text = folded(text);
     query
         .split_whitespace()
-        .all(|word| text.contains(&word.to_lowercase()))
+        .all(|word| text.contains(&folded(word)))
 }
 
 impl DevelopPanel {
@@ -181,6 +182,23 @@ fn applies(parameter: Parameter, recipe: &EditRecipe) -> bool {
     }
 }
 
+/// Whether the parameter does something with the amount it depends on. Unlike one that does not
+/// apply, it stays listed: turning up the amount must not move the rows below.
+pub(super) fn has_effect(parameter: Parameter, recipe: &EditRecipe, defaults: &EditRecipe) -> bool {
+    let amount = match parameter {
+        Parameter::LuminanceDetail => Parameter::LuminanceNoiseReduction,
+        Parameter::CaptureRadius | Parameter::CaptureNoise => Parameter::CaptureAmount,
+        Parameter::DefringePurpleHueStart | Parameter::DefringePurpleHueEnd => {
+            Parameter::DefringePurpleAmount
+        }
+        Parameter::DefringeGreenHueStart | Parameter::DefringeGreenHueEnd => {
+            Parameter::DefringeGreenAmount
+        }
+        _ => return true,
+    };
+    amount.get(recipe, defaults) > 0.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,6 +209,23 @@ mod tests {
         assert!(matches(text, ""));
         assert!(matches(text, "shad CURVE"));
         assert!(!matches(text, "curve whites"));
+        assert!(matches("Moiré", "moire") && matches("Moiré", "MOIRÉ"));
+    }
+
+    #[test]
+    fn details_need_their_amount() {
+        let mut recipe = EditRecipe::default();
+        let defaults = recipe.clone();
+        let radius = Parameter::CaptureRadius;
+        assert!(has_effect(Parameter::CaptureAmount, &recipe, &defaults));
+        assert!(!has_effect(radius, &recipe, &defaults));
+        recipe = Parameter::CaptureAmount.with_value(&recipe, &defaults, 0.3);
+        assert!(has_effect(radius, &recipe, &defaults));
+        let green = Parameter::DefringeGreenHueEnd;
+        recipe.defringe.purple_amount = 0.3;
+        assert!(!has_effect(green, &recipe, &defaults));
+        recipe.defringe.green_amount = 0.3;
+        assert!(has_effect(green, &recipe, &defaults));
     }
 
     #[test]

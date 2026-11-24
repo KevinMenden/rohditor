@@ -93,7 +93,7 @@ impl RecipeSection {
             Self::HighlightReconstruction => "Highlight reconstruction",
             Self::NoiseReduction => "Noise reduction",
             Self::CaptureSharpening => "Capture sharpening",
-            Self::FalseColor => "Moiré / false colour",
+            Self::FalseColor => "Moiré & false color",
             Self::Defringe => "Defringe",
             Self::Optics => "Optics",
             Self::Geometry => "Crop & orientation",

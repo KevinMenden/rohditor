@@ -32,6 +32,7 @@ impl Render for Tooltip {
             div()
                 .flex()
                 .gap_2()
+                .max_w(px(320.0))
                 .px_2()
                 .py_1()
                 .rounded(RADIUS)
@@ -41,11 +42,11 @@ impl Render for Tooltip {
                 .shadow_md()
                 .text_size(SMALL_FONT_SIZE)
                 .text_color(theme.text)
-                .child(self.text.clone())
+                .child(div().min_w_0().child(self.text.clone()))
                 .children(
                     self.key
                         .clone()
-                        .map(|key| div().text_color(theme.faint).child(key)),
+                        .map(|key| div().flex_none().text_color(theme.faint).child(key)),
                 ),
         )
     }

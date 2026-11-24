@@ -147,7 +147,10 @@ impl OpenDocument {
         self.noise.stage = NoiseStage::Ready(profile);
         match purpose {
             NoisePurpose::Default => self.apply_default_noise_reduction(),
-            NoisePurpose::Suggestion => self.apply_noise_suggestion_now(),
+            NoisePurpose::Suggestion => {
+                let derived = self.noise.default_applies && self.apply_default_noise_reduction();
+                self.apply_noise_suggestion_now() || derived
+            }
         }
     }
 
@@ -164,7 +167,11 @@ impl OpenDocument {
                 self.request_noise_estimate(coordinator, render_options, NoisePurpose::Suggestion);
                 false
             }
-            NoiseStage::Pending(_) => false,
+            // Also apply the estimate that is under way.
+            NoiseStage::Pending(_) => {
+                self.noise.stage = NoiseStage::Pending(NoisePurpose::Suggestion);
+                false
+            }
         }
     }
 
@@ -176,20 +183,29 @@ impl OpenDocument {
         if self.edits.recipe().noise_reduction != NoiseReduction::default() {
             return false;
         }
-        self.edits
-            .apply_derived(|recipe| recipe.noise_reduction = target)
+        self.edits.apply_derived_throughout(|recipe| {
+            if recipe.noise_reduction == NoiseReduction::default() {
+                recipe.noise_reduction = target;
+            }
+        })
     }
 
     /// Set the colour strength to the suggestion as an undoable user edit; the
-    /// luminance settings stay as the user left them.
+    /// luminance settings stay as the user left them. Says so where it can do
+    /// nothing.
     fn apply_noise_suggestion_now(&mut self) -> bool {
         let Some(profile) = self.noise.profile() else {
+            self.notice = Some("The noise of this photo could not be estimated.".to_owned());
             return false;
         };
         let chroma = suggested_noise_reduction(profile).chroma;
         let mut next = self.edits.recipe().clone();
         next.noise_reduction.chroma = chroma;
-        self.edits.set_discrete(next)
+        let changed = self.edits.set_discrete(next);
+        if !changed && chroma == 0.0 {
+            self.notice = Some("This photo needs no color noise reduction.".to_owned());
+        }
+        changed
     }
 }
 
@@ -260,6 +276,54 @@ mod tests {
         assert!(!document.apply_default_noise_reduction());
         assert_eq!(document.edits.recipe().noise_reduction.chroma, 0.0);
         assert_eq!(document.edits.recipe().noise_reduction.luminance, 0.3);
+    }
+
+    #[test]
+    fn undo_keeps_a_default_that_arrived_after_an_edit() {
+        let mut document = document(true, NoiseStage::Pending(NoisePurpose::Default));
+        let mut brighter = document.edits.recipe().clone();
+        brighter.light.exposure_ev = 0.5;
+        assert!(document.edits.set_discrete(brighter));
+        assert!(document.noise_profile_ready(Ok(Some(noisy()))));
+        assert!(document.edits.undo());
+        assert_eq!(document.edits.recipe().light.exposure_ev, 0.0);
+        assert!(!document.has_user_adjustments());
+    }
+
+    #[test]
+    fn auto_also_waits_for_the_default_estimate() {
+        let pending = || document(true, NoiseStage::Pending(NoisePurpose::Default));
+        let coordinator = RenderCoordinator::new(std::sync::Arc::new(|| {})).expect("workers");
+        let options = RenderOptions::default();
+        // An own noise reduction keeps the default away, but not Auto.
+        let mut edited = pending();
+        let mut mine = edited.edits.recipe().clone();
+        mine.noise_reduction.luminance = 0.3;
+        assert!(edited.edits.set_discrete(mine));
+        assert!(!edited.apply_noise_suggestion(&coordinator, options));
+        assert!(edited.noise_profile_ready(Ok(Some(noisy()))));
+        assert!(edited.edits.recipe().noise_reduction.chroma > 0.0);
+        assert!(edited.edits.undo());
+        assert_eq!(edited.edits.recipe().noise_reduction.chroma, 0.0);
+        // Without one, it is still the default.
+        let mut untouched = pending();
+        assert!(!untouched.apply_noise_suggestion(&coordinator, options));
+        assert!(untouched.noise_profile_ready(Ok(Some(noisy()))));
+        assert!(!untouched.has_user_adjustments() && !untouched.edits.can_undo());
+    }
+
+    #[test]
+    fn auto_says_when_it_can_do_nothing() {
+        let clean = NoiseProfile {
+            a: 0.0,
+            b: 0.0,
+            bins: 16,
+        };
+        for profile in [None, Some(clean)] {
+            let mut document = document(false, NoiseStage::Ready(profile));
+            assert!(!document.apply_noise_suggestion_now());
+            assert!(document.notice.is_some());
+        }
     }
 
     #[test]

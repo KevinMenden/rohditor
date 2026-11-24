@@ -7,7 +7,7 @@ use gpui::{
 
 use crate::actions::Command;
 use crate::assets::Icon;
-use crate::theme::{RADIUS, theme};
+use crate::theme::{RADIUS, SMALL_FONT_SIZE, theme};
 use crate::ui::test_id::TestId as _;
 use crate::ui::tooltip::tooltip;
 
@@ -116,4 +116,39 @@ pub fn button(
         .hover(move |style| style.bg(theme.hover))
         .child(label)
         .on_click(on_click)
+}
+
+/// A small text that runs a command, and says which and its key.
+pub fn link(
+    id: &'static str,
+    label: &'static str,
+    action: impl Action,
+    enabled: bool,
+) -> Stateful<gpui::Div> {
+    let theme = theme();
+    let command = Command::of(&action);
+    let key = command.key_label().map(SharedString::from);
+    let link = div()
+        .id(id)
+        .role(Role::Button)
+        .aria_label(command.title())
+        .test_id(format!("button:{id}"))
+        .border_1()
+        .border_color(gpui::transparent_black())
+        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+        .tooltip(tooltip(command.title(), key))
+        .px_1p5()
+        .rounded(RADIUS)
+        .text_size(SMALL_FONT_SIZE)
+        .child(label);
+    if enabled {
+        link.tab_index(0)
+            .focus_visible(move |style| style.border_color(theme.accent))
+            .text_color(theme.muted)
+            .cursor_pointer()
+            .hover(move |style| style.bg(theme.hover).text_color(theme.text))
+            .on_click(move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx))
+    } else {
+        link.text_color(theme.faint)
+    }
 }

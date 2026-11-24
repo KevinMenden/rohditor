@@ -18,11 +18,11 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use gpui::{
-    App, Context, Div, Entity, IntoElement, MouseButton, Render, RenderImage, Role, Window, div,
-    prelude::*,
+    App, Context, Div, Entity, IntoElement, Render, RenderImage, Role, Window, div, prelude::*,
 };
 use rohditor_core::Histogram;
 use rohditor_edit::{EditRecipe, RecipeSection};
+use rohditor_engine::open_document::NoiseSuggestion;
 use rohditor_engine::tools::Picker;
 
 use focus::PanelFocus;
@@ -31,11 +31,11 @@ use gestures::{Drag, Nudge, Typing, drag_tracker};
 use super::adjustments::GROUPS;
 use crate::actions::{AutoTone, ResetAdjustments};
 use crate::session::{MixerColorPicked, Session};
-use crate::theme::{DEVELOP_WIDTH, RADIUS, SMALL_FONT_SIZE, TAB_HEIGHT, theme};
+use crate::theme::{DEVELOP_WIDTH, RADIUS, TAB_HEIGHT, theme};
+use crate::ui::button::link;
 use crate::ui::histogram::histogram;
 use crate::ui::keys::{SelectNext, SelectPrevious};
 use crate::ui::overlays::Overlays;
-use crate::ui::test_id::TestId as _;
 use crate::ui::text_input::{Changed, TextInput};
 
 /// What the panel shows. Compared on every session change, so that the panel only redraws for
@@ -46,6 +46,7 @@ struct Model {
     recipes: Option<(EditRecipe, EditRecipe)>,
     histogram: Option<Histogram>,
     picker: Option<Picker>,
+    noise: Option<NoiseSuggestion>,
 }
 
 impl Model {
@@ -60,6 +61,7 @@ impl Model {
             recipes: Some((document.edits.recipe().clone(), document.default_recipe())),
             histogram: document.preview.histogram,
             picker: session.picker(),
+            noise: Some(document.noise_suggestion()),
         }
     }
 }
@@ -132,6 +134,8 @@ impl DevelopPanel {
                 RecipeSection::ColorMixer,
                 RecipeSection::ColorGrading,
                 RecipeSection::ColorProfile,
+                RecipeSection::FalseColor,
+                RecipeSection::Defringe,
             ]),
             search,
             edited_only: false,
@@ -143,30 +147,6 @@ impl DevelopPanel {
 
     fn header(&self, enabled: bool) -> impl IntoElement + use<> {
         let theme = theme();
-        let link = |id, label, action: Box<dyn gpui::Action>| {
-            let link = div()
-                .id(id)
-                .role(Role::Button)
-                .aria_label(label)
-                .test_id(format!("button:{id}"))
-                .border_1()
-                .border_color(gpui::transparent_black())
-                .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-                .px_1p5()
-                .rounded(RADIUS)
-                .text_size(SMALL_FONT_SIZE)
-                .child(label);
-            if enabled {
-                link.tab_index(0)
-                    .focus_visible(move |style| style.border_color(theme.accent))
-                    .text_color(theme.muted)
-                    .cursor_pointer()
-                    .hover(move |style| style.bg(theme.hover).text_color(theme.text))
-                    .on_click(move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx))
-            } else {
-                link.text_color(theme.faint)
-            }
-        };
         div()
             .flex()
             .flex_none()
@@ -181,8 +161,8 @@ impl DevelopPanel {
                 div()
                     .flex()
                     .gap_1()
-                    .child(link("auto", "Auto", Box::new(AutoTone)))
-                    .child(link("reset", "Reset", Box::new(ResetAdjustments))),
+                    .child(link("auto", "Auto", AutoTone, enabled))
+                    .child(link("reset", "Reset", ResetAdjustments, enabled)),
             )
     }
 }

@@ -41,6 +41,14 @@ impl Adjustment {
         Self::new(parameter, label, Format::Percent)
     }
 
+    const fn amount(parameter: Parameter, label: &'static str) -> Self {
+        Self::new(parameter, label, Format::Amount)
+    }
+
+    const fn hue(parameter: Parameter, label: &'static str) -> Self {
+        Self::new(parameter, label, Format::Degrees).ramp(Ramp::Hues)
+    }
+
     const fn ramp(self, ramp: Ramp) -> Self {
         Self {
             ramp: Some(ramp),
@@ -140,14 +148,38 @@ pub const GROUPS: [Group; 3] = [
         title: "Detail",
         sections: &[
             Section {
-                section: RecipeSection::CaptureSharpening,
-                adjustments: &[Adjustment::percent(Parameter::CaptureAmount, "Amount")],
-            },
-            Section {
                 section: RecipeSection::NoiseReduction,
                 adjustments: &[
-                    Adjustment::percent(Parameter::LuminanceNoiseReduction, "Luminance"),
-                    Adjustment::percent(Parameter::ChromaNoiseReduction, "Color"),
+                    Adjustment::amount(Parameter::ChromaNoiseReduction, "Color"),
+                    Adjustment::amount(Parameter::LuminanceNoiseReduction, "Luminance"),
+                    Adjustment::amount(Parameter::LuminanceDetail, "Luminance detail"),
+                ],
+            },
+            Section {
+                section: RecipeSection::CaptureSharpening,
+                adjustments: &[
+                    Adjustment::amount(Parameter::CaptureAmount, "Amount"),
+                    Adjustment::new(Parameter::CaptureRadius, "Radius", Format::Pixels),
+                    Adjustment::amount(Parameter::CaptureNoise, "Noise protection"),
+                ],
+            },
+            Section {
+                section: RecipeSection::FalseColor,
+                adjustments: &[Adjustment::new(
+                    Parameter::FalseColorSteps,
+                    "Steps",
+                    Format::Count,
+                )],
+            },
+            Section {
+                section: RecipeSection::Defringe,
+                adjustments: &[
+                    Adjustment::amount(Parameter::DefringePurpleAmount, "Purple"),
+                    Adjustment::hue(Parameter::DefringePurpleHueStart, "Purple hue from"),
+                    Adjustment::hue(Parameter::DefringePurpleHueEnd, "Purple hue to"),
+                    Adjustment::amount(Parameter::DefringeGreenAmount, "Green"),
+                    Adjustment::hue(Parameter::DefringeGreenHueStart, "Green hue from"),
+                    Adjustment::hue(Parameter::DefringeGreenHueEnd, "Green hue to"),
                 ],
             },
         ],
@@ -156,6 +188,28 @@ pub const GROUPS: [Group; 3] = [
 
 pub fn sections() -> impl Iterator<Item = &'static Section> {
     GROUPS.iter().flat_map(|group| group.sections)
+}
+
+/// What a section does, where its title does not say it all.
+pub const fn section_hint(section: RecipeSection) -> Option<&'static str> {
+    match section {
+        RecipeSection::NoiseReduction => Some(
+            "Removes color noise, then luminance noise. More luminance detail keeps more fine \
+             texture, and some grain. Best judged at 1:1.",
+        ),
+        RecipeSection::CaptureSharpening => {
+            Some("Recovers fine detail lost in the lens and the sensor. Best judged at 1:1.")
+        }
+        RecipeSection::FalseColor => Some(
+            "Removes rainbow bands on fine patterns such as fabric. Each step can wash out more \
+             of the tiny color details. Best judged at 1:1.",
+        ),
+        RecipeSection::Defringe => Some(
+            "Takes the color out of fringes along high-contrast edges whose hue is in the range. \
+             Best judged at 1:1.",
+        ),
+        _ => None,
+    }
 }
 
 /// How the panel lists this parameter.
@@ -199,30 +253,30 @@ const MIXER_ROWS: [[&str; 3]; HSL_CHANNEL_COUNT] = [
 /// A full hue slider shifts a colour by this many degrees.
 const HUE_SHIFT: i32 = 45;
 
-const MIXER: [Adjustment; HSL_CHANNEL_COUNT * 3] =
-    {
-        let mut rows = [Adjustment::percent(Parameter::HslHue(0), ""); HSL_CHANNEL_COUNT * 3];
-        let mut channel = 0;
-        while channel < HSL_CHANNEL_COUNT {
-            let hue = MIXER_HUES[channel];
-            let [hue_label, saturation_label, luminance_label] = MIXER_ROWS[channel];
-            let color = MIXER_COLORS[channel];
-            rows[channel * 3] =
-                Adjustment::percent(Parameter::HslHue(channel), hue_label).ramp(Ramp([
-                    hsl(hue - HUE_SHIFT, 65, 52),
-                    color,
-                    hsl(hue + HUE_SHIFT, 65, 52),
-                ]));
-            rows[channel * 3 + 1] =
-                Adjustment::percent(Parameter::HslSaturation(channel), saturation_label)
-                    .ramp(Ramp([hsl(hue, 0, 52), hsl(hue, 40, 52), hsl(hue, 85, 52)]));
-            rows[channel * 3 + 2] =
-                Adjustment::percent(Parameter::HslLuminance(channel), luminance_label)
-                    .ramp(Ramp([hsl(hue, 65, 18), color, hsl(hue, 65, 82)]));
-            channel += 1;
-        }
-        rows
-    };
+const MIXER: [Adjustment; HSL_CHANNEL_COUNT * 3] = {
+    let mut rows = [Adjustment::percent(Parameter::HslHue(0), ""); HSL_CHANNEL_COUNT * 3];
+    let mut channel = 0;
+    while channel < HSL_CHANNEL_COUNT {
+        let hue = MIXER_HUES[channel];
+        let [hue_label, saturation_label, luminance_label] = MIXER_ROWS[channel];
+        let color = MIXER_COLORS[channel];
+        rows[channel * 3] =
+            Adjustment::percent(Parameter::HslHue(channel), hue_label).ramp(Ramp::Through([
+                hsl(hue - HUE_SHIFT, 65, 52),
+                color,
+                hsl(hue + HUE_SHIFT, 65, 52),
+            ]));
+        rows[channel * 3 + 1] =
+            Adjustment::percent(Parameter::HslSaturation(channel), saturation_label).ramp(
+                Ramp::Through([hsl(hue, 0, 52), hsl(hue, 40, 52), hsl(hue, 85, 52)]),
+            );
+        rows[channel * 3 + 2] =
+            Adjustment::percent(Parameter::HslLuminance(channel), luminance_label)
+                .ramp(Ramp::Through([hsl(hue, 65, 18), color, hsl(hue, 65, 82)]));
+        channel += 1;
+    }
+    rows
+};
 
 /// A colour of this hue in degrees, and saturation and lightness in percent, as `0xrrggbb`.
 const fn hsl(hue: i32, saturation: i32, lightness: i32) -> u32 {
