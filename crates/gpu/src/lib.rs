@@ -24,8 +24,10 @@ pub use export_fallback::{ExportBackend, ExportRender, ExportRenderError, Fallba
 mod memory;
 pub use memory::{GpuMemoryReservations, gpu_memory_reservations};
 mod capture;
+mod clipping;
 mod masks;
 pub use capture::{CaptureMetrics, GpuCaptureProcessor, GpuCaptureResult};
+pub use clipping::{ClippingTints, GpuClippingOverlay};
 mod preview;
 mod sensor;
 mod spatial;

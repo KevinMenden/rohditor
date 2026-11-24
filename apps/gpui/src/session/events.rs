@@ -6,6 +6,7 @@ use rohditor_engine::open_document::OpenDocument;
 use rohditor_engine::preview::{DocumentPreviewDiagnostics, GpuUpload, PreviewSource};
 
 use super::Session;
+use super::display::FrameKind;
 
 impl Session {
     pub(super) fn process_worker_events(&mut self) {
@@ -57,8 +58,12 @@ impl Session {
                         .is_some_and(PreviewSource::is_developed)
                 {
                     document.preview.source = Some(PreviewSource::Embedded);
-                    self.display
-                        .show_cpu_image(image.width, image.height, &image.pixels);
+                    self.display.show_cpu_image(
+                        FrameKind::Embedded,
+                        image.width,
+                        image.height,
+                        &image.pixels,
+                    );
                 }
             }
             WorkerEvent::RawReady { document_id, frame } => {
@@ -125,8 +130,12 @@ impl Session {
                 preview.diagnostics = Some(DocumentPreviewDiagnostics::cpu(diagnostics));
                 self.display.sync(preview);
                 document.error = None;
-                self.display
-                    .show_cpu_image(image.width, image.height, &image.pixels);
+                self.display.show_cpu_image(
+                    FrameKind::Cpu,
+                    image.width,
+                    image.height,
+                    &image.pixels,
+                );
             }
             WorkerEvent::GpuUploadReady {
                 ticket,

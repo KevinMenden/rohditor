@@ -8,8 +8,8 @@ use rohditor_engine::view::ViewState;
 
 use super::Workspace;
 use crate::actions::{
-    ActualPixels, CloseFile, Command, Export, Quit, Redo, ToggleCommandPalette, ToggleDevelop,
-    ToggleFiles, Undo, ZoomToFit,
+    ActualPixels, CloseFile, Command, Export, Quit, Redo, ToggleClipping, ToggleCommandPalette,
+    ToggleDevelop, ToggleFiles, Undo, ZoomToFit,
 };
 use crate::assets::Icon;
 use crate::theme::{SMALL_FONT_SIZE, STATUS_BAR_HEIGHT, TAB_HEIGHT, TITLE_BAR_HEIGHT, theme};
@@ -164,6 +164,10 @@ impl Workspace {
                     .gap_3()
                     .children(details.map(text))
                     .children(zoom.map(|zoom| self.zoom_dropdown(zoom)))
+                    .child(
+                        command_button("toggle-clipping", Icon::Clipping, ToggleClipping, true)
+                            .when(session.clipping_shown(), |button| button.bg(theme.selected)),
+                    )
                     .child(text(session.processor()))
                     .child(
                         command_button("toggle-develop", Icon::Sliders, ToggleDevelop, true)

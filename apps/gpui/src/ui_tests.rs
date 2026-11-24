@@ -4,6 +4,8 @@
 //! photo. The photo is copied to a scratch folder first, so sidecars never end up next to the
 //! original. `ROHDITOR_SHOTS=DIR` writes a PNG per scenario.
 
+mod viewport;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -40,6 +42,11 @@ impl Harness {
     }
 
     fn sized(window: Size<Pixels>) -> Self {
+        Self::start(window, device::shared_context)
+    }
+
+    /// Previews render on the device of `gpu`, or on the CPU without one.
+    fn start(window: Size<Pixels>, gpu: fn() -> Option<WgpuContext>) -> Self {
         let mut cx = HeadlessAppContext::with_platform(
             Arc::new(gpui_wgpu::CosmicTextSystem::new("Noto Sans")),
             Arc::new(assets::Assets),
@@ -54,7 +61,7 @@ impl Harness {
                 let session = cx.new(|cx| {
                     let workers = SessionWorkers::start().expect("the engine starts");
                     let settings = rohditor_engine::settings::AppSettings::default();
-                    Session::new(workers, settings, device::shared_context(), cx)
+                    Session::new(workers, settings, gpu(), cx)
                 });
                 let library = cx.new(|cx| {
                     let worker = LibraryWorker::start().expect("the catalog starts");
@@ -560,7 +567,8 @@ fn menus_and_the_filter_work_on_the_sliders() {
     harness.capture("dropdown");
     // Zoom to fit is checked, so that the arrow selects the next entry.
     harness.keys("down enter");
-    assert_eq!(harness.with_session(|session, _| fit(session)), Some(false));
+    // 1:1 shows once its frame is rendered.
+    harness.wait_until("actual pixels", |session| fit(session) == Some(false));
     harness.click("dropdown:zoom");
     let beside = harness.find("viewport").center();
     harness.press(beside, 1);

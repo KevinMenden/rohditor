@@ -13,6 +13,7 @@ use rohditor_engine::tools::{
 };
 
 use super::theme::colors;
+use super::viewport::placement;
 
 const HANDLE_RADIUS: f32 = 5.0;
 /// How close, in screen pixels, a click must be to another mask's pin to select it.
@@ -60,17 +61,11 @@ fn mask_view(model: &MaskOverlayModel<'_>, image_rect: egui::Rect) -> MaskView {
 }
 
 fn to_display(image_rect: egui::Rect, pointer: egui::Pos2) -> (f64, f64) {
-    (
-        f64::from((pointer.x - image_rect.left()) / image_rect.width()),
-        f64::from((pointer.y - image_rect.top()) / image_rect.height()),
-    )
+    placement(image_rect).to_image(pointer.into())
 }
 
 fn to_screen(image_rect: egui::Rect, position: (f64, f64)) -> egui::Pos2 {
-    egui::pos2(
-        image_rect.left() + position.0 as f32 * image_rect.width(),
-        image_rect.top() + position.1 as f32 * image_rect.height(),
-    )
+    placement(image_rect).to_screen(position).into()
 }
 
 /// Whether a primary press at `pointer` would start a mask gesture, so the viewport knows not to
@@ -617,13 +612,5 @@ mod tests {
                 "{scale}"
             );
         }
-    }
-
-    #[test]
-    fn screen_and_display_positions_round_trip() {
-        let rect = egui::Rect::from_min_size(egui::pos2(40.0, 20.0), egui::vec2(300.0, 200.0));
-        let display = to_display(rect, egui::pos2(190.0, 70.0));
-        assert_eq!(display, (0.5, 0.25));
-        assert_eq!(to_screen(rect, display), egui::pos2(190.0, 70.0));
     }
 }

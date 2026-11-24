@@ -3,12 +3,14 @@
 //! Owns no widgets. Views observe the [`Session`] entity and call its methods; worker wake-ups
 //! and timers arrive through [`Session::tick`].
 
+mod clipping;
 mod display;
 mod editing;
 mod events;
 mod export;
 mod renderer;
 mod saving;
+mod upload;
 mod zoom;
 
 use std::path::{Path, PathBuf};
@@ -168,7 +170,6 @@ impl Session {
         if let Some(document) = self.document.take() {
             self.renderer.coordinator.abandon(document.id);
         }
-        self.display.remove_retired(cx);
         cx.notify();
     }
 
@@ -216,7 +217,22 @@ impl Session {
                 let _ = this.update(cx, Self::tick);
             })
         });
-        self.display.remove_retired(cx);
+        cx.notify();
+    }
+}
+
+#[cfg(test)]
+impl Session {
+    /// Show these pixels as if the CPU had rendered them.
+    pub fn show_test_image(
+        &mut self,
+        width: usize,
+        height: usize,
+        rgb: &[u8],
+        cx: &mut Context<Self>,
+    ) {
+        self.display
+            .show_cpu_image(display::FrameKind::Cpu, width, height, rgb);
         cx.notify();
     }
 }

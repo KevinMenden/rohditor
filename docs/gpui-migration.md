@@ -24,7 +24,7 @@ Assumed from the recommendations unless marked open; change them here if they tu
 | Open, folder list, autosave, undo | Done | Save status and errors, recovery checks |
 | Basic sliders | 16, typed, by keyboard | Section reset, changed markers |
 | Other adjustments | None | Curve, mixer, grading, profiles, highlights, defringe, moiré, optics, full detail controls |
-| Viewport | Fit, zoom, pan | Real 1:1, clipping overlay, tool overlays |
+| Viewport | Fit, zoom, pan, 1:1, clipping overlay | Tool overlays |
 | Tools | None | Crop, masks, white balance and colour pickers |
 | Presets, info | None | All |
 | Library | File list | Grid, sorting, filmstrip |
@@ -72,9 +72,9 @@ Done when a full slider edit works by keyboard alone.
 ## Stage 2: Viewport
 
 - [x] 2.1 Source-resolution 1:1.
-- [ ] 2.2 An overlay layer with screen-to-image mapping.
-- [ ] 2.3 Clipping overlay.
-- [ ] 2.4 Measure large CPU frames (crop, CPU-fallback 1:1; about 24 MP). Upload them straight to
+- [x] 2.2 An overlay layer with screen-to-image mapping.
+- [x] 2.3 Clipping overlay.
+- [x] 2.4 Measure large CPU frames (crop, CPU-fallback 1:1; about 24 MP). Upload them straight to
   a texture instead of GPUI's atlas if that is slow.
 
 Done when 1:1 and clipping match egui on GPU and CPU.
