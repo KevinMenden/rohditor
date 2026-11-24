@@ -1,4 +1,4 @@
-//! Changing to the Crop tool and back.
+//! Changing to the Crop tool and back, and dragging its rectangle.
 
 use rohditor_edit::NormalizedCropRect;
 use rohditor_engine::tools::{CropAspect, Picker, ToolKind};
@@ -25,7 +25,9 @@ fn shown(harness: &mut Harness) -> (u32, u32) {
 }
 
 fn draft_square(harness: &mut Harness) {
-    harness.with_session(|session, cx| session.draft_aspect(CropAspect::Square, cx));
+    harness.with_session(|session, cx| {
+        session.edit_crop(|crop| crop.set_aspect(CropAspect::Square), cx)
+    });
 }
 
 fn enter(harness: &mut Harness) {
@@ -141,7 +143,7 @@ fn a_draft_is_undone_cancelled_or_applied() {
     draft_square(&mut harness);
     harness.with_session(|session, cx| {
         session.undo(cx);
-        session.draft_aspect(CropAspect::SixteenNine, cx);
+        session.edit_crop(|crop| crop.set_aspect(CropAspect::SixteenNine), cx);
         session.close_document(cx);
     });
     assert_eq!(tool(&mut harness), ToolKind::Edit);
@@ -153,4 +155,102 @@ fn a_draft_is_undone_cancelled_or_applied() {
     });
     let drafted = drafted.expect("the crop was saved");
     assert!(drafted.bottom - drafted.top < 0.999);
+}
+
+/// Where the fitted whole photo is on screen.
+fn photo(harness: &mut Harness) -> Bounds<Pixels> {
+    let area = harness.find("viewport");
+    let (width, height) = shown(harness);
+    let padded = area.size - size(px(40.0), px(40.0));
+    let scale = (padded.width / width as f32).min(padded.height / height as f32);
+    Bounds::centered_at(
+        area.center(),
+        size(scale * width as f32, scale * height as f32),
+    )
+}
+
+/// Drag from one image position to another, starting `grab` pixels beside the first.
+fn drag(harness: &mut Harness, from: (f32, f32), to: (f32, f32), grab: Pixels) {
+    let photo = photo(harness);
+    let at = |(x, y): (f32, f32)| {
+        photo.origin + point(photo.size.width * x + grab, photo.size.height * y + grab)
+    };
+    harness.press(at(from), 1);
+    harness.drag_to(at(((from.0 + to.0) / 2.0, (from.1 + to.1) / 2.0)));
+    harness.drag_to(at(to));
+    harness.release(at(to));
+}
+
+#[track_caller]
+fn assert_draft(harness: &mut Harness, expected: [f64; 4]) {
+    let draft = harness.with_session(|session, _| session.crop_draft().expect("drafting").draft());
+    let edges = [draft.left, draft.top, draft.right, draft.bottom];
+    let close = std::iter::zip(edges, expected).all(|(a, b)| (a - b).abs() < 1.0e-3);
+    assert!(close, "{edges:?} is not {expected:?}");
+}
+
+#[test]
+#[ignore = "requires a wgpu adapter and ROHDITOR_RAW"]
+fn the_rectangle_is_resized_and_moved_by_dragging() {
+    let Some((mut harness, ..)) = opened("crop-drag") else {
+        return;
+    };
+    let pan = |harness: &mut Harness| {
+        harness.with_session(|session, _| session.document().map(|d| d.preview.view.pan()))
+    };
+    enter(&mut harness);
+    // A handle keeps its distance to the pointer.
+    drag(&mut harness, (0.0, 0.0), (0.2, 0.3), px(6.0));
+    assert_draft(&mut harness, [0.2, 0.3, 1.0, 1.0]);
+    drag(&mut harness, (1.0, 0.65), (0.7, 0.1), px(0.0));
+    assert_draft(&mut harness, [0.2, 0.3, 0.7, 1.0]);
+    drag(&mut harness, (0.45, 1.0), (0.1, 0.8), px(-4.0));
+    assert_draft(&mut harness, [0.2, 0.3, 0.7, 0.8]);
+    drag(&mut harness, (0.3, 0.4), (0.4, 0.5), px(0.0));
+    assert_draft(&mut harness, [0.3, 0.4, 0.8, 0.9]);
+    let shot = harness.capture("crop-dragged");
+    // It stops at the edge, although the pointer goes on over the panels.
+    drag(&mut harness, (0.4, 0.5), (3.0, 0.5), px(0.0));
+    assert_draft(&mut harness, [0.5, 0.4, 1.0, 0.9]);
+    assert!(harness.capture("crop-moved") != shot, "it is drawn");
+    assert_eq!(pan(&mut harness), Some([0.0, 0.0]));
+
+    // Leaving the tool ends a drag.
+    let photo = photo(&mut harness);
+    let inside = photo.origin + point(photo.size.width * 0.6, photo.size.height * 0.5);
+    harness.press(inside, 1);
+    harness.keys("enter");
+    harness.drag_to(inside - point(px(50.0), px(0.0)));
+    harness.release(inside);
+    let committed = crop(&mut harness).expect("the crop was applied");
+    assert!((committed.left - 0.5).abs() < 1.0e-3, "{committed:?}");
+    harness.wait_until("the cropped preview", settled);
+    harness.keys("ctrl-z");
+    assert_eq!(crop(&mut harness), None, "all drags are one undo step");
+}
+
+#[test]
+#[ignore = "requires a wgpu adapter and ROHDITOR_RAW"]
+fn dragging_beside_the_rectangle_pans() {
+    let Some((mut harness, ..)) = opened("crop-pan") else {
+        return;
+    };
+    let pan = |harness: &mut Harness| {
+        harness.with_session(|session, _| session.document().map(|d| d.preview.view.pan()))
+    };
+    enter(&mut harness);
+    // A full-frame rectangle cannot be moved.
+    let center = harness.find("viewport").center();
+    harness.press(center, 1);
+    harness.drag_to(center + point(px(30.0), px(0.0)));
+    harness.release(center);
+    assert_eq!(pan(&mut harness), Some([30.0, 0.0]));
+    harness.press(center, 2);
+    harness.release(center);
+    assert_eq!(pan(&mut harness), Some([0.0, 0.0]));
+
+    drag(&mut harness, (0.0, 0.0), (0.5, 0.5), px(0.0));
+    drag(&mut harness, (0.2, 0.2), (0.3, 0.2), px(0.0));
+    assert_draft(&mut harness, [0.5, 0.5, 1.0, 1.0]);
+    assert_ne!(pan(&mut harness), Some([0.0, 0.0]));
 }

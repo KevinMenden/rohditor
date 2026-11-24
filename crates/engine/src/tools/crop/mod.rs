@@ -1,75 +1,14 @@
+//! The Crop tool: the rectangle being drafted, and how gestures and ratios change it.
+
+mod aspect;
+mod handles;
+mod resize;
+
 use rohditor_edit::NormalizedCropRect;
 
-const MINIMUM_NORMALIZED_EDGE: f64 = 0.002;
-
-/// Which part of the crop rectangle a pointer gesture grabbed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CropHandle {
-    NorthWest,
-    North,
-    NorthEast,
-    East,
-    SouthEast,
-    South,
-    SouthWest,
-    West,
-    Move,
-}
-
-/// The aspect constraint chosen by the crop authoring UI. It is intentionally
-/// not stored in the recipe: only the resulting rectangle changes pixels.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum CropAspect {
-    #[default]
-    Free,
-    Original,
-    Square,
-    ThreeTwo,
-    FourThree,
-    FourFive,
-    FiveSeven,
-    SixteenNine,
-}
-
-impl CropAspect {
-    pub const ALL: [Self; 8] = [
-        Self::Free,
-        Self::Original,
-        Self::Square,
-        Self::ThreeTwo,
-        Self::FourThree,
-        Self::FourFive,
-        Self::FiveSeven,
-        Self::SixteenNine,
-    ];
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Free => "Free",
-            Self::Original => "Original",
-            Self::Square => "1:1",
-            Self::ThreeTwo => "3:2",
-            Self::FourThree => "4:3",
-            Self::FourFive => "4:5",
-            Self::FiveSeven => "5:7",
-            Self::SixteenNine => "16:9",
-        }
-    }
-
-    const fn ratio(self, original_ratio: f64, portrait: bool) -> Option<f64> {
-        let landscape = match self {
-            Self::Free => return None,
-            Self::Original => original_ratio,
-            Self::Square => 1.0,
-            Self::ThreeTwo => 3.0 / 2.0,
-            Self::FourThree => 4.0 / 3.0,
-            Self::FourFive => 4.0 / 5.0,
-            Self::FiveSeven => 5.0 / 7.0,
-            Self::SixteenNine => 16.0 / 9.0,
-        };
-        Some(if portrait { 1.0 / landscape } else { landscape })
-    }
-}
+pub use aspect::CropAspect;
+pub use handles::CropHandle;
+use resize::{fit_rect, resize_free, resize_locked, translate};
 
 #[derive(Debug, Clone, Copy)]
 struct CropDrag {
@@ -150,7 +89,7 @@ impl CropToolSession {
     pub fn set_locked(&mut self, locked: bool) {
         self.locked = locked;
         self.locked_ratio = if locked && self.aspect == CropAspect::Free {
-            // Dragged rects keep both edges >= MINIMUM_NORMALIZED_EDGE and presets
+            // Dragged rects keep both edges at a minimum length and presets
             // are fit-to-frame, so this division can't produce inf/NaN.
             let pixel_ratio = ((self.draft.right - self.draft.left) * self.full_width as f64)
                 / ((self.draft.bottom - self.draft.top) * self.full_height as f64);
@@ -230,18 +169,22 @@ impl CropToolSession {
         });
     }
 
+    /// `point` may lie outside the photo. What was grabbed keeps its distance to the pointer, so
+    /// that grabbing a handle beside its center does not move it.
     pub fn drag_to(&mut self, point: (f64, f64)) {
         let Some(drag) = self.drag else {
             return;
         };
         let dx = point.0 - drag.start.0;
         let dy = point.1 - drag.start.1;
-        self.draft = if drag.handle == CropHandle::Move {
-            translate(drag.rect, dx, dy)
-        } else if self.locked {
-            resize_locked(drag.rect, drag.handle, point, self.normalized_ratio())
-        } else {
-            resize_free(drag.rect, drag.handle, point)
+        let Some((x, y)) = drag.handle.position(drag.rect) else {
+            self.draft = translate(drag.rect, dx, dy);
+            return;
+        };
+        let point = (x + dx, y + dy);
+        self.draft = match self.normalized_ratio().filter(|_| self.locked) {
+            Some(ratio) => resize_locked(drag.rect, drag.handle, point, ratio),
+            None => resize_free(drag.rect, drag.handle, point),
         };
     }
 
@@ -285,109 +228,6 @@ impl CropToolSession {
             height = width / ratio;
         }
         self.draft = fit_rect(center_x, center_y, width, height);
-    }
-}
-
-fn translate(rect: NormalizedCropRect, dx: f64, dy: f64) -> NormalizedCropRect {
-    let width = rect.right - rect.left;
-    let height = rect.bottom - rect.top;
-    let left = (rect.left + dx).clamp(0.0, 1.0 - width);
-    let top = (rect.top + dy).clamp(0.0, 1.0 - height);
-    NormalizedCropRect {
-        left,
-        top,
-        right: left + width,
-        bottom: top + height,
-    }
-}
-
-fn resize_free(
-    rect: NormalizedCropRect,
-    handle: CropHandle,
-    point: (f64, f64),
-) -> NormalizedCropRect {
-    let mut next = rect;
-    let x = point.0.clamp(0.0, 1.0);
-    let y = point.1.clamp(0.0, 1.0);
-    match handle {
-        CropHandle::NorthWest | CropHandle::West | CropHandle::SouthWest => {
-            next.left = x.min(rect.right - MINIMUM_NORMALIZED_EDGE)
-        }
-        CropHandle::NorthEast | CropHandle::East | CropHandle::SouthEast => {
-            next.right = x.max(rect.left + MINIMUM_NORMALIZED_EDGE)
-        }
-        CropHandle::North | CropHandle::South | CropHandle::Move => {}
-    }
-    match handle {
-        CropHandle::NorthWest | CropHandle::North | CropHandle::NorthEast => {
-            next.top = y.min(rect.bottom - MINIMUM_NORMALIZED_EDGE)
-        }
-        CropHandle::SouthWest | CropHandle::South | CropHandle::SouthEast => {
-            next.bottom = y.max(rect.top + MINIMUM_NORMALIZED_EDGE)
-        }
-        CropHandle::West | CropHandle::East | CropHandle::Move => {}
-    }
-    next
-}
-
-fn resize_locked(
-    rect: NormalizedCropRect,
-    handle: CropHandle,
-    point: (f64, f64),
-    ratio: Option<f64>,
-) -> NormalizedCropRect {
-    let Some(ratio) = ratio else {
-        return resize_free(rect, handle, point);
-    };
-    if handle == CropHandle::Move {
-        return translate(rect, point.0 - rect.left, point.1 - rect.top);
-    }
-    let (anchor_x, anchor_y) = match handle {
-        CropHandle::NorthWest => (rect.right, rect.bottom),
-        CropHandle::NorthEast => (rect.left, rect.bottom),
-        CropHandle::SouthWest => (rect.right, rect.top),
-        CropHandle::SouthEast => (rect.left, rect.top),
-        CropHandle::West => (rect.right, (rect.top + rect.bottom) * 0.5),
-        CropHandle::East => (rect.left, (rect.top + rect.bottom) * 0.5),
-        CropHandle::North => ((rect.left + rect.right) * 0.5, rect.bottom),
-        CropHandle::South => ((rect.left + rect.right) * 0.5, rect.top),
-        CropHandle::Move => unreachable!(),
-    };
-    let requested_width = (point.0 - anchor_x).abs();
-    let requested_height = (point.1 - anchor_y).abs();
-    let width = match handle {
-        CropHandle::West | CropHandle::East => requested_width,
-        CropHandle::North | CropHandle::South => requested_height * ratio,
-        _ => requested_width.max(requested_height * ratio),
-    }
-    .max(MINIMUM_NORMALIZED_EDGE);
-    let height = (width / ratio).max(MINIMUM_NORMALIZED_EDGE);
-    let center_x = match handle {
-        CropHandle::West | CropHandle::East | CropHandle::North | CropHandle::South => anchor_x,
-        CropHandle::NorthWest | CropHandle::SouthWest => anchor_x - width * 0.5,
-        CropHandle::NorthEast | CropHandle::SouthEast => anchor_x + width * 0.5,
-        CropHandle::Move => unreachable!(),
-    };
-    let center_y = match handle {
-        CropHandle::North | CropHandle::South | CropHandle::West | CropHandle::East => anchor_y,
-        CropHandle::NorthWest | CropHandle::NorthEast => anchor_y - height * 0.5,
-        CropHandle::SouthWest | CropHandle::SouthEast => anchor_y + height * 0.5,
-        CropHandle::Move => unreachable!(),
-    };
-    fit_rect(center_x, center_y, width, height)
-}
-
-fn fit_rect(center_x: f64, center_y: f64, width: f64, height: f64) -> NormalizedCropRect {
-    let scale = (1.0_f64).min(1.0 / width).min(1.0 / height);
-    let width = width * scale;
-    let height = height * scale;
-    let left = (center_x - width * 0.5).clamp(0.0, 1.0 - width);
-    let top = (center_y - height * 0.5).clamp(0.0, 1.0 - height);
-    NormalizedCropRect {
-        left,
-        top,
-        right: left + width,
-        bottom: top + height,
     }
 }
 

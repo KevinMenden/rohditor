@@ -2,7 +2,7 @@
 
 use gpui::Context;
 use rohditor_engine::open_document::OpenDocument;
-use rohditor_engine::tools::{ActiveTool, ToolKind};
+use rohditor_engine::tools::{ActiveTool, CropToolSession, ToolKind};
 
 use super::Session;
 
@@ -38,6 +38,22 @@ impl Session {
         self.tool.kind() == ToolKind::Crop
     }
 
+    /// The crop being drafted, once the photo is shown without its crop.
+    pub fn crop_draft(&self) -> Option<&CropToolSession> {
+        let document = self.document.as_ref()?;
+        self.tool
+            .crop()
+            .filter(|_| document.preview.full_frame_shown())
+    }
+
+    /// Change the crop being drafted, if the Crop tool is active.
+    pub fn edit_crop(&mut self, change: impl FnOnce(&mut CropToolSession), cx: &mut Context<Self>) {
+        if let Some(crop) = self.tool.crop_mut() {
+            change(crop);
+            cx.notify();
+        }
+    }
+
     fn change_tool(
         &mut self,
         change: impl FnOnce(&mut ActiveTool, &mut OpenDocument) -> bool,
@@ -49,19 +65,5 @@ impl Session {
             self.queue_preview();
         }
         self.tick(cx);
-    }
-}
-
-#[cfg(test)]
-impl Session {
-    pub fn draft_aspect(
-        &mut self,
-        aspect: rohditor_engine::tools::CropAspect,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(crop) = self.tool.crop_mut() {
-            crop.set_aspect(aspect);
-            cx.notify();
-        }
     }
 }

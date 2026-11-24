@@ -6,7 +6,6 @@ use super::theme::colors;
 use super::viewport::placement;
 
 const HANDLE_RADIUS: f32 = 5.0;
-const HIT_RADIUS: f32 = 12.0;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct CropOverlayModel {
@@ -33,8 +32,8 @@ pub(crate) fn interact_and_paint(
     let mut output = CropOverlayOutput::default();
     let crop_rect = normalized_rect(image_rect, model.crop);
     let pointer = response.interact_pointer_pos();
-    if let Some(pointer) = pointer.filter(|pointer| image_rect.contains(*pointer)) {
-        let hovered = hit_test(crop_rect, pointer);
+    if let Some(pointer) = pointer {
+        let hovered = CropHandle::at(placement(image_rect), model.crop, pointer.into());
         if let Some(handle) = model.active_handle.or(hovered) {
             context.set_cursor_icon(cursor_for(handle));
         }
@@ -110,7 +109,9 @@ pub(crate) fn interact_and_paint(
         egui::Stroke::new(1.5_f32, colors::ACCENT_HOVER),
         egui::StrokeKind::Inside,
     );
-    for (_, point) in handles(crop_rect) {
+    let handles = CropHandle::OUTLINE.into_iter();
+    for position in handles.filter_map(|handle| handle.position(model.crop)) {
+        let point = egui::Pos2::from(placement(image_rect).to_screen(position));
         painter.circle_filled(point, HANDLE_RADIUS, colors::ACCENT_HOVER);
         painter.circle_stroke(
             point,
@@ -214,49 +215,7 @@ fn normalized_rect(image: egui::Rect, crop: NormalizedCropRect) -> egui::Rect {
 }
 
 fn normalized(image: egui::Rect, point: egui::Pos2) -> (f64, f64) {
-    placement(image).to_image_clamped(point.into())
-}
-
-fn handles(rect: egui::Rect) -> [(CropHandle, egui::Pos2); 8] {
-    [
-        (CropHandle::NorthWest, rect.left_top()),
-        (CropHandle::North, egui::pos2(rect.center().x, rect.top())),
-        (CropHandle::NorthEast, rect.right_top()),
-        (CropHandle::East, egui::pos2(rect.right(), rect.center().y)),
-        (CropHandle::SouthEast, rect.right_bottom()),
-        (
-            CropHandle::South,
-            egui::pos2(rect.center().x, rect.bottom()),
-        ),
-        (CropHandle::SouthWest, rect.left_bottom()),
-        (CropHandle::West, egui::pos2(rect.left(), rect.center().y)),
-    ]
-}
-
-fn hit_test(rect: egui::Rect, pointer: egui::Pos2) -> Option<CropHandle> {
-    for (handle, point) in handles(rect) {
-        if point.distance(pointer) <= HIT_RADIUS {
-            return Some(handle);
-        }
-    }
-    if pointer.x >= rect.left() - HIT_RADIUS
-        && pointer.x <= rect.right() + HIT_RADIUS
-        && pointer.y >= rect.top() - HIT_RADIUS
-        && pointer.y <= rect.bottom() + HIT_RADIUS
-    {
-        let distances = [
-            (CropHandle::North, (pointer.y - rect.top()).abs()),
-            (CropHandle::East, (pointer.x - rect.right()).abs()),
-            (CropHandle::South, (pointer.y - rect.bottom()).abs()),
-            (CropHandle::West, (pointer.x - rect.left()).abs()),
-        ];
-        if let Some((handle, distance)) = distances.into_iter().min_by(|a, b| a.1.total_cmp(&b.1))
-            && distance <= HIT_RADIUS
-        {
-            return Some(handle);
-        }
-    }
-    rect.contains(pointer).then_some(CropHandle::Move)
+    placement(image).to_image(point.into())
 }
 
 fn cursor_for(handle: CropHandle) -> egui::CursorIcon {
@@ -266,30 +225,5 @@ fn cursor_for(handle: CropHandle) -> egui::CursorIcon {
         CropHandle::North | CropHandle::South => egui::CursorIcon::ResizeVertical,
         CropHandle::East | CropHandle::West => egui::CursorIcon::ResizeHorizontal,
         CropHandle::Move => egui::CursorIcon::Grab,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{CropHandle, hit_test};
-
-    #[test]
-    fn corners_take_precedence_over_edges_and_interior() {
-        let rect = eframe::egui::Rect::from_min_max(
-            eframe::egui::pos2(10.0, 10.0),
-            eframe::egui::pos2(90.0, 90.0),
-        );
-        assert_eq!(
-            hit_test(rect, eframe::egui::pos2(11.0, 11.0)),
-            Some(CropHandle::NorthWest)
-        );
-        assert_eq!(
-            hit_test(rect, eframe::egui::pos2(50.0, 10.5)),
-            Some(CropHandle::North)
-        );
-        assert_eq!(
-            hit_test(rect, eframe::egui::pos2(50.0, 50.0)),
-            Some(CropHandle::Move)
-        );
     }
 }
