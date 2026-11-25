@@ -230,3 +230,19 @@ fn the_cursor_moves_out_of_a_collapsed_folder() {
     tree.collapse(Path::new("/p/a"));
     assert_eq!(tree.cursor(), Some(Path::new("/p/a")));
 }
+
+#[test]
+fn clicking_a_folder_shows_it_before_it_closes() {
+    let mut tree = opened();
+    let folder = Path::new("/p");
+    tree.click_folder(folder, false);
+    assert!(tree.is_expanded(folder), "it was open and is shown now");
+    tree.click_folder(folder, true);
+    assert!(!tree.is_expanded(folder));
+    tree.click_folder(folder, true);
+    assert!(tree.is_expanded(folder));
+    tree.collapse(folder);
+    tree.click_folder(folder, false);
+    assert!(tree.is_expanded(folder));
+    assert_eq!(tree.cursor(), Some(folder));
+}

@@ -151,6 +151,17 @@ impl FolderTree {
         }
     }
 
+    /// A click on a folder, which also shows it. One that was not shown yet is
+    /// only opened; one that was opens and closes.
+    pub fn click_folder(&mut self, folder: &Path, was_shown: bool) {
+        if was_shown {
+            self.toggle(folder);
+        } else if !self.is_expanded(folder) {
+            self.expand(folder);
+        }
+        self.set_cursor(folder);
+    }
+
     /// List every folder whose content is visible again.
     pub fn refresh(&mut self) {
         let open = self.rows.iter().filter(|row| {

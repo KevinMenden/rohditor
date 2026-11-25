@@ -34,7 +34,10 @@ fn main() -> Result<()> {
         session: SessionWorkers::start()?,
         library: LibraryWorker::start()?,
     };
-    run(std::env::args_os().nth(1).map(PathBuf::from), workers);
+    // Relative paths would not match the folder tree's.
+    let open = std::env::args_os().nth(1).map(PathBuf::from);
+    let open = open.map(|path| std::path::absolute(&path).unwrap_or(path));
+    run(open, workers);
     Ok(())
 }
 
@@ -90,7 +93,7 @@ fn run(open: Option<PathBuf>, workers: Workers) {
                         library.update(cx, |library, cx| library.open_folder(path, cx));
                     }
                     Some(path) => session.update(cx, |session, cx| session.open_file(path, cx)),
-                    None => library.update(cx, Library::restore_folder),
+                    None => library.update(cx, Library::restore),
                 }
                 let closing = session.clone();
                 cx.on_app_quit(move |cx| {

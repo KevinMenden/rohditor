@@ -21,7 +21,7 @@ Assumed from the recommendations unless marked open; change them here if they tu
 
 | Area | GPUI today | Missing |
 |---|---|---|
-| Open, folder list, autosave, undo | Done | Save status and errors, recovery checks |
+| Open, file tree, autosave, undo | Done | Save status and errors, recovery checks |
 | Basic sliders | Typed, by keyboard, grouped and searchable, with section reset and changed markers | |
 | Light | Tone, parametric curve, presence, highlight reconstruction | |
 | Color | White balance, mixer, grading wheels, profiles, pickers | |
@@ -29,7 +29,7 @@ Assumed from the recommendations unless marked open; change them here if they tu
 | Viewport | Fit, zoom, pan, 1:1, clipping overlay, tool overlays | |
 | Tools | Crop, pickers, masks | |
 | Presets, info | None | All |
-| Library | File list | File tree, albums, filmstrip, sorting (#233) |
+| Library | File tree, selection | Albums, filmstrip, sorting (#233) |
 | Export | JPEG only | PNG, size, sharpening, metadata, overwrite |
 | Settings, diagnostics | None | All, including neural demosaic |
 
@@ -119,7 +119,7 @@ Done when the moved tests pass and painting feels smooth on real RAWs.
 
 - [ ] 6.1 Library: file tree, albums, filmstrip and sorting, tracked in #233 (no grid).
   - [x] L.1 Engine: catalog sources, folder tree, albums, selection by path.
-  - [ ] L.2 File tree panel.
+  - [x] L.2 File tree panel.
   - [ ] L.3 Filmstrip, sorting, keyboard navigation.
   - [ ] L.4 Albums panel.
 - [ ] 6.2 Full export dialog.

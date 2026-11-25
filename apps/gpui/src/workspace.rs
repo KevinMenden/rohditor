@@ -16,8 +16,8 @@ use crate::actions::{
     ActualPixels, ApplyPreset, ApplyTool, AutoNoiseReduction, AutoTone, CancelTool, ChooseLens,
     CloseFile, CropTool, EditTool, Export, FlipCrop, FocusAdjustments, FocusPhoto,
     ImportCameraProfile, LockCrop, NextPhoto, OpenFile, OpenFolder, PAINTING_CONTEXT,
-    PHOTO_CONTEXT, PickMixerColor, PickWhiteBalance, PreviousPhoto, Quit, Redo, ResetAdjustments,
-    ResetCrop, ResetSection, Save, SavePreset, SearchAdjustments, SetCropAspect,
+    PHOTO_CONTEXT, PickMixerColor, PickWhiteBalance, PreviousPhoto, Quit, Redo, RefreshFolders,
+    ResetAdjustments, ResetCrop, ResetSection, Save, SavePreset, SearchAdjustments, SetCropAspect,
     SetHighlightMethod, SetLensProfile, SetRendering, SetWhiteBalance, ToggleClipping,
     ToggleCommandPalette, ToggleDevelop, ToggleFiles, Undo, WORKSPACE_CONTEXT, ZoomToFit,
 };
@@ -26,7 +26,7 @@ use crate::panels::command_palette::command_palette;
 use crate::panels::controls::FocusControls as _;
 use crate::panels::crop::CropPanel;
 use crate::panels::develop::DevelopPanel;
-use crate::panels::files::FilesPanel;
+use crate::panels::file_tree::FileTreePanel;
 use crate::panels::masks::MasksPanel;
 use crate::session::Session;
 use crate::theme::{FILES_WIDTH, UI_FONT_SIZE, theme};
@@ -40,7 +40,7 @@ use notifications::Announced;
 pub struct Workspace {
     session: Entity<Session>,
     library: Entity<Library>,
-    files: Entity<FilesPanel>,
+    files: Entity<FileTreePanel>,
     develop: Entity<DevelopPanel>,
     crop: Entity<CropPanel>,
     masks: Entity<MasksPanel>,
@@ -89,8 +89,9 @@ impl Workspace {
         .detach();
         cx.observe(&library, |_, _, cx| cx.notify()).detach();
         Self {
-            files: cx
-                .new(|cx| FilesPanel::new(session.clone(), library.clone(), overlays.clone(), cx)),
+            files: cx.new(|cx| {
+                FileTreePanel::new(session.clone(), library.clone(), overlays.clone(), cx)
+            }),
             develop: cx.new(|cx| DevelopPanel::new(session.clone(), overlays.clone(), window, cx)),
             crop: cx.new(|cx| CropPanel::new(session.clone(), overlays.clone(), cx)),
             masks: cx.new(|cx| MasksPanel::new(session.clone(), overlays.clone(), cx)),
@@ -213,6 +214,9 @@ impl Workspace {
             .on_action(cx.listener(|this, _: &PreviousPhoto, _, cx| this.open_adjacent(false, cx)))
             .on_action(cx.listener(|this, _: &OpenFile, _, cx| this.prompt(false, cx)))
             .on_action(cx.listener(|this, _: &OpenFolder, _, cx| this.prompt(true, cx)))
+            .on_action(cx.listener(|this, _: &RefreshFolders, _, cx| {
+                this.library.update(cx, Library::refresh);
+            }))
             .on_action(cx.listener(|this, _: &ZoomToFit, _, cx| {
                 this.viewport.update(cx, Viewport::zoom_to_fit);
             }))

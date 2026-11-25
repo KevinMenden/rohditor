@@ -11,6 +11,7 @@
 //! ```text
 //! window 1440 1800        # first line only; the default is 1440 900
 //! open A.ARW              # A.ARW or B.ARW: copies of ROHDITOR_RAW in a scratch folder
+//! folder                  # add the scratch folder to the file tree
 //! click SEL               # also: rightclick
 //! hover SEL               # moves the pointer to the center of SEL
 //! drag SEL DX DY          # press at the center of SEL, move by (DX, DY), release
@@ -33,6 +34,7 @@ use super::*;
 enum Step {
     Window(Size<Pixels>),
     Open(String),
+    Folder,
     Click(String),
     RightClick(String),
     Hover(String),
@@ -89,6 +91,8 @@ fn parse_line(line: &str, first: bool) -> Result<Step, String> {
         }
         "window" => return Err("window must be the first command".into()),
         "open" => Step::Open(selector(&words)?),
+        "folder" if words.is_empty() => Step::Folder,
+        "folder" => return Err("folder takes nothing".into()),
         "click" => Step::Click(selector(&words)?),
         "rightclick" => Step::RightClick(selector(&words)?),
         "hover" => Step::Hover(selector(&words)?),
@@ -166,11 +170,15 @@ impl Driver {
         self.pressed = false;
     }
 
-    fn open(&mut self, name: &str) -> Result<(), String> {
+    fn photos(&mut self) -> Result<(PathBuf, PathBuf), String> {
         if self.photos.is_none() {
             self.photos = Some(scratch_photos("script").ok_or("ROHDITOR_RAW is not set")?);
         }
-        let (first, second) = self.photos.clone().expect("copied above");
+        Ok(self.photos.clone().expect("copied above"))
+    }
+
+    fn open(&mut self, name: &str) -> Result<(), String> {
+        let (first, second) = self.photos()?;
         let path = match name {
             "A.ARW" => first,
             "B.ARW" => second,
@@ -185,6 +193,11 @@ impl Driver {
             // Only matters before the window opens.
             Step::Window(_) => {}
             Step::Open(name) => self.open(name)?,
+            Step::Folder => {
+                let (photo, _) = self.photos()?;
+                let folder = photo.parent().expect("the scratch folder");
+                self.harness.open_folder(folder);
+            }
             Step::Click(name) => {
                 let position = self.target(name)?;
                 self.move_pointer(position);

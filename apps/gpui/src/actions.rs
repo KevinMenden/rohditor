@@ -18,6 +18,7 @@ actions!(
     [
         OpenFile,
         OpenFolder,
+        RefreshFolders,
         CloseFile,
         NextPhoto,
         PreviousPhoto,
@@ -130,6 +131,7 @@ pub fn commands() -> Vec<Command> {
     let mut commands = vec![
         command("file: open", Some("ctrl-o"), OpenFile),
         command("file: open folder", Some("ctrl-k"), OpenFolder),
+        command("file: refresh folders", Some("f5"), RefreshFolders),
         command("file: close", Some("ctrl-w"), CloseFile),
         command("file: save edits", Some("ctrl-s"), Save),
         command("file: export JPEG", Some("ctrl-e"), Export),
@@ -319,6 +321,7 @@ pub fn bind_keys(cx: &mut App) {
     ui::keys::bind(cx);
     panels::controls::bind_keys(cx);
     panels::develop::bind_keys(cx);
+    panels::file_tree::bind_keys(cx);
 }
 
 /// Commands with a plain letter as their key leave it alone in text inputs.
