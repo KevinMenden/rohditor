@@ -46,7 +46,7 @@ impl RohditorApp {
             return;
         };
         let result = Preset::new(name, document.core.edits.recipe(), sections)
-            .and_then(|preset| self.presets.save(preset));
+            .and_then(|preset| Ok(self.presets.save(preset)?));
         match result {
             Ok(()) => {
                 self.presets_ui.error = None;

@@ -1,46 +1,55 @@
 //! The window: title bar, docks, tab, viewport and status bar.
 
 mod chrome;
+mod left_dock;
 mod masks;
 mod notifications;
 mod tools;
 
 use gpui::{
     App, Context, Div, Entity, FocusHandle, Focusable, IntoElement, KeyContext, PathPromptOptions,
-    Pixels, Render, Role, Stateful, StyleRefinement, Window, div, prelude::*,
+    Render, Role, Stateful, StyleRefinement, Window, div, prelude::*,
 };
 
 use rohditor_engine::tools::{CropToolSession, MaskToolSession, Picker, ToolKind};
 
 use crate::actions::{
-    ActualPixels, ApplyPreset, ApplyTool, AutoNoiseReduction, AutoTone, CancelTool, ChooseLens,
-    CloseFile, CropTool, EditTool, Export, FlipCrop, FocusAdjustments, FocusPhoto,
-    ImportCameraProfile, LockCrop, NextPhoto, OpenFile, OpenFolder, PAINTING_CONTEXT,
-    PHOTO_CONTEXT, PickMixerColor, PickWhiteBalance, PreviousPhoto, Quit, Redo, ResetAdjustments,
-    ResetCrop, ResetSection, Save, SavePreset, SearchAdjustments, SetCropAspect,
-    SetHighlightMethod, SetLensProfile, SetRendering, SetWhiteBalance, ToggleClipping,
-    ToggleCommandPalette, ToggleDevelop, ToggleFiles, Undo, WORKSPACE_CONTEXT, ZoomToFit,
+    ActualPixels, AddToAlbum, ApplyPreset, ApplyTool, AutoNoiseReduction, AutoTone, CancelTool,
+    ChooseLens, CloseFile, CropTool, EditTool, Export, FlipCrop, FocusAdjustments, FocusPhoto,
+    ImportCameraProfile, LockCrop, NewAlbum, NextPhoto, OpenFile, OpenFolder, PAINTING_CONTEXT,
+    PHOTO_CONTEXT, PickMixerColor, PickWhiteBalance, PreviousPhoto, Quit, Redo, RefreshFolders,
+    RemoveFromAlbum, ResetAdjustments, ResetCrop, ResetSection, Save, SavePreset,
+    SearchAdjustments, SelectAllPhotos, SetCropAspect, SetHighlightMethod, SetLensProfile,
+    SetRendering, SetWhiteBalance, ShowAlbums, ShowFiles, SortPhotos, ToggleClipping,
+    ToggleCommandPalette, ToggleDevelop, ToggleFiles, ToggleFilmstrip, Undo, WORKSPACE_CONTEXT,
+    ZoomToFit,
 };
 use crate::library::Library;
+use crate::panels::albums::{AlbumCommands, AlbumsPanel};
 use crate::panels::command_palette::command_palette;
 use crate::panels::controls::FocusControls as _;
 use crate::panels::crop::CropPanel;
 use crate::panels::develop::DevelopPanel;
-use crate::panels::files::FilesPanel;
+use crate::panels::file_tree::FileTreePanel;
+use crate::panels::filmstrip::FilmstripPanel;
 use crate::panels::masks::MasksPanel;
 use crate::session::Session;
-use crate::theme::{FILES_WIDTH, UI_FONT_SIZE, theme};
+use crate::theme::{FILMSTRIP_HEIGHT, UI_FONT_SIZE, theme};
 use crate::ui::confirm::Confirm;
 use crate::ui::keys::{FocusNext, FocusPrevious};
 use crate::ui::overlays::{Overlays, ToastKind};
 use crate::ui::search_list::SearchList;
 use crate::viewport::Viewport;
+use left_dock::LeftTab;
 use notifications::Announced;
 
 pub struct Workspace {
     session: Entity<Session>,
     library: Entity<Library>,
-    files: Entity<FilesPanel>,
+    files: Entity<FileTreePanel>,
+    albums: Entity<AlbumsPanel>,
+    album_commands: AlbumCommands,
+    filmstrip: Entity<FilmstripPanel>,
     develop: Entity<DevelopPanel>,
     crop: Entity<CropPanel>,
     masks: Entity<MasksPanel>,
@@ -48,6 +57,8 @@ pub struct Workspace {
     overlays: Entity<Overlays>,
     announced: Announced,
     files_open: bool,
+    left_tab: LeftTab,
+    filmstrip_open: bool,
     develop_open: bool,
     focus: FocusHandle,
 }
@@ -88,9 +99,19 @@ impl Workspace {
         })
         .detach();
         cx.observe(&library, |_, _, cx| cx.notify()).detach();
+        let album_commands = AlbumCommands {
+            library: library.clone(),
+            overlays: overlays.clone(),
+        };
         Self {
-            files: cx
-                .new(|cx| FilesPanel::new(session.clone(), library.clone(), overlays.clone(), cx)),
+            albums: cx.new(|cx| AlbumsPanel::new(album_commands.clone(), cx)),
+            album_commands,
+            files: cx.new(|cx| {
+                FileTreePanel::new(session.clone(), library.clone(), overlays.clone(), cx)
+            }),
+            filmstrip: cx.new(|cx| {
+                FilmstripPanel::new(session.clone(), library.clone(), overlays.clone(), cx)
+            }),
             develop: cx.new(|cx| DevelopPanel::new(session.clone(), overlays.clone(), window, cx)),
             crop: cx.new(|cx| CropPanel::new(session.clone(), overlays.clone(), cx)),
             masks: cx.new(|cx| MasksPanel::new(session.clone(), overlays.clone(), cx)),
@@ -100,6 +121,8 @@ impl Workspace {
             overlays,
             announced: Announced::default(),
             files_open: true,
+            left_tab: LeftTab::Files,
+            filmstrip_open: false,
             develop_open: true,
             focus,
         }
@@ -140,6 +163,17 @@ impl Workspace {
             self.session
                 .update(cx, |session, cx| session.open_file(path, cx));
         }
+    }
+
+    fn toggle_filmstrip(&mut self, cx: &mut Context<Self>) {
+        self.filmstrip_open = !self.filmstrip_open;
+        if self.filmstrip_open {
+            self.filmstrip.update(cx, FilmstripPanel::opened);
+        } else {
+            self.library
+                .update(cx, |library, cx| library.set_visible(None, cx));
+        }
+        cx.notify();
     }
 
     fn toggle_palette(
@@ -213,6 +247,9 @@ impl Workspace {
             .on_action(cx.listener(|this, _: &PreviousPhoto, _, cx| this.open_adjacent(false, cx)))
             .on_action(cx.listener(|this, _: &OpenFile, _, cx| this.prompt(false, cx)))
             .on_action(cx.listener(|this, _: &OpenFolder, _, cx| this.prompt(true, cx)))
+            .on_action(cx.listener(|this, _: &RefreshFolders, _, cx| {
+                this.library.update(cx, Library::refresh);
+            }))
             .on_action(cx.listener(|this, _: &ZoomToFit, _, cx| {
                 this.viewport.update(cx, Viewport::zoom_to_fit);
             }))
@@ -222,6 +259,28 @@ impl Workspace {
             .on_action(cx.listener(|this, _: &ToggleFiles, _, cx| {
                 this.files_open = !this.files_open;
                 cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ToggleFilmstrip, _, cx| this.toggle_filmstrip(cx)))
+            .on_action(cx.listener(|this, _: &ShowFiles, _, cx| this.show_left(LeftTab::Files, cx)))
+            .on_action(
+                cx.listener(|this, _: &ShowAlbums, _, cx| this.show_left(LeftTab::Albums, cx)),
+            )
+            .on_action(cx.listener(|this, _: &NewAlbum, window, cx| {
+                this.show_left(LeftTab::Albums, cx);
+                this.album_commands.create(Vec::new(), window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &AddToAlbum, window, cx| {
+                this.album_commands.add_selected(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &RemoveFromAlbum, _, cx| {
+                this.album_commands.remove_selected(cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectAllPhotos, _, cx| {
+                this.library.update(cx, Library::select_all);
+            }))
+            .on_action(cx.listener(|this, action: &SortPhotos, _, cx| {
+                this.library
+                    .update(cx, |library, cx| library.set_sort(action.0, cx));
             }))
             .on_action(cx.listener(|this, _: &ToggleDevelop, _, cx| {
                 this.develop_open = !this.develop_open;
@@ -323,13 +382,6 @@ impl Workspace {
     }
 }
 
-/// A side panel, redrawn only when it notifies.
-fn dock<P: Render>(panel: &Entity<P>, width: Pixels) -> impl IntoElement + use<P> {
-    panel
-        .clone()
-        .cached(StyleRefinement::default().flex_none().w(width).h_full())
-}
-
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme();
@@ -366,9 +418,7 @@ impl Render for Workspace {
                     .flex()
                     .flex_1()
                     .min_h_0()
-                    .when(self.files_open, |body| {
-                        body.child(dock(&self.files, FILES_WIDTH))
-                    })
+                    .when(self.files_open, |body| body.child(self.left_dock()))
                     .child(
                         div()
                             .flex()
@@ -376,7 +426,17 @@ impl Render for Workspace {
                             .flex_1()
                             .min_w_0()
                             .children(self.tab(cx))
-                            .child(self.viewport.clone()),
+                            .child(self.viewport.clone())
+                            .when(self.filmstrip_open, |center| {
+                                center.child(
+                                    self.filmstrip.clone().cached(
+                                        StyleRefinement::default()
+                                            .flex_none()
+                                            .w_full()
+                                            .h(FILMSTRIP_HEIGHT),
+                                    ),
+                                )
+                            }),
                     )
                     .when(self.develop_open, |body| body.child(self.tool_dock(cx))),
             )

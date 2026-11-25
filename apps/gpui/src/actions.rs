@@ -5,6 +5,7 @@ use rohditor_edit::{
     HighlightMethod, LensProfileSelection, MaskMode, RecipeSection, RenderingProfileSelection,
     WhiteBalancePreset,
 };
+use rohditor_engine::catalog::library::LibrarySort;
 use rohditor_engine::tools::CropAspect;
 
 use crate::panels::adjustments::{
@@ -18,9 +19,14 @@ actions!(
     [
         OpenFile,
         OpenFolder,
+        RefreshFolders,
         CloseFile,
         NextPhoto,
         PreviousPhoto,
+        SelectAllPhotos,
+        NewAlbum,
+        AddToAlbum,
+        RemoveFromAlbum,
         Save,
         Export,
         Undo,
@@ -59,6 +65,9 @@ actions!(
         ActualPixels,
         ToggleClipping,
         ToggleFiles,
+        ShowFiles,
+        ShowAlbums,
+        ToggleFilmstrip,
         ToggleDevelop,
         FocusAdjustments,
         SearchAdjustments,
@@ -93,6 +102,11 @@ pub struct SetLensProfile(pub LensProfileSelection);
 #[derive(Debug, Clone, PartialEq, Eq, Action)]
 #[action(namespace = rohditor, no_json)]
 pub struct SetCropAspect(pub CropAspect);
+
+/// Choose the order of the photos shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Action)]
+#[action(namespace = rohditor, no_json)]
+pub struct SortPhotos(pub LibrarySort);
 
 /// Make a new mask of a shape.
 #[derive(Debug, Clone, PartialEq, Eq, Action)]
@@ -130,11 +144,20 @@ pub fn commands() -> Vec<Command> {
     let mut commands = vec![
         command("file: open", Some("ctrl-o"), OpenFile),
         command("file: open folder", Some("ctrl-k"), OpenFolder),
+        command("file: refresh folders", Some("f5"), RefreshFolders),
         command("file: close", Some("ctrl-w"), CloseFile),
         command("file: save edits", Some("ctrl-s"), Save),
         command("file: export JPEG", Some("ctrl-e"), Export),
         command("photo: next", Some("right"), NextPhoto),
         command("photo: previous", Some("left"), PreviousPhoto),
+        command("photo: select all", Some("ctrl-a"), SelectAllPhotos),
+        command("album: new album", None, NewAlbum),
+        command("album: add selected photos to album", None, AddToAlbum),
+        command(
+            "album: remove selected photos from album",
+            None,
+            RemoveFromAlbum,
+        ),
         command("edit: undo", Some("ctrl-z"), Undo),
         command("edit: redo", Some("ctrl-shift-z"), Redo),
         command("develop: auto tone", Some("ctrl-u"), AutoTone),
@@ -189,6 +212,9 @@ pub fn commands() -> Vec<Command> {
         command("view: actual pixels (1:1)", Some("ctrl-1"), ActualPixels),
         command("view: toggle clipping overlay", Some("j"), ToggleClipping),
         command("view: toggle files panel", Some("ctrl-b"), ToggleFiles),
+        command("view: files", None, ShowFiles),
+        command("view: albums", None, ShowAlbums),
+        command("view: toggle filmstrip", Some("ctrl-j"), ToggleFilmstrip),
         command("view: toggle develop panel", Some("ctrl-r"), ToggleDevelop),
         command("view: focus adjustments", Some("ctrl-d"), FocusAdjustments),
         command(
@@ -206,6 +232,10 @@ pub fn commands() -> Vec<Command> {
         ),
         command("rohditor: quit", Some("ctrl-q"), Quit),
     ];
+    commands.extend(LibrarySort::ALL.into_iter().map(|sort| {
+        let name = format!("photo: sort by {}", sort.label().to_lowercase());
+        command(name, None, SortPhotos(sort))
+    }));
     commands.extend(sections().map(|section| {
         let section = section.section;
         let name = format!("develop: reset {}", section.label().to_lowercase());
@@ -319,6 +349,8 @@ pub fn bind_keys(cx: &mut App) {
     ui::keys::bind(cx);
     panels::controls::bind_keys(cx);
     panels::develop::bind_keys(cx);
+    panels::file_tree::bind_keys(cx);
+    panels::albums::bind_keys(cx);
 }
 
 /// Commands with a plain letter as their key leave it alone in text inputs.

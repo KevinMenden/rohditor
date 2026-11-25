@@ -50,9 +50,10 @@ use crate::ui::theme;
 use crate::ui::tool_panel;
 use crate::ui::toolbar::{self, FilePanelModel, StatusBarModel, ToolbarModel};
 use crate::ui::viewport::{self, PreviewTexture, ViewportModel};
+use grid_selection::{GridNavigation, GridSelection};
 use rohditor_engine::camera_profiles::CameraProfileRegistry;
-use rohditor_engine::catalog::library::{LibraryNavigation, LibraryState};
-use rohditor_engine::catalog::{CatalogCoordinator, CatalogState, ThumbnailSlot};
+use rohditor_engine::catalog::library::LibraryState;
+use rohditor_engine::catalog::{CatalogCoordinator, CatalogSource, CatalogState, ThumbnailSlot};
 use rohditor_engine::coordinator::{
     PreparedGpuSource, PreviewBackend, PreviewResolution, RenderCoordinator, WorkerImage,
     WorkerPreviewDiagnostics,
@@ -77,6 +78,7 @@ mod derived_data;
 mod events;
 #[path = "gpu.rs"]
 mod gpu;
+mod grid_selection;
 #[path = "lifecycle.rs"]
 mod lifecycle;
 mod masks;
@@ -199,8 +201,9 @@ pub(crate) struct RohditorApp {
     color_mixer_channel: usize,
     white_balance_memory: WhiteBalanceModeMemory,
     view_mode: ViewMode,
-    /// Library selection, display order and resident grid textures.
+    /// Display order and resident grid textures.
     library: LibraryState<egui::TextureHandle>,
+    grid: GridSelection,
     filmstrip_visible: (usize, usize),
     filmstrip_active: Option<usize>,
 }
@@ -303,7 +306,9 @@ impl RohditorApp {
         if initial_path.is_none()
             && let Some(directory) = &config_dir
             && let Some(folder) = session::load_last_folder(directory)
-            && catalog_coordinator.scan_folder(folder).is_ok()
+            && catalog_coordinator
+                .show(CatalogSource::Folder(folder))
+                .is_ok()
         {
             view_mode = ViewMode::Library;
         }
@@ -340,6 +345,7 @@ impl RohditorApp {
             white_balance_memory: WhiteBalanceModeMemory::default(),
             view_mode,
             library: LibraryState::default(),
+            grid: GridSelection::default(),
             filmstrip_visible: (0, 0),
             filmstrip_active: None,
         };
@@ -407,7 +413,10 @@ impl RohditorApp {
         else {
             return;
         };
-        if let Err(error) = self.catalog_coordinator.scan_folder(folder.clone()) {
+        if let Err(error) = self
+            .catalog_coordinator
+            .show(CatalogSource::Folder(folder.clone()))
+        {
             warn!(%error, "could not start the catalog scan");
             return;
         }
@@ -1371,17 +1380,19 @@ impl RohditorApp {
     fn show_library(&mut self, root: &mut egui::Ui) {
         let context = &root.ctx().clone();
         self.library.sync(&self.catalog);
+        self.grid
+            .sync(self.catalog.folder(), self.catalog.entry_count());
         let opened_by_keyboard = self.handle_library_keyboard(context);
         self.fill_library_textures(context, self.library.visible);
         let model = self.library_model();
         let output = catalog::show(root, &model);
         self.library.visible = (output.visible_range.start, output.visible_range.end);
-        self.library.columns = output.columns.max(1);
+        self.grid.columns = output.columns.max(1);
         if let Some(sort) = output.sort_changed {
             self.library.sort = sort;
         }
         if let Some(index) = output.selected_entry {
-            self.library.selection = Some(index);
+            self.grid.selection = Some(index);
         }
         if let Some(index) = opened_by_keyboard.or(output.open_entry) {
             self.open_catalog_entry(context, index);
@@ -1419,26 +1430,26 @@ impl RohditorApp {
         }
         let key = context.input(|input| {
             if input.key_pressed(egui::Key::ArrowLeft) {
-                Some(LibraryNavigation::Left)
+                Some(GridNavigation::Left)
             } else if input.key_pressed(egui::Key::ArrowRight) {
-                Some(LibraryNavigation::Right)
+                Some(GridNavigation::Right)
             } else if input.key_pressed(egui::Key::ArrowUp) {
-                Some(LibraryNavigation::Up)
+                Some(GridNavigation::Up)
             } else if input.key_pressed(egui::Key::ArrowDown) {
-                Some(LibraryNavigation::Down)
+                Some(GridNavigation::Down)
             } else if input.key_pressed(egui::Key::Home) {
-                Some(LibraryNavigation::Home)
+                Some(GridNavigation::Home)
             } else if input.key_pressed(egui::Key::End) {
-                Some(LibraryNavigation::End)
+                Some(GridNavigation::End)
             } else {
                 None
             }
         });
         if let Some(key) = key {
-            self.library.navigate(count, key);
+            self.grid.navigate(count, key);
             None
         } else if context.input(|input| input.key_pressed(egui::Key::Enter)) {
-            self.library.selection
+            self.grid.selection
         } else {
             None
         }
@@ -1458,8 +1469,8 @@ impl RohditorApp {
     }
 
     fn library_model(&mut self) -> LibraryModel {
-        let selection = self.library.selection;
-        let scroll_to_selection = std::mem::take(&mut self.library.scroll_to_selection);
+        let selection = self.grid.selection;
+        let scroll_to_selection = std::mem::take(&mut self.grid.scroll_to_selection);
         let entries = self
             .library
             .order()
@@ -1467,7 +1478,7 @@ impl RohditorApp {
             .filter_map(|&catalog_index| self.library_entry_model(catalog_index))
             .collect();
         LibraryModel {
-            folder_name: self.catalog.folder_name(),
+            folder_name: self.catalog.title(),
             folder_path: self
                 .catalog
                 .folder()
@@ -1518,7 +1529,7 @@ impl RohditorApp {
             .as_ref()
             .and_then(|document| self.catalog.entry_index_for_path(&document.core.path));
         let active_grid =
-            active_catalog_index.and_then(|catalog_index| self.library.grid_index(catalog_index));
+            active_catalog_index.and_then(|catalog_index| self.library.position(catalog_index));
         let scroll_to_active = active_grid != self.filmstrip_active;
         self.filmstrip_active = active_grid;
 
@@ -1561,7 +1572,7 @@ impl RohditorApp {
             }
         })?;
         self.library
-            .adjacent_grid_index(active_catalog_index, forward)
+            .adjacent_position(&self.catalog, active_catalog_index, forward)
     }
 
     fn background_work_is_active(&self) -> bool {

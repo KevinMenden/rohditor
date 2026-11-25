@@ -5,10 +5,13 @@
 //! original. `ROHDITOR_SHOTS=DIR` writes a PNG per scenario. `driver` runs a text script
 //! instead of a compiled scenario.
 
+mod albums;
 mod color;
 mod crop;
 mod detail;
 mod driver;
+mod files;
+mod filmstrip;
 mod light;
 mod masks;
 mod optics;
@@ -24,6 +27,7 @@ use gpui::{
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, PlatformInput, Point, ScrollDelta,
     ScrollWheelEvent, Size, TouchPhase, WindowHandle, point, px, size,
 };
+use rohditor_engine::catalog::library::LibrarySort;
 use rohditor_engine::open_document::ExportActivity;
 use rohditor_engine::persistence;
 use rohditor_engine::preview::{PreviewSource, WgpuContext};
@@ -80,7 +84,7 @@ impl Harness {
                 });
                 let library = cx.new(|cx| {
                     let worker = LibraryWorker::start().expect("the catalog starts");
-                    Library::new(worker, None, &session, cx)
+                    Library::new(worker, Some(scratch_config()), &session, cx)
                 });
                 created = Some((session.clone(), library.clone()));
                 cx.new(|cx| Workspace::new(session, library, window, cx))
@@ -207,6 +211,40 @@ impl Harness {
             click_count: 1,
             ..Default::default()
         }));
+    }
+
+    /// Click with keys held, such as Ctrl.
+    fn click_with(&mut self, name: &str, modifiers: Modifiers) {
+        let position = self.find(name).center();
+        self.send(PlatformInput::MouseDown(MouseDownEvent {
+            button: MouseButton::Left,
+            position,
+            modifiers,
+            click_count: 1,
+            ..Default::default()
+        }));
+        self.send(PlatformInput::MouseUp(MouseUpEvent {
+            button: MouseButton::Left,
+            position,
+            modifiers,
+            click_count: 1,
+        }));
+    }
+
+    /// Add a folder to the tree and wait until it is listed.
+    fn open_folder(&mut self, folder: &Path) {
+        let library = self.library.clone();
+        let root = folder.to_path_buf();
+        self.cx
+            .update(|cx| library.update(cx, |library, cx| library.open_folder(root, cx)));
+        self.wait_for_library("the folder in the tree", |library| {
+            let rows = library.tree().rows();
+            library.folder() == Some(folder)
+                && rows
+                    .iter()
+                    .any(|row| row.path.parent() == Some(folder) && row.is_photo())
+        });
+        self.draw();
     }
 
     fn press(&mut self, position: Point<Pixels>, click_count: usize) {
@@ -533,11 +571,14 @@ fn the_palette_runs_commands_and_arrows_change_photos() {
     harness.keys("x backspace enter");
     assert_eq!(open(&mut harness).as_ref(), Some(&second));
     harness.wait_until("the second photo", settled);
+    harness.keys("ctrl-j");
+    harness.draw();
     harness.wait_for_library("the thumbnails", |library| {
         [&first, &second]
             .iter()
             .all(|path| library.thumbnail(path).is_some())
     });
+    harness.capture("filmstrip-photos");
 
     harness.keys("left");
     assert_eq!(open(&mut harness).as_ref(), Some(&first));
@@ -598,9 +639,10 @@ fn actual_pixels_renders_the_source_resolution_and_fit_returns() {
 #[test]
 #[ignore = "requires a wgpu adapter and ROHDITOR_RAW"]
 fn panels_redraw_only_for_their_own_changes() {
-    let Some((mut harness, _, second)) = opened("redraw") else {
+    let Some((mut harness, first, second)) = opened("redraw") else {
         return;
     };
+    harness.open_folder(first.parent().expect("a folder"));
     harness.wait_for_library("the folder", |library| library.len() == 2);
     let viewport = harness.find("viewport").center();
     let exposure = harness.find(EXPOSURE).center();

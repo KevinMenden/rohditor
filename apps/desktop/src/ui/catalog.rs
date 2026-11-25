@@ -32,13 +32,6 @@ pub(crate) enum LibraryEntryState {
     Failed,
 }
 
-fn sort_label(sort: LibrarySort) -> &'static str {
-    match sort {
-        LibrarySort::Filename => "Filename",
-        LibrarySort::CaptureDate => "Capture date",
-    }
-}
-
 #[derive(Clone)]
 pub(crate) struct LibraryEntryModel {
     pub name: String,
@@ -155,9 +148,9 @@ fn show_header(ui: &mut egui::Ui, model: &LibraryModel, output: &mut LibraryOutp
 
 fn show_sort_selector(ui: &mut egui::Ui, current: LibrarySort) -> Option<LibrarySort> {
     let mut selected = current;
-    widgets::dropdown(ui, "library_sort", "Sort", sort_label(current), |ui| {
+    widgets::dropdown(ui, "library_sort", "Sort", current.label(), |ui| {
         for option in LibrarySort::ALL {
-            ui.selectable_value(&mut selected, option, sort_label(option));
+            ui.selectable_value(&mut selected, option, option.label());
         }
     });
     (selected != current).then_some(selected)
