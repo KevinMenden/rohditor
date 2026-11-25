@@ -3,6 +3,7 @@
 //! Follows the [`Session`]: opening a photo shows its folder and reveals it in the tree, and thumbnails wait while the photo
 //! needs the CPU. The session does not know about the library.
 
+mod shown;
 mod tree;
 
 use std::path::{Path, PathBuf};
@@ -90,29 +91,14 @@ impl Library {
         }
     }
 
-    pub fn folder_name(&self) -> Option<String> {
-        self.catalog.title()
-    }
-
     /// The folder shown.
     pub fn folder(&self) -> Option<&Path> {
         self.catalog.folder()
     }
 
-    #[expect(dead_code, reason = "for the filmstrip (#233, L.3)")]
-    pub fn thumbnail(&self, path: &Path) -> Option<&AtlasImage> {
-        self.state.texture(path)
-    }
-
     /// What went wrong last, for example why the folder shown could not be read.
     pub fn failure(&self) -> Option<&str> {
         self.error.as_deref().or(self.catalog.failure())
-    }
-
-    /// The photo after or before `current`, or the first one if `current` is not shown.
-    pub fn adjacent(&self, current: Option<&Path>, forward: bool) -> Option<PathBuf> {
-        let path = self.state.adjacent_path(&self.catalog, current, forward);
-        path.map(Path::to_path_buf)
     }
 
     /// Add a folder to the tree and show it.
@@ -177,15 +163,6 @@ impl Library {
             Err(error) => {
                 self.error = Some(format!("The folders could not be remembered: {error}"));
             }
-        }
-    }
-
-    /// These positions are shown now, or none; have their thumbnails ready.
-    #[expect(dead_code, reason = "for the filmstrip (#233, L.3)")]
-    pub fn set_visible(&mut self, visible: Option<(usize, usize)>, cx: &mut Context<Self>) {
-        if self.visible != visible {
-            self.visible = visible;
-            self.tick(cx);
         }
     }
 

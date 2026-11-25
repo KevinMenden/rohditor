@@ -50,6 +50,7 @@ pub const TITLE_BAR_HEIGHT: Pixels = px(36.0);
 pub const TAB_HEIGHT: Pixels = px(34.0);
 pub const STATUS_BAR_HEIGHT: Pixels = px(28.0);
 pub const FILES_WIDTH: Pixels = px(248.0);
+pub const FILMSTRIP_HEIGHT: Pixels = px(126.0);
 pub const DEVELOP_WIDTH: Pixels = px(300.0);
 pub const UI_FONT_SIZE: Pixels = px(13.0);
 pub const SMALL_FONT_SIZE: Pixels = px(11.5);

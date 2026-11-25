@@ -5,15 +5,15 @@ mod row;
 use std::path::{Path, PathBuf};
 
 use gpui::{
-    App, ClipboardItem, Context, Entity, FocusHandle, IntoElement, KeyBinding, MouseButton, Pixels,
-    Point, Render, Role, ScrollStrategy, UniformListScrollHandle, Window, actions, div, prelude::*,
-    uniform_list,
+    App, Context, Entity, FocusHandle, IntoElement, KeyBinding, MouseButton, Pixels, Point, Render,
+    Role, ScrollStrategy, UniformListScrollHandle, Window, actions, div, prelude::*, uniform_list,
 };
 use rohditor_engine::catalog::folder_tree::{TreeNavigation, TreeRowKind};
 
 use crate::actions::{OpenFolder, RefreshFolders};
 use crate::assets::Icon;
 use crate::library::Library;
+use crate::panels::photo_menu::path_entries;
 use crate::session::Session;
 use crate::theme::{FILES_WIDTH, SMALL_FONT_SIZE, TAB_HEIGHT, theme};
 use crate::ui::button::{button, command_button, icon};
@@ -126,13 +126,7 @@ impl FileTreePanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (reveal, copy) = (path.to_path_buf(), path.display().to_string());
-        let mut entries = vec![
-            MenuEntry::new("Show in File Manager", move |_, cx| cx.reveal_path(&reveal)),
-            MenuEntry::new("Copy Path", move |_, cx| {
-                cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
-            }),
-        ];
+        let mut entries = path_entries(path);
         if matches!(kind, TreeRowKind::Folder { .. }) {
             entries.push(MenuEntry::command(RefreshFolders));
         }

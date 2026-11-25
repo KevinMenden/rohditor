@@ -34,6 +34,13 @@ pub enum LibrarySort {
 
 impl LibrarySort {
     pub const ALL: [Self; 2] = [Self::Filename, Self::CaptureDate];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Filename => "Filename",
+            Self::CaptureDate => "Capture date",
+        }
+    }
 }
 
 /// A thumbnail decoded and reduced to at most [`TEXTURE_LONG_EDGE`].

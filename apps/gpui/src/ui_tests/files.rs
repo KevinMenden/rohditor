@@ -4,7 +4,7 @@ use super::*;
 
 /// `Trip` with `a.arw`, `b.arw`, `c.arw` and the folder `Day` with `d.arw`, none of which are
 /// photos.
-fn scratch_tree(name: &str) -> PathBuf {
+pub(super) fn scratch_tree(name: &str) -> PathBuf {
     let folder = std::env::temp_dir().join(format!("rohditor-gpui-tree-{name}"));
     drop(std::fs::remove_dir_all(&folder));
     let trip = folder.join("Trip");
@@ -15,14 +15,14 @@ fn scratch_tree(name: &str) -> PathBuf {
     trip
 }
 
-fn selected(harness: &mut Harness) -> Vec<String> {
+pub(super) fn selected(harness: &mut Harness) -> Vec<String> {
     let library = harness.library.clone();
     let paths = harness.cx.update(|cx| library.read(cx).selected());
     let name = |path: &PathBuf| path.file_name().map(|name| name.to_string_lossy().into());
     paths.iter().filter_map(name).collect()
 }
 
-fn open_photo(harness: &mut Harness) -> Option<PathBuf> {
+pub(super) fn open_photo(harness: &mut Harness) -> Option<PathBuf> {
     harness.with_session(|session, _| session.document().map(|open| open.path.clone()))
 }
 

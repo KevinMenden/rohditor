@@ -4,12 +4,13 @@ use gpui::{
     Context, CursorStyle, Decorations, Div, Hsla, IntoElement, MouseButton, ResizeEdge, Window,
     div, prelude::*, px,
 };
+use rohditor_engine::catalog::CatalogSource;
 use rohditor_engine::view::ViewState;
 
 use super::Workspace;
 use crate::actions::{
     ActualPixels, CloseFile, Export, Quit, Redo, ToggleClipping, ToggleCommandPalette,
-    ToggleDevelop, ToggleFiles, Undo, ZoomToFit,
+    ToggleDevelop, ToggleFiles, ToggleFilmstrip, Undo, ZoomToFit,
 };
 use crate::assets::Icon;
 use crate::theme::{SMALL_FONT_SIZE, STATUS_BAR_HEIGHT, TAB_HEIGHT, TITLE_BAR_HEIGHT, theme};
@@ -27,7 +28,7 @@ impl Workspace {
     ) -> impl IntoElement + use<> {
         let theme = theme();
         let session = self.session.read(cx);
-        let folder = self.library.read(cx).folder_name();
+        let folder = self.library.read(cx).source().map(CatalogSource::title);
         let edits = session.document().map(|document| &document.edits);
         let can_undo = edits.is_some_and(|edits| edits.can_undo()) || session.tool().is_modified();
         let can_redo = edits.is_some_and(|edits| edits.can_redo()) && !session.tool().is_modified();
@@ -153,6 +154,10 @@ impl Workspace {
                     .child(
                         command_button("toggle-files", Icon::Files, ToggleFiles, true)
                             .when(self.files_open, |button| button.bg(theme.selected)),
+                    )
+                    .child(
+                        command_button("toggle-filmstrip", Icon::Filmstrip, ToggleFilmstrip, true)
+                            .when(self.filmstrip_open, |button| button.bg(theme.selected)),
                     )
                     .child(div().min_w_0().truncate().text_color(color).child(message)),
             )

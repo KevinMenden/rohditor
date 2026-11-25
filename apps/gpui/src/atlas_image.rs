@@ -50,7 +50,6 @@ impl AtlasImage {
         })
     }
 
-    #[expect(dead_code, reason = "for the filmstrip (#233, L.3)")]
     pub fn image(&self) -> &Arc<RenderImage> {
         &self.image
     }
