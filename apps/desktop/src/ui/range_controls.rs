@@ -6,8 +6,8 @@
 //! validated and combined by the engine, not here.
 
 use eframe::egui;
-use rohditor_core::{linear_srgb_to_srgb, oklab_to_linear_srgb};
-use rohditor_edit::{COLOR_TOLERANCE_RANGE, ColorRange, ColorSample, LuminanceRange};
+use rohditor_core::color_sample_srgb;
+use rohditor_edit::{COLOR_TOLERANCE_RANGE, ColorRange, ColorSample, LuminanceRange, MaskShape};
 use rohditor_engine::tools::{MaskAction, RangeSlider, SliderPhase};
 
 use super::theme::colors;
@@ -68,8 +68,8 @@ pub(crate) fn show_luminance(
     paint_gradient(painter, bar);
     // The selected band: full strength between the ends, falling to nothing over the feathers.
     let (low, high) = (range.low, range.high);
-    let outer_low = (low - range.feather_low).max(0.0);
-    let outer_high = (high + range.feather_high).min(1.0);
+    let outer_low = RangeSlider::LuminanceFeatherLow.handle_position(range);
+    let outer_high = RangeSlider::LuminanceFeatherHigh.handle_position(range);
     painter.add(egui::Shape::convex_polygon(
         vec![
             egui::pos2(x_of(outer_low), bar.bottom()),
@@ -130,17 +130,11 @@ pub(crate) fn show_luminance(
         if !(response.drag_started() || response.dragged() || response.drag_stopped()) {
             continue;
         }
-        let current = handle_value(slider, range);
+        let current = slider
+            .get(&MaskShape::Luminance(*range))
+            .unwrap_or_default();
         let new_value = response.interact_pointer_pos().map_or(current, |pointer| {
-            let target = value_of(pointer.x);
-            // The ends stay in order; a feather handle sets the distance from its end.
-            match slider {
-                RangeSlider::LuminanceLow => target.min(high),
-                RangeSlider::LuminanceHigh => target.max(low),
-                RangeSlider::LuminanceFeatherLow => (low - target).max(0.0),
-                RangeSlider::LuminanceFeatherHigh => (target - high).max(0.0),
-                RangeSlider::ColorTolerance => current,
-            }
+            slider.value_at_handle(range, value_of(pointer.x))
         });
         actions.push(at.action(slider, new_value, drag_phase(&response)));
     }
@@ -156,17 +150,6 @@ pub(crate) fn show_luminance(
         .small()
         .color(colors::TEXT_MUTED),
     );
-}
-
-/// The value `slider` currently has in `range`.
-const fn handle_value(slider: RangeSlider, range: &LuminanceRange) -> f32 {
-    match slider {
-        RangeSlider::LuminanceLow => range.low,
-        RangeSlider::LuminanceHigh => range.high,
-        RangeSlider::LuminanceFeatherLow => range.feather_low,
-        RangeSlider::LuminanceFeatherHigh => range.feather_high,
-        RangeSlider::ColorTolerance => 0.0,
-    }
 }
 
 /// Black to white, in steps small enough to look smooth. The bar is in sRGB-encoded luminance,
@@ -265,10 +248,7 @@ pub(crate) fn show_color(
     }
 }
 
-/// The colour of a sample on screen: OkLab to linear sRGB, clipped, then encoded.
 fn swatch_color(sample: &ColorSample) -> egui::Color32 {
-    let linear = oklab_to_linear_srgb([sample.lightness, sample.a, sample.b]);
-    let [red, green, blue] =
-        linear.map(|value| (linear_srgb_to_srgb(value.clamp(0.0, 1.0)) * 255.0).round() as u8);
+    let [red, green, blue] = color_sample_srgb(sample);
     egui::Color32::from_rgb(red, green, blue)
 }

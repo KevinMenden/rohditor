@@ -7,7 +7,7 @@
 use rayon::prelude::*;
 use rohditor_core::OutputGeometry;
 use rohditor_edit::BrushMask;
-use rohditor_mask::{BrushCoverage, MaskFrame};
+use rohditor_mask::{BrushCoverage, MaskArea, MaskFrame};
 
 use crate::GpuPreviewError;
 use crate::memory::Reservation;
@@ -41,6 +41,15 @@ impl FrameRect {
         }
     }
 
+    fn of_area(area: &MaskArea) -> Self {
+        Self {
+            x: area.columns.start as u32,
+            y: area.rows.start as u32,
+            width: area.columns.len() as u32,
+            height: area.rows.len() as u32,
+        }
+    }
+
     fn texels(self) -> usize {
         self.width as usize * self.height as usize
     }
@@ -61,8 +70,12 @@ fn rasterize(brush: &BrushCoverage, rect: FrameRect, out: &mut [u16]) {
         );
 }
 
-fn prepare(brush: &BrushMask, frame: MaskFrame) -> Result<BrushCoverage, GpuPreviewError> {
-    BrushCoverage::prepare(brush, frame).map_err(|error| GpuPreviewError::InvalidInput {
+fn prepare(
+    brush: &BrushMask,
+    frame: MaskFrame,
+    area: &MaskArea,
+) -> Result<BrushCoverage, GpuPreviewError> {
+    BrushCoverage::prepare_area(brush, frame, area).map_err(|error| GpuPreviewError::InvalidInput {
         reason: error.to_string(),
     })
 }
@@ -116,14 +129,22 @@ impl Planes {
         self.memory.bytes()
     }
 
-    fn write(&self, queue: &wgpu::Queue, plane: u32, rect: FrameRect, texels: &[u16]) {
+    /// Writes the texels of `rect` to the plane at `origin`.
+    fn write(
+        &self,
+        queue: &wgpu::Queue,
+        plane: u32,
+        origin: (u32, u32),
+        rect: FrameRect,
+        texels: &[u16],
+    ) {
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d {
-                    x: 0,
-                    y: 0,
+                    x: origin.0,
+                    y: origin.1,
                     z: plane,
                 },
                 aspect: wgpu::TextureAspect::All,
@@ -172,8 +193,8 @@ pub(crate) fn empty_view(device: &wgpu::Device) -> wgpu::TextureView {
     array_view(&create_texture(device, (1, 1), 1))
 }
 
-/// Full-frame planes kept between fit-preview renders. Moving a slider changes no stroke, so only
-/// a plane whose brush changed is rasterized and uploaded again.
+/// Full-frame planes kept between fit-preview renders. Moving a slider changes no stroke, and
+/// painting only a part of one brush, so only what changed is rasterized and uploaded again.
 #[derive(Default)]
 pub(crate) struct FitCoverage(Option<FitPlanes>);
 
@@ -213,7 +234,7 @@ impl FitCoverage {
         let stale: Vec<usize> = (0..brushes.len())
             .filter(|&plane| fit.brushes.get(plane) != Some(brushes[plane]))
             .collect();
-        // Painting rewrites one plane per move, so one plane of staging stays reserved. Nothing
+        // Painting rewrites up to one plane per move, so one plane of staging stays reserved. Nothing
         // uploaded before this render is still waiting for its staging by now.
         let settled = fit.planes.bytes() + fit.planes.plane_bytes();
         fit.planes
@@ -222,20 +243,26 @@ impl FitCoverage {
         if !stale.is_empty() {
             // Prepare everything first: a failure must not leave a plane holding strokes that
             // `fit.brushes` does not list, which a later render would take for up to date.
-            let prepared = stale
-                .iter()
-                .map(|&plane| prepare(brushes[plane], mask_frame(frame)))
-                .collect::<Result<Vec<_>, _>>()?;
-            let rect = FrameRect {
-                x: 0,
-                y: 0,
-                width: frame.0,
-                height: frame.1,
-            };
-            let mut texels = vec![0_u16; rect.texels()];
-            for (&plane, brush) in stale.iter().zip(&prepared) {
-                rasterize(brush, rect, &mut texels);
-                fit.planes.write(queue, plane as u32, rect, &texels);
+            let mask_frame = mask_frame(frame);
+            let changed = stale.iter().filter_map(|&plane| {
+                let area = match fit.brushes.get(plane) {
+                    Some(shown) => MaskArea::changed(shown, brushes[plane], mask_frame)?,
+                    None => MaskArea::whole(mask_frame),
+                };
+                Some((plane, area))
+            });
+            let prepared = changed
+                .map(|(plane, area)| {
+                    let brush = prepare(brushes[plane], mask_frame, &area)?;
+                    Ok((plane, FrameRect::of_area(&area), brush))
+                })
+                .collect::<Result<Vec<_>, GpuPreviewError>>()?;
+            for (plane, rect, brush) in &prepared {
+                let mut texels = vec![0_u16; rect.texels()];
+                rasterize(brush, *rect, &mut texels);
+                let origin = (rect.x, rect.y);
+                fit.planes
+                    .write(queue, *plane as u32, origin, *rect, &texels);
             }
             fit.brushes = brushes.iter().map(|brush| (*brush).clone()).collect();
         }
@@ -285,9 +312,10 @@ impl BandCoverage {
             brushes.len() as u32,
             budget,
         )?);
+        let frame = mask_frame(frame);
         coverage.brushes = brushes
             .iter()
-            .map(|brush| prepare(brush, mask_frame(frame)))
+            .map(|brush| prepare(brush, frame, &MaskArea::whole(frame)))
             .collect::<Result<_, _>>()?;
         coverage.texels = vec![0; largest.texels()];
         Ok(coverage)
@@ -315,7 +343,7 @@ impl BandCoverage {
         let texels = &mut self.texels[..rect.texels()];
         for (plane, brush) in self.brushes.iter().enumerate() {
             rasterize(brush, rect, texels);
-            planes.write(queue, plane as u32, rect, texels);
+            planes.write(queue, plane as u32, (0, 0), rect, texels);
         }
         self.uploaded_bytes += self.brushes.len() as u64 * rect.texels() as u64 * BYTES_PER_TEXEL;
         queue.write_buffer(

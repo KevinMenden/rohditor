@@ -8,6 +8,7 @@ mod display;
 mod editing;
 mod events;
 mod export;
+mod mask_tint;
 mod masks;
 mod optics;
 mod picking;
@@ -74,6 +75,7 @@ pub struct Session {
     tool: ActiveTool,
     /// A picked mixer colour that is not announced yet.
     picked_channel: Option<usize>,
+    mask_tint: mask_tint::MaskTint,
     next_document_id: u64,
     next_export_id: u64,
     _wake: Task<()>,
@@ -109,6 +111,7 @@ impl Session {
             presets: Presets::new(presets),
             tool: ActiveTool::default(),
             picked_channel: None,
+            mask_tint: mask_tint::MaskTint::default(),
             next_document_id: 1,
             next_export_id: 1,
             _wake: workers.woken.run(cx, Self::tick),
@@ -195,6 +198,7 @@ impl Session {
         self.tool = ActiveTool::default();
         self.save_now();
         self.display.clear();
+        self.mask_tint.clear();
         if let Some(document) = self.document.take() {
             self.renderer.coordinator.abandon(document.id);
         }
@@ -236,6 +240,7 @@ impl Session {
             delays.extend(self.renderer.poll(document));
             delays.extend(self.saves.autosave(document));
         }
+        self.refresh_mask_tint();
         if self.saves.pending() {
             // The save worker has no wake-up of its own.
             delays.push(Duration::from_millis(100));

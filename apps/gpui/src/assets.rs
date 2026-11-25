@@ -28,6 +28,7 @@ pub enum Icon {
     Eye,
     EyeOff,
     Invert,
+    Brush,
 }
 
 impl Icon {
@@ -54,6 +55,7 @@ impl Icon {
             Self::Eye => "eye.svg",
             Self::EyeOff => "eye-off.svg",
             Self::Invert => "invert.svg",
+            Self::Brush => "brush.svg",
         }
     }
 }
@@ -92,6 +94,7 @@ impl AssetSource for Assets {
             "eye.svg",
             "eye-off.svg",
             "invert.svg",
+            "brush.svg",
         ];
         Ok(bytes.map(Cow::Borrowed))
     }

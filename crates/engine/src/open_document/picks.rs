@@ -3,12 +3,14 @@
 use std::sync::Arc;
 
 use rohditor_core::PreviewOptions;
+use rohditor_edit::{ColorSample, EditRecipe};
+use rohditor_raw::RawFrame;
 
 use super::OpenDocument;
 use crate::coordinator::RenderCoordinator;
 use crate::document::PreviewTicket;
 use crate::preview::PreviewSource;
-use crate::tools::Picker;
+use crate::tools::{ColorPick, MaskToolSession, Picker};
 
 impl OpenDocument {
     /// Sample at `position`, `0..1` over the image as shown. Ignored while another
@@ -20,6 +22,33 @@ impl OpenDocument {
         position: (f64, f64),
         options: PreviewOptions,
     ) {
+        self.send_pick(|ticket, frame, recipe| match picker {
+            Picker::WhiteBalance => {
+                coordinator.sample_white_balance(ticket, frame, recipe, position, options)
+            }
+            Picker::ColorMixer => {
+                coordinator.sample_color_mixer(ticket, frame, recipe, position, options)
+            }
+        });
+    }
+
+    /// As [`Self::pick`], for the colour range of a mask.
+    pub fn pick_color_range(
+        &mut self,
+        coordinator: &RenderCoordinator,
+        pick: ColorPick,
+        position: (f64, f64),
+        options: PreviewOptions,
+    ) {
+        self.send_pick(|ticket, frame, recipe| {
+            coordinator.sample_color_range(ticket, frame, recipe, position, pick, options)
+        });
+    }
+
+    fn send_pick(
+        &mut self,
+        send: impl FnOnce(PreviewTicket, Arc<RawFrame>, EditRecipe) -> Result<(), String>,
+    ) {
         if self.pending_pick.is_some() {
             return;
         }
@@ -30,15 +59,7 @@ impl OpenDocument {
         };
         let ticket = self.ticket();
         let recipe = self.edits.recipe().clone();
-        let sent = match picker {
-            Picker::WhiteBalance => {
-                coordinator.sample_white_balance(ticket, frame, recipe, position, options)
-            }
-            Picker::ColorMixer => {
-                coordinator.sample_color_mixer(ticket, frame, recipe, position, options)
-            }
-        };
-        self.error = sent.err();
+        self.error = send(ticket, frame, recipe).err();
         if self.error.is_none() {
             self.pending_pick = Some(ticket);
         }
@@ -64,6 +85,25 @@ impl OpenDocument {
         channel: Result<usize, String>,
     ) -> Option<usize> {
         self.take_pick(ticket, channel)
+    }
+
+    /// A sample for a colour range arrived. It edits the range that `session` picks for. Returns
+    /// whether the recipe changed, so the caller must queue a preview.
+    pub fn color_range_picked(
+        &mut self,
+        session: Option<&mut MaskToolSession>,
+        ticket: PreviewTicket,
+        pick: ColorPick,
+        sample: Result<ColorSample, String>,
+    ) -> bool {
+        // Settled in any case, so that another pick can follow.
+        let sample = self.take_pick(ticket, sample);
+        let (Some(sample), Some(session)) = (sample, session) else {
+            return false;
+        };
+        session
+            .pick_color(self.edits.recipe(), sample, pick)
+            .is_some_and(|next| self.edits.set_discrete(next))
     }
 
     /// Whether a sample is on its way.
@@ -137,6 +177,28 @@ mod tests {
         assert!(document.edits.set_discrete(next));
         assert_eq!(document.color_mixer_picked(ticket, Ok(3)), None);
         assert!(document.pending_pick.is_none(), "another pick can follow");
+    }
+
+    #[test]
+    fn a_picked_color_edits_the_range_of_the_masks_tool() {
+        let sample = ColorSample {
+            lightness: 0.5,
+            a: 0.1,
+            b: -0.1,
+        };
+        let (mut document, ticket) = picking();
+        let mut session = MaskToolSession::default();
+        session.start_color_pick();
+        let pick = ColorPick::Replace;
+        assert!(document.color_range_picked(Some(&mut session), ticket, pick, Ok(sample)));
+        assert_eq!(document.edits.recipe().local.layers.len(), 1);
+        let again = document.color_range_picked(Some(&mut session), ticket, pick, Ok(sample));
+        assert!(!again, "settled once");
+
+        // The tool was left meanwhile.
+        let (mut document, ticket) = picking();
+        assert!(!document.color_range_picked(None, ticket, pick, Ok(sample)));
+        assert!(!document.is_picking(), "another pick can follow");
     }
 
     #[test]

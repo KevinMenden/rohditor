@@ -8,6 +8,7 @@ use eframe::egui;
 use rohditor_engine::coordinator::{PreviewResolution, WorkerEvent};
 use rohditor_engine::document::PreviewTicket;
 use rohditor_engine::preview::{DocumentPreviewDiagnostics, PreviewSource};
+use rohditor_engine::tools::ColorPick;
 
 use super::{Document, RohditorApp, install_texture};
 
@@ -164,16 +165,19 @@ impl RohditorApp {
                 ticket,
                 pick,
                 sample,
-            } => self.apply_color_sample(context, ticket, pick, sample),
+            } => self.color_range_picked(context, ticket, pick, Ok(sample)),
             WorkerEvent::ColorRangeSampleFailed { ticket, message } => {
-                self.fail_color_sample(ticket, message);
+                // What a failed pick would have done does not matter.
+                self.color_range_picked(context, ticket, ColorPick::Replace, Err(message));
             }
             WorkerEvent::MaskOverlayReady {
                 ticket,
                 layer,
                 overlay,
-            } => self.install_range_overlay(context, ticket, layer, &overlay),
-            WorkerEvent::MaskOverlayFailed { ticket, .. } => self.fail_range_overlay(ticket),
+            } => self.range_overlay_ready(context, ticket, layer, Some(*overlay)),
+            WorkerEvent::MaskOverlayFailed { ticket, layer, .. } => {
+                self.range_overlay_ready(context, ticket, layer, None);
+            }
             WorkerEvent::WhiteBalanceSampleFailed { ticket, message } => {
                 self.white_balance_picked(context, ticket, Err(message));
             }

@@ -26,10 +26,11 @@ pub trait Overlay {
         false
     }
 
-    /// The pointer moved during a claimed drag, possibly outside the viewport.
+    /// The pointer moved during a claimed drag, possibly outside the viewport. `moves` are those
+    /// since the last frame, oldest first, so that a fast drag is followed but rendered once.
     fn drag(
         &mut self,
-        _event: &MouseMoveEvent,
+        _moves: &[MouseMoveEvent],
         _photo: ImagePlacement,
         _window: &mut Window,
         _cx: &mut Context<Viewport>,
@@ -38,6 +39,11 @@ pub trait Overlay {
 
     /// A claimed drag is over.
     fn release(&mut self, _window: &mut Window, _cx: &mut Context<Viewport>) {}
+
+    /// Whether it is drawn at the pointer.
+    fn follows_pointer(&self, _cx: &App) -> bool {
+        false
+    }
 
     /// The cursor while the pointer is at `position`.
     fn cursor(

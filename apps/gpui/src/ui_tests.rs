@@ -237,7 +237,22 @@ impl Harness {
         }));
     }
 
+    /// Move the pointer with the button held, and let the next frame begin.
     fn drag_to(&mut self, position: Point<Pixels>) {
+        self.move_held(position);
+        self.begin_frame();
+    }
+
+    fn begin_frame(&mut self) {
+        self.cx
+            .update_window(self.window.into(), |_, window, cx| {
+                window.simulate_next_frame(cx);
+            })
+            .expect("window is open");
+        self.cx.run_until_parked();
+    }
+
+    fn move_held(&mut self, position: Point<Pixels>) {
         self.send(PlatformInput::MouseMove(MouseMoveEvent {
             position,
             pressed_button: Some(MouseButton::Left),

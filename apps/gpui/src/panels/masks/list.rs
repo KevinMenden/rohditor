@@ -10,7 +10,7 @@ use rohditor_engine::tools::{LayerEdit, MaskAction};
 use super::MasksPanel;
 use super::control::Control;
 use super::model::{Component, Mask, Selected};
-use crate::actions::{MoveMaskDown, MoveMaskUp, RenameMask, ToggleMask};
+use crate::actions::{MoveMaskDown, MoveMaskUp, PaintMask, RenameMask, ToggleMask};
 use crate::assets::Icon;
 use crate::panels::controls::FocusControls as _;
 use crate::theme::{RADIUS, SMALL_FONT_SIZE, theme};
@@ -227,6 +227,19 @@ impl MasksPanel {
             true,
             cx.listener(move |this, _, _, cx| this.act(MaskAction::DeleteComponent(index), cx)),
         );
+        let paint = component.brush.then(|| {
+            icon_button(
+                format!("paint-component-{index}"),
+                Icon::Brush,
+                "Paint into it",
+                true,
+                cx.listener(move |this, _, window, cx| {
+                    this.act(MaskAction::SelectComponent(index), cx);
+                    window.dispatch_action(Box::new(PaintMask), cx);
+                }),
+            )
+            .tab_stop(false)
+        });
         // The first has nothing to combine with, and is the mask when it is the only one.
         let mode = (index > 0).then(|| self.component_mode(index, component.mode, mask, cx));
         let only = selected.components.len() == 1;
@@ -245,6 +258,7 @@ impl MasksPanel {
             this.act(MaskAction::SelectComponent(index), cx);
         }))
         .child(div().flex_1().min_w_0().truncate().child(component.label))
+        .children(paint)
         .children(mode)
         .child(invert.tab_stop(false))
         .when(!only, |row| row.child(delete.tab_stop(false)))

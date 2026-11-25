@@ -1,16 +1,20 @@
-//! The shapes of the masks: the handles of the selected one, and pins for the others.
+//! The masks: a tint over the selected one, the handles of its shape or the brush that paints it,
+//! and pins for the others.
+
+use std::sync::Arc;
 
 use gpui::{
-    App, BorderStyle, Bounds, Context, CursorStyle, Entity, Hsla, MouseDownEvent, MouseMoveEvent,
-    PathBuilder, Pixels, Point, Window, black, point, px, quad, size, transparent_black, white,
+    App, BorderStyle, Bounds, Context, Corners, CursorStyle, Entity, Hsla, Modifiers,
+    MouseDownEvent, MouseMoveEvent, PathBuilder, Pixels, Point, Window, black, point, px, quad,
+    size, transparent_black, white,
 };
 use rohditor_engine::tools::{
-    MaskEditMode, MaskHandle, MaskOutline, MaskPointerEvents, MaskToolSession, MaskView,
+    ColorPick, MaskEditMode, MaskHandle, MaskOutline, MaskPointerEvents, MaskToolSession, MaskView,
 };
 use rohditor_engine::view::ImagePlacement;
 
-use super::Viewport;
 use super::overlay::{Overlay, pair};
+use super::{Viewport, bounds_of};
 use crate::session::Session;
 use crate::theme::theme;
 
@@ -48,6 +52,42 @@ impl MaskOverlay {
         Some(question(session.masks()?, recipe, &view))
     }
 
+    fn paint_tint(&self, photo: ImagePlacement, window: &mut Window, cx: &App) {
+        let Some(image) = self.session.read(cx).mask_tint().map(Arc::clone) else {
+            return;
+        };
+        let target = bounds_of(photo);
+        if let Err(error) = window.paint_image(target, target, Corners::default(), image, 0, false)
+        {
+            log::error!("could not paint the mask: {error:#}");
+        }
+    }
+
+    /// The brush at the pointer: a ring at its edge, and one where its feather starts.
+    fn paint_brush(&self, photo: ImagePlacement, window: &mut Window, cx: &App) {
+        let pointer = window.mouse_position();
+        let brush = self.ask(photo, cx, |masks, _, view| {
+            // A stroke may leave the photo.
+            let over =
+                photo.contains(pair(pointer)) && window.content_mask().bounds.contains(&pointer);
+            let shown = masks.is_painting() && (over || masks.is_dragging());
+            shown.then(|| {
+                let radius = view.units_to_screen(f64::from(masks.brush.radius)) as f32;
+                (radius, masks.brush.feather, masks.is_erasing())
+            })
+        });
+        let Some(Some((radius, feather, erasing))) = brush else {
+            return;
+        };
+        let color = if erasing { theme().warning } else { white() };
+        ring(pointer, radius, color, 1.5, window);
+        let inner = radius * (1.0 - feather);
+        // Less than a pixel would only blur the other one.
+        if inner >= 1.0 && feather > 0.0 {
+            ring(pointer, inner, color.opacity(0.7), 1.0, window);
+        }
+    }
+
     fn drive(&self, events: &MaskPointerEvents, photo: ImagePlacement, cx: &mut Context<Viewport>) {
         self.session.update(cx, |session, cx| {
             if let Some(view) = view(session, photo) {
@@ -75,6 +115,7 @@ impl Overlay for MaskOverlay {
         let Some((pins, hovered, outline)) = shown else {
             return;
         };
+        self.paint_tint(photo, window, cx);
         let theme = theme();
         let screen = |position| screen(photo, position);
         for pin in pins {
@@ -104,6 +145,7 @@ impl Overlay for MaskOverlay {
             ),
             None => {}
         }
+        self.paint_brush(photo, window, cx);
     }
 
     fn press(
@@ -115,6 +157,20 @@ impl Overlay for MaskOverlay {
     ) -> bool {
         self.pressed_pin = None;
         let position = photo.to_image(pair(event.position));
+        let on_photo = photo.contains(pair(event.position));
+        let mode = self.ask(photo, cx, |masks, _, _| masks.mode);
+        match mode {
+            // Claimed, so that the photo never slides under the brush.
+            Some(MaskEditMode::Paint { .. }) if !on_photo => return true,
+            Some(MaskEditMode::PickColor) if on_photo => {
+                let pick = color_pick(event.modifiers);
+                self.session.update(cx, |session, cx| {
+                    session.pick_mask_color(pick, position, cx);
+                });
+                return true;
+            }
+            _ => {}
+        }
         let found = self.ask(photo, cx, |masks, recipe, view| {
             let handle = masks.hit_test(recipe, view, position);
             // A double click inside an ellipse returns to fit, as everywhere.
@@ -129,6 +185,7 @@ impl Overlay for MaskOverlay {
         if grabs {
             let events = MaskPointerEvents {
                 press: Some(position),
+                erase_held: event.modifiers.alt,
                 ..MaskPointerEvents::default()
             };
             self.drive(&events, photo, cx);
@@ -138,20 +195,25 @@ impl Overlay for MaskOverlay {
 
     fn drag(
         &mut self,
-        event: &MouseMoveEvent,
+        moves: &[MouseMoveEvent],
         photo: ImagePlacement,
         _: &mut Window,
         cx: &mut Context<Viewport>,
     ) {
         if let Some((_, pressed)) = self.pressed_pin {
-            let moved = event.position - pressed;
-            if moved.x.as_f32().hypot(moved.y.as_f32()) <= CLICK_SLOP {
+            let clicks = |event: &MouseMoveEvent| {
+                let moved = event.position - pressed;
+                moved.x.as_f32().hypot(moved.y.as_f32()) <= CLICK_SLOP
+            };
+            if moves.iter().all(clicks) {
                 return;
             }
             self.pressed_pin = None;
         }
+        let positions = moves.iter().map(|event| pair(event.position));
         let events = MaskPointerEvents {
-            drag_to: vec![photo.to_image(pair(event.position))],
+            drag_to: positions.map(|position| photo.to_image(position)).collect(),
+            erase_held: moves.last().is_some_and(|event| event.modifiers.alt),
             ..MaskPointerEvents::default()
         };
         self.drive(&events, photo, cx);
@@ -161,6 +223,11 @@ impl Overlay for MaskOverlay {
         let clicked = self.pressed_pin.take().map(|(mask, _)| mask);
         self.session
             .update(cx, |session, cx| session.release_masks(clicked, cx));
+    }
+
+    fn follows_pointer(&self, cx: &App) -> bool {
+        let masks = self.session.read(cx).masks();
+        masks.is_some_and(MaskToolSession::is_painting)
     }
 
     fn cursor(
@@ -179,6 +246,17 @@ impl Overlay for MaskOverlay {
                 _ => Some(CursorStyle::Crosshair),
             }
         })?
+    }
+}
+
+/// What a click does to the picked colors.
+const fn color_pick(modifiers: Modifiers) -> ColorPick {
+    if modifiers.alt {
+        ColorPick::RemoveNearest
+    } else if modifiers.shift {
+        ColorPick::Add
+    } else {
+        ColorPick::Replace
     }
 }
 
@@ -217,23 +295,8 @@ fn linear(start: Point<Pixels>, center: Point<Pixels>, end: Point<Pixels>, windo
         halo(&[anchor - across, anchor + across], width, window);
     }
     halo(&[start, end], 1.0, window);
-    let ring = start + (center - start) * 0.5;
-    dot(
-        ring,
-        HANDLE_RADIUS + 1.0,
-        transparent_black(),
-        black().opacity(0.6),
-        3.0,
-        window,
-    );
-    dot(
-        ring,
-        HANDLE_RADIUS,
-        transparent_black(),
-        white(),
-        1.5,
-        window,
-    );
+    let turn = start + (center - start) * 0.5;
+    ring(turn, HANDLE_RADIUS, white(), 1.5, window);
     handle(start, HANDLE_RADIUS - 1.0, window);
     handle(end, HANDLE_RADIUS - 1.0, window);
     handle(center, HANDLE_RADIUS, window);
@@ -282,6 +345,14 @@ fn halo(points: &[Point<Pixels>], width: f32, window: &mut Window) {
 
 fn handle(center: Point<Pixels>, radius: f32, window: &mut Window) {
     dot(center, radius, theme().accent, black(), 1.0, window);
+}
+
+/// A circle that shows on any photo.
+fn ring(center: Point<Pixels>, radius: f32, color: Hsla, width: f32, window: &mut Window) {
+    let clear = transparent_black();
+    let dark = black().opacity(0.6);
+    dot(center, radius + 1.0, clear, dark, width + 2.0, window);
+    dot(center, radius, clear, color, width, window);
 }
 
 fn dot(

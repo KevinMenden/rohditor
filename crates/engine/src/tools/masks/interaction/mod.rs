@@ -49,6 +49,13 @@ pub enum RangeKind {
 
 impl RangeKind {
     pub const ALL: [Self; 2] = [Self::Luminance, Self::Color];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Luminance => "Luminance range",
+            Self::Color => "Color range",
+        }
+    }
 }
 
 /// Which bracket key was pressed while painting.

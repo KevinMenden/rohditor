@@ -2,8 +2,11 @@
 
 use gpui::Context;
 use rohditor_core::OutputGeometry;
-use rohditor_engine::document::EditSession;
-use rohditor_engine::tools::{MaskAction, MaskPointerEvents, MaskToolSession, MaskView, ToolKind};
+use rohditor_edit::ColorSample;
+use rohditor_engine::document::{EditSession, PreviewTicket};
+use rohditor_engine::tools::{
+    ColorPick, MaskAction, MaskPointerEvents, MaskToolSession, MaskView, ToolKind,
+};
 
 use super::Session;
 
@@ -40,6 +43,48 @@ impl Session {
             },
             cx,
         );
+    }
+
+    /// The key that erases instead of painting, and the other way round, is held or not.
+    pub fn hold_erase(&mut self, held: bool, cx: &mut Context<Self>) {
+        if let Some(masks) = self.tool.masks_mut()
+            && masks.erase_held != held
+        {
+            masks.erase_held = held;
+            cx.notify();
+        }
+    }
+
+    /// Pick the color at `position`, 0 to 1 over the photo, for the color range.
+    pub fn pick_mask_color(
+        &mut self,
+        pick: ColorPick,
+        position: (f64, f64),
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(document) = self.document.as_mut() {
+            let options = self.renderer.preview_options();
+            document.pick_color_range(&self.renderer.coordinator, pick, position, options);
+        }
+        self.tick(cx);
+    }
+
+    pub(super) fn mask_color_picked(
+        &mut self,
+        ticket: PreviewTicket,
+        pick: ColorPick,
+        sample: Result<ColorSample, String>,
+    ) {
+        let changed = self
+            .document
+            .as_mut()
+            .filter(|document| document.id == ticket.document_id)
+            .is_some_and(|document| {
+                document.color_range_picked(self.tool.masks_mut(), ticket, pick, sample)
+            });
+        if changed {
+            self.queue_preview();
+        }
     }
 
     /// Stop drawing a new shape. Returns whether one was being drawn.

@@ -5,11 +5,10 @@
 
 use eframe::egui;
 use rohditor_edit::{
-    MASK_UNIT_RANGE, MAX_LOCAL_DETAIL_VARIANTS, ParameterRange, local_detail_is_full,
+    MAX_LOCAL_DETAIL_VARIANTS, MaskLayer, MaskMode, MaskShape, local_detail_is_full,
 };
-use rohditor_edit::{MaskLayer, MaskMode, MaskShape};
 use rohditor_engine::tools::{
-    BRUSH_RADIUS_RANGE, BrushSettings, LayerEdit, LocalSlider, MaskAction, MaskEditMode, MaskLimit,
+    BrushSettings, BrushSlider, LayerEdit, LocalSlider, MaskAction, MaskEditMode, MaskLimit,
     RangeKind, SliderPhase,
 };
 
@@ -29,14 +28,6 @@ pub(crate) struct MasksPanelModel<'a> {
     pub show_overlay: bool,
     /// The recipe limit that stopped the last edit, if any.
     pub limit: Option<MaskLimit>,
-}
-
-/// The label of a range kind in the "New mask" menus.
-const fn range_label(kind: RangeKind) -> &'static str {
-    match kind {
-        RangeKind::Luminance => "Luminance range",
-        RangeKind::Color => "Color range",
-    }
 }
 
 pub(crate) fn show(ui: &mut egui::Ui, model: &MasksPanelModel<'_>) -> Vec<MaskAction> {
@@ -174,7 +165,7 @@ fn show_new_mask(ui: &mut egui::Ui, model: &MasksPanelModel<'_>, actions: &mut V
             }
             ui.separator();
             for kind in RangeKind::ALL {
-                if ui.button(range_label(kind)).clicked() {
+                if ui.button(kind.label()).clicked() {
                     actions.push(MaskAction::NewRange {
                         kind,
                         new_layer: true,
@@ -223,38 +214,32 @@ fn show_brush(ui: &mut egui::Ui, model: &MasksPanelModel<'_>, actions: &mut Vec<
         actions.push(MaskAction::SetErase(erase));
     }
 
-    let mut brush = model.brush;
-    let spec = |label, range: ParameterRange, decimals, step| AdjustmentSpec {
-        label,
-        minimum: range.minimum,
-        maximum: range.maximum,
-        neutral: range.neutral,
-        decimals,
-        step,
-        suffix: "%",
-        scale: ValueScale::Percent,
-    };
     // Size is the radius, as a percentage of the image's long edge. The slider snaps its value
     // to the step on every frame, and the `[` and `]` keys change it by a factor: with a coarser
     // step than this, a factor-1.15 increase at the smallest sizes would snap back and the
     // brush could not grow.
-    let mut changed = brush_slider(
-        ui,
-        &mut brush.radius,
-        spec("Size", BRUSH_RADIUS_RANGE, 1, 0.0005),
-    );
-    changed |= brush_slider(
-        ui,
-        &mut brush.feather,
-        spec("Feather", MASK_UNIT_RANGE, 0, 0.01),
-    );
-    let flow = ParameterRange {
-        neutral: 1.0,
-        ..MASK_UNIT_RANGE
-    };
-    changed |= brush_slider(ui, &mut brush.flow, spec("Flow", flow, 0, 0.01));
-    if changed {
-        actions.push(MaskAction::SetBrush(brush));
+    let mut brush = model.brush;
+    for slider in BrushSlider::ALL {
+        let (decimals, step) = match slider {
+            BrushSlider::Size => (1, 0.0005),
+            BrushSlider::Feather | BrushSlider::Flow => (0, 0.01),
+        };
+        let range = slider.range();
+        let spec = AdjustmentSpec {
+            label: slider.label(),
+            minimum: range.minimum,
+            maximum: range.maximum,
+            neutral: range.neutral,
+            decimals,
+            step,
+            suffix: "%",
+            scale: ValueScale::Percent,
+        };
+        let mut value = slider.get(brush);
+        if brush_slider(ui, &mut value, spec) {
+            brush = slider.with(brush, value);
+            actions.push(MaskAction::SetBrush(brush));
+        }
     }
     ui.label(
         egui::RichText::new("[ ] size · Shift+[ ] feather · E erase · hold Alt to flip erase")
@@ -350,7 +335,7 @@ fn show_components(
         // Ranges refine what the other components select, so they intersect by default.
         ui.menu_button("Refine", |ui| {
             for kind in RangeKind::ALL {
-                if ui.button(range_label(kind)).clicked() {
+                if ui.button(kind.label()).clicked() {
                     actions.push(MaskAction::NewRange {
                         kind,
                         new_layer: false,

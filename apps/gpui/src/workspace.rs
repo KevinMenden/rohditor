@@ -10,16 +10,16 @@ use gpui::{
     Pixels, Render, Role, Stateful, StyleRefinement, Window, div, prelude::*,
 };
 
-use rohditor_engine::tools::{CropToolSession, Picker, ToolKind};
+use rohditor_engine::tools::{CropToolSession, MaskToolSession, Picker, ToolKind};
 
 use crate::actions::{
     ActualPixels, ApplyPreset, ApplyTool, AutoNoiseReduction, AutoTone, CancelTool, ChooseLens,
     CloseFile, CropTool, EditTool, Export, FlipCrop, FocusAdjustments, FocusPhoto,
-    ImportCameraProfile, LockCrop, NextPhoto, OpenFile, OpenFolder, PHOTO_CONTEXT, PickMixerColor,
-    PickWhiteBalance, PreviousPhoto, Quit, Redo, ResetAdjustments, ResetCrop, ResetSection, Save,
-    SavePreset, SearchAdjustments, SetCropAspect, SetHighlightMethod, SetLensProfile, SetRendering,
-    SetWhiteBalance, ToggleClipping, ToggleCommandPalette, ToggleDevelop, ToggleFiles, Undo,
-    WORKSPACE_CONTEXT, ZoomToFit,
+    ImportCameraProfile, LockCrop, NextPhoto, OpenFile, OpenFolder, PAINTING_CONTEXT,
+    PHOTO_CONTEXT, PickMixerColor, PickWhiteBalance, PreviousPhoto, Quit, Redo, ResetAdjustments,
+    ResetCrop, ResetSection, Save, SavePreset, SearchAdjustments, SetCropAspect,
+    SetHighlightMethod, SetLensProfile, SetRendering, SetWhiteBalance, ToggleClipping,
+    ToggleCommandPalette, ToggleDevelop, ToggleFiles, Undo, WORKSPACE_CONTEXT, ZoomToFit,
 };
 use crate::library::Library;
 use crate::panels::command_palette::command_palette;
@@ -343,6 +343,10 @@ impl Render for Workspace {
                 // No button or other control has the focus.
                 if self.focus.is_focused(window) {
                     context.add(PHOTO_CONTEXT);
+                }
+                let masks = self.session.read(cx).masks();
+                if masks.is_some_and(MaskToolSession::is_painting) {
+                    context.add(PAINTING_CONTEXT);
                 }
                 root.key_context(context)
             })

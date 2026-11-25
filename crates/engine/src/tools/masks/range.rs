@@ -27,7 +27,7 @@ pub enum ColorPick {
 }
 
 /// A numeric control of a range component.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RangeSlider {
     LuminanceLow,
     LuminanceHigh,
@@ -37,6 +37,32 @@ pub enum RangeSlider {
 }
 
 impl RangeSlider {
+    pub const ALL: [Self; 5] = [
+        Self::LuminanceLow,
+        Self::LuminanceHigh,
+        Self::LuminanceFeatherLow,
+        Self::LuminanceFeatherHigh,
+        Self::ColorTolerance,
+    ];
+
+    /// The handles of a luminance range.
+    pub const LUMINANCE: [Self; 4] = [
+        Self::LuminanceLow,
+        Self::LuminanceHigh,
+        Self::LuminanceFeatherLow,
+        Self::LuminanceFeatherHigh,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::LuminanceLow => "Low",
+            Self::LuminanceHigh => "High",
+            Self::LuminanceFeatherLow => "Low feather",
+            Self::LuminanceFeatherHigh => "High feather",
+            Self::ColorTolerance => "Tolerance",
+        }
+    }
+
     pub const fn range(self) -> ParameterRange {
         match self {
             Self::ColorTolerance => COLOR_TOLERANCE_RANGE,
@@ -53,6 +79,54 @@ impl RangeSlider {
             (Self::LuminanceFeatherHigh, MaskShape::Luminance(range)) => Some(range.feather_high),
             (Self::ColorTolerance, MaskShape::Color(range)) => Some(range.tolerance),
             _ => None,
+        }
+    }
+
+    /// Of a new range.
+    pub fn default_value(self) -> f32 {
+        let shape = match self {
+            Self::ColorTolerance => MaskShape::Color(ColorRange::default()),
+            _ => MaskShape::Luminance(LuminanceRange::default()),
+        };
+        self.get(&shape).unwrap_or(self.range().neutral)
+    }
+
+    /// Where the handle of this slider is on a bar from black (0) to white (1). Those of the
+    /// feathers are where the range has faded to nothing.
+    pub fn handle_position(self, range: &LuminanceRange) -> f32 {
+        match self {
+            Self::LuminanceLow => range.low,
+            Self::LuminanceHigh => range.high,
+            Self::LuminanceFeatherLow => (range.low - range.feather_low).max(0.0),
+            Self::LuminanceFeatherHigh => (range.high + range.feather_high).min(1.0),
+            Self::ColorTolerance => 0.0,
+        }
+    }
+
+    /// The value that puts the handle at `position`. The ends of the range stay in order, and
+    /// the feathers outside of them.
+    pub fn value_at_handle(self, range: &LuminanceRange, position: f32) -> f32 {
+        let position = position.clamp(0.0, 1.0);
+        match self {
+            Self::LuminanceLow => position.min(range.high),
+            Self::LuminanceHigh => position.max(range.low),
+            Self::LuminanceFeatherLow => (range.low - position).max(0.0),
+            Self::LuminanceFeatherHigh => (position - range.high).max(0.0),
+            Self::ColorTolerance => 0.0,
+        }
+    }
+
+    /// Of `handles`, the one closest to `position`. Of two at the same place, the one that can
+    /// move towards `position`.
+    pub fn closest_handle(handles: [Self; 2], range: &LuminanceRange, position: f32) -> Self {
+        let [low, high] = handles;
+        let from_low = position - low.handle_position(range);
+        let from_high = high.handle_position(range) - position;
+        if from_low.abs() < from_high.abs() || (from_low.abs() == from_high.abs() && from_low < 0.0)
+        {
+            low
+        } else {
+            high
         }
     }
 
@@ -223,6 +297,45 @@ mod tests {
             MaskShape::Color(range) => range,
             other => panic!("not a colour range: {other:?}"),
         }
+    }
+
+    #[test]
+    fn handles_are_put_where_they_are_dragged() {
+        let range = LuminanceRange {
+            low: 0.3,
+            high: 0.6,
+            feather_low: 0.1,
+            feather_high: 0.5,
+        };
+        let positions = RangeSlider::LUMINANCE.map(|slider| slider.handle_position(&range));
+        assert_eq!(positions, [0.3, 0.6, 0.3 - 0.1, 1.0], "within the bar");
+
+        let dragged = |position| {
+            RangeSlider::LUMINANCE.map(|slider| slider.value_at_handle(&range, position))
+        };
+        assert_eq!(dragged(0.4), [0.4, 0.4, 0.0, 0.0]);
+        // Past the other end they stop at it.
+        assert_eq!(dragged(0.9)[..2], [0.6, 0.9]);
+        assert_eq!(dragged(0.1)[..2], [0.1, 0.3]);
+        assert_eq!(dragged(-1.0)[2], 0.3);
+        assert_eq!(dragged(2.0)[3], 1.0 - 0.6);
+    }
+
+    #[test]
+    fn a_press_takes_the_closest_handle_and_any_of_two_can_be_dragged_apart() {
+        let ends = [RangeSlider::LuminanceLow, RangeSlider::LuminanceHigh];
+        let mut range = LuminanceRange {
+            low: 0.25,
+            high: 0.75,
+            feather_low: 0.0,
+            feather_high: 0.0,
+        };
+        let closest = |range: &_, position| RangeSlider::closest_handle(ends, range, position);
+        assert_eq!(closest(&range, 0.4), RangeSlider::LuminanceLow);
+        assert_eq!(closest(&range, 0.6), RangeSlider::LuminanceHigh);
+        range.high = range.low;
+        assert_eq!(closest(&range, 0.2), RangeSlider::LuminanceLow);
+        assert_eq!(closest(&range, 0.3), RangeSlider::LuminanceHigh);
     }
 
     #[test]

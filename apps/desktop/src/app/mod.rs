@@ -125,10 +125,7 @@ struct Document {
     core: OpenDocument,
     texture: Option<PreviewTexture>,
     /// The Masks tool's red tint of the selected mask.
-    mask_overlay: Option<masks::MaskTint>,
-    /// The (recipe revision, layer) whose range overlay was asked of the worker. It stays set
-    /// after a failure, so a failing request is not repeated every frame.
-    range_overlay_requested: Option<(u64, u32)>,
+    mask_overlay: Option<egui::TextureHandle>,
     preview_pixels: Option<DisplayPreviewPixels>,
     /// egui's id for the engine's GPU display texture.
     gpu_texture_id: Option<egui::TextureId>,
@@ -152,7 +149,6 @@ impl Document {
             core: OpenDocument::opening(id, path, recipe, warning),
             texture: None,
             mask_overlay: None,
-            range_overlay_requested: None,
             preview_pixels: None,
             gpu_texture_id: None,
             synced_display_generation: 0,
@@ -201,8 +197,6 @@ pub(crate) struct RohditorApp {
     /// The active tool and its transient state (pickers, crop draft).
     tool: ActiveTool,
     color_mixer_channel: usize,
-    /// A click of the color-range picker waiting for its sample from the worker.
-    pending_color_pick: Option<PreviewTicket>,
     white_balance_memory: WhiteBalanceModeMemory,
     view_mode: ViewMode,
     /// Library selection, display order and resident grid textures.
@@ -343,7 +337,6 @@ impl RohditorApp {
             show_clipping: false,
             tool: ActiveTool::default(),
             color_mixer_channel: 0,
-            pending_color_pick: None,
             white_balance_memory: WhiteBalanceModeMemory::default(),
             view_mode,
             library: LibraryState::default(),
@@ -1188,22 +1181,20 @@ impl RohditorApp {
                     render: self.settings.render_options(),
                     ..PreviewOptions::default()
                 };
-                masks::refresh_tint(
-                    context,
-                    document,
-                    session,
-                    crop_policy,
-                    &self.coordinator,
-                    options,
-                );
+                masks::refresh_tint(context, document, session, &self.coordinator, options);
             }
+            let tint_shown = self
+                .tool
+                .masks()
+                .is_some_and(|session| document.core.shows_mask_tint(session));
+            let tint = document.mask_overlay.as_ref().filter(|_| tint_shown);
             let masks = self.tool.masks().and_then(|session| {
                 masks::overlay_model(
                     session,
                     &document.core.edits,
                     document.core.frame.as_deref(),
                     crop_policy,
-                    document.mask_overlay.as_ref(),
+                    tint,
                 )
             });
             viewport::show(

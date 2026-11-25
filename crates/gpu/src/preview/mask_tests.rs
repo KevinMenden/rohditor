@@ -291,13 +291,32 @@ fn fit_coverage_follows_stroke_changes_between_renders() {
         exposure_ev: 1.0,
         ..LocalSettings::default()
     };
-    let painted = |offset: f32, settings| {
+    let masked = |shape, settings| {
         let mut recipe = neutral_recipe();
         recipe.local.layers = vec![layer(
-            vec![component(MaskMode::Add, false, brush(offset))],
+            vec![component(MaskMode::Add, false, shape)],
             settings,
         )];
         recipe
+    };
+    let painted = |offset: f32, settings| masked(brush(offset), settings);
+    // A stroke over the others, while it is painted.
+    let painting = |points: usize, erase| {
+        let mut shape = brush(0.1);
+        if let rohditor_edit::MaskShape::Brush(brush) = &mut shape {
+            let path = [(0.9, 0.2), (0.7, 0.4), (0.75, 0.7), (0.3, 0.75)];
+            brush.strokes.push(rohditor_edit::BrushStroke {
+                points: path[..points]
+                    .iter()
+                    .map(|&(x, y)| rohditor_edit::MaskPoint { x, y })
+                    .collect(),
+                radius: 0.06,
+                feather: 0.4,
+                flow: 0.6,
+                erase,
+            });
+        }
+        masked(shape, exposure)
     };
     let mut reusable = None;
     for recipe in [
@@ -314,6 +333,14 @@ fn fit_coverage_follows_stroke_changes_between_renders() {
         painted(0.2, exposure),
         // Back to no masks, then a brush again.
         neutral_recipe(),
+        painted(0.1, exposure),
+        // Only a part of the plane changes from here on.
+        painting(1, false),
+        painting(2, false),
+        painting(3, false),
+        painting(4, false),
+        painting(4, true),
+        painting(3, true),
         painted(0.1, exposure),
     ] {
         let mut cpu = fixture_image(WIDTH, HEIGHT);

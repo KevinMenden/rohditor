@@ -1,16 +1,20 @@
 //! Right dock of the Masks tool: the list of the masks, and the sliders of the selected one. Its
 //! shapes are changed on the photo.
 
+mod brush;
 mod control;
 mod list;
 mod model;
 mod new;
+mod range;
 mod rename;
 mod sliders;
 
 use gpui::{Context, Entity, IntoElement, Render, Role, Window, div, prelude::*, px};
 use rohditor_edit::MAX_MASK_COMPONENTS;
-use rohditor_engine::tools::{LayerEdit, LocalSection, LocalSlider, MaskAction, MaskEditMode};
+use rohditor_engine::tools::{
+    BrushSlider, LayerEdit, LocalSection, LocalSlider, MaskAction, MaskEditMode, RangeSlider,
+};
 
 use super::controls::{Controls, FocusControls as _, Gestures as _, drag_tracker};
 use crate::actions::CancelTool;
@@ -19,11 +23,12 @@ use crate::theme::{SMALL_FONT_SIZE, TAB_HEIGHT, theme};
 use crate::ui::button::link;
 use crate::ui::overlays::Overlays;
 use crate::ui::test_id::TestId as _;
+use crate::ui::toggle::toggle;
 use control::Control;
 use model::Model;
 use rename::Rename;
 
-pub use new::{COMPONENT_MODES, SHAPES};
+pub use new::Shape;
 
 pub struct MasksPanel {
     session: Entity<Session>,
@@ -49,7 +54,14 @@ impl MasksPanel {
         let sections = LocalSection::ALL.map(Control::Section);
         let sliders = LocalSlider::ALL.map(Control::Slider);
         let components = (0..MAX_MASK_COMPONENTS).map(Control::Component);
-        let focusable = sections.into_iter().chain(sliders).chain(components);
+        let brush = BrushSlider::ALL.map(Control::Brush);
+        let ranges = RangeSlider::ALL.map(Control::Range);
+        let focusable = sections
+            .into_iter()
+            .chain(sliders)
+            .chain(components)
+            .chain(brush)
+            .chain(ranges);
         let mut controls = Controls::new(focusable, cx);
         controls
             .collapsed
@@ -64,8 +76,8 @@ impl MasksPanel {
     }
 
     fn follow(&mut self, model: Model, cx: &mut Context<Self>) {
-        if self.model.selected_mask() != model.selected_mask() {
-            // What was being changed belongs to the mask that was selected.
+        if self.model.selection() != model.selection() {
+            // What was being changed belongs to what was selected.
             self.abandon_gestures(cx);
         }
         let listed = model.masks.iter().map(|mask| mask.id);
@@ -125,12 +137,17 @@ impl MasksPanel {
             .child(self.new_mask(cx))
     }
 
-    /// What the next drag on the photo does, while it draws a shape.
+    /// What the pointer does on the photo, while it makes a shape.
     fn creation(&self) -> Option<impl IntoElement + use<>> {
-        let hint = match self.model.mode {
-            MaskEditMode::CreateLinear => "Drag on the photo from full to no effect.",
-            MaskEditMode::CreateRadial => "Drag on the photo from the center outwards.",
-            _ => return None,
+        let (hint, end) = match self.model.mode {
+            MaskEditMode::CreateLinear => ("Drag on the photo from full to no effect.", "Cancel"),
+            MaskEditMode::CreateRadial => ("Drag on the photo from the center outwards.", "Cancel"),
+            MaskEditMode::Paint { .. } => ("Paint on the photo.", "Done"),
+            MaskEditMode::PickColor => (
+                "Click a color on the photo. Shift adds it, Alt removes the nearest.",
+                "Done",
+            ),
+            MaskEditMode::Select => return None,
         };
         let theme = theme();
         Some(
@@ -148,7 +165,7 @@ impl MasksPanel {
                 .text_size(SMALL_FONT_SIZE)
                 .text_color(theme.accent)
                 .child(div().min_w_0().child(hint))
-                .child(link("cancel-mask", "Cancel", CancelTool, true).flex_none()),
+                .child(link("cancel-mask", end, CancelTool, true).flex_none()),
         )
     }
 
@@ -174,6 +191,9 @@ impl MasksPanel {
             .model
             .limit
             .map(|limit| note(limit.to_string()).text_color(theme.warning));
+        let brush = self.model.brush.map(|brush| self.brush(brush, cx));
+        let range = self.model.range().and_then(|shape| self.range(shape, cx));
+        let overlay = (!self.model.masks.is_empty()).then(|| self.overlay_toggle(cx));
         let sliders = self
             .model
             .selected
@@ -187,7 +207,27 @@ impl MasksPanel {
             .children(empty)
             .children(masks)
             .children(limit)
+            .children(overlay)
+            .children(brush)
+            .children(range)
             .children(sliders)
+    }
+
+    fn overlay_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let panel = cx.entity();
+        // Painting is never blind.
+        let fixed = self.model.brush.is_some();
+        toggle(
+            "mask-overlay",
+            "Show the mask (O)",
+            self.model.overlay,
+            move |_, cx| {
+                if !fixed {
+                    panel.update(cx, |panel, cx| panel.act(MaskAction::ToggleOverlay, cx));
+                }
+            },
+        )
+        .when(fixed, |toggle| toggle.opacity(0.5))
     }
 }
 

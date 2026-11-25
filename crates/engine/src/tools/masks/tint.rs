@@ -1,8 +1,8 @@
 //! The red tint drawn over the preview for the selected mask: what it shows, when it is out of
 //! date, and how it is made.
 //!
-//! A frontend keeps the [`TintSource`] of the tint it shows next to its texture and asks
-//! [`plan_tint`] each frame what to do about it.
+//! The open document keeps the [`TintSource`] of the tint that the frontend shows and asks
+//! [`plan_tint`] what to do about it, see `OpenDocument::refresh_mask_tint`.
 
 use rohditor_core::{MaskAlphaImage, RawCropPolicy};
 use rohditor_edit::{EditRecipe, GeometryAdjustments, MaskComponent, MaskLayer};
@@ -46,6 +46,10 @@ impl TintSource {
             policy,
             revision,
         }
+    }
+
+    pub const fn layer(&self) -> u32 {
+        self.layer
     }
 
     /// The source of a tint of layer `layer` that was measured at `revision` (see
@@ -154,13 +158,13 @@ pub fn plan_tint(
     }
 }
 
-/// The tint as premultiplied RGBA pixels: red, as opaque as the mask is strong.
+/// The tint as RGBA pixels (not premultiplied): red, as opaque as the mask is strong.
 pub fn tint_pixels(alpha: &[u8]) -> Vec<[u8; 4]> {
     alpha
         .iter()
         .map(|&value| {
             let strength = (f32::from(value) * OVERLAY_TINT_OPACITY).round() as u8;
-            [strength, 0, 0, strength]
+            [255, 0, 0, strength]
         })
         .collect()
 }
@@ -288,10 +292,10 @@ mod tests {
     }
 
     #[test]
-    fn the_tint_is_premultiplied_red_scaled_by_the_mask() {
+    fn the_tint_is_red_and_as_opaque_as_the_mask_is_strong() {
         assert_eq!(
             tint_pixels(&[0, 100, 255]),
-            [[0, 0, 0, 0], [50, 0, 0, 50], [128, 0, 0, 128]]
+            [[255, 0, 0, 0], [255, 0, 0, 50], [255, 0, 0, 128]]
         );
     }
 }

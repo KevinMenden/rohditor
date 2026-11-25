@@ -1,7 +1,10 @@
 //! The Masks tool: its list, its sliders and the gradients on the photo.
 
-use rohditor_edit::{LinearGradient, MaskLayer, MaskMode, MaskPoint, MaskShape, RadialGradient};
-use rohditor_engine::tools::{MaskEditMode, ToolKind};
+use rohditor_edit::{
+    BrushMask, BrushStroke, LinearGradient, LocalSettings, MaskComponent, MaskLayer, MaskMode,
+    MaskPoint, MaskShape, RadialGradient,
+};
+use rohditor_engine::tools::{MaskAction, MaskEditMode, ToolKind};
 
 use super::*;
 
@@ -355,7 +358,7 @@ fn masks_are_used_by_keyboard_and_follow_a_crop() {
     // The masks, their shapes and the sliders are one list for the keyboard.
     harness.keys("ctrl-d enter");
     assert_eq!(selection(&mut harness).0, Some(mask));
-    harness.keys("down down down left left");
+    harness.keys("down down down down left left");
     assert!((layers(&mut harness)[0].opacity - 0.98).abs() < 1.0e-6);
     harness.keys("ctrl-d delete");
     assert!(layers(&mut harness).is_empty());
@@ -379,4 +382,414 @@ fn masks_are_used_by_keyboard_and_follow_a_crop() {
     let moved = radial(&layers(&mut harness)[0]);
     assert_at(moved.center, 0.7, 0.7);
     assert_eq!(moved.radius_x, before.radius_x);
+}
+
+/// The strokes of a mask's first shape.
+fn strokes(layer: &MaskLayer) -> &[BrushStroke] {
+    match &layer.components[0].shape {
+        MaskShape::Brush(brush) => &brush.strokes,
+        other => panic!("not a brush: {other:?}"),
+    }
+}
+
+/// Press with these modifiers at an image position, and release.
+fn click_with(harness: &mut Harness, (x, y): (f32, f32), modifiers: Modifiers) {
+    let area = photo(harness);
+    let position = area.origin + point(area.size.width * x, area.size.height * y);
+    harness.send(PlatformInput::MouseDown(MouseDownEvent {
+        button: MouseButton::Left,
+        position,
+        click_count: 1,
+        modifiers,
+        ..Default::default()
+    }));
+    harness.release(position);
+}
+
+/// How much redder the photo is at an image position than it is green and blue.
+fn redness(harness: &mut Harness, shot: &image::RgbaImage, (x, y): (f32, f32)) -> f64 {
+    let area = photo(harness);
+    let position = area.origin + point(area.size.width * x, area.size.height * y);
+    let scale = shot.width() as f32 / WINDOW.width.as_f32();
+    let pixel = shot.get_pixel(
+        (position.x.as_f32() * scale) as u32,
+        (position.y.as_f32() * scale) as u32,
+    );
+    f64::from(pixel[0]) - (f64::from(pixel[1]) + f64::from(pixel[2])) / 2.0
+}
+
+const ALT: Modifiers = Modifiers {
+    alt: true,
+    control: false,
+    shift: false,
+    platform: false,
+    function: false,
+};
+
+#[test]
+#[ignore = "requires a wgpu adapter and ROHDITOR_RAW"]
+fn a_brush_paints_and_erases() {
+    let Some((mut harness, ..)) = opened("masks-brush") else {
+        return;
+    };
+    harness.keys("m");
+    let before = harness.capture("masks-unpainted");
+    harness.click("dropdown:new-mask");
+    harness.click("menu:New brush");
+    harness.find("mask-creation");
+    assert_eq!(mode(&mut harness), MaskEditMode::Paint { erase: false });
+
+    // All positions of one frame are followed, around a corner.
+    let area = photo(&mut harness);
+    let at = |x: f32, y: f32| area.origin + point(area.size.width * x, area.size.height * y);
+    harness.press(at(0.2, 0.3), 1);
+    for step in 1..=10_u8 {
+        harness.move_held(at(0.2 + f32::from(step) * 0.04, 0.3));
+    }
+    for step in 1..=10_u8 {
+        harness.move_held(at(0.6, 0.3 + f32::from(step) * 0.04));
+    }
+    assert_eq!(strokes(&layers(&mut harness)[0])[0].points.len(), 1);
+    harness.begin_frame();
+    let drawn = strokes(&layers(&mut harness)[0])[0].points.clone();
+    assert!(drawn.len() > 10, "{drawn:?}");
+    // It is tinted while it is painted.
+    harness.draw();
+    let during = harness.capture("masks-painting");
+    for place in [(0.4, 0.3), (0.6, 0.5)] {
+        let change = redness(&mut harness, &during, place) - redness(&mut harness, &before, place);
+        assert!(change > 40.0, "{change} at {place:?}");
+    }
+    harness.release(at(0.6, 0.7));
+    let stroke = strokes(&layers(&mut harness)[0])[0].clone();
+    assert_eq!(stroke.points.len(), 3, "simplified: {:?}", stroke.points);
+    assert_at(stroke.points[1], 0.6, 0.3);
+    assert_at(stroke.points[2], 0.6, 0.7);
+
+    // Beside the photo nothing is painted, and the photo does not move.
+    let view = harness.find("viewport");
+    harness.press(view.origin + point(px(5.0), px(5.0)), 1);
+    harness.drag_to(view.origin + point(px(60.0), px(60.0)));
+    harness.release(view.origin + point(px(60.0), px(60.0)));
+    assert_eq!(strokes(&layers(&mut harness)[0]).len(), 1);
+    assert_eq!(pan(&mut harness), Some([0.0, 0.0]));
+
+    // A click is a dab. Alt erases.
+    drag(&mut harness, (0.2, 0.8), (0.2, 0.8), px(0.0));
+    click_with(&mut harness, (0.4, 0.3), ALT);
+    let mask = layers(&mut harness).remove(0);
+    let erases: Vec<_> = strokes(&mask).iter().map(|stroke| stroke.erase).collect();
+    assert_eq!(erases, [false, false, true]);
+    let erased = harness.capture("masks-erased");
+    let left = redness(&mut harness, &erased, (0.4, 0.3));
+    assert!(left < redness(&mut harness, &during, (0.4, 0.3)) - 40.0);
+    harness.keys("ctrl-z");
+    assert_eq!(strokes(&layers(&mut harness)[0]).len(), 2);
+    harness.keys("ctrl-z ctrl-z");
+    assert!(layers(&mut harness).is_empty(), "one step per stroke");
+    harness.keys("ctrl-shift-z ctrl-shift-z ctrl-shift-z");
+    assert_eq!(strokes(&layers(&mut harness)[0]).len(), 3);
+}
+
+#[test]
+#[ignore = "requires a wgpu adapter and ROHDITOR_RAW"]
+fn the_brush_is_set_by_keys_and_sliders() {
+    let Some((mut harness, ..)) = opened("masks-brush-keys") else {
+        return;
+    };
+    let brush = |harness: &mut Harness| {
+        harness.with_session(|session, _| session.masks().expect("the tool is active").brush)
+    };
+    harness.keys("m");
+    harness.click("dropdown:new-mask");
+    harness.click("menu:New brush");
+    let first = brush(&mut harness);
+    harness.keys("]");
+    assert!(brush(&mut harness).radius > first.radius);
+    harness.keys("[ [");
+    assert!(brush(&mut harness).radius < first.radius);
+    harness.keys("}");
+    assert!(brush(&mut harness).feather > first.feather);
+    harness.keys("{ {");
+    assert!(brush(&mut harness).feather < first.feather);
+
+    let size = harness.find("adjustment:brush-Size").center();
+    harness.press(size, 1);
+    harness.drag_to(size + point(px(60.0), px(0.0)));
+    harness.release(size + point(px(60.0), px(0.0)));
+    let wide = brush(&mut harness);
+    assert!(wide.radius > first.radius * 1.5, "{wide:?}");
+    // Typed, where E is no shortcut.
+    harness.keys("enter 8 e backspace enter");
+    assert!((brush(&mut harness).radius - 0.08).abs() < 1.0e-6);
+    harness.capture("masks-brush");
+
+    // E erases while painting, and is the Edit tool otherwise.
+    harness.keys("e");
+    assert_eq!(mode(&mut harness), MaskEditMode::Paint { erase: true });
+    harness.click("toggle:erase");
+    assert_eq!(mode(&mut harness), MaskEditMode::Paint { erase: false });
+    drag(&mut harness, (0.3, 0.3), (0.5, 0.5), px(0.0));
+    let radius = strokes(&layers(&mut harness)[0])[0].radius;
+    assert!((radius - 0.08).abs() < 1.0e-6);
+    // The size is no edit of the photo.
+    harness.keys("ctrl-z ctrl-shift-z");
+    assert!((brush(&mut harness).radius - 0.08).abs() < 1.0e-6);
+    harness.keys("escape");
+    assert_eq!(mode(&mut harness), MaskEditMode::Select);
+    assert_eq!(harness.lookup("adjustment:brush-Size"), None);
+
+    // More strokes are painted into the same shape.
+    harness.keys("b");
+    drag(&mut harness, (0.6, 0.3), (0.7, 0.5), px(0.0));
+    harness.keys("escape");
+    harness.click("button:paint-component-0");
+    drag(&mut harness, (0.6, 0.6), (0.7, 0.7), px(0.0));
+    let mask = layers(&mut harness).remove(0);
+    assert_eq!(mask.components.len(), 1);
+    assert_eq!(strokes(&mask).len(), 3);
+    harness.keys("escape e");
+    let tool = harness.with_session(|session, _| session.tool().kind());
+    assert_eq!(tool, ToolKind::Edit);
+}
+
+#[test]
+#[ignore = "requires a wgpu adapter and ROHDITOR_RAW"]
+fn luminance_ranges_are_set_on_their_bar_and_by_their_rows() {
+    let Some((mut harness, ..)) = opened("masks-luminance") else {
+        return;
+    };
+    let range = |harness: &mut Harness| match layers(harness)[0].components.last() {
+        Some(MaskComponent {
+            shape: MaskShape::Luminance(range),
+            ..
+        }) => *range,
+        other => panic!("not a luminance range: {other:?}"),
+    };
+    harness.keys("m");
+    harness.click("dropdown:new-mask");
+    harness.click("menu:New luminance range");
+    assert_eq!(layers(&mut harness).len(), 1);
+    harness.wait_until("the measured mask", |session| session.mask_tint().is_some());
+
+    let width = harness.find("luminance").size.width;
+    let handle = harness.find("handle:LuminanceLow").center();
+    harness.press(handle, 1);
+    harness.drag_to(handle + point(width * 0.25, px(0.0)));
+    harness.drag_to(handle + point(width * 0.5, px(0.0)));
+    harness.release(handle + point(width * 0.5, px(0.0)));
+    let dragged = range(&mut harness);
+    assert!((dragged.low - 0.5).abs() < 0.01, "{dragged:?}");
+    assert_eq!((dragged.high, dragged.feather_low), (1.0, 0.1));
+    // Its row has the keyboard.
+    harness.keys("right");
+    assert!((range(&mut harness).low - 0.51).abs() < 0.011);
+    let feather = harness.find("handle:LuminanceFeatherLow").center();
+    harness.press(feather, 1);
+    harness.drag_to(feather - point(width * 0.1, px(0.0)));
+    harness.release(feather - point(width * 0.1, px(0.0)));
+    assert!((range(&mut harness).feather_low - 0.2).abs() < 0.02);
+    let row = harness.find("adjustment:range-LuminanceHigh").center();
+    harness.press(row, 1);
+    harness.release(row);
+    harness.keys("enter 9 0 enter");
+    assert_eq!(range(&mut harness).high, 0.9);
+    harness.wait_until("the measured mask", |session| session.mask_tint().is_some());
+    harness.wait_until("the preview", settled);
+    harness.capture("masks-luminance");
+
+    harness.keys("ctrl-z ctrl-z ctrl-z ctrl-z");
+    assert_eq!(range(&mut harness).low, 0.0, "each change is one step");
+    harness.keys("ctrl-z");
+    assert!(layers(&mut harness).is_empty());
+
+    // It refines another shape.
+    draw(&mut harness, "New radial gradient", (0.5, 0.5), (0.8, 0.5));
+    harness.click("dropdown:new-component");
+    harness.capture("masks-refine");
+    harness.click("menu:Intersect luminance range");
+    let mask = layers(&mut harness).remove(0);
+    assert_eq!(mask.components[1].mode, MaskMode::Intersect);
+    harness.find("luminance");
+    harness.click("component:0");
+    assert_eq!(harness.lookup("luminance"), None);
+}
+
+#[test]
+#[ignore = "requires a wgpu adapter and ROHDITOR_RAW"]
+fn color_ranges_are_picked_on_the_photo() {
+    let Some((mut harness, ..)) = opened("masks-color") else {
+        return;
+    };
+    let samples = |session: &Session| {
+        let layers = &session
+            .document()
+            .expect("open")
+            .edits
+            .recipe()
+            .local
+            .layers;
+        match layers.first().map(|layer| &layer.components[0].shape) {
+            Some(MaskShape::Color(range)) => range.samples.len(),
+            _ => 0,
+        }
+    };
+    harness.keys("m");
+    harness.click("dropdown:new-mask");
+    harness.click("menu:New color range");
+    assert_eq!(mode(&mut harness), MaskEditMode::PickColor);
+    harness.find("mask-creation");
+    click_with(&mut harness, (0.3, 0.3), Modifiers::default());
+    harness.wait_until("the first color", |session| samples(session) == 1);
+    harness.draw();
+    harness.find("swatch:0");
+    assert_eq!(pan(&mut harness), Some([0.0, 0.0]));
+    click_with(&mut harness, (0.7, 0.6), Modifiers::shift());
+    harness.wait_until("another color", |session| samples(session) == 2);
+    harness.wait_until("the measured mask", |session| session.mask_tint().is_some());
+    harness.capture("masks-color");
+    click_with(&mut harness, (0.7, 0.6), ALT);
+    harness.wait_until("one color less", |session| samples(session) == 1);
+    harness.keys("ctrl-z ctrl-z ctrl-z");
+    assert!(layers(&mut harness).is_empty(), "a step per click");
+    harness.keys("ctrl-shift-z");
+
+    harness.keys("escape");
+    assert_eq!(mode(&mut harness), MaskEditMode::Select);
+    let mask = layers(&mut harness)[0].id;
+    harness.click(&format!("mask:{mask}"));
+    harness.click("button:pick-mask-colors");
+    assert_eq!(mode(&mut harness), MaskEditMode::PickColor);
+    harness.keys("escape");
+    let row = harness.find("adjustment:range-ColorTolerance").center();
+    harness.press(row, 1);
+    harness.drag_to(row + point(px(30.0), px(0.0)));
+    harness.release(row + point(px(30.0), px(0.0)));
+    harness.keys("ctrl-z");
+    assert_eq!(layers(&mut harness).len(), 1);
+}
+
+#[test]
+#[ignore = "requires a wgpu adapter and ROHDITOR_RAW"]
+fn the_selected_mask_is_tinted_unless_hidden() {
+    let Some((mut harness, ..)) = opened("masks-tint") else {
+        return;
+    };
+    let tinted =
+        |harness: &mut Harness| harness.with_session(|session, _| session.mask_tint().is_some());
+    harness.keys("m");
+    let before = harness.capture("masks-no-tint");
+    draw(&mut harness, "New linear gradient", (0.5, 0.2), (0.5, 0.6));
+    harness.draw();
+    let after = harness.capture("masks-tint");
+    let change = |harness: &mut Harness, shot, place| {
+        redness(harness, shot, place) - redness(harness, &before, place)
+    };
+    assert!(change(&mut harness, &after, (0.3, 0.1)) > 40.0);
+    assert!(change(&mut harness, &after, (0.3, 0.9)).abs() < 3.0);
+
+    harness.keys("o");
+    assert!(!tinted(&mut harness));
+    harness.click("toggle:mask-overlay");
+    assert!(tinted(&mut harness));
+    harness.keys("o");
+    // Painting is never blind.
+    harness.click("dropdown:new-component");
+    harness.click("menu:Add brush");
+    assert!(tinted(&mut harness));
+    harness.keys("escape");
+    assert!(!tinted(&mut harness));
+    harness.keys("o");
+
+    // Not without its mask, and not in the other tools.
+    harness.keys("ctrl-z");
+    assert!(!tinted(&mut harness));
+    harness.keys("ctrl-shift-z");
+    assert!(tinted(&mut harness));
+    harness.keys("e");
+    assert!(!tinted(&mut harness));
+    harness.keys("m");
+    let mask = layers(&mut harness)[0].id;
+    harness.click(&format!("mask:{mask}"));
+    assert!(tinted(&mut harness));
+}
+
+/// Prints what painting costs on a photo that already has a lot of strokes, with a mouse that
+/// reports eight positions per frame. The time is what the interface is busy for per frame.
+#[test]
+#[ignore = "requires a wgpu adapter and ROHDITOR_RAW"]
+fn painting_cost() {
+    let Some((mut harness, ..)) = opened("masks-cost") else {
+        return;
+    };
+    harness.keys("m");
+    for (name, strokes) in [("no", 0), ("150", 150)] {
+        harness.with_session(|session, cx| {
+            let document = session.document_mut().expect("a photo is open");
+            let mut next = document.edits.recipe().clone();
+            next.local.layers = vec![painted(strokes)];
+            document.edits.set_discrete(next);
+            session.edit_masks(MaskAction::SelectLayer(0), cx);
+            session.edit_masks(MaskAction::PaintSelected, cx);
+        });
+        let area = photo(&mut harness);
+        let at = |step: u16| {
+            let turn = f32::from(step) / 480.0 * std::f32::consts::TAU;
+            let (x, y) = (0.5 + 0.3 * turn.cos(), 0.5 + 0.3 * turn.sin());
+            area.origin + point(area.size.width * x, area.size.height * y)
+        };
+        harness.press(at(0), 1);
+        let mut frames = Vec::new();
+        for frame in 0..60 {
+            let begun = Instant::now();
+            for step in 0..8 {
+                harness.move_held(at(frame * 8 + step));
+            }
+            harness.begin_frame();
+            harness.draw();
+            frames.push(begun.elapsed());
+            // Leave the GPU some time, as the display would.
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        harness.release(at(479));
+        frames.sort_unstable();
+        println!(
+            "painting over {name} strokes: median {:?}, 95% {:?}, max {:?}",
+            frames[30], frames[57], frames[59]
+        );
+        harness.wait_until("the painted preview", settled);
+    }
+}
+
+/// A brush with this many strokes of 40 points.
+fn painted(strokes: u16) -> MaskLayer {
+    let stroke = |index: u16| BrushStroke {
+        points: (0..40_u16)
+            .map(|step| MaskPoint {
+                x: 0.1 + f32::from(step) / 50.0,
+                y: 0.1 + f32::from(index % 50) / 60.0,
+            })
+            .collect(),
+        radius: 0.02,
+        feather: 0.5,
+        flow: 1.0,
+        erase: false,
+    };
+    MaskLayer {
+        id: 0,
+        name: "Painted".to_owned(),
+        enabled: true,
+        opacity: 1.0,
+        components: vec![MaskComponent {
+            mode: MaskMode::Add,
+            invert: false,
+            shape: MaskShape::Brush(BrushMask {
+                strokes: (0..strokes.max(1)).map(stroke).collect(),
+            }),
+        }],
+        settings: LocalSettings {
+            exposure_ev: -1.0,
+            ..LocalSettings::default()
+        },
+    }
 }

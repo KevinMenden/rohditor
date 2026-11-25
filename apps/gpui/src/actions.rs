@@ -5,12 +5,12 @@ use rohditor_edit::{
     HighlightMethod, LensProfileSelection, MaskMode, RecipeSection, RenderingProfileSelection,
     WhiteBalancePreset,
 };
-use rohditor_engine::tools::{CropAspect, MaskEditMode};
+use rohditor_engine::tools::CropAspect;
 
 use crate::panels::adjustments::{
     HIGHLIGHT_METHODS, RENDERINGS, method_label, rendering_label, sections,
 };
-use crate::panels::masks::{COMPONENT_MODES, SHAPES};
+use crate::panels::masks::Shape;
 use crate::{panels, ui};
 
 actions!(
@@ -45,6 +45,14 @@ actions!(
         ToggleMask,
         MoveMaskUp,
         MoveMaskDown,
+        ToggleMaskOverlay,
+        PaintMask,
+        PickMaskColors,
+        ToggleErase,
+        GrowBrush,
+        ShrinkBrush,
+        SoftenBrush,
+        HardenBrush,
         ApplyTool,
         CancelTool,
         ZoomToFit,
@@ -86,16 +94,16 @@ pub struct SetLensProfile(pub LensProfileSelection);
 #[action(namespace = rohditor, no_json)]
 pub struct SetCropAspect(pub CropAspect);
 
-/// Draw a shape as a new mask.
+/// Make a new mask of a shape.
 #[derive(Debug, Clone, PartialEq, Eq, Action)]
 #[action(namespace = rohditor, no_json)]
-pub struct NewMask(pub MaskEditMode);
+pub struct NewMask(pub Shape);
 
-/// Draw a shape into the selected mask.
+/// Add a shape to the selected mask.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Action)]
 #[action(namespace = rohditor, no_json)]
 pub struct AddToMask {
-    pub shape: MaskEditMode,
+    pub shape: Shape,
     pub mode: MaskMode,
 }
 
@@ -167,6 +175,15 @@ pub fn commands() -> Vec<Command> {
         command("masks: enable or disable mask", None, ToggleMask),
         command("masks: move mask up", Some("alt-up"), MoveMaskUp),
         command("masks: move mask down", Some("alt-down"), MoveMaskDown),
+        command("masks: show or hide the mask", Some("o"), ToggleMaskOverlay),
+        command("masks: paint selected brush", Some("b"), PaintMask),
+        command("masks: pick colors", None, PickMaskColors),
+        // After the tool with the same key, so that it comes first while painting.
+        command("masks: erase or paint", Some("e"), ToggleErase),
+        command("masks: larger brush", Some("]"), GrowBrush),
+        command("masks: smaller brush", Some("["), ShrinkBrush),
+        command("masks: softer brush", Some("}"), SoftenBrush),
+        command("masks: harder brush", Some("{"), HardenBrush),
         command("tool: apply", Some("enter"), ApplyTool),
         command("view: zoom to fit", Some("ctrl-0"), ZoomToFit),
         command("view: actual pixels (1:1)", Some("ctrl-1"), ActualPixels),
@@ -209,9 +226,10 @@ pub fn commands() -> Vec<Command> {
         let name = format!("crop: aspect {}", aspect.label().to_lowercase());
         command(name, None, SetCropAspect(aspect))
     }));
-    for (shape, name) in SHAPES {
+    for shape in Shape::ALL {
+        let name = shape.name();
         commands.push(command(format!("masks: new {name}"), None, NewMask(shape)));
-        commands.extend(COMPONENT_MODES.into_iter().map(|mode| {
+        commands.extend(shape.modes().iter().map(|&mode| {
             let name = format!("masks: {} {name}", mode.label().to_lowercase());
             command(name, None, AddToMask { shape, mode })
         }));
@@ -274,6 +292,8 @@ pub fn bind_keys(cx: &mut App) {
         } else if command.action.partial_eq(&ApplyTool) {
             // Enter also presses the focused control.
             Some(context(PHOTO_CONTEXT))
+        } else if is_for_painting(command.action.as_ref()) {
+            Some(context(PAINTING_CONTEXT))
         } else {
             Some(context(WORKSPACE_CONTEXT))
         };
@@ -304,9 +324,23 @@ fn letters_to_type() -> Vec<KeyBinding> {
         .collect()
 }
 
+/// Whether the action's key means it only while painting a mask.
+fn is_for_painting(action: &dyn Action) -> bool {
+    let brush: [&dyn Action; 5] = [
+        &ToggleErase,
+        &GrowBrush,
+        &ShrinkBrush,
+        &SoftenBrush,
+        &HardenBrush,
+    ];
+    brush.iter().any(|one| one.partial_eq(action))
+}
+
 pub const WORKSPACE_CONTEXT: &str = "Workspace";
 /// Added while the photo has the focus.
 pub const PHOTO_CONTEXT: &str = "Photo";
+/// Added while painting a mask.
+pub const PAINTING_CONTEXT: &str = "Painting";
 
 fn context(name: &'static str) -> std::rc::Rc<gpui::KeyBindingContextPredicate> {
     std::rc::Rc::new(gpui::KeyBindingContextPredicate::Identifier(name.into()))

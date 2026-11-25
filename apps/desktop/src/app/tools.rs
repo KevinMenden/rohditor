@@ -66,6 +66,7 @@ impl RohditorApp {
         let changed = self.tool.switch_to(target, &mut document.core, policy, now);
         if self.tool.masks().is_none() {
             document.mask_overlay = None;
+            document.core.forget_mask_tint();
         }
         let id = document.core.id;
         if changed {

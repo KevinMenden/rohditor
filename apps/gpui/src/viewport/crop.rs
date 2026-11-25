@@ -81,12 +81,15 @@ impl Overlay for CropOverlay {
 
     fn drag(
         &mut self,
-        event: &MouseMoveEvent,
+        moves: &[MouseMoveEvent],
         photo: ImagePlacement,
         _: &mut Window,
         cx: &mut Context<Viewport>,
     ) {
-        let position = photo.to_image(pair(event.position));
+        let Some(last) = moves.last() else {
+            return;
+        };
+        let position = photo.to_image(pair(last.position));
         self.0.update(cx, |session, cx| {
             session.edit_crop(|crop| crop.drag_to(position), cx);
         });
