@@ -9,7 +9,7 @@ use eframe::egui;
 use rohditor_core::OutputGeometry;
 use rohditor_edit::{EditRecipe, MaskLayer, MaskShape};
 use rohditor_engine::tools::{
-    ColorPick, HandleMarker, MaskEditMode, MaskHandle, MaskToolSession, MaskView,
+    ColorPick, HandleMarker, MaskEditMode, MaskHandle, MaskPointerEvents, MaskToolSession, MaskView,
 };
 
 use super::theme::colors;
@@ -32,17 +32,8 @@ pub(crate) struct MaskOverlayModel<'a> {
 
 #[derive(Debug, Default)]
 pub(crate) struct MaskOverlayOutput {
-    /// The pointer pressed on something the tool grabs, at a display position (`0..1` over the
-    /// image).
-    pub press: Option<(f64, f64)>,
-    /// Display positions the pointer moved through during the gesture this frame, oldest first;
-    /// the last is where it is now. A stroke follows all of them, so a fast one stays smooth.
-    pub drag_to: Vec<(f64, f64)>,
-    pub release: bool,
-    /// The erase modifier (Alt) is down.
-    pub erase_held: bool,
-    /// A click on another mask's pin.
-    pub select_layer: Option<u32>,
+    /// The pointer events of the frame, for the engine to turn into edit gestures.
+    pub events: MaskPointerEvents,
     /// A click of the colour picker: where, and what it does to the samples (a plain click
     /// replaces them, Shift adds, Alt removes the nearest).
     pub pick_color: Option<((f64, f64), ColorPick)>,
@@ -184,14 +175,14 @@ fn read_stroke(
             input.pointer.primary_down(),
         )
     });
-    output.press = events.press.map(|pos| to_display(image_rect, pos));
-    output.drag_to = events
+    output.events.press = events.press.map(|pos| to_display(image_rect, pos));
+    output.events.drag_to = events
         .moves
         .into_iter()
         .map(|pos| to_display(image_rect, pos))
         .collect();
     // A release the window never saw (focus was lost mid-stroke) ends the stroke too.
-    output.release = events.release || (running && !button_down);
+    output.events.release = events.release || (running && !button_down);
 }
 
 /// The pin of a mask in the viewport: where a click selects it.
@@ -255,22 +246,22 @@ pub(crate) fn interact_and_paint(
     let primary = egui::PointerButton::Primary;
     let pointer = response.interact_pointer_pos();
 
-    output.erase_held = ui.input(|input| input.modifiers.alt);
+    output.events.erase_held = ui.input(|input| input.modifiers.alt);
     output.captures_drag = captures_drag(ui, response, image_rect, model);
     let painting = model.session.is_painting();
     if painting {
         read_stroke(ui, response, image_rect, model, &mut output);
     } else {
-        output.press = grabbing_press(ui, response, image_rect, model)
+        output.events.press = grabbing_press(ui, response, image_rect, model)
             .map(|origin| to_display(image_rect, origin));
         if output.captures_drag
             && response.dragged_by(primary)
             && let Some(pointer) = pointer
         {
-            output.drag_to = vec![to_display(image_rect, pointer)];
+            output.events.drag_to = vec![to_display(image_rect, pointer)];
         }
         if response.drag_stopped_by(primary) && model.session.is_dragging() {
-            output.release = true;
+            output.events.release = true;
         }
     }
 
@@ -303,7 +294,7 @@ pub(crate) fn interact_and_paint(
     if response.clicked_by(primary)
         && let Some(layer) = hovered_pin
     {
-        output.select_layer = Some(layer.id);
+        output.events.select_layer = Some(layer.id);
     }
     if let Some(layer) = hovered_pin {
         context.set_cursor_icon(egui::CursorIcon::PointingHand);

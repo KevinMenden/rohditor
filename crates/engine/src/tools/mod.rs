@@ -10,8 +10,10 @@ mod switching;
 
 pub use crop::{CropAspect, CropHandle, CropToolSession};
 pub use masks::{
-    BRUSH_RADIUS_RANGE, BrushSettings, ColorPick, HandleMarker, LayerEdit, LocalSlider,
-    MaskEditMode, MaskHandle, MaskLimit, MaskToolSession, MaskView, RangeSlider,
+    BRUSH_RADIUS_RANGE, Bracket, BrushKeySteps, BrushSettings, ColorPick, HandleMarker, LayerEdit,
+    LocalSlider, MaskAction, MaskEditMode, MaskHandle, MaskLimit, MaskPointerEvents,
+    MaskToolSession, MaskView, RangeKind, RangeSlider, SliderPhase, TintPlan, TintSource,
+    plan_tint, tint_pixels,
 };
 
 use rohditor_edit::EditRecipe;

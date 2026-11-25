@@ -14,6 +14,10 @@
 //! stroke is one undo step. All methods are pure over `EditRecipe`: the caller owns undo and
 //! revisions.
 //!
+//! `MaskToolSession::drive_pointer` and `apply_action` (see `interaction`) do that plumbing
+//! for a frontend, and `plan_tint` (see `tint`) decides when the red tint over the preview
+//! needs recomputing.
+//!
 //! Pointer positions are display positions (`0..1` over the image on screen). The tool turns
 //! them into the developed frame the recipe stores via `OutputGeometry`; see `view`.
 //!
@@ -25,8 +29,10 @@ mod brush;
 mod edit;
 mod gesture;
 mod handles;
+mod interaction;
 mod layers;
 mod range;
+mod tint;
 mod view;
 
 #[cfg(test)]
@@ -34,8 +40,12 @@ mod tests;
 
 pub use brush::{BRUSH_RADIUS_RANGE, BrushSettings};
 pub use handles::MaskHandle;
+pub use interaction::{
+    Bracket, BrushKeySteps, MaskAction, MaskPointerEvents, RangeKind, SliderPhase,
+};
 pub use layers::{LayerEdit, LocalSlider};
 pub use range::{ColorPick, RangeSlider};
+pub use tint::{TintPlan, TintSource, plan_tint, tint_pixels};
 pub use view::MaskView;
 
 use rohditor_edit::{

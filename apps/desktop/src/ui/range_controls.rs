@@ -2,15 +2,14 @@
 //! samples.
 //!
 //! Presentation only, like the rest of the panel. Edits are reported as
-//! [`MasksAction::RangeSlider`] with the engine's [`RangeSlider`] ids, so the values are
+//! [`MaskAction::RangeSlider`] with the engine's [`RangeSlider`] ids, so the values are
 //! validated and combined by the engine, not here.
 
 use eframe::egui;
 use rohditor_core::{linear_srgb_to_srgb, oklab_to_linear_srgb};
 use rohditor_edit::{COLOR_TOLERANCE_RANGE, ColorRange, ColorSample, LuminanceRange};
-use rohditor_engine::tools::RangeSlider;
+use rohditor_engine::tools::{MaskAction, RangeSlider, SliderPhase};
 
-use super::masks::{MasksAction, SliderPhase};
 use super::theme::colors;
 use super::widgets::{self, AdjustmentSpec, ValueScale};
 
@@ -27,8 +26,8 @@ pub(crate) struct ComponentRef {
 }
 
 impl ComponentRef {
-    fn action(self, slider: RangeSlider, value: f32, phase: SliderPhase) -> MasksAction {
-        MasksAction::RangeSlider {
+    fn action(self, slider: RangeSlider, value: f32, phase: SliderPhase) -> MaskAction {
+        MaskAction::RangeSlider {
             layer: self.layer,
             component: self.component,
             slider,
@@ -55,7 +54,7 @@ pub(crate) fn show_luminance(
     ui: &mut egui::Ui,
     at: ComponentRef,
     range: &LuminanceRange,
-    actions: &mut Vec<MasksAction>,
+    actions: &mut Vec<MaskAction>,
 ) {
     let width = ui.available_width().max(120.0);
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, BAR_HEIGHT), egui::Sense::hover());
@@ -194,7 +193,7 @@ pub(crate) fn show_color(
     at: ComponentRef,
     range: &ColorRange,
     picking: bool,
-    actions: &mut Vec<MasksAction>,
+    actions: &mut Vec<MaskAction>,
 ) {
     ui.horizontal_wrapped(|ui| {
         for sample in &range.samples {
@@ -226,7 +225,7 @@ pub(crate) fn show_color(
             .on_hover_text("Click the image to pick the colors this range selects")
             .clicked()
     {
-        actions.push(MasksAction::PickColor);
+        actions.push(MaskAction::PickColor);
     }
     ui.label(
         egui::RichText::new("Click replaces · Shift-click adds · Alt-click removes the nearest")
