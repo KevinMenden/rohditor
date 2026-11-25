@@ -2,6 +2,8 @@
 
 pub mod adjustments;
 pub mod command_palette;
+pub mod controls;
 pub mod crop;
 pub mod develop;
 pub mod files;
+pub mod masks;

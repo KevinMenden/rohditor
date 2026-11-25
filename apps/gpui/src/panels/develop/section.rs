@@ -1,34 +1,25 @@
 //! A section of the panel: its header and its rows.
 
-use gpui::{
-    App, Context, Div, IntoElement, KeyBinding, MouseButton, Role, SharedString, Stateful, Window,
-    div, prelude::*, px,
-};
+use gpui::{Context, IntoElement, Role, SharedString, Window, div, prelude::*, px};
 use rohditor_edit::{EditRecipe, LensCorrection, RecipeSection};
 use rohditor_engine::open_document::NoiseSuggestion;
 use rohditor_engine::tools::Picker;
 
 use super::DevelopPanel;
 use super::choices::Choice;
-use super::focus::Control;
-use super::row::ResetValue;
+use super::control::Control;
+use super::filter::has_effect;
 use crate::actions::{AutoNoiseReduction, PickMixerColor, PickWhiteBalance};
 use crate::assets::Icon;
-use crate::panels::adjustments::{Group, Section, section_hint};
-use crate::theme::{RADIUS, SMALL_FONT_SIZE, theme};
-use crate::ui::button::{command_button, icon, icon_button, link};
+use crate::panels::adjustments::{Adjustment, Group, Section, section_hint};
+use crate::panels::controls::{
+    ControlPanel as _, Gestures as _, Header, ResetValue, RowState, SectionHeaders as _,
+    SliderRows as _,
+};
+use crate::theme::theme;
+use crate::ui::button::{command_button, link};
 use crate::ui::test_id::TestId as _;
 use crate::ui::tooltip::tooltip;
-
-const CONTEXT: &str = "SectionHeader";
-
-pub(super) fn bind_keys(cx: &mut App) {
-    let header = Some(CONTEXT);
-    cx.bind_keys([
-        KeyBinding::new("delete", ResetValue, header),
-        KeyBinding::new("backspace", ResetValue, header),
-    ]);
-}
 
 impl DevelopPanel {
     /// Restore the photo's defaults in this section.
@@ -40,27 +31,12 @@ impl DevelopPanel {
     ) {
         self.finish_nudge(cx);
         // What is being typed must not be applied afterwards.
-        if self
-            .typing
-            .as_ref()
-            .is_some_and(|typing| typing.adjustment.parameter.section() == section)
-        {
+        let typed = self.controls.typed().and_then(Control::parameter);
+        if typed.is_some_and(|parameter| parameter.section() == section) {
             self.stop_typing(false, window, cx);
         }
         self.session
             .update(cx, |session, cx| session.reset_section(section, cx));
-    }
-
-    fn toggle_section(&mut self, header: Control, cx: &mut Context<Self>) {
-        if !self.collapsed.remove(&header) {
-            self.collapsed.insert(header);
-        }
-        cx.notify();
-    }
-
-    /// Whether the rows of the section are shown. Always while searching.
-    pub(super) fn is_open(&self, header: Control, cx: &Context<Self>) -> bool {
-        self.searching(cx) || !self.collapsed.contains(&header)
     }
 
     /// The group's title and sections, or `None` when the filter hides all of them.
@@ -188,25 +164,52 @@ impl DevelopPanel {
         changed: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
+        let header = Header {
+            control: Control::Section(section),
+            title: section.label(),
+            id: format!("{section:?}").into(),
+            changed,
+        };
+        let reset = self.reset_button(
+            &header,
+            move |this, window, cx| this.reset_section(section, window, cx),
+            cx,
+        );
+        let title = self
+            .title(header, cx)
+            .when_some(section_hint(section), |title, hint| {
+                title.tooltip(tooltip(hint, None))
+            })
+            .on_action(cx.listener(move |this, _: &ResetValue, window, cx| {
+                this.reset_section(section, window, cx);
+            }));
         div()
             .flex()
             .items_center()
             .gap_1()
-            .child(self.section_title(section, changed, cx))
+            .child(title)
             .children(self.picker_button(section))
             .children(self.auto_button(section))
-            .when(changed, |header| {
-                let label = format!("Reset {}", section.label());
-                let reset = icon_button(
-                    format!("reset-{section:?}"),
-                    Icon::Reset,
-                    label,
-                    true,
-                    cx.listener(move |this, _, window, cx| this.reset_section(section, window, cx)),
-                );
-                // By keyboard, Delete on the header does the same.
-                header.child(reset.tab_stop(false))
-            })
+            .children(reset)
+    }
+
+    fn row(
+        &self,
+        adjustment: Adjustment,
+        recipe: &EditRecipe,
+        defaults: &EditRecipe,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let parameter = adjustment.parameter;
+        let state = RowState {
+            value: parameter.get(recipe, defaults),
+            origin: parameter.get(defaults, defaults),
+            edited: parameter.is_changed(recipe, defaults),
+            effective: has_effect(parameter, recipe, defaults),
+        };
+        let control = Control::Parameter(parameter);
+        let id = format!("{parameter:?}");
+        self.slider_row(control, &id, adjustment.slider(), state, cx)
     }
 
     /// Starts the section's picker, if it has one.
@@ -241,88 +244,5 @@ impl DevelopPanel {
             NoiseSuggestion::Estimating | NoiseSuggestion::Unavailable
         );
         Some(link("auto-noise", label, AutoNoiseReduction, enabled))
-    }
-
-    /// The title, which collapses the section.
-    fn section_title(
-        &self,
-        section: RecipeSection,
-        changed: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
-        let theme = theme();
-        let title = section.label();
-        let dot = changed.then(|| {
-            div()
-                .test_id(format!("changed:{section:?}"))
-                .relative()
-                .ml_1()
-                .size(px(5.0))
-                .rounded_full()
-                .bg(theme.accent)
-        });
-        let described = if changed {
-            format!("{title}, edited")
-        } else {
-            title.to_owned()
-        };
-        self.title(
-            Control::Section(section),
-            title,
-            &format!("{section:?}"),
-            cx,
-        )
-        .aria_label(described)
-        .when(changed, |header| header.text_color(theme.text))
-        .when_some(section_hint(section), |header, hint| {
-            header.tooltip(tooltip(hint, None))
-        })
-        .children(dot)
-        .on_action(cx.listener(move |this, _: &ResetValue, window, cx| {
-            this.reset_section(section, window, cx);
-        }))
-    }
-
-    /// A title that collapses what is below it.
-    pub(super) fn title(
-        &self,
-        control: Control,
-        title: &'static str,
-        test_id: &str,
-        cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
-        let theme = theme();
-        let collapsed = !self.is_open(control, cx);
-        let chevron = if collapsed {
-            Icon::ChevronRight
-        } else {
-            Icon::ChevronDown
-        };
-        div()
-            .id(title)
-            .role(Role::Button)
-            .aria_label(title)
-            .aria_expanded(!collapsed)
-            .key_context(CONTEXT)
-            .track_focus(self.focus.control(control))
-            .relative()
-            .child(self.revealer(control, cx))
-            .rounded(RADIUS)
-            .border_1()
-            .border_color(gpui::transparent_black())
-            .focus_visible(move |style| style.border_color(theme.accent))
-            .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-            .test_id(format!("section:{test_id}"))
-            .flex()
-            .flex_1()
-            .items_center()
-            .gap_1()
-            .h(px(28.0))
-            .cursor_pointer()
-            .text_size(SMALL_FONT_SIZE)
-            .text_color(theme.muted)
-            .child(icon(chevron, theme.faint))
-            .child(title)
-            .on_click(cx.listener(move |this, _, _, cx| this.toggle_section(control, cx)))
     }
 }

@@ -24,6 +24,10 @@ pub enum Icon {
     Pipette,
     Plus,
     Crop,
+    Mask,
+    Eye,
+    EyeOff,
+    Invert,
 }
 
 impl Icon {
@@ -46,6 +50,10 @@ impl Icon {
             Self::Pipette => "pipette.svg",
             Self::Plus => "plus.svg",
             Self::Crop => "crop.svg",
+            Self::Mask => "mask.svg",
+            Self::Eye => "eye.svg",
+            Self::EyeOff => "eye-off.svg",
+            Self::Invert => "invert.svg",
         }
     }
 }
@@ -80,6 +88,10 @@ impl AssetSource for Assets {
             "pipette.svg",
             "plus.svg",
             "crop.svg",
+            "mask.svg",
+            "eye.svg",
+            "eye-off.svg",
+            "invert.svg",
         ];
         Ok(bytes.map(Cow::Borrowed))
     }

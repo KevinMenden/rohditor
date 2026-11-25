@@ -2,14 +2,15 @@
 
 use gpui::{Action, App, KeyBinding, NoAction, SharedString, actions};
 use rohditor_edit::{
-    HighlightMethod, LensProfileSelection, RecipeSection, RenderingProfileSelection,
+    HighlightMethod, LensProfileSelection, MaskMode, RecipeSection, RenderingProfileSelection,
     WhiteBalancePreset,
 };
-use rohditor_engine::tools::CropAspect;
+use rohditor_engine::tools::{CropAspect, MaskEditMode};
 
 use crate::panels::adjustments::{
     HIGHLIGHT_METHODS, RENDERINGS, method_label, rendering_label, sections,
 };
+use crate::panels::masks::{COMPONENT_MODES, SHAPES};
 use crate::{panels, ui};
 
 actions!(
@@ -38,6 +39,12 @@ actions!(
         LockCrop,
         FlipCrop,
         ResetCrop,
+        MasksTool,
+        DeleteMask,
+        RenameMask,
+        ToggleMask,
+        MoveMaskUp,
+        MoveMaskDown,
         ApplyTool,
         CancelTool,
         ZoomToFit,
@@ -78,6 +85,19 @@ pub struct SetLensProfile(pub LensProfileSelection);
 #[derive(Debug, Clone, PartialEq, Eq, Action)]
 #[action(namespace = rohditor, no_json)]
 pub struct SetCropAspect(pub CropAspect);
+
+/// Draw a shape as a new mask.
+#[derive(Debug, Clone, PartialEq, Eq, Action)]
+#[action(namespace = rohditor, no_json)]
+pub struct NewMask(pub MaskEditMode);
+
+/// Draw a shape into the selected mask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Action)]
+#[action(namespace = rohditor, no_json)]
+pub struct AddToMask {
+    pub shape: MaskEditMode,
+    pub mode: MaskMode,
+}
 
 /// An entry of the command palette and, when it has a key, of the keymap.
 pub struct Command {
@@ -141,6 +161,12 @@ pub fn commands() -> Vec<Command> {
         command("crop: lock ratio", None, LockCrop),
         command("crop: flip ratio", Some("x"), FlipCrop),
         command("crop: reset", None, ResetCrop),
+        command("tool: masks", Some("m"), MasksTool),
+        command("masks: delete selected shape", Some("delete"), DeleteMask),
+        command("masks: rename mask", Some("f2"), RenameMask),
+        command("masks: enable or disable mask", None, ToggleMask),
+        command("masks: move mask up", Some("alt-up"), MoveMaskUp),
+        command("masks: move mask down", Some("alt-down"), MoveMaskDown),
         command("tool: apply", Some("enter"), ApplyTool),
         command("view: zoom to fit", Some("ctrl-0"), ZoomToFit),
         command("view: actual pixels (1:1)", Some("ctrl-1"), ActualPixels),
@@ -183,6 +209,13 @@ pub fn commands() -> Vec<Command> {
         let name = format!("crop: aspect {}", aspect.label().to_lowercase());
         command(name, None, SetCropAspect(aspect))
     }));
+    for (shape, name) in SHAPES {
+        commands.push(command(format!("masks: new {name}"), None, NewMask(shape)));
+        commands.extend(COMPONENT_MODES.into_iter().map(|mode| {
+            let name = format!("masks: {} {name}", mode.label().to_lowercase());
+            command(name, None, AddToMask { shape, mode })
+        }));
+    }
     commands.extend(RENDERINGS.into_iter().map(|rendering| {
         let name = format!(
             "develop: rendering {}",
@@ -258,6 +291,7 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys(bindings);
     cx.bind_keys(letters_to_type());
     ui::keys::bind(cx);
+    panels::controls::bind_keys(cx);
     panels::develop::bind_keys(cx);
 }
 

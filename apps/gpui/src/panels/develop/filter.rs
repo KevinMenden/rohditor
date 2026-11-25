@@ -1,6 +1,6 @@
 //! Which adjustments the panel lists: a search and "Edited only".
 
-use gpui::{Context, Focusable as _, IntoElement, SharedString, Window, div, prelude::*, px};
+use gpui::{App, Context, Focusable as _, IntoElement, SharedString, Window, div, prelude::*, px};
 use rohditor_edit::{EditRecipe, GradingTones, HighlightMethod, Parameter, RecipeSection};
 
 use super::DevelopPanel;
@@ -9,6 +9,7 @@ use super::mixer::channel_of;
 use crate::actions::FocusPhoto;
 use crate::assets::Icon;
 use crate::panels::adjustments::{Adjustment, Group, Section};
+use crate::panels::controls::FocusControls as _;
 use crate::theme::{RADIUS, theme};
 use crate::ui::button::{icon, icon_button};
 use crate::ui::keys::{Cancel, Confirm, SelectNext};
@@ -17,11 +18,11 @@ use crate::ui::test_id::TestId as _;
 use crate::ui::toggle::toggle;
 
 impl DevelopPanel {
-    pub(super) fn query(&self, cx: &Context<Self>) -> SharedString {
+    pub(super) fn query(&self, cx: &App) -> SharedString {
         self.search.read(cx).text().to_owned().into()
     }
 
-    pub(super) fn searching(&self, cx: &Context<Self>) -> bool {
+    pub(super) fn searching(&self, cx: &App) -> bool {
         !self.query(cx).trim().is_empty()
     }
 
@@ -52,13 +53,10 @@ impl DevelopPanel {
             return false;
         }
         // A slider must not vanish while it is changed.
-        let active = [
-            self.drag.as_ref().and_then(|drag| drag.parameter),
-            self.typing
-                .as_ref()
-                .map(|typing| typing.adjustment.parameter),
-        ]
-        .contains(&Some(parameter));
+        let active = [self.controls.dragged(), self.controls.typed()]
+            .into_iter()
+            .flatten()
+            .any(|control| control.parameter() == Some(parameter));
         let passes = !self.edited_only || parameter.is_changed(recipe, defaults);
         // Searches and the filter list the sliders of all colours.
         let listed = self.edited_only
@@ -136,10 +134,10 @@ impl DevelopPanel {
                 }
             }))
             .on_action(cx.listener(|this, _: &Confirm, window, cx| {
-                this.focus_adjustments(window, cx);
+                this.focus_first(window, cx);
             }))
             .on_action(cx.listener(|this, _: &SelectNext, window, cx| {
-                this.focus_adjustments(window, cx);
+                this.focus_first(window, cx);
             }));
         let panel = cx.entity();
         let edited_only = toggle(

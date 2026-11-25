@@ -114,6 +114,24 @@ pub struct MaskView {
 }
 
 impl MaskView {
+    /// The image shown `width` screen pixels wide.
+    #[must_use]
+    pub fn new(geometry: OutputGeometry, width: f64) -> Self {
+        let (output_width, _) = geometry.output_dimensions();
+        Self {
+            geometry,
+            screen_scale: width / output_width as f64,
+        }
+    }
+
+    /// Distance of two display positions in screen pixels.
+    pub(super) fn screen_distance(self, a: (f64, f64), b: (f64, f64)) -> f64 {
+        let (width, height) = self.geometry.output_dimensions();
+        let across = (a.0 - b.0) * width as f64;
+        let down = (a.1 - b.1) * height as f64;
+        across.hypot(down) * self.screen_scale
+    }
+
     pub(super) fn space(self) -> Space {
         Space::new(self.geometry.developed_dimensions())
     }

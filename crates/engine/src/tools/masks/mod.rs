@@ -26,6 +26,7 @@
 //! [`MaskToolSession::limit_reached`].
 
 mod brush;
+mod canvas;
 mod edit;
 mod gesture;
 mod handles;
@@ -39,11 +40,12 @@ mod view;
 mod tests;
 
 pub use brush::{BRUSH_RADIUS_RANGE, BrushSettings};
+pub use canvas::{MaskOutline, MaskPin};
 pub use handles::MaskHandle;
 pub use interaction::{
     Bracket, BrushKeySteps, MaskAction, MaskPointerEvents, RangeKind, SliderPhase,
 };
-pub use layers::{LayerEdit, LocalSlider};
+pub use layers::{LayerEdit, LocalSection, LocalSlider};
 pub use range::{ColorPick, RangeSlider};
 pub use tint::{TintPlan, TintSource, plan_tint, tint_pixels};
 pub use view::MaskView;

@@ -7,16 +7,17 @@ use rohditor_edit::{
 };
 
 use super::DevelopPanel;
-use super::focus::Control;
+use super::control::Control;
 use crate::actions::ImportCameraProfile;
 use crate::panels::adjustments::{HIGHLIGHT_METHODS, RENDERINGS, method_label, rendering_label};
+use crate::panels::controls::{FocusControls as _, Gestures as _};
 use crate::session::Session;
 use crate::theme::theme;
 use crate::ui::dropdown::dropdown;
 use crate::ui::menu::MenuEntry;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) enum Choice {
+pub enum Choice {
     WhiteBalance,
     HighlightMethod,
     Rendering,
@@ -158,7 +159,7 @@ impl DevelopPanel {
                     .child(div().flex_none().child(choice.label()))
                     .child(
                         list.min_w_0()
-                            .track_focus(self.focus.control(control))
+                            .track_focus(self.controls.focus.control(control))
                             .child(self.revealer(control, cx)),
                     ),
             )

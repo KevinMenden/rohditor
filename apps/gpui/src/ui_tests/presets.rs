@@ -37,7 +37,7 @@ fn presets_are_saved_applied_and_managed() {
     assert_eq!(harness.exposure(), 0.0);
     harness.click("preset:bright");
     assert_eq!(harness.exposure(), brighter);
-    let amount = harness.find("preset-amount").center();
+    let amount = harness.find("adjustment:preset-amount").center();
     harness.press(amount, 1);
     harness.drag_to(amount - point(px(60.0), px(0.0)));
     harness.drag_to(amount - point(px(100.0), px(0.0)));
@@ -53,7 +53,7 @@ fn presets_are_saved_applied_and_managed() {
     assert_eq!(harness.exposure(), brighter, "a drag is one undo step");
     harness.keys("ctrl-z");
     assert_eq!(harness.exposure(), 0.0);
-    assert_eq!(harness.lookup("preset-amount"), None);
+    assert_eq!(harness.lookup("adjustment:preset-amount"), None);
 
     // By key.
     harness.keys("escape p");

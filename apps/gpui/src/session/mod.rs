@@ -8,6 +8,7 @@ mod display;
 mod editing;
 mod events;
 mod export;
+mod masks;
 mod optics;
 mod picking;
 mod presets;

@@ -10,8 +10,8 @@ use rohditor_core::{ToneCurveHandle, display_tone_curve};
 use rohditor_edit::ToneCurve;
 
 use super::DevelopPanel;
-use super::focus::Control;
-use super::gestures::Grip;
+use super::control::Control;
+use crate::panels::controls::Gestures as _;
 use crate::theme::{RADIUS, theme};
 use crate::ui::test_id::TestId as _;
 
@@ -27,7 +27,7 @@ impl DevelopPanel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let theme = theme();
-        let grabbed = self.drag.as_ref().and_then(|drag| drag.parameter);
+        let grabbed = self.controls.dragged().and_then(Control::parameter);
         let handles = ToneCurveHandle::ALL.map(|handle| {
             let active = grabbed == Some(handle.parameter());
             div()
@@ -70,8 +70,8 @@ impl DevelopPanel {
         // For the arrow keys. Not on the panel, which would get it now.
         window.prevent_default();
         let row = Control::Parameter(handle.parameter());
-        self.focus.control(row).focus(window, cx);
-        self.press(Grip::Curve(handle), event, bounds, cx);
+        self.controls.focus.control(row).focus(window, cx);
+        self.press(Control::Curve(handle), event, bounds, cx);
     }
 }
 

@@ -16,14 +16,6 @@ fn crop(harness: &mut Harness) -> Option<NormalizedCropRect> {
     })
 }
 
-/// The size of the shown frame.
-fn shown(harness: &mut Harness) -> (u32, u32) {
-    harness.with_session(|session, _| {
-        let display = session.display().expect("a frame is shown");
-        (display.width, display.height)
-    })
-}
-
 fn draft_square(harness: &mut Harness) {
     harness.with_session(|session, cx| {
         session.edit_crop(|crop| crop.set_aspect(CropAspect::Square), cx)
@@ -155,30 +147,6 @@ fn a_draft_is_undone_cancelled_or_applied() {
     });
     let drafted = drafted.expect("the crop was saved");
     assert!(drafted.bottom - drafted.top < 0.999);
-}
-
-/// Where the fitted whole photo is on screen.
-fn photo(harness: &mut Harness) -> Bounds<Pixels> {
-    let area = harness.find("viewport");
-    let (width, height) = shown(harness);
-    let padded = area.size - size(px(40.0), px(40.0));
-    let scale = (padded.width / width as f32).min(padded.height / height as f32);
-    Bounds::centered_at(
-        area.center(),
-        size(scale * width as f32, scale * height as f32),
-    )
-}
-
-/// Drag from one image position to another, starting `grab` pixels beside the first.
-fn drag(harness: &mut Harness, from: (f32, f32), to: (f32, f32), grab: Pixels) {
-    let photo = photo(harness);
-    let at = |(x, y): (f32, f32)| {
-        photo.origin + point(photo.size.width * x + grab, photo.size.height * y + grab)
-    };
-    harness.press(at(from), 1);
-    harness.drag_to(at(((from.0 + to.0) / 2.0, (from.1 + to.1) / 2.0)));
-    harness.drag_to(at(to));
-    harness.release(at(to));
 }
 
 #[track_caller]

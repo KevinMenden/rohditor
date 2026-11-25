@@ -4,7 +4,7 @@ use gpui::{Context, IntoElement, Role, StyleRefinement, div, prelude::*};
 use rohditor_engine::tools::ToolKind;
 
 use super::Workspace;
-use crate::actions::{CropTool, EditTool};
+use crate::actions::{CropTool, EditTool, MasksTool};
 use crate::assets::Icon;
 use crate::theme::{DEVELOP_WIDTH, TAB_HEIGHT, theme};
 use crate::ui::button::command_button;
@@ -31,9 +31,8 @@ impl Workspace {
         let fill = StyleRefinement::default().flex_1().min_h_0().w_full();
         let panel = match active {
             ToolKind::Crop => self.crop.clone().cached(fill).into_any_element(),
-            ToolKind::Edit | ToolKind::Masks => {
-                self.develop.clone().cached(fill).into_any_element()
-            }
+            ToolKind::Masks => self.masks.clone().cached(fill).into_any_element(),
+            ToolKind::Edit => self.develop.clone().cached(fill).into_any_element(),
         };
         let theme = theme();
         let selected = |tool| tool == active;
@@ -65,6 +64,12 @@ impl Workspace {
                     .child(
                         command_button("tool-crop", Icon::Crop, CropTool, ready)
                             .when(selected(ToolKind::Crop), |button| button.bg(theme.selected)),
+                    )
+                    .child(
+                        command_button("tool-masks", Icon::Mask, MasksTool, ready)
+                            .when(selected(ToolKind::Masks), |button| {
+                                button.bg(theme.selected)
+                            }),
                     ),
             )
             .child(panel)

@@ -1,17 +1,12 @@
 //! One adjustment: a row that is its own slider.
 
 use gpui::{
-    AccessibleAction, App, Bounds, Context, CursorStyle, DispatchPhase, Entity, IntoElement,
-    KeyBinding, MouseButton, MouseDownEvent, Pixels, Point, Role, SharedString, Window, actions,
-    canvas, div, linear_color_stop, linear_gradient, prelude::*, px, relative, rgb,
+    AccessibleAction, App, Bounds, Context, CursorStyle, DispatchPhase, Div, Entity, IntoElement,
+    KeyBinding, MouseButton, MouseDownEvent, Pixels, Point, Role, SharedString, Stateful, Window,
+    actions, canvas, div, linear_color_stop, linear_gradient, prelude::*, px, relative, rgb,
 };
-use rohditor_edit::EditRecipe;
 
-use super::DevelopPanel;
-use super::filter::has_effect;
-use super::focus::Control;
-use super::gestures::{Grip, NudgeBy};
-use crate::panels::adjustments::Adjustment;
+use super::{ControlPanel, FocusControls as _, Gestures as _, Slider};
 use crate::theme::{RADIUS, SMALL_FONT_SIZE, theme};
 use crate::ui::keys::{Cancel, Confirm};
 use crate::ui::menu::MenuEntry;
@@ -23,7 +18,7 @@ actions!(
     [Decrease, Increase, DecreaseMore, IncreaseMore, ResetValue]
 );
 
-pub(super) const CONTEXT: &str = "Slider";
+pub const CONTEXT: &str = "Slider";
 /// Steps of Page Up and Page Down.
 const MANY_STEPS: i8 = 10;
 
@@ -40,10 +35,21 @@ pub(super) fn bind_keys(cx: &mut App) {
     ]);
 }
 
-impl DevelopPanel {
-    fn show_menu(
+/// What a row shows of its slider.
+#[derive(Debug, Clone, Copy)]
+pub struct RowState {
+    pub value: f32,
+    /// Where the filled part starts.
+    pub origin: f32,
+    pub edited: bool,
+    /// Changing it does something.
+    pub effective: bool,
+}
+
+pub trait SliderRows: ControlPanel {
+    fn show_slider_menu(
         &self,
-        adjustment: Adjustment,
+        control: Self::Control,
         at: Point<Pixels>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -52,103 +58,93 @@ impl DevelopPanel {
         let typed = panel.clone();
         let entries = vec![
             MenuEntry::new("Type Value", move |window, cx| {
-                typed.update(cx, |panel, cx| panel.start_typing(adjustment, window, cx));
+                typed.update(cx, |panel, cx| panel.start_typing(control, window, cx));
             })
             .key(Some("Enter".into())),
             MenuEntry::new("Reset", move |_, cx| {
-                panel.update(cx, |panel, cx| panel.reset(adjustment, cx));
+                panel.update(cx, |panel, cx| panel.reset(control, cx));
             })
             .key(Some("Delete".into())),
         ];
-        self.overlays.update(cx, |overlays, cx| {
+        self.overlays().clone().update(cx, |overlays, cx| {
             overlays.show_menu(at, entries, window, cx);
         });
     }
 
-    pub(super) fn row(
+    fn slider_row(
         &self,
-        adjustment: Adjustment,
-        recipe: &EditRecipe,
-        defaults: &EditRecipe,
+        control: Self::Control,
+        id: &str,
+        slider: Slider,
+        state: RowState,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
+    ) -> Stateful<Div> {
         let theme = theme();
-        let Adjustment {
-            parameter,
+        let Slider {
             label,
             format,
+            range,
             ramp,
-        } = adjustment;
-        let range = adjustment.range();
-        let control = Control::Parameter(parameter);
-        let value = parameter.get(recipe, defaults);
-        let default = parameter.get(defaults, defaults);
+        } = slider;
+        let RowState {
+            value,
+            origin,
+            edited,
+            effective,
+        } = state;
         let at = |value| fraction(format, range, value);
-        let (from, to) = (at(default).min(at(value)), at(default).max(at(value)));
-        let edited = parameter.is_changed(recipe, defaults);
-        let effective = has_effect(parameter, recipe, defaults);
-        let active = self
-            .drag
-            .is_some_and(|drag| drag.parameter == Some(parameter));
-        let panel = cx.entity();
+        let (from, to) = (at(origin).min(at(value)), at(origin).max(at(value)));
+        let active = self.controls().dragged() == Some(control);
         let typing = self
+            .controls()
             .typing
             .as_ref()
-            .filter(|typing| typing.adjustment.parameter == parameter)
+            .filter(|typing| typing.control == control)
             .map(|typing| typing.input.clone());
         // The input gets the presses and keys while typing.
         let idle = typing.is_none();
+        let nudge = |steps: i8| {
+            let panel = cx.entity();
+            move |_: &mut Window, cx: &mut App| {
+                panel.update(cx, |panel, cx| panel.nudge(control, steps, cx));
+            }
+        };
+        let (increase, decrease) = (nudge(1), nudge(-1));
+        let (increase_more, decrease_more) = (nudge(MANY_STEPS), nudge(-MANY_STEPS));
+        let (increment, decrement) = (nudge(1), nudge(-1));
         div()
-            .id(SharedString::from(format!("{parameter:?}")))
+            .id(SharedString::from(id.to_owned()))
             .role(Role::Slider)
-            .aria_label(label)
+            .aria_label(label.clone())
             .aria_value(format.label(value, range))
             .aria_numeric_value(f64::from(value))
             .aria_min_numeric_value(f64::from(range.minimum))
             .aria_max_numeric_value(f64::from(range.maximum))
             .aria_numeric_value_step(format.step())
-            .on_a11y_action(AccessibleAction::Increment, {
-                let panel = cx.entity();
-                move |_, _, cx| {
-                    panel.update(cx, |panel, cx| {
-                        panel.nudge(NudgeBy::Steps(adjustment, 1), cx)
-                    })
-                }
+            .on_a11y_action(AccessibleAction::Increment, move |_, window, cx| {
+                increment(window, cx);
             })
-            .on_a11y_action(AccessibleAction::Decrement, {
-                let panel = cx.entity();
-                move |_, _, cx| {
-                    panel.update(cx, |panel, cx| {
-                        panel.nudge(NudgeBy::Steps(adjustment, -1), cx)
-                    })
-                }
+            .on_a11y_action(AccessibleAction::Decrement, move |_, window, cx| {
+                decrement(window, cx);
             })
             .when(idle, |row| row.key_context(CONTEXT))
-            .track_focus(self.focus.control(control))
+            .track_focus(self.controls().focus.control(control))
             .child(self.revealer(control, cx))
             .border_1()
             .border_color(gpui::transparent_black())
             // Also after a press, as it shows what the arrow keys change.
             .focus(move |style| style.border_color(theme.accent))
-            .on_action(cx.listener(move |this, _: &Decrease, _, cx| {
-                this.nudge(NudgeBy::Steps(adjustment, -1), cx)
-            }))
-            .on_action(cx.listener(move |this, _: &Increase, _, cx| {
-                this.nudge(NudgeBy::Steps(adjustment, 1), cx)
-            }))
-            .on_action(cx.listener(move |this, _: &DecreaseMore, _, cx| {
-                this.nudge(NudgeBy::Steps(adjustment, -MANY_STEPS), cx);
-            }))
-            .on_action(cx.listener(move |this, _: &IncreaseMore, _, cx| {
-                this.nudge(NudgeBy::Steps(adjustment, MANY_STEPS), cx);
-            }))
-            .on_action(cx.listener(move |this, _: &ResetValue, _, cx| this.reset(adjustment, cx)))
+            .on_action(move |_: &Decrease, window, cx| decrease(window, cx))
+            .on_action(move |_: &Increase, window, cx| increase(window, cx))
+            .on_action(move |_: &DecreaseMore, window, cx| decrease_more(window, cx))
+            .on_action(move |_: &IncreaseMore, window, cx| increase_more(window, cx))
+            .on_action(cx.listener(move |this, _: &ResetValue, _, cx| this.reset(control, cx)))
             // Enter on the slider starts typing, Enter in its input ends it.
             .on_action(cx.listener(move |this, _: &Confirm, window, cx| {
-                if this.typing.is_some() {
+                if this.controls().typed().is_some() {
                     this.stop_typing(true, window, cx);
                 } else {
-                    this.start_typing(adjustment, window, cx);
+                    this.start_typing(control, window, cx);
                 }
             }))
             .when(!idle, |row| {
@@ -166,7 +162,7 @@ impl DevelopPanel {
                     }),
                 )
             })
-            .test_id(format!("adjustment:{parameter:?}"))
+            .test_id(format!("adjustment:{id}"))
             .relative()
             .flex()
             .items_center()
@@ -206,12 +202,15 @@ impl DevelopPanel {
             .child(
                 div()
                     .relative()
+                    .min_w_0()
+                    .truncate()
                     .text_color(if edited { theme.text } else { theme.muted })
                     .child(label),
             )
             .child(
                 div()
                     .relative()
+                    .flex_none()
                     .text_size(SMALL_FONT_SIZE)
                     .text_color(if edited { theme.text } else { theme.faint })
                     .map(|slot| match typing {
@@ -228,14 +227,14 @@ impl DevelopPanel {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    this.show_menu(adjustment, event.position, window, cx);
+                    this.show_slider_menu(control, event.position, window, cx);
                 }),
             )
-            .when(idle, |row| {
-                row.child(press_area(panel, Grip::Row(adjustment)))
-            })
+            .when(idle, |row| row.child(press_area(cx.entity(), control)))
     }
 }
+
+impl<P: ControlPanel> SliderRows for P {}
 
 /// The colours a value leads to, along the bottom of its row.
 fn track(ramp: Ramp, neutral: f32) -> impl IntoElement {
@@ -261,8 +260,8 @@ fn track(ramp: Ramp, neutral: f32) -> impl IntoElement {
         .children(parts)
 }
 
-/// Covers a row and reports presses together with the row's width.
-pub(super) fn press_area(panel: Entity<DevelopPanel>, grip: Grip) -> impl IntoElement {
+/// Covers a control and reports presses together with its bounds.
+pub fn press_area<P: ControlPanel>(panel: Entity<P>, control: P::Control) -> impl IntoElement {
     canvas(
         |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
         move |bounds: Bounds<Pixels>, hitbox, window, _| {
@@ -271,9 +270,7 @@ pub(super) fn press_area(panel: Entity<DevelopPanel>, grip: Grip) -> impl IntoEl
                     && event.button == MouseButton::Left
                     && hitbox.is_hovered(window)
                 {
-                    panel.update(cx, |panel, cx| {
-                        panel.press(grip, event, bounds, cx);
-                    });
+                    panel.update(cx, |panel, cx| panel.press(control, event, bounds, cx));
                 }
             });
         },

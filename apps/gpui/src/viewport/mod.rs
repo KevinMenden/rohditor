@@ -3,6 +3,7 @@
 
 mod clipping;
 mod crop;
+mod masks;
 pub mod overlay;
 mod picker;
 mod welcome;
@@ -21,6 +22,7 @@ use crate::theme::theme;
 use crate::ui::test_id::TestId as _;
 use clipping::ClippingOverlay;
 use crop::CropOverlay;
+use masks::MaskOverlay;
 use overlay::{Overlay, pair};
 use picker::PickerOverlay;
 use welcome::welcome;
@@ -67,6 +69,7 @@ impl Viewport {
             overlays: vec![
                 Box::new(ClippingOverlay(session.clone())),
                 Box::new(CropOverlay(session.clone())),
+                Box::new(MaskOverlay::new(session.clone())),
                 Box::new(PickerOverlay(session.clone())),
             ],
             session,

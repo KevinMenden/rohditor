@@ -5,15 +5,17 @@
 use std::sync::Arc;
 
 use gpui::{
-    Bounds, Context, Corners, CursorStyle, DispatchPhase, Entity, IntoElement, MouseButton,
-    MouseDownEvent, Pixels, RenderImage, Role, canvas, div, prelude::*, px, relative,
+    Context, Corners, CursorStyle, IntoElement, Pixels, RenderImage, Role, canvas, div, prelude::*,
+    px, relative,
 };
 use rohditor_edit::{EditRecipe, GradingTint, GradingTones};
 
 use super::DevelopPanel;
-use super::focus::Control;
-use super::gestures::{Grip, NudgeBy};
-use super::row::{CONTEXT, Decrease, DecreaseMore, Increase, IncreaseMore, ResetValue};
+use super::control::Control;
+use crate::panels::controls::{
+    ControlPanel as _, Decrease, DecreaseMore, FocusControls as _, Gestures as _, Increase,
+    IncreaseMore, ResetValue, SLIDER_CONTEXT, press_area,
+};
 use crate::session::EditPhase;
 use crate::theme::{RADIUS, SMALL_FONT_SIZE, theme};
 use crate::ui::test_id::TestId as _;
@@ -66,9 +68,7 @@ impl DevelopPanel {
         } else {
             format!("{:.0}° · {strength:.0}%", tint.hue_degrees())
         };
-        let active = self
-            .drag
-            .is_some_and(|drag| drag.parameter == Some(tones.parameter()));
+        let active = self.controls.dragged() == Some(control);
         let disc = div()
             .test_id(format!("wheel:{tones:?}"))
             .relative()
@@ -89,15 +89,14 @@ impl DevelopPanel {
                     .border_color(theme.editor)
                     .bg(if active { theme.accent } else { theme.text }),
             )
-            .child(press_area(cx.entity(), tones));
-        let nudge = move |x: f32, y: f32| NudgeBy::Wheel(tones, x * STEP, y * STEP);
+            .child(press_area(cx.entity(), control));
         div()
             .id(tones.label())
             .role(Role::Slider)
             .aria_label(format!("{} tint", tones.label()))
             .aria_value(readout.clone())
-            .key_context(CONTEXT)
-            .track_focus(self.focus.control(control))
+            .key_context(SLIDER_CONTEXT)
+            .track_focus(self.controls.focus.control(control))
             .relative()
             .child(self.revealer(control, cx))
             .flex()
@@ -109,19 +108,19 @@ impl DevelopPanel {
             .border_1()
             .border_color(gpui::transparent_black())
             .focus(move |style| style.border_color(theme.accent))
-            .on_action(
-                cx.listener(move |this, _: &Decrease, _, cx| this.nudge(nudge(-1.0, 0.0), cx)),
-            )
-            .on_action(
-                cx.listener(move |this, _: &Increase, _, cx| this.nudge(nudge(1.0, 0.0), cx)),
-            )
-            .on_action(
-                cx.listener(move |this, _: &DecreaseMore, _, cx| this.nudge(nudge(0.0, -1.0), cx)),
-            )
-            .on_action(
-                cx.listener(move |this, _: &IncreaseMore, _, cx| this.nudge(nudge(0.0, 1.0), cx)),
-            )
-            .on_action(cx.listener(move |this, _: &ResetValue, _, cx| this.reset_wheel(tones, cx)))
+            .on_action(cx.listener(move |this, _: &Decrease, _, cx| {
+                this.nudge_wheel(tones, -1.0, 0.0, cx);
+            }))
+            .on_action(cx.listener(move |this, _: &Increase, _, cx| {
+                this.nudge_wheel(tones, 1.0, 0.0, cx);
+            }))
+            .on_action(cx.listener(move |this, _: &DecreaseMore, _, cx| {
+                this.nudge_wheel(tones, 0.0, -1.0, cx);
+            }))
+            .on_action(cx.listener(move |this, _: &IncreaseMore, _, cx| {
+                this.nudge_wheel(tones, 0.0, 1.0, cx);
+            }))
+            .on_action(cx.listener(move |this, _: &ResetValue, _, cx| this.reset(control, cx)))
             .text_size(SMALL_FONT_SIZE)
             .child(div().text_color(theme.muted).child(tones.label()))
             .child(disc)
@@ -136,9 +135,9 @@ impl DevelopPanel {
             )
     }
 
-    pub(super) fn reset_wheel(&mut self, tones: GradingTones, cx: &mut Context<Self>) {
-        self.finish_nudge(cx);
-        self.set_wheel(tones, GradingTint::default(), EditPhase::Finished, cx);
+    fn nudge_wheel(&mut self, tones: GradingTones, x: f32, y: f32, cx: &mut Context<Self>) {
+        self.hold_nudge(Control::Wheel(tones), cx);
+        self.move_wheel(tones, x * STEP, y * STEP, cx);
     }
 
     pub(super) fn set_wheel(
@@ -175,27 +174,6 @@ fn disc(picture: Arc<RenderImage>) -> impl IntoElement {
             {
                 log::error!("could not paint the colour wheel: {error:#}");
             }
-        },
-    )
-    .absolute()
-    .size_full()
-}
-
-/// Covers a wheel and reports presses together with its bounds.
-fn press_area(panel: Entity<DevelopPanel>, tones: GradingTones) -> impl IntoElement {
-    canvas(
-        |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
-        move |bounds: Bounds<Pixels>, hitbox, window, _| {
-            window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
-                if phase == DispatchPhase::Bubble
-                    && event.button == MouseButton::Left
-                    && hitbox.is_hovered(window)
-                {
-                    panel.update(cx, |panel, cx| {
-                        panel.press(Grip::Wheel(tones), event, bounds, cx);
-                    });
-                }
-            });
         },
     )
     .absolute()
