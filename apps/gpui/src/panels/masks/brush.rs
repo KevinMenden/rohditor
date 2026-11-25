@@ -1,4 +1,4 @@
-//! The brush, while painting.
+//! The brush that the next strokes are painted with.
 
 use gpui::{AnyElement, Context, IntoElement, div, prelude::*, px};
 use rohditor_engine::tools::{BrushSlider, MaskAction};
@@ -41,27 +41,29 @@ impl MasksPanel {
             })
             .collect();
         let panel = cx.entity();
+        let erase = brush.erase.map(|erase| {
+            toggle("erase", "Erase (E, or hold Alt)", erase, move |_, cx| {
+                panel.update(cx, |panel, cx| panel.act(MaskAction::ToggleErase, cx));
+            })
+        });
+        let hint = if erase.is_some() {
+            "Size: + and −, [ and ], or Ctrl and the wheel. Feather: { and }."
+        } else {
+            "For the next strokes. B paints them."
+        };
+        let hint = div()
+            .px_1()
+            .text_size(SMALL_FONT_SIZE)
+            .text_color(theme().faint)
+            .child(hint);
         div()
             .flex()
             .flex_col()
             .gap(px(3.0))
             .pt_2()
-            .child(toggle(
-                "erase",
-                "Erase (E, or hold Alt)",
-                brush.erase,
-                move |_, cx| {
-                    panel.update(cx, |panel, cx| panel.act(MaskAction::ToggleErase, cx));
-                },
-            ))
+            .children(erase)
             .children(rows)
-            .child(
-                div()
-                    .px_1()
-                    .text_size(SMALL_FONT_SIZE)
-                    .text_color(theme().faint)
-                    .child("[ and ] change the size, { and } the feather."),
-            )
+            .child(hint)
             .into_any_element()
     }
 }

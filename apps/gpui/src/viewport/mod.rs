@@ -221,8 +221,15 @@ impl Viewport {
     fn scroll(&mut self, event: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
         // The positions so far are on the photo as it is still shown.
         self.continue_drag(window, cx);
+        let delta = event.delta.pixel_delta(LINE_HEIGHT).y;
+        if let Some(photo) = self.placement(window, cx) {
+            let mut topmost = self.overlays.iter_mut().rev();
+            if topmost.any(|one| one.scroll(delta / LINE_HEIGHT, event.modifiers, photo, cx)) {
+                return;
+            }
+        }
         let pointer = pair(event.position - self.bounds.center());
-        let amount = event.delta.pixel_delta(LINE_HEIGHT).y.as_f32();
+        let amount = delta.as_f32();
         self.change_view(window, cx, |view, geometry, now| {
             view.zoom_by(
                 geometry.fit(),

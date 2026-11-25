@@ -15,7 +15,7 @@ pub(super) struct Model {
     pub masks: Vec<Mask>,
     pub selected: Option<Selected>,
     pub mode: MaskEditMode,
-    /// While painting.
+    /// While painting, and before more is painted into the selected shape.
     pub brush: Option<Brush>,
     /// The selected mask is tinted.
     pub overlay: bool,
@@ -26,7 +26,8 @@ pub(super) struct Model {
 #[derive(Clone, Copy, PartialEq)]
 pub(super) struct Brush {
     pub settings: BrushSettings,
-    pub erase: bool,
+    /// While painting, whether it erases.
+    pub erase: Option<bool>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -107,6 +108,14 @@ impl Model {
         let selected = layers
             .iter()
             .find(|layer| Some(layer.id) == masks.selected_layer);
+        let erase = match masks.mode {
+            MaskEditMode::Paint { erase } => Some(erase),
+            _ => None,
+        };
+        let shape = selected
+            .zip(masks.selected_component)
+            .and_then(|(layer, component)| layer.components.get(component));
+        let paintable = shape.is_some_and(|one| matches!(one.shape, MaskShape::Brush(_)));
         Self {
             ready: true,
             masks: layers
@@ -119,13 +128,10 @@ impl Model {
                 .collect(),
             selected: selected.map(|layer| Selected::of(layer, layers, masks.selected_component)),
             mode: masks.mode,
-            brush: match masks.mode {
-                MaskEditMode::Paint { erase } => Some(Brush {
-                    settings: masks.brush,
-                    erase,
-                }),
-                _ => None,
-            },
+            brush: (erase.is_some() || paintable).then_some(Brush {
+                settings: masks.brush,
+                erase,
+            }),
             overlay: masks.show_overlay || masks.is_painting(),
             limit: masks.limit_reached(),
         }

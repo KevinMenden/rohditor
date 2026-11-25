@@ -309,6 +309,12 @@ pub fn bind_keys(cx: &mut App) {
     });
     let bindings: Vec<_> = bindings.collect();
     cx.bind_keys(bindings);
+    let painting = Some(PAINTING_CONTEXT);
+    let [larger, smaller] = BRUSH_SIZE_KEYS;
+    cx.bind_keys([
+        KeyBinding::new(larger, GrowBrush, painting),
+        KeyBinding::new(smaller, ShrinkBrush, painting),
+    ]);
     cx.bind_keys(letters_to_type());
     ui::keys::bind(cx);
     panels::controls::bind_keys(cx);
@@ -320,9 +326,13 @@ fn letters_to_type() -> Vec<KeyBinding> {
     let letters = commands().into_iter().filter_map(|command| command.key);
     letters
         .filter(|key| key.len() == 1)
+        .chain(BRUSH_SIZE_KEYS)
         .map(|key| KeyBinding::new(key, NoAction, Some(ui::text_input::CONTEXT)))
         .collect()
 }
+
+/// Larger and smaller, besides the brackets, which many keyboard layouts only have with AltGr.
+const BRUSH_SIZE_KEYS: [&str; 2] = ["+", "-"];
 
 /// Whether the action's key means it only while painting a mask.
 fn is_for_painting(action: &dyn Action) -> bool {

@@ -508,6 +508,40 @@ fn the_brush_is_set_by_keys_and_sliders() {
     assert!(brush(&mut harness).radius > first.radius);
     harness.keys("[ [");
     assert!(brush(&mut harness).radius < first.radius);
+    // Those that need no AltGr on a German keyboard.
+    let small = brush(&mut harness).radius;
+    harness.keys("+");
+    let larger = brush(&mut harness).radius;
+    assert!(larger > small);
+    harness.keys("-");
+    assert!(brush(&mut harness).radius < larger);
+
+    // Ctrl and the wheel, one step per notch of 60 pixels. The wheel alone zooms.
+    let fits = |harness: &mut Harness| {
+        harness.with_session(|session, _| session.document().map(|d| d.preview.view.is_fit()))
+    };
+    let over = harness.find("viewport").center();
+    let turn = |harness: &mut Harness, pixels: f32, modifiers: Modifiers| {
+        harness.send(PlatformInput::ScrollWheel(ScrollWheelEvent {
+            position: over,
+            delta: ScrollDelta::Pixels(point(px(0.0), px(pixels))),
+            modifiers,
+            touch_phase: TouchPhase::Moved,
+        }));
+    };
+    let unturned = brush(&mut harness).radius;
+    for _ in 0..2 {
+        turn(&mut harness, 30.0, Modifiers::control());
+    }
+    assert!((brush(&mut harness).radius / unturned - 1.15).abs() < 1.0e-3);
+    turn(&mut harness, -60.0, Modifiers::control());
+    assert!((brush(&mut harness).radius - unturned).abs() < 1.0e-6);
+    assert_eq!(fits(&mut harness), Some(true));
+    turn(&mut harness, 60.0, Modifiers::default());
+    assert_eq!(fits(&mut harness), Some(false));
+    assert!((brush(&mut harness).radius - unturned).abs() < 1.0e-6);
+    harness.keys("ctrl-0");
+
     harness.keys("}");
     assert!(brush(&mut harness).feather > first.feather);
     harness.keys("{ {");
@@ -537,7 +571,14 @@ fn the_brush_is_set_by_keys_and_sliders() {
     assert!((brush(&mut harness).radius - 0.08).abs() < 1.0e-6);
     harness.keys("escape");
     assert_eq!(mode(&mut harness), MaskEditMode::Select);
-    assert_eq!(harness.lookup("adjustment:brush-Size"), None);
+    // The size can be set before painting on.
+    assert_eq!(harness.lookup("toggle:erase"), None);
+    let size = harness.find("adjustment:brush-Size").center();
+    harness.press(size, 1);
+    harness.drag_to(size - point(px(20.0), px(0.0)));
+    harness.release(size - point(px(20.0), px(0.0)));
+    assert!(brush(&mut harness).radius < 0.08);
+    harness.capture("masks-brush-selected");
 
     // More strokes are painted into the same shape.
     harness.keys("b");

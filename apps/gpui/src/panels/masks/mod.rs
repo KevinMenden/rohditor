@@ -216,7 +216,7 @@ impl MasksPanel {
     fn overlay_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let panel = cx.entity();
         // Painting is never blind.
-        let fixed = self.model.brush.is_some();
+        let fixed = matches!(self.model.mode, MaskEditMode::Paint { .. });
         toggle(
             "mask-overlay",
             "Show the mask (O)",

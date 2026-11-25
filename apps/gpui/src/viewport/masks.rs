@@ -9,7 +9,8 @@ use gpui::{
     size, transparent_black, white,
 };
 use rohditor_engine::tools::{
-    ColorPick, MaskEditMode, MaskHandle, MaskOutline, MaskPointerEvents, MaskToolSession, MaskView,
+    BrushKeySteps, ColorPick, MaskAction, MaskEditMode, MaskHandle, MaskOutline, MaskPointerEvents,
+    MaskToolSession, MaskView,
 };
 use rohditor_engine::view::ImagePlacement;
 
@@ -22,6 +23,8 @@ const HANDLE_RADIUS: f32 = 5.0;
 const PIN_RADIUS: f32 = 4.5;
 /// How far the pointer may move in a click.
 const CLICK_SLOP: f32 = 3.0;
+/// What one notch of a wheel reports.
+const LINES_PER_STEP: f32 = 3.0;
 /// Enough that an ellipse looks smooth at any zoom.
 const ELLIPSE_SEGMENTS: u8 = 96;
 
@@ -29,6 +32,8 @@ pub struct MaskOverlay {
     session: Entity<Session>,
     /// The press on a pin, which selects its mask if it becomes a click.
     pressed_pin: Option<(u32, Point<Pixels>)>,
+    /// Lines the wheel was turned that are no step of the brush size yet.
+    turned: f32,
 }
 
 impl MaskOverlay {
@@ -36,6 +41,7 @@ impl MaskOverlay {
         Self {
             session,
             pressed_pin: None,
+            turned: 0.0,
         }
     }
 
@@ -223,6 +229,34 @@ impl Overlay for MaskOverlay {
         let clicked = self.pressed_pin.take().map(|(mask, _)| mask);
         self.session
             .update(cx, |session, cx| session.release_masks(clicked, cx));
+    }
+
+    /// Ctrl and the wheel change the brush size.
+    fn scroll(
+        &mut self,
+        lines: f32,
+        modifiers: Modifiers,
+        photo: ImagePlacement,
+        cx: &mut Context<Viewport>,
+    ) -> bool {
+        let painting = self.ask(photo, cx, |masks, _, _| masks.is_painting());
+        if !modifiers.control || painting != Some(true) {
+            self.turned = 0.0;
+            return false;
+        }
+        self.turned += lines;
+        let steps = (self.turned / LINES_PER_STEP).trunc();
+        self.turned -= steps * LINES_PER_STEP;
+        let steps = BrushKeySteps {
+            size: steps as i32,
+            feather: 0,
+        };
+        if !steps.is_empty() {
+            self.session.update(cx, |session, cx| {
+                session.edit_masks(MaskAction::BrushKeys(steps), cx);
+            });
+        }
+        true
     }
 
     fn follows_pointer(&self, cx: &App) -> bool {
