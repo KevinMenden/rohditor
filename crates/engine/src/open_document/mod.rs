@@ -10,6 +10,7 @@
 
 mod camera_look;
 mod lens;
+mod mask_tint;
 mod noise;
 mod picks;
 mod presets;
@@ -30,6 +31,7 @@ use rohditor_raw::{RawFileInfo, RawFrame};
 
 pub use camera_look::CameraLookState;
 pub use lens::LensProfiles;
+pub use mask_tint::TintUpdate;
 pub use noise::{NoisePurpose, NoiseState, NoiseSuggestion};
 
 use crate::autosave::Autosave;
@@ -68,6 +70,7 @@ pub struct OpenDocument {
     noise: NoiseState,
     /// A picker's sample on its way from the worker.
     pending_pick: Option<PreviewTicket>,
+    mask_tint: mask_tint::MaskTint,
 }
 
 impl OpenDocument {
@@ -92,6 +95,7 @@ impl OpenDocument {
             camera_look: CameraLookState::default(),
             noise: NoiseState::default(),
             pending_pick: None,
+            mask_tint: mask_tint::MaskTint::default(),
         }
     }
 

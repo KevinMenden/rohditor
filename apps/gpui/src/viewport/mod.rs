@@ -3,6 +3,7 @@
 
 mod clipping;
 mod crop;
+mod masks;
 pub mod overlay;
 mod picker;
 mod welcome;
@@ -21,6 +22,7 @@ use crate::theme::theme;
 use crate::ui::test_id::TestId as _;
 use clipping::ClippingOverlay;
 use crop::CropOverlay;
+use masks::MaskOverlay;
 use overlay::{Overlay, pair};
 use picker::PickerOverlay;
 use welcome::welcome;
@@ -42,8 +44,12 @@ pub struct Viewport {
 enum Drag {
     /// Panning, with the pointer last seen here.
     Pan(Point<Pixels>),
-    /// Claimed by the overlay of this index.
-    Overlay(usize),
+    /// Claimed by an overlay.
+    Overlay {
+        index: usize,
+        /// What it is not told yet, which happens once per frame: mice move more often than that.
+        moves: Vec<MouseMoveEvent>,
+    },
 }
 
 /// Sizes in logical pixels, as `ViewState` expects them. At 100% one image pixel covers one
@@ -67,6 +73,7 @@ impl Viewport {
             overlays: vec![
                 Box::new(ClippingOverlay(session.clone())),
                 Box::new(CropOverlay(session.clone())),
+                Box::new(MaskOverlay::new(session.clone())),
                 Box::new(PickerOverlay(session.clone())),
             ],
             session,
@@ -138,7 +145,10 @@ impl Viewport {
             .rev()
             .find(|&index| self.overlays[index].press(event, photo, window, cx));
         if let Some(index) = claimed {
-            self.drag = Some(Drag::Overlay(index));
+            self.drag = Some(Drag::Overlay {
+                index,
+                moves: Vec::new(),
+            });
             return;
         }
         self.drag = Some(Drag::Pan(event.position));
@@ -154,30 +164,45 @@ impl Viewport {
             self.end_drag(window, cx);
             return;
         }
-        match self.drag {
+        match &mut self.drag {
             Some(Drag::Pan(from)) => {
-                self.drag = Some(Drag::Pan(event.position));
-                let delta = pair(event.position - from);
+                let delta = pair(event.position - *from);
+                *from = event.position;
                 self.change_view(window, cx, |view, geometry, _| {
                     view.pan_by(geometry.fit(), geometry.viewport, geometry.image, delta);
                 });
             }
-            Some(Drag::Overlay(index)) => {
-                if let Some(photo) = self.placement(window, cx) {
-                    self.overlays[index].drag(event, photo, window, cx);
+            Some(Drag::Overlay { moves, .. }) => {
+                moves.push(event.clone());
+                if moves.len() == 1 {
+                    cx.on_next_frame(window, Self::continue_drag);
                 }
             }
             None => {}
         }
     }
 
+    /// Tell the overlay that claimed the drag how the pointer moved.
+    fn continue_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Drag::Overlay { index, moves }) = &mut self.drag else {
+            return;
+        };
+        let (index, moves) = (*index, std::mem::take(moves));
+        if !moves.is_empty()
+            && let Some(photo) = self.placement(window, cx)
+        {
+            self.overlays[index].drag(&moves, photo, window, cx);
+        }
+    }
+
     fn end_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(Drag::Overlay(index)) = self.drag.take() {
+        self.continue_drag(window, cx);
+        if let Some(Drag::Overlay { index, .. }) = self.drag.take() {
             self.overlays[index].release(window, cx);
         }
     }
 
-    /// Follow the cursor of the overlay under the pointer.
+    /// Follow the pointer, with the cursor of the overlay under it.
     fn hover(&mut self, event: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
         if self.drag.is_some() {
             return;
@@ -186,15 +211,25 @@ impl Viewport {
             let mut topmost = self.overlays.iter().rev();
             topmost.find_map(|overlay| overlay.cursor(event.position, photo, cx))
         });
-        if self.cursor != cursor {
+        let follows = self.overlays.iter().any(|one| one.follows_pointer(cx));
+        if self.cursor != cursor || follows {
             self.cursor = cursor;
             cx.notify();
         }
     }
 
     fn scroll(&mut self, event: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // The positions so far are on the photo as it is still shown.
+        self.continue_drag(window, cx);
+        let delta = event.delta.pixel_delta(LINE_HEIGHT).y;
+        if let Some(photo) = self.placement(window, cx) {
+            let mut topmost = self.overlays.iter_mut().rev();
+            if topmost.any(|one| one.scroll(delta / LINE_HEIGHT, event.modifiers, photo, cx)) {
+                return;
+            }
+        }
         let pointer = pair(event.position - self.bounds.center());
-        let amount = event.delta.pixel_delta(LINE_HEIGHT).y.as_f32();
+        let amount = delta.as_f32();
         self.change_view(window, cx, |view, geometry, now| {
             view.zoom_by(
                 geometry.fit(),
@@ -288,6 +323,8 @@ impl Render for Viewport {
             .overflow_hidden()
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
             .on_mouse_move(cx.listener(Self::hover))
+            // What is drawn at the pointer leaves with it.
+            .on_hover(cx.listener(|_, _, _, cx| cx.notify()))
             .when_some(self.cursor, |view, cursor| view.cursor(cursor))
             .on_scroll_wheel(cx.listener(Self::scroll))
             .test_id("viewport")

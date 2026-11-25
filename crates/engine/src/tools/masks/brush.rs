@@ -11,7 +11,7 @@ use super::{MaskEditMode, MaskToolSession};
 
 /// Brush sizes the tool offers, as radii in long-edge units. The recipe accepts far more (up to
 /// `MASK_RADIUS_RANGE`), but a brush beyond this is a gradient in practice.
-pub const BRUSH_RADIUS_RANGE: ParameterRange = ParameterRange {
+const BRUSH_RADIUS_RANGE: ParameterRange = ParameterRange {
     minimum: 0.002,
     maximum: 0.3,
     neutral: 0.05,
@@ -35,6 +35,59 @@ pub(super) const SIMPLIFY_TOLERANCE_PER_RADIUS: f64 = 0.1;
 /// Smallest brush radius: the recipe needs a positive one.
 const MIN_BRUSH_RADIUS: f32 = 1e-3;
 
+/// A numeric control of the brush.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BrushSlider {
+    /// The radius.
+    Size,
+    Feather,
+    Flow,
+}
+
+impl BrushSlider {
+    pub const ALL: [Self; 3] = [Self::Size, Self::Feather, Self::Flow];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Size => "Size",
+            Self::Feather => "Feather",
+            Self::Flow => "Flow",
+        }
+    }
+
+    pub const fn range(self) -> ParameterRange {
+        match self {
+            Self::Size => BRUSH_RADIUS_RANGE,
+            Self::Feather => MASK_UNIT_RANGE,
+            Self::Flow => ParameterRange {
+                neutral: 1.0,
+                ..MASK_UNIT_RANGE
+            },
+        }
+    }
+
+    pub const fn get(self, brush: BrushSettings) -> f32 {
+        match self {
+            Self::Size => brush.radius,
+            Self::Feather => brush.feather,
+            Self::Flow => brush.flow,
+        }
+    }
+
+    /// The brush with this value, within the range.
+    #[must_use]
+    pub fn with(self, mut brush: BrushSettings, value: f32) -> BrushSettings {
+        let range = self.range();
+        let value = value.clamp(range.minimum, range.maximum);
+        match self {
+            Self::Size => brush.radius = value,
+            Self::Feather => brush.feather = value,
+            Self::Flow => brush.flow = value,
+        }
+        brush
+    }
+}
+
 /// Authoring state of the brush. Each stroke copies it when it starts, so changing it later
 /// never alters strokes already painted.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -50,9 +103,9 @@ pub struct BrushSettings {
 impl Default for BrushSettings {
     fn default() -> Self {
         Self {
-            radius: BRUSH_RADIUS_RANGE.neutral,
-            feather: MASK_UNIT_RANGE.neutral,
-            flow: 1.0,
+            radius: BrushSlider::Size.range().neutral,
+            feather: BrushSlider::Feather.range().neutral,
+            flow: BrushSlider::Flow.range().neutral,
         }
     }
 }
@@ -214,6 +267,19 @@ mod tests {
         assert_eq!(brush.feather, 1.0);
         brush.step_feather(-100);
         assert_eq!(brush.feather, 0.0);
+    }
+
+    #[test]
+    fn a_slider_changes_its_own_value_within_its_range() {
+        let brush = BrushSettings::default();
+        for slider in BrushSlider::ALL {
+            assert_eq!(slider.get(brush), slider.range().neutral);
+            let changed = slider.with(brush, -1.0);
+            assert_eq!(slider.get(changed), slider.range().minimum);
+            for other in BrushSlider::ALL.into_iter().filter(|one| *one != slider) {
+                assert_eq!(other.get(changed), other.get(brush));
+            }
+        }
     }
 
     #[test]

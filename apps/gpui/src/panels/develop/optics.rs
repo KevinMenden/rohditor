@@ -4,9 +4,10 @@ use gpui::{Context, IntoElement, SharedString, Window, div, prelude::*, px};
 use rohditor_edit::{EditRecipe, LensCorrection, LensProfileSelection, RecipeSection};
 
 use super::DevelopPanel;
-use super::focus::Control;
+use super::control::Control;
 use crate::actions::ChooseLens;
 use crate::panels::adjustments::{Group, Section};
+use crate::panels::controls::FocusControls as _;
 use crate::theme::{SMALL_FONT_SIZE, theme};
 use crate::ui::matching;
 use crate::ui::menu::MenuEntry;
@@ -167,7 +168,7 @@ impl DevelopPanel {
             }
         })
         .when(offered != Some(true), |toggle| toggle.opacity(0.5))
-        .track_focus(self.focus.control(control))
+        .track_focus(self.controls.focus.control(control))
         .relative()
         .pl_2()
         .child(self.revealer(control, cx))

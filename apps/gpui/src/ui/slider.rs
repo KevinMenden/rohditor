@@ -15,6 +15,8 @@ pub enum Format {
     Factor,
     /// Percent from zero: `40`
     Amount,
+    /// Percent from zero, of a size that matters most while it is small: `0.8`
+    Size,
     /// `0.60 px`
     Pixels,
     /// `270°`
@@ -30,6 +32,7 @@ impl Format {
             Self::Kelvin => format!("{value:.0} K"),
             Self::Factor => format!("{value:.2}×"),
             Self::Amount => format!("{:.0}", value * 100.0),
+            Self::Size => format!("{:.1}", value * 100.0),
             Self::Pixels => format!("{value:.2} px"),
             Self::Degrees => format!("{value:.0}°"),
             Self::Count => format!("{value:.0}"),
@@ -59,7 +62,7 @@ impl Format {
         let value = match self {
             Self::Stops | Self::Kelvin | Self::Factor | Self::Pixels | Self::Degrees => number,
             Self::Count => number.round(),
-            Self::Amount => number / 100.0,
+            Self::Amount | Self::Size => number / 100.0,
             Self::Percent => number / 100.0 + range.neutral,
         };
         Some(value.clamp(range.minimum, range.maximum))
@@ -71,6 +74,7 @@ impl Format {
             Self::Stops => 0.05,
             Self::Kelvin => 50.0,
             Self::Percent | Self::Amount | Self::Factor | Self::Pixels => 0.01,
+            Self::Size => 0.001,
             Self::Degrees | Self::Count => 1.0,
         }
     }
@@ -83,10 +87,11 @@ impl Format {
         (next as f32).clamp(range.minimum, range.maximum)
     }
 
-    /// Temperature feels even in mireds, everything else is linear.
+    /// Temperature feels even in mireds and sizes as ratios, everything else is linear.
     fn track_at(self, value: f32) -> f32 {
         match self {
             Self::Kelvin => -1.0 / value,
+            Self::Size => value.ln(),
             _ => value,
         }
     }
@@ -94,6 +99,7 @@ impl Format {
     fn value_at(self, track: f32) -> f32 {
         match self {
             Self::Kelvin => -1.0 / track,
+            Self::Size => track.exp(),
             _ => track,
         }
     }
@@ -230,6 +236,18 @@ mod tests {
         assert!((drag(1.0, 0.1) - 2.0).abs() < 1e-5);
         assert_eq!(drag(1.0, 9.0), EXPOSURE_EV_RANGE.maximum);
         assert_eq!(drag(1.0, -9.0), EXPOSURE_EV_RANGE.minimum);
+    }
+
+    #[test]
+    fn sizes_move_by_ratios() {
+        let range = rohditor_engine::tools::BrushSlider::Size.range();
+        assert_eq!(Format::Size.label(0.0085, range), "0.9");
+        assert_eq!(Format::Size.parse("2.5 %", range), Some(0.025));
+        assert!((Format::Size.stepped(range, 0.05, -1) - 0.049).abs() < 1e-6);
+        let grow = |start| dragged(Format::Size, range, start, 0.1);
+        assert!((grow(0.01) / 0.01 - grow(0.1) / 0.1).abs() < 1e-4);
+        assert!((dragged(Format::Size, range, 0.1, 9.0) - range.maximum).abs() < 1e-6);
+        assert!((fraction(Format::Size, range, range.minimum)).abs() < 1e-6);
     }
 
     #[test]

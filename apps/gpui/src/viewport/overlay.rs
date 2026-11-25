@@ -1,7 +1,9 @@
 //! What is drawn over the photo and reacts to the pointer there: the clipping tint, and the
 //! place for the tools (pickers, crop, masks) to plug into.
 
-use gpui::{App, Context, CursorStyle, MouseDownEvent, MouseMoveEvent, Pixels, Point, Window};
+use gpui::{
+    App, Context, CursorStyle, Modifiers, MouseDownEvent, MouseMoveEvent, Pixels, Point, Window,
+};
 use rohditor_engine::view::ImagePlacement;
 
 use super::Viewport;
@@ -26,10 +28,11 @@ pub trait Overlay {
         false
     }
 
-    /// The pointer moved during a claimed drag, possibly outside the viewport.
+    /// The pointer moved during a claimed drag, possibly outside the viewport. `moves` are those
+    /// since the last frame, oldest first, so that a fast drag is followed but rendered once.
     fn drag(
         &mut self,
-        _event: &MouseMoveEvent,
+        _moves: &[MouseMoveEvent],
         _photo: ImagePlacement,
         _window: &mut Window,
         _cx: &mut Context<Viewport>,
@@ -38,6 +41,23 @@ pub trait Overlay {
 
     /// A claimed drag is over.
     fn release(&mut self, _window: &mut Window, _cx: &mut Context<Viewport>) {}
+
+    /// The wheel was turned over the viewport, by this many lines upwards. Returning `true` claims
+    /// it: the photo does not zoom.
+    fn scroll(
+        &mut self,
+        _lines: f32,
+        _modifiers: Modifiers,
+        _photo: ImagePlacement,
+        _cx: &mut Context<Viewport>,
+    ) -> bool {
+        false
+    }
+
+    /// Whether it is drawn at the pointer.
+    fn follows_pointer(&self, _cx: &App) -> bool {
+        false
+    }
 
     /// The cursor while the pointer is at `position`.
     fn cursor(

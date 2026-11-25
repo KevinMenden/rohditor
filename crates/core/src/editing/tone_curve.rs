@@ -10,7 +10,7 @@ use rohditor_edit::{Parameter, ToneCurve};
 use crate::evaluate_tone_curve;
 
 /// One of the points a tone curve is dragged by.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ToneCurveHandle {
     index: usize,
 }

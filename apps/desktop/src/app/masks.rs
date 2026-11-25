@@ -9,9 +9,9 @@ use rohditor_core::{MaskAlphaImage, OutputGeometry, PreviewOptions, RawCropPolic
 use rohditor_edit::ColorSample;
 use rohditor_engine::coordinator::RenderCoordinator;
 use rohditor_engine::document::{EditSession, PreviewTicket};
+use rohditor_engine::open_document::TintUpdate;
 use rohditor_engine::tools::{
-    Bracket, BrushKeySteps, ColorPick, MaskAction, MaskToolSession, MaskView, TintPlan, TintSource,
-    ToolKind, plan_tint, tint_pixels,
+    Bracket, BrushKeySteps, ColorPick, MaskAction, MaskToolSession, MaskView, ToolKind, tint_pixels,
 };
 use rohditor_raw::RawFrame;
 
@@ -28,7 +28,7 @@ pub(super) fn overlay_model<'a>(
     edits: &'a EditSession,
     frame: Option<&RawFrame>,
     policy: RawCropPolicy,
-    mask_overlay: Option<&'a MaskTint>,
+    tint: Option<&'a egui::TextureHandle>,
 ) -> Option<MaskOverlayModel<'a>> {
     let recipe = edits.recipe();
     let geometry = OutputGeometry::of_photo(&frame?.info, policy, &recipe.geometry).ok()?;
@@ -36,102 +36,47 @@ pub(super) fn overlay_model<'a>(
         session,
         recipe,
         geometry,
-        // A tint belongs to the layer it was rendered for: not drawn once that layer is gone.
-        tint: session
-            .overlay_layer()
-            .filter(|id| recipe.local.layer(*id).is_some())
-            .and(mask_overlay.map(|tint| &tint.texture)),
+        tint,
     })
 }
 
-/// The tint texture and what it was computed from.
-pub(super) struct MaskTint {
-    source: TintSource,
-    texture: egui::TextureHandle,
-}
-
-/// Brings the tint up to date with the recipe and the selected layer, as `plan_tint` decides. A
-/// layer with a luminance or color range depends on the image, so the worker measures it (see
-/// [`request_range_overlay`]) and the tint follows the edits a little later.
+/// Brings the tint up to date with the recipe and the selected layer.
 pub(super) fn refresh_tint(
     context: &egui::Context,
     document: &mut Document,
     session: &MaskToolSession,
-    policy: RawCropPolicy,
     coordinator: &RenderCoordinator,
     options: PreviewOptions,
 ) {
-    let plan = plan_tint(
-        document.mask_overlay.as_ref().map(|tint| &tint.source),
-        session,
-        document.core.edits.recipe(),
-        document.core.edits.revision(),
-        document.core.frame.as_ref().map(|frame| &frame.info),
-        policy,
-    );
-    match plan {
-        TintPlan::Keep => {}
-        TintPlan::Clear => document.mask_overlay = None,
-        TintPlan::Measure { layer } => request_range_overlay(document, layer, coordinator, options),
-        TintPlan::Render { source, alpha } => install_tint(context, document, source, &alpha),
+    let update = document
+        .core
+        .refresh_mask_tint(coordinator, session, options);
+    apply_tint(context, document, update);
+}
+
+fn apply_tint(context: &egui::Context, document: &mut Document, update: TintUpdate) {
+    match update {
+        TintUpdate::Keep => {}
+        TintUpdate::Clear => document.mask_overlay = None,
+        TintUpdate::Show(alpha) => install_tint(context, document, &alpha),
     }
 }
 
-/// Asks the worker for the overlay of a layer that selects by image content. The old tint stays
-/// until the new one arrives, so dragging a range does not make it flicker.
-fn request_range_overlay(
-    document: &mut Document,
-    layer: u32,
-    coordinator: &RenderCoordinator,
-    options: PreviewOptions,
-) {
-    let revision = document.core.edits.revision();
-    if document.range_overlay_requested == Some((revision, layer))
-        || document.core.open_status.is_some()
-    {
-        return;
-    }
-    let Some(frame) = document.core.frame.clone() else {
-        return;
-    };
-    let ticket = document.core.ticket();
-    let recipe = document.core.edits.recipe().clone();
-    // A failed request is remembered too, so it is not repeated every frame.
-    document.range_overlay_requested = Some((revision, layer));
-    if coordinator
-        .render_mask_overlay(ticket, frame, recipe, layer, options)
-        .is_err()
-    {
-        document.mask_overlay = None;
-    }
-}
-
-/// Puts `alpha` on screen as the red tint of the layer `source` describes.
-fn install_tint(
-    context: &egui::Context,
-    document: &mut Document,
-    source: TintSource,
-    alpha: &MaskAlphaImage,
-) {
+/// Puts `alpha` on screen as the red tint of its mask.
+fn install_tint(context: &egui::Context, document: &mut Document, alpha: &MaskAlphaImage) {
     let pixels = tint_pixels(alpha.data())
         .into_iter()
-        .map(|[r, g, b, a]| egui::Color32::from_rgba_premultiplied(r, g, b, a))
+        .map(|[r, g, b, a]| egui::Color32::from_rgba_unmultiplied(r, g, b, a))
         .collect();
     let image = egui::ColorImage::new([alpha.width(), alpha.height()], pixels);
     match document.mask_overlay.as_mut() {
-        Some(tint) => {
-            tint.texture.set(image, egui::TextureOptions::LINEAR);
-            tint.source = source;
-        }
+        Some(texture) => texture.set(image, egui::TextureOptions::LINEAR),
         None => {
-            document.mask_overlay = Some(MaskTint {
-                source,
-                texture: context.load_texture(
-                    format!("document-{}-mask-tint", document.core.id),
-                    image,
-                    egui::TextureOptions::LINEAR,
-                ),
-            });
+            document.mask_overlay = Some(context.load_texture(
+                format!("document-{}-mask-tint", document.core.id),
+                image,
+                egui::TextureOptions::LINEAR,
+            ));
         }
     }
 }
@@ -206,83 +151,44 @@ impl RohditorApp {
         }
     }
 
-    /// Asks the worker for the colour under a click of the color-range picker. The sample is
-    /// measured on the developed image (after the global exposure and base rendering), the same
-    /// reference the mask selects on, so it comes back as an event.
+    /// Asks the worker for the colour under a click of the color-range picker.
     fn request_color_sample(&mut self, position: (f64, f64), pick: ColorPick) {
-        if self.pending_color_pick.is_some() {
-            return;
-        }
         let options = self.preview_options();
-        let Some(document) = self.document.as_mut() else {
-            return;
-        };
-        let Some(frame) = document.core.frame.clone() else {
-            document.core.error =
-                Some("Open a developed RAW preview before picking colors".to_owned());
-            return;
-        };
-        let ticket = document.core.ticket();
-        let recipe = document.core.edits.recipe().clone();
-        match self
-            .coordinator
-            .sample_color_range(ticket, frame, recipe, position, pick, options)
-        {
-            Ok(()) => self.pending_color_pick = Some(ticket),
-            Err(error) => document.core.error = Some(error),
+        if let Some(document) = self.document.as_mut() {
+            document
+                .core
+                .pick_color_range(&self.coordinator, pick, position, options);
         }
     }
 
-    /// A picked colour arrived: it edits the color range, unless the recipe moved on meanwhile.
-    pub(super) fn apply_color_sample(
+    pub(super) fn color_range_picked(
         &mut self,
         context: &egui::Context,
         ticket: PreviewTicket,
         pick: ColorPick,
-        sample: ColorSample,
+        sample: Result<ColorSample, String>,
     ) {
-        if self.pending_color_pick != Some(ticket) {
-            return;
-        }
-        self.pending_color_pick = None;
-        let (Some(document), Some(session)) = (self.document.as_mut(), self.tool.masks_mut())
-        else {
-            return;
-        };
-        if document.core.id != ticket.document_id
-            || document.core.edits.revision() != ticket.revision
-        {
-            return;
-        }
-        let recipe = document.core.edits.recipe().clone();
-        let changed = session
-            .pick_color(&recipe, sample, pick)
-            .is_some_and(|next| document.core.edits.set_discrete(next));
-        self.finish_mask_interaction(context, changed);
-    }
-
-    pub(super) fn fail_color_sample(&mut self, ticket: PreviewTicket, message: String) {
-        if self.pending_color_pick != Some(ticket) {
-            return;
-        }
-        self.pending_color_pick = None;
-        if let Some(document) = self
+        let Some(document) = self
             .document
             .as_mut()
             .filter(|document| document.core.id == ticket.document_id)
-        {
-            document.core.error = Some(message);
-        }
+        else {
+            return;
+        };
+        let session = self.tool.masks_mut();
+        let changed = document
+            .core
+            .color_range_picked(session, ticket, pick, sample);
+        self.finish_mask_interaction(context, changed);
     }
 
-    /// The worker measured the overlay of a range layer. It is shown if the recipe is still the
-    /// one it was measured for; otherwise `refresh_tint` has already asked for a newer one.
-    pub(super) fn install_range_overlay(
+    /// The worker measured the overlay of a range layer, or failed to (`None`).
+    pub(super) fn range_overlay_ready(
         &mut self,
         context: &egui::Context,
         ticket: PreviewTicket,
         layer: u32,
-        overlay: &MaskAlphaImage,
+        overlay: Option<MaskAlphaImage>,
     ) {
         let policy = self.settings.render_options().raw_crop_policy;
         let Some(document) = self
@@ -292,30 +198,14 @@ impl RohditorApp {
         else {
             return;
         };
-        if document.range_overlay_requested == Some((ticket.revision, layer)) {
-            document.range_overlay_requested = None;
-        }
-        if document.core.edits.revision() != ticket.revision {
-            return;
-        }
-        let Some(source) =
-            TintSource::measured(document.core.edits.recipe(), layer, policy, ticket.revision)
-        else {
-            return;
+        let update = match overlay {
+            Some(overlay) => document
+                .core
+                .mask_overlay_ready(ticket, layer, overlay, policy),
+            None => document.core.mask_overlay_failed(ticket),
         };
-        install_tint(context, document, source, overlay);
+        apply_tint(context, document, update);
         context.request_repaint();
-    }
-
-    /// The overlay could not be measured: show no tint rather than one that no longer matches.
-    /// A failure for a recipe the user has since edited says nothing about the current one.
-    pub(super) fn fail_range_overlay(&mut self, ticket: PreviewTicket) {
-        if let Some(document) = self.document.as_mut().filter(|document| {
-            document.core.id == ticket.document_id
-                && document.core.edits.revision() == ticket.revision
-        }) {
-            document.mask_overlay = None;
-        }
     }
 
     fn forward_mask_pointer(&mut self, output: &MaskOverlayOutput, view: &MaskView) -> bool {

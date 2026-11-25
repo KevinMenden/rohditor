@@ -26,8 +26,8 @@ Assumed from the recommendations unless marked open; change them here if they tu
 | Light | Tone, parametric curve, presence, highlight reconstruction | |
 | Color | White balance, mixer, grading wheels, profiles, pickers | |
 | Other adjustments | None | Defringe, moiré, optics, full detail controls |
-| Viewport | Fit, zoom, pan, 1:1, clipping overlay | Tool overlays |
-| Tools | None | Crop, masks, white balance and colour pickers |
+| Viewport | Fit, zoom, pan, 1:1, clipping overlay, tool overlays | |
+| Tools | Crop, pickers, masks | |
 | Presets, info | None | All |
 | Library | File list | Grid, sorting, filmstrip |
 | Export | JPEG only | PNG, size, sharpening, metadata, overwrite |
@@ -106,10 +106,10 @@ Done when each crop is one undo step.
 Reuses tool switching and overlays from stage 4.
 
 - [x] 5.1 Move pointer, action and tint logic into the engine, with its tests.
-- [ ] 5.2 Mask list, components, local sliders.
-- [ ] 5.3 Linear and radial gradients.
-- [ ] 5.4 Brush.
-- [ ] 5.5 Luminance and color ranges, tint overlay.
+- [x] 5.2 Mask list, components, local sliders.
+- [x] 5.3 Linear and radial gradients.
+- [x] 5.4 Brush.
+- [x] 5.5 Luminance and color ranges, tint overlay.
 
 Done when the moved tests pass and painting feels smooth on real RAWs.
 

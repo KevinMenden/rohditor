@@ -4,7 +4,8 @@ use gpui::{Context, IntoElement, SharedString, div, prelude::*, px};
 use rohditor_raw::RawFileInfo;
 
 use super::DevelopPanel;
-use super::focus::Control;
+use super::control::Control;
+use crate::panels::controls::{ControlPanel as _, Header, SectionHeaders as _};
 use crate::theme::{SMALL_FONT_SIZE, theme};
 use crate::ui::matching;
 use crate::ui::test_id::TestId as _;
@@ -83,7 +84,7 @@ impl DevelopPanel {
                 .child(
                     div()
                         .flex()
-                        .child(self.title(Control::Info, "Info", "Info", cx)),
+                        .child(self.title(Header::plain(Control::Info, "Info"), cx)),
                 )
                 .children(rows.collect::<Vec<_>>()),
         )

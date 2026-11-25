@@ -186,6 +186,13 @@ pub fn local_detail_count(layers: &[MaskLayer]) -> usize {
     seen.len()
 }
 
+/// Whether `layer` cannot get detail settings of its own because `layers` hold as many different
+/// ones as a recipe may have. A layer that already has some may keep changing them.
+#[must_use]
+pub fn local_detail_is_full(layers: &[MaskLayer], layer: &MaskLayer) -> bool {
+    layer.settings.detail.is_neutral() && local_detail_count(layers) >= MAX_LOCAL_DETAIL_VARIANTS
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

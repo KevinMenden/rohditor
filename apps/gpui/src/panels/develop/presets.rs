@@ -2,19 +2,17 @@
 
 use gpui::{
     App, ClickEvent, Context, IntoElement, KeyBinding, MouseButton, MouseDownEvent, Role,
-    SharedString, Window, actions, div, prelude::*, px, relative,
+    SharedString, Window, actions, div, prelude::*, px,
 };
 
 use super::DevelopPanel;
-use super::focus::Control;
-use super::gestures::{Grip, NudgeBy};
+use super::control::Control;
 use super::preset_form::PresetForm;
-use super::row::{
-    CONTEXT as SLIDER_CONTEXT, Decrease, DecreaseMore, Increase, IncreaseMore, ResetValue,
-    press_area,
-};
 use crate::actions::SavePreset;
 use crate::assets::Icon;
+use crate::panels::controls::{
+    ControlPanel as _, FocusControls as _, Header, RowState, SectionHeaders as _, SliderRows as _,
+};
 use crate::session::PresetEntry;
 use crate::theme::{RADIUS, SMALL_FONT_SIZE, theme};
 use crate::ui::button::command_button;
@@ -29,8 +27,6 @@ use crate::ui::tooltip::tooltip;
 actions!(presets, [RenamePreset, DeletePreset]);
 
 const CONTEXT: &str = "Preset";
-/// What an arrow key changes.
-const AMOUNT_STEP: f32 = 0.01;
 
 pub(super) fn bind_keys(cx: &mut App) {
     let preset = Some(CONTEXT);
@@ -57,7 +53,7 @@ impl DevelopPanel {
     fn apply_preset(&mut self, name: &str, cx: &mut Context<Self>) {
         self.choose(|session, cx| session.apply_preset(name, cx), cx);
         // Its amount is there.
-        self.collapsed.remove(&Control::Presets);
+        self.controls.collapsed.remove(&Control::Presets);
         cx.notify();
     }
 
@@ -169,19 +165,6 @@ impl DevelopPanel {
         });
     }
 
-    pub(super) fn set_preset_amount(&self, amount: f32, cx: &mut Context<Self>) {
-        self.session
-            .update(cx, |session, cx| session.set_preset_amount(amount, cx));
-    }
-
-    /// Back to all of the preset.
-    pub(super) fn reset_preset_amount(&mut self, cx: &mut Context<Self>) {
-        self.finish_nudge(cx);
-        self.set_preset_amount(1.0, cx);
-        self.session
-            .update(cx, |session, cx| session.finish_gesture(None, cx));
-    }
-
     pub(super) fn presets(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let query = self.query(cx);
         let found = |name: &str| matching::words(&format!("Presets {name}"), &query);
@@ -211,12 +194,7 @@ impl DevelopPanel {
             let warnings = self.session.read(cx).preset_warnings();
             notes.extend(warnings.iter().cloned().map(note));
         }
-        let amount = self
-            .model
-            .applied_preset
-            .as_ref()
-            .filter(|_| open)
-            .map(|(name, amount)| self.preset_amount(name, *amount, cx));
+        let amount = self.preset_amount(cx).filter(|_| open);
         let rows: Vec<_> = listed
             .into_iter()
             .filter(|_| open)
@@ -234,7 +212,7 @@ impl DevelopPanel {
                     div()
                         .flex()
                         .items_center()
-                        .child(self.title(Control::Presets, "Presets", "Presets", cx))
+                        .child(self.title(Header::plain(Control::Presets, "Presets"), cx))
                         .child(save),
                 )
                 .children(notes)
@@ -296,72 +274,17 @@ impl DevelopPanel {
             }))
     }
 
-    /// How much of the preset applied last is used: a slider as the rows of the sections.
-    fn preset_amount(
-        &self,
-        name: &SharedString,
-        amount: f32,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
-        let theme = theme();
+    /// How much of the preset applied last is used.
+    fn preset_amount(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let control = Control::PresetAmount;
-        let label = format!("{:.0}%", amount * 100.0);
-        let step = |steps: f32| NudgeBy::PresetAmount(steps * AMOUNT_STEP);
-        div()
-            .id("preset-amount")
-            .role(Role::Slider)
-            .aria_label(format!("Amount of {name}"))
-            .aria_value(label.clone())
-            .key_context(SLIDER_CONTEXT)
-            .track_focus(self.focus.control(control))
-            .test_id("preset-amount")
-            .relative()
-            .child(self.revealer(control, cx))
-            .flex()
-            .items_center()
-            .justify_between()
-            .h(px(24.0))
-            .px_2()
-            .rounded(RADIUS)
-            .overflow_hidden()
-            .border_1()
-            .border_color(gpui::transparent_black())
-            .focus(move |style| style.border_color(theme.accent))
-            .bg(theme.element)
-            .hover(move |style| style.bg(theme.hover))
-            .cursor(gpui::CursorStyle::ResizeLeftRight)
-            .on_action(cx.listener(move |this, _: &Decrease, _, cx| this.nudge(step(-1.0), cx)))
-            .on_action(cx.listener(move |this, _: &Increase, _, cx| this.nudge(step(1.0), cx)))
-            .on_action(cx.listener(move |this, _: &DecreaseMore, _, cx| {
-                this.nudge(step(-10.0), cx);
-            }))
-            .on_action(cx.listener(move |this, _: &IncreaseMore, _, cx| {
-                this.nudge(step(10.0), cx);
-            }))
-            .on_action(cx.listener(|this, _: &ResetValue, _, cx| this.reset_preset_amount(cx)))
-            .child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .bottom_0()
-                    .left_0()
-                    .w(relative(amount))
-                    .bg(theme.fill),
-            )
-            .child(
-                div()
-                    .relative()
-                    .min_w_0()
-                    .truncate()
-                    .child(format!("Amount of {name}")),
-            )
-            .child(
-                div()
-                    .relative()
-                    .flex_none()
-                    .text_size(SMALL_FONT_SIZE)
-                    .child(label),
-            )
-            .child(press_area(cx.entity(), Grip::PresetAmount))
+        let value = self.value(control, cx)?;
+        let state = RowState {
+            value,
+            origin: 0.0,
+            edited: true,
+            effective: true,
+        };
+        let slider = self.slider(control)?;
+        Some(self.slider_row(control, "preset-amount", slider, state, cx))
     }
 }

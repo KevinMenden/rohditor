@@ -6,6 +6,7 @@ use rohditor_edit::{
     RenderingProfileSelection,
 };
 
+use crate::panels::controls::Slider;
 use crate::ui::slider::{Format, Ramp, TEMPERATURE_RAMP, TINT_RAMP};
 
 /// A parameter shown as a slider.
@@ -58,6 +59,15 @@ impl Adjustment {
 
     pub const fn range(self) -> ParameterRange {
         self.parameter.range()
+    }
+
+    pub fn slider(self) -> Slider {
+        Slider {
+            label: self.label.into(),
+            format: self.format,
+            range: self.range(),
+            ramp: self.ramp,
+        }
     }
 }
 

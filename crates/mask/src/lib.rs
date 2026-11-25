@@ -21,6 +21,7 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
+mod area;
 mod brush;
 mod color_range;
 mod linear;
@@ -33,6 +34,7 @@ mod resolved;
 #[cfg(test)]
 mod test_support;
 
+pub use area::MaskArea;
 pub use prepared::PreparedMask;
 pub use reference::{ReferenceNeeds, ReferenceRow};
 pub use resolved::{BrushCoverage, ResolvedComponent, ResolvedShape, resolve_component};

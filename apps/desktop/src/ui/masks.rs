@@ -5,11 +5,10 @@
 
 use eframe::egui;
 use rohditor_edit::{
-    MASK_UNIT_RANGE, MAX_LOCAL_DETAIL_VARIANTS, ParameterRange, local_detail_count,
+    MAX_LOCAL_DETAIL_VARIANTS, MaskLayer, MaskMode, MaskShape, local_detail_is_full,
 };
-use rohditor_edit::{MaskLayer, MaskMode, MaskShape};
 use rohditor_engine::tools::{
-    BRUSH_RADIUS_RANGE, BrushSettings, LayerEdit, LocalSlider, MaskAction, MaskEditMode, MaskLimit,
+    BrushSettings, BrushSlider, LayerEdit, LocalSlider, MaskAction, MaskEditMode, MaskLimit,
     RangeKind, SliderPhase,
 };
 
@@ -29,14 +28,6 @@ pub(crate) struct MasksPanelModel<'a> {
     pub show_overlay: bool,
     /// The recipe limit that stopped the last edit, if any.
     pub limit: Option<MaskLimit>,
-}
-
-/// The label of a range kind in the "New mask" menus.
-const fn range_label(kind: RangeKind) -> &'static str {
-    match kind {
-        RangeKind::Luminance => "Luminance range",
-        RangeKind::Color => "Color range",
-    }
 }
 
 pub(crate) fn show(ui: &mut egui::Ui, model: &MasksPanelModel<'_>) -> Vec<MaskAction> {
@@ -174,7 +165,7 @@ fn show_new_mask(ui: &mut egui::Ui, model: &MasksPanelModel<'_>, actions: &mut V
             }
             ui.separator();
             for kind in RangeKind::ALL {
-                if ui.button(range_label(kind)).clicked() {
+                if ui.button(kind.label()).clicked() {
                     actions.push(MaskAction::NewRange {
                         kind,
                         new_layer: true,
@@ -223,38 +214,32 @@ fn show_brush(ui: &mut egui::Ui, model: &MasksPanelModel<'_>, actions: &mut Vec<
         actions.push(MaskAction::SetErase(erase));
     }
 
-    let mut brush = model.brush;
-    let spec = |label, range: ParameterRange, decimals, step| AdjustmentSpec {
-        label,
-        minimum: range.minimum,
-        maximum: range.maximum,
-        neutral: range.neutral,
-        decimals,
-        step,
-        suffix: "%",
-        scale: ValueScale::Percent,
-    };
     // Size is the radius, as a percentage of the image's long edge. The slider snaps its value
     // to the step on every frame, and the `[` and `]` keys change it by a factor: with a coarser
     // step than this, a factor-1.15 increase at the smallest sizes would snap back and the
     // brush could not grow.
-    let mut changed = brush_slider(
-        ui,
-        &mut brush.radius,
-        spec("Size", BRUSH_RADIUS_RANGE, 1, 0.0005),
-    );
-    changed |= brush_slider(
-        ui,
-        &mut brush.feather,
-        spec("Feather", MASK_UNIT_RANGE, 0, 0.01),
-    );
-    let flow = ParameterRange {
-        neutral: 1.0,
-        ..MASK_UNIT_RANGE
-    };
-    changed |= brush_slider(ui, &mut brush.flow, spec("Flow", flow, 0, 0.01));
-    if changed {
-        actions.push(MaskAction::SetBrush(brush));
+    let mut brush = model.brush;
+    for slider in BrushSlider::ALL {
+        let (decimals, step) = match slider {
+            BrushSlider::Size => (1, 0.0005),
+            BrushSlider::Feather | BrushSlider::Flow => (0, 0.01),
+        };
+        let range = slider.range();
+        let spec = AdjustmentSpec {
+            label: slider.label(),
+            minimum: range.minimum,
+            maximum: range.maximum,
+            neutral: range.neutral,
+            decimals,
+            step,
+            suffix: "%",
+            scale: ValueScale::Percent,
+        };
+        let mut value = slider.get(brush);
+        if brush_slider(ui, &mut value, spec) {
+            brush = slider.with(brush, value);
+            actions.push(MaskAction::SetBrush(brush));
+        }
     }
     ui.label(
         egui::RichText::new("[ ] size · Shift+[ ] feather · E erase · hold Alt to flip erase")
@@ -273,24 +258,6 @@ fn brush_slider(ui: &mut egui::Ui, value: &mut f32, spec: AdjustmentSpec<'_>) ->
     response.reset_clicked || response.response.changed()
 }
 
-const fn shape_name(shape: &MaskShape) -> &'static str {
-    match shape {
-        MaskShape::Linear(_) => "Linear gradient",
-        MaskShape::Radial(_) => "Radial gradient",
-        MaskShape::Brush(_) => "Brush",
-        MaskShape::Luminance(_) => "Luminance range",
-        MaskShape::Color(_) => "Color range",
-    }
-}
-
-const fn mode_name(mode: MaskMode) -> &'static str {
-    match mode {
-        MaskMode::Add => "Add",
-        MaskMode::Subtract => "Subtract",
-        MaskMode::Intersect => "Intersect",
-    }
-}
-
 fn show_components(
     ui: &mut egui::Ui,
     model: &MasksPanelModel<'_>,
@@ -300,7 +267,7 @@ fn show_components(
     for (index, component) in layer.components.iter().enumerate() {
         ui.horizontal(|ui| {
             let selected = model.selected_component == Some(index);
-            let label = format!("{}. {}", index + 1, shape_name(&component.shape));
+            let label = format!("{}. {}", index + 1, component.shape.label());
             if ui.selectable_label(selected, label).clicked() {
                 actions.push(MaskAction::SelectComponent(index));
             }
@@ -332,11 +299,11 @@ fn show_components(
                 } else {
                     let mut mode = component.mode;
                     egui::ComboBox::from_id_salt(("mask_component_mode", layer.id, index))
-                        .selected_text(mode_name(mode))
+                        .selected_text(mode.label())
                         .width(84.0)
                         .show_ui(ui, |ui| {
-                            for choice in [MaskMode::Add, MaskMode::Subtract, MaskMode::Intersect] {
-                                ui.selectable_value(&mut mode, choice, mode_name(choice));
+                            for choice in MaskMode::ALL {
+                                ui.selectable_value(&mut mode, choice, choice.label());
                             }
                         });
                     if mode != component.mode {
@@ -356,7 +323,7 @@ fn show_components(
     ui.add_space(2.0);
     ui.horizontal(|ui| {
         for mode in [MaskMode::Add, MaskMode::Subtract] {
-            ui.menu_button(mode_name(mode), |ui| {
+            ui.menu_button(mode.label(), |ui| {
                 for (label, shape) in SHAPES {
                     if ui.button(label).clicked() {
                         actions.push(MaskAction::NewComponent(shape, mode));
@@ -368,7 +335,7 @@ fn show_components(
         // Ranges refine what the other components select, so they intersect by default.
         ui.menu_button("Refine", |ui| {
             for kind in RangeKind::ALL {
-                if ui.button(range_label(kind)).clicked() {
+                if ui.button(kind.label()).clicked() {
                     actions.push(MaskAction::NewRange {
                         kind,
                         new_layer: false,
@@ -428,24 +395,14 @@ fn show_range_controls(
 /// Label, unit and precision of a slider, matching the global sliders of the same name.
 fn slider_spec(slider: LocalSlider) -> AdjustmentSpec<'static> {
     let range = slider.range();
-    let (label, decimals, suffix, scale) = match slider {
-        LocalSlider::Opacity => ("Opacity", 0, "%", ValueScale::Percent),
-        LocalSlider::Exposure => ("Exposure", 2, " EV", ValueScale::Raw),
-        LocalSlider::Temperature => ("Temperature", 0, "%", ValueScale::OffsetPercent),
-        LocalSlider::Tint => ("Tint", 0, "%", ValueScale::OffsetPercent),
-        LocalSlider::Contrast => ("Contrast", 0, "%", ValueScale::OffsetPercent),
-        LocalSlider::Highlights => ("Highlights", 0, "%", ValueScale::OffsetPercent),
-        LocalSlider::Shadows => ("Shadows", 0, "%", ValueScale::OffsetPercent),
-        LocalSlider::Whites => ("Whites", 0, "%", ValueScale::OffsetPercent),
-        LocalSlider::Blacks => ("Blacks", 0, "%", ValueScale::OffsetPercent),
-        LocalSlider::Saturation => ("Saturation", 0, "%", ValueScale::OffsetPercent),
-        LocalSlider::ChromaNoise => ("Colour noise", 0, "%", ValueScale::OffsetPercent),
-        LocalSlider::LuminanceNoise => ("Luminance noise", 0, "%", ValueScale::OffsetPercent),
-        LocalSlider::FalseColor => ("Moiré", 0, "", ValueScale::Raw),
-        LocalSlider::Sharpening => ("Sharpening", 0, "%", ValueScale::OffsetPercent),
+    let (decimals, suffix, scale) = match slider {
+        LocalSlider::Opacity => (0, "%", ValueScale::Percent),
+        LocalSlider::Exposure => (2, " EV", ValueScale::Raw),
+        LocalSlider::FalseColor => (0, "", ValueScale::Raw),
+        _ => (0, "%", ValueScale::OffsetPercent),
     };
     AdjustmentSpec {
-        label,
+        label: slider.label(),
         minimum: range.minimum,
         maximum: range.maximum,
         neutral: range.neutral,
@@ -466,10 +423,7 @@ fn show_sliders(
     layer: &MaskLayer,
     actions: &mut Vec<MaskAction>,
 ) {
-    // A layer that already has detail settings may keep changing them; another one would need
-    // a further copy of the image.
-    let detail_full = layer.settings.detail.is_neutral()
-        && local_detail_count(layers) >= MAX_LOCAL_DETAIL_VARIANTS;
+    let detail_full = local_detail_is_full(layers, layer);
     for slider in LocalSlider::ALL {
         if slider == LocalSlider::ChromaNoise {
             ui.add_space(4.0);

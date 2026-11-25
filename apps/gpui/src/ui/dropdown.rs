@@ -16,18 +16,18 @@ use crate::ui::overlays::Overlays;
 use crate::ui::test_id::TestId as _;
 
 pub fn dropdown(
-    id: &'static str,
+    id: impl Into<SharedString>,
     label: &'static str,
     value: impl Into<SharedString>,
     overlays: Entity<Overlays>,
     entries: impl Fn(&mut Window, &mut App) -> Vec<MenuEntry> + 'static,
 ) -> Stateful<Div> {
     let theme = theme();
-    let value = value.into();
+    let (id, value) = (id.into(), value.into());
     let bounds = Rc::new(Cell::new(Bounds::<Pixels>::default()));
     let measured = Rc::clone(&bounds);
     div()
-        .id(id)
+        .id(id.clone())
         .role(Role::ComboBox)
         .aria_label(label)
         .aria_value(value.clone())

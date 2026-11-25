@@ -16,7 +16,7 @@ use super::range::RangeSlider;
 use super::{MaskEditMode, MaskToolSession};
 
 /// A numeric control of a mask layer: its opacity or one of its adjustment sliders.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LocalSlider {
     Opacity,
     Exposure,
@@ -52,6 +52,25 @@ impl LocalSlider {
         Self::FalseColor,
         Self::Sharpening,
     ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Opacity => "Opacity",
+            Self::Exposure => "Exposure",
+            Self::Temperature => "Temperature",
+            Self::Tint => "Tint",
+            Self::Contrast => "Contrast",
+            Self::Highlights => "Highlights",
+            Self::Shadows => "Shadows",
+            Self::Whites => "Whites",
+            Self::Blacks => "Blacks",
+            Self::Saturation => "Saturation",
+            Self::ChromaNoise => "Color noise",
+            Self::LuminanceNoise => "Luminance noise",
+            Self::FalseColor => "Moiré",
+            Self::Sharpening => "Sharpening",
+        }
+    }
 
     /// Whether this slider makes the pipeline develop another copy of the image, which a recipe
     /// has a limit of.
@@ -123,6 +142,57 @@ impl LocalSlider {
     }
 }
 
+/// The adjustment sliders of a layer, grouped as the global ones are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LocalSection {
+    Light,
+    Color,
+    Detail,
+}
+
+impl LocalSection {
+    pub const ALL: [Self; 3] = [Self::Light, Self::Color, Self::Detail];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Light => "Light",
+            Self::Color => "Color",
+            Self::Detail => "Detail",
+        }
+    }
+
+    pub const fn sliders(self) -> &'static [LocalSlider] {
+        match self {
+            Self::Light => &[
+                LocalSlider::Exposure,
+                LocalSlider::Contrast,
+                LocalSlider::Highlights,
+                LocalSlider::Shadows,
+                LocalSlider::Whites,
+                LocalSlider::Blacks,
+            ],
+            Self::Color => &[
+                LocalSlider::Temperature,
+                LocalSlider::Tint,
+                LocalSlider::Saturation,
+            ],
+            Self::Detail => &[
+                LocalSlider::ChromaNoise,
+                LocalSlider::LuminanceNoise,
+                LocalSlider::FalseColor,
+                LocalSlider::Sharpening,
+            ],
+        }
+    }
+
+    /// Whether any of the sliders does something in `layer`.
+    pub fn is_changed(self, layer: &MaskLayer) -> bool {
+        self.sliders()
+            .iter()
+            .any(|slider| slider.get(layer) != slider.range().neutral)
+    }
+}
+
 /// A change to one layer that does not touch the selection.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LayerEdit {
@@ -130,6 +200,8 @@ pub enum LayerEdit {
     Rename(String),
     Enabled(bool),
     Slider(LocalSlider, f32),
+    /// All sliders of the section back to doing nothing.
+    ResetSection(LocalSection),
     /// How a component combines with the ones before it. The first component stays `Add`.
     ComponentMode {
         component: usize,
@@ -169,6 +241,11 @@ impl LayerEdit {
                 slider.set(&mut next.local.layers[index], *value);
                 if slider.is_detail() && next.local.validate().is_err() {
                     return None;
+                }
+            }
+            Self::ResetSection(section) => {
+                for slider in section.sliders() {
+                    slider.set(&mut next.local.layers[index], slider.range().neutral);
                 }
             }
             Self::ComponentMode { component, mode } => {
@@ -492,6 +569,46 @@ mod tests {
                 .apply(&base, 0)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn every_adjustment_slider_is_in_one_section_which_resets_it() {
+        let listed: Vec<_> = LocalSection::ALL
+            .iter()
+            .flat_map(|section| section.sliders())
+            .collect();
+        for slider in LocalSlider::ALL {
+            let found = listed.iter().filter(|one| ***one == slider).count();
+            assert_eq!(found, usize::from(slider != LocalSlider::Opacity));
+        }
+        let mut edited = recipe(1);
+        for slider in LocalSlider::ALL {
+            // Opacity is at its maximum.
+            let value = if slider == LocalSlider::Opacity {
+                0.5
+            } else {
+                slider.range().maximum
+            };
+            edited = LayerEdit::Slider(slider, value)
+                .apply(&edited, 0)
+                .expect("changes the layer");
+        }
+        for section in LocalSection::ALL {
+            assert!(section.is_changed(layer(&edited)));
+            let others: Vec<_> = LocalSlider::ALL
+                .into_iter()
+                .filter(|slider| !section.sliders().contains(slider))
+                .collect();
+            let reset = LayerEdit::ResetSection(section)
+                .apply(&edited, 0)
+                .expect("changes the layer");
+            assert!(!section.is_changed(layer(&reset)));
+            assert!(reset.validate().is_ok());
+            for slider in others {
+                assert_eq!(slider.get(layer(&reset)), slider.get(layer(&edited)));
+            }
+            assert_eq!(LayerEdit::ResetSection(section).apply(&reset, 0), None);
+        }
     }
 
     #[test]

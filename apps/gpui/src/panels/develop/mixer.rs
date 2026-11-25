@@ -4,15 +4,12 @@ use gpui::{Context, IntoElement, MouseButton, Role, Window, div, prelude::*, px,
 use rohditor_edit::{EditRecipe, HSL_CHANNEL_COUNT, Parameter, RecipeSection};
 
 use super::DevelopPanel;
-use super::focus::Control;
-use super::row::{Decrease, Increase};
+use super::control::Control;
 use crate::panels::adjustments::{MIXER_COLORS, MIXER_LABELS};
+use crate::panels::controls::{Decrease, FocusControls as _, Increase, SLIDER_CONTEXT};
 use crate::theme::{RADIUS, theme};
 use crate::ui::test_id::TestId as _;
 use crate::ui::tooltip::tooltip;
-
-/// Left and right, as on a slider.
-const CONTEXT: &str = super::row::CONTEXT;
 
 /// The colour a parameter of the mixer belongs to.
 pub(super) const fn channel_of(parameter: Parameter) -> Option<usize> {
@@ -33,7 +30,8 @@ impl DevelopPanel {
         cx: &mut Context<Self>,
     ) {
         // What would hide the colours.
-        self.collapsed
+        self.controls
+            .collapsed
             .remove(&Control::Section(RecipeSection::ColorMixer));
         self.edited_only = false;
         self.search.update(cx, |search, cx| search.clear(cx));
@@ -101,7 +99,7 @@ impl DevelopPanel {
                     )
                     .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        let colors = this.focus.control(Control::MixerChannels).clone();
+                        let colors = this.controls.focus.control(Control::MixerChannels).clone();
                         colors.focus(window, cx);
                         this.select_mixer_channel(channel, cx);
                     }))
@@ -112,8 +110,8 @@ impl DevelopPanel {
             .id("mixer-channels")
             .role(Role::RadioGroup)
             .aria_label("Color")
-            .key_context(CONTEXT)
-            .track_focus(self.focus.control(control))
+            .key_context(SLIDER_CONTEXT)
+            .track_focus(self.controls.focus.control(control))
             .relative()
             .child(self.revealer(control, cx))
             .flex()

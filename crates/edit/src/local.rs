@@ -120,6 +120,19 @@ pub enum MaskMode {
     Intersect,
 }
 
+impl MaskMode {
+    pub const ALL: [Self; 3] = [Self::Add, Self::Subtract, Self::Intersect];
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Add => "Add",
+            Self::Subtract => "Subtract",
+            Self::Intersect => "Intersect",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MaskComponent {
     pub mode: MaskMode,
@@ -137,6 +150,19 @@ pub enum MaskShape {
     Luminance(LuminanceRange),
     /// Selects by OkLab distance of the reference pixel to sampled colours.
     Color(ColorRange),
+}
+
+impl MaskShape {
+    #[must_use]
+    pub const fn label(&self) -> &'static str {
+        match self {
+            Self::Linear(_) => "Linear gradient",
+            Self::Radial(_) => "Radial gradient",
+            Self::Brush(_) => "Brush",
+            Self::Luminance(_) => "Luminance range",
+            Self::Color(_) => "Color range",
+        }
+    }
 }
 
 /// Normalized position in the developed frame; see the module docs.

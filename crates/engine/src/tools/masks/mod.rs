@@ -15,8 +15,8 @@
 //! revisions.
 //!
 //! `MaskToolSession::drive_pointer` and `apply_action` (see `interaction`) do that plumbing
-//! for a frontend, and `plan_tint` (see `tint`) decides when the red tint over the preview
-//! needs recomputing.
+//! for a frontend, and `OpenDocument::refresh_mask_tint` keeps the red tint over the preview
+//! up to date (see `tint`).
 //!
 //! Pointer positions are display positions (`0..1` over the image on screen). The tool turns
 //! them into the developed frame the recipe stores via `OutputGeometry`; see `view`.
@@ -26,6 +26,7 @@
 //! [`MaskToolSession::limit_reached`].
 
 mod brush;
+mod canvas;
 mod edit;
 mod gesture;
 mod handles;
@@ -38,14 +39,16 @@ mod view;
 #[cfg(test)]
 mod tests;
 
-pub use brush::{BRUSH_RADIUS_RANGE, BrushSettings};
+pub use brush::{BrushSettings, BrushSlider};
+pub use canvas::{MaskOutline, MaskPin};
 pub use handles::MaskHandle;
 pub use interaction::{
     Bracket, BrushKeySteps, MaskAction, MaskPointerEvents, RangeKind, SliderPhase,
 };
-pub use layers::{LayerEdit, LocalSlider};
+pub use layers::{LayerEdit, LocalSection, LocalSlider};
 pub use range::{ColorPick, RangeSlider};
-pub use tint::{TintPlan, TintSource, plan_tint, tint_pixels};
+pub use tint::tint_pixels;
+pub(crate) use tint::{TintPlan, TintSource, plan_tint};
 pub use view::MaskView;
 
 use rohditor_edit::{

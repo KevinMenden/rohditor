@@ -15,7 +15,7 @@ pub use auto_tone::auto_tone;
 pub use mixer_sampling::sample_mixer_channel;
 pub use noise_reduction::{estimate_noise_profile, with_default_noise_reduction};
 pub use patch::developed_patch;
-pub use range_sampling::sample_color_range;
+pub use range_sampling::{color_sample_srgb, sample_color_range};
 pub use tone_curve::{ToneCurveHandle, display_tone_curve};
 pub use white_balance::{
     WhiteBalanceMode, WhiteBalanceModeMemory, white_balance_from_camera_sample,

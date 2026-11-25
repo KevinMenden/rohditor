@@ -1,6 +1,7 @@
 //! The window: title bar, docks, tab, viewport and status bar.
 
 mod chrome;
+mod masks;
 mod notifications;
 mod tools;
 
@@ -9,22 +10,24 @@ use gpui::{
     Pixels, Render, Role, Stateful, StyleRefinement, Window, div, prelude::*,
 };
 
-use rohditor_engine::tools::{CropToolSession, Picker, ToolKind};
+use rohditor_engine::tools::{CropToolSession, MaskToolSession, Picker, ToolKind};
 
 use crate::actions::{
     ActualPixels, ApplyPreset, ApplyTool, AutoNoiseReduction, AutoTone, CancelTool, ChooseLens,
     CloseFile, CropTool, EditTool, Export, FlipCrop, FocusAdjustments, FocusPhoto,
-    ImportCameraProfile, LockCrop, NextPhoto, OpenFile, OpenFolder, PHOTO_CONTEXT, PickMixerColor,
-    PickWhiteBalance, PreviousPhoto, Quit, Redo, ResetAdjustments, ResetCrop, ResetSection, Save,
-    SavePreset, SearchAdjustments, SetCropAspect, SetHighlightMethod, SetLensProfile, SetRendering,
-    SetWhiteBalance, ToggleClipping, ToggleCommandPalette, ToggleDevelop, ToggleFiles, Undo,
-    WORKSPACE_CONTEXT, ZoomToFit,
+    ImportCameraProfile, LockCrop, NextPhoto, OpenFile, OpenFolder, PAINTING_CONTEXT,
+    PHOTO_CONTEXT, PickMixerColor, PickWhiteBalance, PreviousPhoto, Quit, Redo, ResetAdjustments,
+    ResetCrop, ResetSection, Save, SavePreset, SearchAdjustments, SetCropAspect,
+    SetHighlightMethod, SetLensProfile, SetRendering, SetWhiteBalance, ToggleClipping,
+    ToggleCommandPalette, ToggleDevelop, ToggleFiles, Undo, WORKSPACE_CONTEXT, ZoomToFit,
 };
 use crate::library::Library;
 use crate::panels::command_palette::command_palette;
+use crate::panels::controls::FocusControls as _;
 use crate::panels::crop::CropPanel;
 use crate::panels::develop::DevelopPanel;
 use crate::panels::files::FilesPanel;
+use crate::panels::masks::MasksPanel;
 use crate::session::Session;
 use crate::theme::{FILES_WIDTH, UI_FONT_SIZE, theme};
 use crate::ui::confirm::Confirm;
@@ -40,6 +43,7 @@ pub struct Workspace {
     files: Entity<FilesPanel>,
     develop: Entity<DevelopPanel>,
     crop: Entity<CropPanel>,
+    masks: Entity<MasksPanel>,
     viewport: Entity<Viewport>,
     overlays: Entity<Overlays>,
     announced: Announced,
@@ -89,6 +93,7 @@ impl Workspace {
                 .new(|cx| FilesPanel::new(session.clone(), library.clone(), overlays.clone(), cx)),
             develop: cx.new(|cx| DevelopPanel::new(session.clone(), overlays.clone(), window, cx)),
             crop: cx.new(|cx| CropPanel::new(session.clone(), overlays.clone(), cx)),
+            masks: cx.new(|cx| MasksPanel::new(session.clone(), overlays.clone(), cx)),
             viewport: cx.new(|cx| Viewport::new(session.clone(), cx)),
             session,
             library,
@@ -278,15 +283,25 @@ impl Workspace {
             }))
             .on_action(cx.listener(Self::toggle_palette))
             .on_action(cx.listener(|this, _: &FocusAdjustments, window, cx| {
+                if this.session.read(cx).masks().is_some() {
+                    this.show_tool(ToolKind::Masks, cx);
+                    this.masks
+                        .update(cx, |panel, cx| panel.focus_first(window, cx));
+                    return;
+                }
                 this.show_tool(ToolKind::Edit, cx);
                 this.develop
-                    .update(cx, |panel, cx| panel.focus_adjustments(window, cx));
+                    .update(cx, |panel, cx| panel.focus_first(window, cx));
             }))
             .on_action(cx.listener(|this, _: &EditTool, _, cx| this.show_tool(ToolKind::Edit, cx)))
             .on_action(
                 cx.listener(|this, _: &CropTool, _, cx| this.toggle_tool(ToolKind::Crop, cx)),
             )
             .on_action(cx.listener(|this, _: &CancelTool, _, cx| {
+                let drawing = this.session.update(cx, Session::cancel_mask_creation);
+                if drawing {
+                    return;
+                }
                 if this.session.read(cx).drafting() {
                     this.session.update(cx, Session::cancel_tool);
                 } else {
@@ -329,6 +344,10 @@ impl Render for Workspace {
                 if self.focus.is_focused(window) {
                     context.add(PHOTO_CONTEXT);
                 }
+                let masks = self.session.read(cx).masks();
+                if masks.is_some_and(MaskToolSession::is_painting) {
+                    context.add(PAINTING_CONTEXT);
+                }
                 root.key_context(context)
             })
             .track_focus(&self.focus)
@@ -339,7 +358,8 @@ impl Render for Workspace {
             .bg(theme.editor)
             .text_size(UI_FONT_SIZE)
             .text_color(theme.text);
-        self.with_actions(root, cx)
+        let root = self.with_actions(root, cx);
+        self.with_mask_actions(root, cx)
             .child(self.title_bar(window, cx))
             .child(
                 div()

@@ -41,12 +41,14 @@ impl Overlay for Probe {
 
     fn drag(
         &mut self,
-        event: &MouseMoveEvent,
+        moves: &[MouseMoveEvent],
         photo: ImagePlacement,
         _: &mut Window,
         _: &mut Context<Viewport>,
     ) {
-        self.record("drag", event.position, photo);
+        for event in moves {
+            self.record("drag", event.position, photo);
+        }
     }
 
     fn release(&mut self, _: &mut Window, _: &mut Context<Viewport>) {

@@ -10,6 +10,7 @@ mod crop;
 mod detail;
 mod driver;
 mod light;
+mod masks;
 mod optics;
 mod presets;
 mod viewport;
@@ -236,7 +237,22 @@ impl Harness {
         }));
     }
 
+    /// Move the pointer with the button held, and let the next frame begin.
     fn drag_to(&mut self, position: Point<Pixels>) {
+        self.move_held(position);
+        self.begin_frame();
+    }
+
+    fn begin_frame(&mut self) {
+        self.cx
+            .update_window(self.window.into(), |_, window, cx| {
+                window.simulate_next_frame(cx);
+            })
+            .expect("window is open");
+        self.cx.run_until_parked();
+    }
+
+    fn move_held(&mut self, position: Point<Pixels>) {
         self.send(PlatformInput::MouseMove(MouseMoveEvent {
             position,
             pressed_button: Some(MouseButton::Left),
@@ -369,6 +385,38 @@ fn brightness(shot: &image::RgbaImage, center: Point<Pixels>) -> f64 {
         }
     }
     sum / (200.0 * 200.0 * 3.0)
+}
+
+/// The size of the shown frame.
+fn shown(harness: &mut Harness) -> (u32, u32) {
+    harness.with_session(|session, _| {
+        let display = session.display().expect("a frame is shown");
+        (display.width, display.height)
+    })
+}
+
+/// Where the fitted photo is on screen.
+fn photo(harness: &mut Harness) -> Bounds<Pixels> {
+    let area = harness.find("viewport");
+    let (width, height) = shown(harness);
+    let padded = area.size - size(px(40.0), px(40.0));
+    let scale = (padded.width / width as f32).min(padded.height / height as f32);
+    Bounds::centered_at(
+        area.center(),
+        size(scale * width as f32, scale * height as f32),
+    )
+}
+
+/// Drag from one image position to another, starting `grab` pixels beside the first.
+fn drag(harness: &mut Harness, from: (f32, f32), to: (f32, f32), grab: Pixels) {
+    let photo = photo(harness);
+    let at = |(x, y): (f32, f32)| {
+        photo.origin + point(photo.size.width * x + grab, photo.size.height * y + grab)
+    };
+    harness.press(at(from), 1);
+    harness.drag_to(at(((from.0 + to.0) / 2.0, (from.1 + to.1) / 2.0)));
+    harness.drag_to(at(to));
+    harness.release(at(to));
 }
 
 #[test]

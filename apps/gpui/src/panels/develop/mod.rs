@@ -5,42 +5,39 @@
 //! types it. With the focus, the arrow keys change it.
 
 mod choices;
+mod control;
 mod filter;
-mod focus;
-mod gestures;
 mod info;
 mod mixer;
 mod optics;
 mod preset_form;
 mod presets;
-mod row;
 mod section;
 mod tone_curve;
 mod wheels;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui::{
-    App, Context, Div, Entity, FocusHandle, IntoElement, Render, RenderImage, Role, SharedString,
-    Window, div, prelude::*,
+    App, Context, Div, Entity, FocusHandle, IntoElement, Render, RenderImage, SharedString, Window,
+    div, prelude::*,
 };
 use rohditor_core::Histogram;
 use rohditor_edit::{EditRecipe, RecipeSection};
 use rohditor_engine::open_document::{LensProfiles, NoiseSuggestion};
 use rohditor_engine::tools::Picker;
 
-use focus::{Control, PanelFocus};
-use gestures::{Drag, Nudge, Typing, drag_tracker};
+use control::Control;
 use info::PhotoInfo;
 
 use super::adjustments::GROUPS;
+use super::controls::{Controls, FocusControls as _, drag_tracker};
 use crate::actions::{ApplyPreset, AutoTone, ResetAdjustments};
 use crate::session::{MixerColorPicked, PresetEntry, Session};
 use crate::theme::{DEVELOP_WIDTH, RADIUS, TAB_HEIGHT, theme};
 use crate::ui::button::link;
 use crate::ui::histogram::histogram;
-use crate::ui::keys::{SelectNext, SelectPrevious};
 use crate::ui::overlays::Overlays;
 use crate::ui::text_input::{Changed, TextInput};
 
@@ -99,10 +96,7 @@ impl Model {
 }
 
 pub fn bind_keys(cx: &mut App) {
-    focus::bind_keys(cx);
     presets::bind_keys(cx);
-    row::bind_keys(cx);
-    section::bind_keys(cx);
 }
 
 pub struct DevelopPanel {
@@ -111,11 +105,7 @@ pub struct DevelopPanel {
     model: Model,
     #[cfg(test)]
     pub renders: usize,
-    drag: Option<Drag>,
-    nudge: Option<Nudge>,
-    typing: Option<Typing>,
-    /// The headers of the collapsed sections.
-    collapsed: HashSet<Control>,
+    controls: Controls<Control>,
     search: Entity<TextInput>,
     /// Hide what is at its default.
     edited_only: bool,
@@ -124,7 +114,6 @@ pub struct DevelopPanel {
     wheel_picture: Arc<RenderImage>,
     /// The focus of each listed preset.
     preset_focus: HashMap<SharedString, FocusHandle>,
-    focus: PanelFocus,
 }
 
 impl DevelopPanel {
@@ -155,33 +144,31 @@ impl DevelopPanel {
             cx.new(|cx| TextInput::new("Search adjustments", "Search…", String::new(), cx));
         cx.subscribe(&search, |_, _, _: &Changed, cx| cx.notify())
             .detach();
+        let mut controls = Controls::new(Control::focusable(), cx);
+        // Used less often than what follows them.
+        controls.collapsed.extend([
+            Control::Section(RecipeSection::ToneCurve),
+            Control::Section(RecipeSection::HighlightReconstruction),
+            Control::Section(RecipeSection::ColorMixer),
+            Control::Section(RecipeSection::ColorGrading),
+            Control::Section(RecipeSection::ColorProfile),
+            Control::Section(RecipeSection::FalseColor),
+            Control::Section(RecipeSection::Defringe),
+            Control::Presets,
+            Control::Info,
+        ]);
         Self {
             session,
             overlays,
             model: Model::default(),
             #[cfg(test)]
             renders: 0,
-            drag: None,
-            nudge: None,
-            typing: None,
-            // Used less often than what follows them.
-            collapsed: HashSet::from([
-                Control::Section(RecipeSection::ToneCurve),
-                Control::Section(RecipeSection::HighlightReconstruction),
-                Control::Section(RecipeSection::ColorMixer),
-                Control::Section(RecipeSection::ColorGrading),
-                Control::Section(RecipeSection::ColorProfile),
-                Control::Section(RecipeSection::FalseColor),
-                Control::Section(RecipeSection::Defringe),
-                Control::Presets,
-                Control::Info,
-            ]),
+            controls,
             search,
             edited_only: false,
             mixer_channel: 0,
             wheel_picture: wheels::wheel_picture(),
             preset_focus: HashMap::new(),
-            focus: PanelFocus::new(cx),
         }
     }
 
@@ -218,7 +205,7 @@ impl Render for DevelopPanel {
         {
             self.renders += 1;
         }
-        self.forget_lost_focus(window);
+        self.controls.focus.forget_lost(window);
         let theme = theme();
         let Model {
             recipes,
@@ -272,22 +259,7 @@ impl Render for DevelopPanel {
             )
             .when(recipes.is_some(), |panel| panel.child(self.filter(cx)))
             .child(
-                div()
-                    .id("adjustments")
-                    .role(Role::Group)
-                    .aria_label("Adjustments")
-                    .key_context(focus::CONTEXT)
-                    .track_focus(&self.focus.entry)
-                    .on_action(cx.listener(|this, _: &SelectNext, window, cx| {
-                        this.focus.step(true, window, cx);
-                    }))
-                    .on_action(cx.listener(|this, _: &SelectPrevious, window, cx| {
-                        this.focus.step(false, window, cx);
-                    }))
-                    .track_scroll(&self.focus.scroll)
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
+                self.control_list("adjustments", "Adjustments", cx)
                     .child(body),
             )
     }

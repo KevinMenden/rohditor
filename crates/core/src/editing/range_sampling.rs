@@ -1,4 +1,4 @@
-use rohditor_color::rec2020_to_oklab;
+use rohditor_color::{linear_srgb_to_srgb, oklab_to_linear_srgb, rec2020_to_oklab};
 use rohditor_edit::{COLOR_SAMPLE_AB_RANGE, COLOR_SAMPLE_LIGHTNESS_RANGE, ColorSample, EditRecipe};
 use rohditor_image::{LinearRgbImage, Orientation};
 
@@ -61,6 +61,13 @@ pub fn sample_color_range(
     })
 }
 
+/// The 8-bit sRGB colour of a sample, to show it. Colours outside of sRGB are clipped.
+#[must_use]
+pub fn color_sample_srgb(sample: &ColorSample) -> [u8; 3] {
+    oklab_to_linear_srgb([sample.lightness, sample.a, sample.b])
+        .map(|value| (linear_srgb_to_srgb(value.clamp(0.0, 1.0)) * 255.0).round() as u8)
+}
+
 #[cfg(test)]
 mod tests {
     use rohditor_edit::{NormalizedCropRect, RenderingProfileSelection};
@@ -85,6 +92,16 @@ mod tests {
         }
         LinearRgbImage::new(WIDTH, HEIGHT, stride, LinearRgbSpace::Rec2020D65, data)
             .expect("valid test image")
+    }
+
+    #[test]
+    fn samples_are_shown_in_their_color() {
+        let sample = |lightness, a, b| ColorSample { lightness, a, b };
+        assert_eq!(color_sample_srgb(&sample(0.0, 0.0, 0.0)), [0, 0, 0]);
+        assert_eq!(color_sample_srgb(&sample(1.0, 0.0, 0.0)), [255, 255, 255]);
+        // OkLab of pure sRGB red.
+        let red = color_sample_srgb(&sample(0.627_955, 0.224_863, 0.125_846));
+        assert_eq!(red, [255, 0, 0]);
     }
 
     fn neutral() -> EditRecipe {

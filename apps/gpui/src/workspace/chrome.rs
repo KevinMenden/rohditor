@@ -8,7 +8,7 @@ use rohditor_engine::view::ViewState;
 
 use super::Workspace;
 use crate::actions::{
-    ActualPixels, CloseFile, Command, Export, Quit, Redo, ToggleClipping, ToggleCommandPalette,
+    ActualPixels, CloseFile, Export, Quit, Redo, ToggleClipping, ToggleCommandPalette,
     ToggleDevelop, ToggleFiles, Undo, ZoomToFit,
 };
 use crate::assets::Icon;
@@ -180,20 +180,10 @@ impl Workspace {
         let viewport = self.viewport.clone();
         dropdown("zoom", "Zoom", zoom, self.overlays.clone(), move |_, cx| {
             let view = viewport.read(cx).view(cx);
-            let entry = |action: Box<dyn gpui::Action>, checked| {
-                let command = Command::of(action.as_ref());
-                MenuEntry::new(command.title(), move |window, cx| {
-                    window.dispatch_action(action.boxed_clone(), cx);
-                })
-                .key(command.key_label().map(Into::into))
-                .checked(checked)
-            };
             vec![
-                entry(Box::new(ZoomToFit), view.is_some_and(ViewState::is_fit)),
-                entry(
-                    Box::new(ActualPixels),
-                    view.is_some_and(ViewState::is_actual_size),
-                ),
+                MenuEntry::command(ZoomToFit).checked(view.is_some_and(ViewState::is_fit)),
+                MenuEntry::command(ActualPixels)
+                    .checked(view.is_some_and(ViewState::is_actual_size)),
             ]
         })
     }

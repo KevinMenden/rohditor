@@ -2,7 +2,7 @@
 
 use gpui::{Action, App, KeyBinding, NoAction, SharedString, actions};
 use rohditor_edit::{
-    HighlightMethod, LensProfileSelection, RecipeSection, RenderingProfileSelection,
+    HighlightMethod, LensProfileSelection, MaskMode, RecipeSection, RenderingProfileSelection,
     WhiteBalancePreset,
 };
 use rohditor_engine::tools::CropAspect;
@@ -10,6 +10,7 @@ use rohditor_engine::tools::CropAspect;
 use crate::panels::adjustments::{
     HIGHLIGHT_METHODS, RENDERINGS, method_label, rendering_label, sections,
 };
+use crate::panels::masks::Shape;
 use crate::{panels, ui};
 
 actions!(
@@ -38,6 +39,20 @@ actions!(
         LockCrop,
         FlipCrop,
         ResetCrop,
+        MasksTool,
+        DeleteMask,
+        RenameMask,
+        ToggleMask,
+        MoveMaskUp,
+        MoveMaskDown,
+        ToggleMaskOverlay,
+        PaintMask,
+        PickMaskColors,
+        ToggleErase,
+        GrowBrush,
+        ShrinkBrush,
+        SoftenBrush,
+        HardenBrush,
         ApplyTool,
         CancelTool,
         ZoomToFit,
@@ -78,6 +93,19 @@ pub struct SetLensProfile(pub LensProfileSelection);
 #[derive(Debug, Clone, PartialEq, Eq, Action)]
 #[action(namespace = rohditor, no_json)]
 pub struct SetCropAspect(pub CropAspect);
+
+/// Make a new mask of a shape.
+#[derive(Debug, Clone, PartialEq, Eq, Action)]
+#[action(namespace = rohditor, no_json)]
+pub struct NewMask(pub Shape);
+
+/// Add a shape to the selected mask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Action)]
+#[action(namespace = rohditor, no_json)]
+pub struct AddToMask {
+    pub shape: Shape,
+    pub mode: MaskMode,
+}
 
 /// An entry of the command palette and, when it has a key, of the keymap.
 pub struct Command {
@@ -141,6 +169,21 @@ pub fn commands() -> Vec<Command> {
         command("crop: lock ratio", None, LockCrop),
         command("crop: flip ratio", Some("x"), FlipCrop),
         command("crop: reset", None, ResetCrop),
+        command("tool: masks", Some("m"), MasksTool),
+        command("masks: delete selected shape", Some("delete"), DeleteMask),
+        command("masks: rename mask", Some("f2"), RenameMask),
+        command("masks: enable or disable mask", None, ToggleMask),
+        command("masks: move mask up", Some("alt-up"), MoveMaskUp),
+        command("masks: move mask down", Some("alt-down"), MoveMaskDown),
+        command("masks: show or hide the mask", Some("o"), ToggleMaskOverlay),
+        command("masks: paint selected brush", Some("b"), PaintMask),
+        command("masks: pick colors", None, PickMaskColors),
+        // After the tool with the same key, so that it comes first while painting.
+        command("masks: erase or paint", Some("e"), ToggleErase),
+        command("masks: larger brush", Some("]"), GrowBrush),
+        command("masks: smaller brush", Some("["), ShrinkBrush),
+        command("masks: softer brush", Some("}"), SoftenBrush),
+        command("masks: harder brush", Some("{"), HardenBrush),
         command("tool: apply", Some("enter"), ApplyTool),
         command("view: zoom to fit", Some("ctrl-0"), ZoomToFit),
         command("view: actual pixels (1:1)", Some("ctrl-1"), ActualPixels),
@@ -183,6 +226,14 @@ pub fn commands() -> Vec<Command> {
         let name = format!("crop: aspect {}", aspect.label().to_lowercase());
         command(name, None, SetCropAspect(aspect))
     }));
+    for shape in Shape::ALL {
+        let name = shape.name();
+        commands.push(command(format!("masks: new {name}"), None, NewMask(shape)));
+        commands.extend(shape.modes().iter().map(|&mode| {
+            let name = format!("masks: {} {name}", mode.label().to_lowercase());
+            command(name, None, AddToMask { shape, mode })
+        }));
+    }
     commands.extend(RENDERINGS.into_iter().map(|rendering| {
         let name = format!(
             "develop: rendering {}",
@@ -241,6 +292,8 @@ pub fn bind_keys(cx: &mut App) {
         } else if command.action.partial_eq(&ApplyTool) {
             // Enter also presses the focused control.
             Some(context(PHOTO_CONTEXT))
+        } else if is_for_painting(command.action.as_ref()) {
+            Some(context(PAINTING_CONTEXT))
         } else {
             Some(context(WORKSPACE_CONTEXT))
         };
@@ -256,8 +309,15 @@ pub fn bind_keys(cx: &mut App) {
     });
     let bindings: Vec<_> = bindings.collect();
     cx.bind_keys(bindings);
+    let painting = Some(PAINTING_CONTEXT);
+    let [larger, smaller] = BRUSH_SIZE_KEYS;
+    cx.bind_keys([
+        KeyBinding::new(larger, GrowBrush, painting),
+        KeyBinding::new(smaller, ShrinkBrush, painting),
+    ]);
     cx.bind_keys(letters_to_type());
     ui::keys::bind(cx);
+    panels::controls::bind_keys(cx);
     panels::develop::bind_keys(cx);
 }
 
@@ -266,13 +326,31 @@ fn letters_to_type() -> Vec<KeyBinding> {
     let letters = commands().into_iter().filter_map(|command| command.key);
     letters
         .filter(|key| key.len() == 1)
+        .chain(BRUSH_SIZE_KEYS)
         .map(|key| KeyBinding::new(key, NoAction, Some(ui::text_input::CONTEXT)))
         .collect()
+}
+
+/// Larger and smaller, besides the brackets, which many keyboard layouts only have with AltGr.
+const BRUSH_SIZE_KEYS: [&str; 2] = ["+", "-"];
+
+/// Whether the action's key means it only while painting a mask.
+fn is_for_painting(action: &dyn Action) -> bool {
+    let brush: [&dyn Action; 5] = [
+        &ToggleErase,
+        &GrowBrush,
+        &ShrinkBrush,
+        &SoftenBrush,
+        &HardenBrush,
+    ];
+    brush.iter().any(|one| one.partial_eq(action))
 }
 
 pub const WORKSPACE_CONTEXT: &str = "Workspace";
 /// Added while the photo has the focus.
 pub const PHOTO_CONTEXT: &str = "Photo";
+/// Added while painting a mask.
+pub const PAINTING_CONTEXT: &str = "Painting";
 
 fn context(name: &'static str) -> std::rc::Rc<gpui::KeyBindingContextPredicate> {
     std::rc::Rc::new(gpui::KeyBindingContextPredicate::Identifier(name.into()))

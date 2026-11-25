@@ -12,7 +12,7 @@ use crate::color_range::{LIGHTNESS_WEIGHT, PreparedColor};
 use crate::linear::PreparedLinear;
 use crate::luminance::PreparedLuminance;
 use crate::radial::PreparedRadial;
-use crate::{MaskError, MaskFrame};
+use crate::{MaskArea, MaskError, MaskFrame};
 
 /// One component's combine mode, inversion and resolved shape.
 #[derive(Debug, Clone, PartialEq)]
@@ -119,6 +119,22 @@ impl BrushCoverage {
     /// [`MaskError`] for a degenerate stroke, or a brush too dense for this frame.
     pub fn prepare(brush: &BrushMask, frame: MaskFrame) -> Result<Self, MaskError> {
         PreparedBrush::prepare(brush, frame).map(Self)
+    }
+
+    /// As [`Self::prepare`], to evaluate only `area`: strokes that do not reach it are left out.
+    ///
+    /// # Errors
+    /// As [`Self::prepare`].
+    pub fn prepare_area(
+        brush: &BrushMask,
+        frame: MaskFrame,
+        area: &MaskArea,
+    ) -> Result<Self, MaskError> {
+        let strokes = brush
+            .strokes
+            .iter()
+            .filter(|stroke| area.is_reached_by(stroke, frame));
+        PreparedBrush::prepare_strokes(strokes, frame).map(Self)
     }
 
     /// Writes the brush's alpha (before the component's `invert`) for the `out.len()` pixels of

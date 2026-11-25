@@ -53,10 +53,17 @@ struct PreparedStroke {
 
 impl PreparedBrush {
     pub(crate) fn prepare(brush: &BrushMask, frame: MaskFrame) -> Result<Self, MaskError> {
+        Self::prepare_strokes(&brush.strokes, frame)
+    }
+
+    /// As [`Self::prepare`], with only some of a brush's strokes.
+    pub(crate) fn prepare_strokes<'a>(
+        strokes: impl IntoIterator<Item = &'a BrushStroke>,
+        frame: MaskFrame,
+    ) -> Result<Self, MaskError> {
         let mut entries = 0usize;
-        let strokes = brush
-            .strokes
-            .iter()
+        let strokes = strokes
+            .into_iter()
             .map(|stroke| {
                 let prepared = PreparedStroke::prepare(stroke, frame, MAX_DAB_ENTRIES - entries)?;
                 entries += prepared.dabs.len();

@@ -49,6 +49,13 @@ pub enum RangeKind {
 
 impl RangeKind {
     pub const ALL: [Self; 2] = [Self::Luminance, Self::Color];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Luminance => "Luminance range",
+            Self::Color => "Color range",
+        }
+    }
 }
 
 /// Which bracket key was pressed while painting.
@@ -170,10 +177,16 @@ impl MaskToolSession {
             changed |= install_during_gesture(edits, next);
         }
         if events.release {
-            let next = self.release(edits.recipe());
-            changed |= install_during_gesture(edits, next);
-            edits.finish_gesture();
+            changed |= self.finish_pointer(edits);
         }
+        changed
+    }
+
+    /// Ends the gesture of the pointer, if there is one. Returns whether the recipe changed.
+    pub fn finish_pointer(&mut self, edits: &mut EditSession) -> bool {
+        let next = self.release(edits.recipe());
+        let changed = install_during_gesture(edits, next);
+        edits.finish_gesture();
         changed
     }
 

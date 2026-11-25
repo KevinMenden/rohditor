@@ -50,9 +50,10 @@ pub use cpu::{
 };
 pub use cpu_only::cpu_only_stage_reason;
 pub use editing::{
-    ToneCurveHandle, WhiteBalanceMode, WhiteBalanceModeMemory, auto_tone, default_recipe,
-    developed_patch, display_tone_curve, estimate_noise_profile, sample_color_range,
-    sample_mixer_channel, white_balance_from_camera_sample, with_default_noise_reduction,
+    ToneCurveHandle, WhiteBalanceMode, WhiteBalanceModeMemory, auto_tone, color_sample_srgb,
+    default_recipe, developed_patch, display_tone_curve, estimate_noise_profile,
+    sample_color_range, sample_mixer_channel, white_balance_from_camera_sample,
+    with_default_noise_reduction,
 };
 pub use error::PipelineError;
 pub use export::{

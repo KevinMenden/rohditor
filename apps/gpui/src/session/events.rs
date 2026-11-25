@@ -4,6 +4,7 @@ use rohditor_engine::coordinator::{PreviewResolution, WorkerEvent};
 use rohditor_engine::document::{PreviewIntent, PreviewTicket};
 use rohditor_engine::open_document::OpenDocument;
 use rohditor_engine::preview::{DocumentPreviewDiagnostics, GpuUpload, PreviewSource};
+use rohditor_engine::tools::ColorPick;
 
 use super::Session;
 use super::display::FrameKind;
@@ -16,7 +17,7 @@ impl Session {
         }
     }
 
-    fn current(&mut self, document_id: u64) -> Option<&mut OpenDocument> {
+    pub(super) fn current(&mut self, document_id: u64) -> Option<&mut OpenDocument> {
         self.document.as_mut().filter(|open| open.id == document_id)
     }
 
@@ -273,12 +274,25 @@ impl Session {
                     .current(ticket.document_id)
                     .and_then(|document| document.color_mixer_picked(ticket, channel));
             }
-            // Features this frontend never requests: masks and the neural demosaic.
-            WorkerEvent::ColorRangeSampleReady { .. }
-            | WorkerEvent::ColorRangeSampleFailed { .. }
-            | WorkerEvent::MaskOverlayReady { .. }
-            | WorkerEvent::MaskOverlayFailed { .. }
-            | WorkerEvent::NeuralDemosaicReady { .. } => {}
+            WorkerEvent::ColorRangeSampleReady {
+                ticket,
+                pick,
+                sample,
+            } => self.mask_color_picked(ticket, pick, Ok(sample)),
+            WorkerEvent::ColorRangeSampleFailed { ticket, message } => {
+                // What the pick was for does not matter any more.
+                self.mask_color_picked(ticket, ColorPick::Replace, Err(message));
+            }
+            WorkerEvent::MaskOverlayReady {
+                ticket,
+                layer,
+                overlay,
+            } => self.mask_measured(ticket, layer, Some(*overlay)),
+            WorkerEvent::MaskOverlayFailed { ticket, layer, .. } => {
+                self.mask_measured(ticket, layer, None);
+            }
+            // This frontend never requests the neural demosaic.
+            WorkerEvent::NeuralDemosaicReady { .. } => {}
         }
     }
 }

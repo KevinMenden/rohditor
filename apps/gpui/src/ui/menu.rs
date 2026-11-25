@@ -3,10 +3,11 @@
 use std::rc::Rc;
 
 use gpui::{
-    App, Context, DismissEvent, EventEmitter, FocusHandle, Focusable, IntoElement, Render, Role,
-    SharedString, Window, div, prelude::*, px,
+    Action, App, Context, DismissEvent, EventEmitter, FocusHandle, Focusable, IntoElement, Render,
+    Role, SharedString, Window, div, prelude::*, px,
 };
 
+use crate::actions::Command;
 use crate::theme::{RADIUS, SMALL_FONT_SIZE, theme};
 use crate::ui::keys::{Confirm, SelectNext, SelectPrevious};
 use crate::ui::test_id::TestId as _;
@@ -34,6 +35,15 @@ impl MenuEntry {
             checked: false,
             run: Rc::new(run),
         }
+    }
+
+    /// Runs a command, by its name and with its key.
+    pub fn command(action: impl Action) -> Self {
+        let command = Command::of(&action);
+        let entry = Self::new(command.title(), move |window, cx| {
+            window.dispatch_action(action.boxed_clone(), cx);
+        });
+        entry.key(command.key_label().map(Into::into))
     }
 
     pub fn key(mut self, key: Option<SharedString>) -> Self {
