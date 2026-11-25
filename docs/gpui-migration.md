@@ -29,7 +29,7 @@ Assumed from the recommendations unless marked open; change them here if they tu
 | Viewport | Fit, zoom, pan, 1:1, clipping overlay, tool overlays | |
 | Tools | Crop, pickers, masks | |
 | Presets, info | None | All |
-| Library | File list | Grid, sorting, filmstrip |
+| Library | File list | File tree, albums, filmstrip, sorting (#233) |
 | Export | JPEG only | PNG, size, sharpening, metadata, overwrite |
 | Settings, diagnostics | None | All, including neural demosaic |
 
@@ -41,7 +41,9 @@ Assumed from the recommendations unless marked open; change them here if they tu
   multipliers keep rendering, but there is no UI for them.
 - **Color grading:** three colour wheels over the recipe values of today's nine RGB sliders.
 - **Tone curve:** stays parametric for now, laid out so that #175, #176 and #177 fit in.
-- **Library:** a tab beside Develop and a toggleable filmstrip. No single-file panel.
+- **Library:** no Library tab and no thumbnail grid. A file tree and an albums tab in the left dock,
+  and a thumbnail-only filmstrip at the bottom that toggles with Ctrl+J and is hidden by default,
+  with no ratings. Albums are named lists of photos from any folder. No single-file panel. See #233.
 - **Masks:** a compact list, with shape controls on the canvas.
 - **Commands:** everything is in the command palette; tooltips show keys.
 - **Diagnostics:** a plain panel with the same report export.
@@ -115,7 +117,7 @@ Done when the moved tests pass and painting feels smooth on real RAWs.
 
 ## Stage 6: Library, export, settings
 
-- [ ] 6.1 Library grid, sorting, filmstrip.
+- [ ] 6.1 Library: file tree, albums, filmstrip and sorting, tracked in #233 (no grid).
 - [ ] 6.2 Full export dialog.
 - [ ] 6.3 Settings, neural model, diagnostics.
 - [ ] 6.4 Startup options and `--screenshot`.
@@ -135,5 +137,6 @@ Done when nothing needs egui any more.
 
 - #187: drop the desktop half; the CLI half stands.
 - #167: the engine half stands; its UI moves to GPUI.
-- #164, #168, #173, #176, #194: their UI moves to GPUI.
+- #164, #168, #173, #176, #194: their UI moves to GPUI. #168 and #194 build on the library
+  redesign (#233) instead of a library grid.
 - #195 (work queue): needs the above, or it keeps sending UI work to egui.
