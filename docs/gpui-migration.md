@@ -105,7 +105,7 @@ Done when each crop is one undo step.
 
 Reuses tool switching and overlays from stage 4.
 
-- [ ] 5.1 Move pointer, action and tint logic into the engine, with its tests.
+- [x] 5.1 Move pointer, action and tint logic into the engine, with its tests.
 - [ ] 5.2 Mask list, components, local sliders.
 - [ ] 5.3 Linear and radial gradients.
 - [ ] 5.4 Brush.

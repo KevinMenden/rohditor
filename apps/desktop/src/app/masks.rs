@@ -6,29 +6,20 @@
 
 use eframe::egui;
 use rohditor_core::{MaskAlphaImage, OutputGeometry, PreviewOptions, RawCropPolicy};
-use rohditor_edit::{ColorSample, EditRecipe, GeometryAdjustments, MaskComponent, MaskLayer};
+use rohditor_edit::ColorSample;
 use rohditor_engine::coordinator::RenderCoordinator;
 use rohditor_engine::document::{EditSession, PreviewTicket};
 use rohditor_engine::tools::{
-    ColorPick, LayerEdit, MaskEditMode, MaskToolSession, MaskView, ToolKind,
+    Bracket, BrushKeySteps, ColorPick, MaskAction, MaskToolSession, MaskView, TintPlan, TintSource,
+    ToolKind, plan_tint, tint_pixels,
 };
-use rohditor_raw::{RawFileInfo, RawFrame};
+use rohditor_raw::RawFrame;
 
 use super::tools::tool_panel_model;
 use super::{Document, RohditorApp};
 use crate::ui::mask_overlay::{MaskOverlayModel, MaskOverlayOutput};
-use crate::ui::masks::{self, MasksAction, MasksPanelModel, RangeKind, SliderPhase};
+use crate::ui::masks::{self, MasksPanelModel};
 use crate::ui::tool_panel;
-
-/// Peak opacity of the red mask tint, at alpha 1.
-const OVERLAY_TINT_OPACITY: f32 = 0.5;
-
-/// Size of the developed frame (the sensor area the pipeline develops, before the user's crop
-/// and orientation) that masks are normalized over. The RAW's full sensor size is not it: masked
-/// borders are cut off, which changes the aspect and with it every long-edge length.
-fn developed_size(info: &RawFileInfo, policy: RawCropPolicy) -> Option<(usize, usize)> {
-    rohditor_core::raw_crop_dimensions(info, policy).ok()
-}
 
 /// What the viewport needs to draw and drive the Masks tool, or `None` while the photo has
 /// no frame to map pointer positions onto.
@@ -53,66 +44,14 @@ pub(super) fn overlay_model<'a>(
     })
 }
 
-/// Long edge, in pixels, of the tint image. It is a soft red wash, so a small image stretched
-/// over the preview is enough, and it is recomputed on every frame of a handle drag.
-const TINT_LONG_EDGE: usize = 512;
-
-/// What a tint shows: the shape of one layer in the displayed frame. Opacity, sliders and
-/// everything else in the recipe do not change it, so a slider drag never recomputes it.
-struct TintSource {
-    layer: u32,
-    components: Vec<MaskComponent>,
-    /// Orientation and crop of the displayed image.
-    geometry: GeometryAdjustments,
-    /// Sets the developed frame, and with it the aspect the mask lives in.
-    policy: RawCropPolicy,
-    /// For a layer with range components, whose shape depends on the image: the recipe revision
-    /// it was measured at. `None` for a layer that the recipe alone determines.
-    revision: Option<u64>,
-}
-
-impl TintSource {
-    fn new(
-        recipe: &EditRecipe,
-        layer: &MaskLayer,
-        policy: RawCropPolicy,
-        revision: Option<u64>,
-    ) -> Self {
-        Self {
-            layer: layer.id,
-            components: layer.components.clone(),
-            geometry: recipe.geometry.clone(),
-            policy,
-            revision,
-        }
-    }
-
-    /// Whether the tint of this source is still right, without copying the layer.
-    fn matches(
-        &self,
-        recipe: &EditRecipe,
-        layer: &MaskLayer,
-        policy: RawCropPolicy,
-        revision: Option<u64>,
-    ) -> bool {
-        self.layer == layer.id
-            && self.revision == revision
-            && self.policy == policy
-            && self.geometry == recipe.geometry
-            && self.components == layer.components
-    }
-}
-
 /// The tint texture and what it was computed from.
 pub(super) struct MaskTint {
     source: TintSource,
     texture: egui::TextureHandle,
 }
 
-/// Brings the tint up to date with the recipe and the selected layer. A gradient or brush is
-/// computed here, from the recipe, at a small size: a render would show the mask only after the
-/// whole preview was done, so the tint would trail the handles while they are dragged. A layer
-/// with a luminance or color range depends on the image, so the worker measures it (see
+/// Brings the tint up to date with the recipe and the selected layer, as `plan_tint` decides. A
+/// layer with a luminance or color range depends on the image, so the worker measures it (see
 /// [`request_range_overlay`]) and the tint follows the edits a little later.
 pub(super) fn refresh_tint(
     context: &egui::Context,
@@ -122,52 +61,20 @@ pub(super) fn refresh_tint(
     coordinator: &RenderCoordinator,
     options: PreviewOptions,
 ) {
-    let Some(layer) = session.overlay_layer() else {
-        return;
-    };
-    let recipe = document.core.edits.recipe();
-    let Some(shown) = recipe.local.layer(layer) else {
-        // The selection is stale (the layer was deleted): show nothing rather than its tint.
-        document.mask_overlay = None;
-        return;
-    };
-    let ranged = shown
-        .components
-        .iter()
-        .any(|component| component.shape.is_range());
-    let revision = ranged.then(|| document.core.edits.revision());
-    if document
-        .mask_overlay
-        .as_ref()
-        .is_some_and(|tint| tint.source.matches(recipe, shown, policy, revision))
-    {
-        return;
-    }
-    if ranged {
-        request_range_overlay(document, layer, coordinator, options);
-        return;
-    }
-    let source = TintSource::new(recipe, shown, policy, None);
-    let Some(info) = document.core.frame.as_ref().map(|frame| &frame.info) else {
-        return;
-    };
-    let Some(developed) = developed_size(info, policy) else {
-        document.mask_overlay = None;
-        return;
-    };
-    let alpha = rohditor_core::render_mask_overlay_preview(
+    let plan = plan_tint(
+        document.mask_overlay.as_ref().map(|tint| &tint.source),
+        session,
         document.core.edits.recipe(),
-        layer,
-        developed,
-        info.orientation,
-        TINT_LONG_EDGE,
+        document.core.edits.revision(),
+        document.core.frame.as_ref().map(|frame| &frame.info),
+        policy,
     );
-    let Ok(Some(alpha)) = alpha else {
-        // No such layer (or an unusable recipe): show nothing rather than a stale tint.
-        document.mask_overlay = None;
-        return;
-    };
-    install_tint(context, document, source, &alpha);
+    match plan {
+        TintPlan::Keep => {}
+        TintPlan::Clear => document.mask_overlay = None,
+        TintPlan::Measure { layer } => request_range_overlay(document, layer, coordinator, options),
+        TintPlan::Render { source, alpha } => install_tint(context, document, source, &alpha),
+    }
 }
 
 /// Asks the worker for the overlay of a layer that selects by image content. The old tint stays
@@ -206,14 +113,9 @@ fn install_tint(
     source: TintSource,
     alpha: &MaskAlphaImage,
 ) {
-    let pixels = alpha
-        .data()
-        .iter()
-        .map(|&value| {
-            let strength = (f32::from(value) * OVERLAY_TINT_OPACITY).round() as u8;
-            // Premultiplied red.
-            egui::Color32::from_rgba_premultiplied(strength, 0, 0, strength)
-        })
+    let pixels = tint_pixels(alpha.data())
+        .into_iter()
+        .map(|[r, g, b, a]| egui::Color32::from_rgba_premultiplied(r, g, b, a))
         .collect();
     let image = egui::ColorImage::new([alpha.width(), alpha.height()], pixels);
     match document.mask_overlay.as_mut() {
@@ -234,90 +136,9 @@ fn install_tint(
     }
 }
 
-/// Installs a recipe the tool returned as part of one pointer gesture.
-fn install_during_gesture(edits: &mut EditSession, next: Option<EditRecipe>) -> bool {
-    next.is_some_and(|next| edits.set_during_gesture(next))
-}
-
-/// Installs a one-step edit of the panel (delete, rename, mode change, …).
-fn install_discrete(edits: &mut EditSession, next: Option<EditRecipe>) -> bool {
-    next.is_some_and(|next| edits.set_discrete(next))
-}
-
-/// A slider event as one edit. A drag is one undo step, as for the global sliders: it starts
-/// a gesture, every change joins it, and it ends when the drag stops.
-fn apply_slider(edits: &mut EditSession, next: Option<EditRecipe>, phase: SliderPhase) -> bool {
-    if phase.drag_started {
-        edits.begin_gesture();
-    }
-    let changed = match next {
-        Some(next) if phase.reset => edits.set_discrete(next),
-        Some(next) if phase.changed => {
-            if phase.dragged || phase.drag_stopped || edits.gesture_active() {
-                edits.set_during_gesture(next)
-            } else {
-                edits.set_discrete(next)
-            }
-        }
-        _ => false,
-    };
-    if phase.drag_stopped {
-        edits.finish_gesture();
-    }
-    changed
-}
-
-/// Forwards one frame of viewport pointer events to the session as edit gestures. Returns
-/// whether the recipe changed.
-///
-/// A drag or a stroke is one gesture: opened by the press, closed by the release. A press that
-/// grabs nothing (or a brush press that hits a limit) opens none, so no release follows and the
-/// gesture must not stay open. `begin_gesture` and `finish_gesture` are no-ops when one is already open or
-/// none is, so a release without a press is harmless.
-fn drive_pointer(
-    edits: &mut EditSession,
-    session: &mut MaskToolSession,
-    output: &MaskOverlayOutput,
-    view: &MaskView,
-) -> bool {
-    if let Some(layer) = output.select_layer {
-        session.select_layer(edits.recipe(), layer);
-    }
-    // Read at the press, where a stroke takes it as its mode.
-    session.erase_held = output.erase_held;
-    let mut changed = false;
-    if let Some(position) = output.press {
-        edits.begin_gesture();
-        let next = session.press(edits.recipe(), view, position);
-        changed |= install_during_gesture(edits, next);
-        if !session.is_dragging() {
-            edits.finish_gesture();
-        }
-    }
-    for position in &output.drag_to {
-        let next = session.drag_to(edits.recipe(), view, *position);
-        changed |= install_during_gesture(edits, next);
-    }
-    if output.release {
-        let next = session.release(edits.recipe());
-        changed |= install_during_gesture(edits, next);
-        edits.finish_gesture();
-    }
-    changed
-}
-
-/// Net brush steps asked for by the `[` and `]` presses of one frame.
-#[derive(Debug, Default, PartialEq, Eq)]
-struct BrushKeySteps {
-    /// `]` grows the brush, `[` shrinks it.
-    size: i32,
-    /// Shift+`]` softens the edge, Shift+`[` hardens it.
-    feather: i32,
-}
-
 /// Reads the brush keys from the frame's key events, so held keys (which repeat) and several
 /// presses in one frame all count. `{` and `}` are what Shift+`[` and Shift+`]` produce on many
-/// layouts, so they mean the same as the shifted brackets.
+/// layouts, so they mean the same as the shifted brackets. What the steps do is the engine's.
 fn brush_key_steps(input: &egui::InputState) -> BrushKeySteps {
     let mut steps = BrushKeySteps::default();
     for event in &input.events {
@@ -333,18 +154,14 @@ fn brush_key_steps(input: &egui::InputState) -> BrushKeySteps {
         if modifiers.ctrl || modifiers.command {
             continue;
         }
-        let (direction, curly) = match key {
-            egui::Key::CloseBracket => (1, false),
-            egui::Key::OpenBracket => (-1, false),
-            egui::Key::CloseCurlyBracket => (1, true),
-            egui::Key::OpenCurlyBracket => (-1, true),
+        let (bracket, curly) = match key {
+            egui::Key::CloseBracket => (Bracket::Close, false),
+            egui::Key::OpenBracket => (Bracket::Open, false),
+            egui::Key::CloseCurlyBracket => (Bracket::Close, true),
+            egui::Key::OpenCurlyBracket => (Bracket::Open, true),
             _ => continue,
         };
-        if modifiers.shift || curly {
-            steps.feather += direction;
-        } else {
-            steps.size += direction;
-        }
+        steps.press(bracket, modifiers.shift || curly);
     }
     steps
 }
@@ -438,10 +255,9 @@ impl RohditorApp {
             return;
         }
         let recipe = document.core.edits.recipe().clone();
-        let changed = install_discrete(
-            &mut document.core.edits,
-            session.pick_color(&recipe, sample, pick),
-        );
+        let changed = session
+            .pick_color(&recipe, sample, pick)
+            .is_some_and(|next| document.core.edits.set_discrete(next));
         self.finish_mask_interaction(context, changed);
     }
 
@@ -482,11 +298,11 @@ impl RohditorApp {
         if document.core.edits.revision() != ticket.revision {
             return;
         }
-        let recipe = document.core.edits.recipe();
-        let Some(shown) = recipe.local.layer(layer) else {
+        let Some(source) =
+            TintSource::measured(document.core.edits.recipe(), layer, policy, ticket.revision)
+        else {
             return;
         };
-        let source = TintSource::new(recipe, shown, policy, Some(ticket.revision));
         install_tint(context, document, source, overlay);
         context.request_repaint();
     }
@@ -507,7 +323,7 @@ impl RohditorApp {
         else {
             return false;
         };
-        drive_pointer(&mut document.core.edits, session, output, view)
+        session.drive_pointer(&mut document.core.edits, &output.events, view)
     }
 
     /// A changed recipe needs a new preview. Selection and overlay changes do not: the tint is
@@ -525,81 +341,12 @@ impl RohditorApp {
     }
 
     /// One panel action. Returns whether the recipe changed.
-    fn apply_mask_action(&mut self, action: MasksAction) -> bool {
+    fn apply_mask_action(&mut self, action: MaskAction) -> bool {
         let (Some(document), Some(session)) = (self.document.as_mut(), self.tool.masks_mut())
         else {
             return false;
         };
-        let edits = &mut document.core.edits;
-        let recipe = edits.recipe().clone();
-        match action {
-            MasksAction::SelectLayer(layer) => session.select_layer(&recipe, layer),
-            MasksAction::SelectComponent(component) => session.select_component(&recipe, component),
-            MasksAction::NewLayer(shape) => session.create_layer(shape),
-            MasksAction::NewComponent(shape, mode) => session.create_component(shape, mode),
-            MasksAction::PaintSelected => {
-                session.paint_selected(&recipe);
-            }
-            MasksAction::NewRange { kind, new_layer } => {
-                if new_layer {
-                    // Clears the selection, so the range becomes a layer of its own. A color
-                    // range then waits for its first click on the image.
-                    session.create_layer(match kind {
-                        RangeKind::Luminance => MaskEditMode::Select,
-                        RangeKind::Color => MaskEditMode::PickColor,
-                    });
-                }
-                match kind {
-                    RangeKind::Luminance => {
-                        return install_discrete(edits, session.add_luminance_range(&recipe));
-                    }
-                    RangeKind::Color => session.start_color_pick(),
-                }
-            }
-            MasksAction::PickColor => session.start_color_pick(),
-            MasksAction::RangeSlider {
-                layer,
-                component,
-                slider,
-                value,
-                phase,
-            } => {
-                let next = LayerEdit::RangeSlider {
-                    component,
-                    slider,
-                    value,
-                }
-                .apply(&recipe, layer);
-                return apply_slider(edits, next, phase);
-            }
-            MasksAction::CancelCreate => {
-                session.cancel_create();
-            }
-            MasksAction::SetBrush(brush) => session.brush = brush,
-            MasksAction::SetErase(erase) => {
-                if session.is_painting() {
-                    session.mode = MaskEditMode::Paint { erase };
-                }
-            }
-            MasksAction::SetOverlay(show) => session.show_overlay = show,
-            MasksAction::DeleteLayer(layer) => {
-                return install_discrete(edits, session.delete_layer(&recipe, layer));
-            }
-            MasksAction::DeleteComponent(component) => {
-                let next = session
-                    .selected_layer
-                    .and_then(|layer| session.delete_component(&recipe, layer, component));
-                return install_discrete(edits, next);
-            }
-            MasksAction::Edit(layer, edit) => {
-                return install_discrete(edits, edit.apply(&recipe, layer));
-            }
-            MasksAction::Slider(layer, slider, value, phase) => {
-                let next = LayerEdit::Slider(slider, value).apply(&recipe, layer);
-                return apply_slider(edits, next, phase);
-            }
-        }
-        false
+        session.apply_action(&mut document.core.edits, action)
     }
 
     /// O, Delete, Backspace and Esc inside the Masks tool, and while painting `[`, `]` (size),
@@ -619,33 +366,26 @@ impl RohditorApp {
         let brush_steps = context.input(brush_key_steps);
         let mut changed = false;
         let mut used = true;
-        if painting && brush_steps != BrushKeySteps::default() {
-            if let Some(session) = self.tool.masks_mut() {
-                session.brush.step_radius(brush_steps.size);
-                session.brush.step_feather(brush_steps.feather);
-            }
+        let action = if painting && !brush_steps.is_empty() {
+            Some(MaskAction::BrushKeys(brush_steps))
         } else if painting && pressed(egui::Key::E) {
-            if let Some(session) = self.tool.masks_mut() {
-                session.toggle_erase();
-            }
+            Some(MaskAction::ToggleErase)
         } else if pressed(egui::Key::O) {
-            if let Some(session) = self.tool.masks_mut() {
-                session.show_overlay = !session.show_overlay;
-            }
+            Some(MaskAction::ToggleOverlay)
         } else if pressed(egui::Key::Delete) || pressed(egui::Key::Backspace) {
-            if let (Some(document), Some(session)) = (self.document.as_mut(), self.tool.masks_mut())
-            {
-                let recipe = document.core.edits.recipe().clone();
-                changed =
-                    install_discrete(&mut document.core.edits, session.delete_selected(&recipe));
-            }
+            Some(MaskAction::DeleteSelected)
         } else if pressed(egui::Key::Escape) {
             used = self
                 .tool
                 .masks_mut()
                 .is_some_and(MaskToolSession::cancel_create);
+            None
         } else {
             used = false;
+            None
+        };
+        if let Some(action) = action {
+            changed = self.apply_mask_action(action);
         }
         if used {
             self.finish_mask_interaction(context, changed);
@@ -657,288 +397,6 @@ impl RohditorApp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rohditor_edit::{LinearGradient, MaskPoint, MaskShape};
-    use rohditor_engine::tools::{LocalSlider, RangeSlider};
-    use rohditor_image::Orientation;
-
-    fn recipe_with_layer() -> EditRecipe {
-        let mut recipe = EditRecipe::default();
-        recipe.local.layers.push(rohditor_edit::MaskLayer {
-            id: 0,
-            name: "Mask 1".to_owned(),
-            enabled: true,
-            opacity: 1.0,
-            components: vec![rohditor_edit::MaskComponent {
-                mode: rohditor_edit::MaskMode::Add,
-                invert: false,
-                shape: MaskShape::Linear(LinearGradient {
-                    start: MaskPoint { x: 0.1, y: 0.1 },
-                    end: MaskPoint { x: 0.9, y: 0.9 },
-                }),
-            }],
-            settings: rohditor_edit::LocalSettings::default(),
-        });
-        recipe
-    }
-
-    fn drag(started: bool, stopped: bool) -> SliderPhase {
-        SliderPhase {
-            changed: true,
-            drag_started: started,
-            dragged: !stopped,
-            drag_stopped: stopped,
-            reset: false,
-        }
-    }
-
-    #[test]
-    fn dragging_a_luminance_handle_is_one_undo_step() {
-        let mut recipe = recipe_with_layer();
-        recipe.local.layers[0]
-            .components
-            .push(rohditor_edit::MaskComponent {
-                mode: rohditor_edit::MaskMode::Intersect,
-                invert: false,
-                shape: MaskShape::Luminance(rohditor_edit::LuminanceRange::default()),
-            });
-        let mut edits = EditSession::from_saved(recipe);
-        let step = |edits: &mut EditSession, value, phase| {
-            let next = LayerEdit::RangeSlider {
-                component: 1,
-                slider: RangeSlider::LuminanceLow,
-                value,
-            }
-            .apply(&edits.recipe().clone(), 0);
-            apply_slider(edits, next, phase)
-        };
-        let low = |edits: &EditSession| match &edits.recipe().local.layers[0].components[1].shape {
-            MaskShape::Luminance(range) => range.low,
-            other => panic!("not a luminance range: {other:?}"),
-        };
-        assert!(step(&mut edits, 0.2, drag(true, false)));
-        assert!(step(&mut edits, 0.4, drag(false, false)));
-        assert!(!step(
-            &mut edits,
-            0.4,
-            SliderPhase {
-                drag_stopped: true,
-                ..SliderPhase::default()
-            }
-        ));
-        assert_eq!(low(&edits), 0.4);
-        assert!(edits.undo());
-        assert_eq!(low(&edits), 0.0);
-        assert!(!edits.can_undo());
-    }
-
-    #[test]
-    fn a_slider_drag_is_one_undo_step_and_undo_restores_the_value() {
-        let mut edits = EditSession::from_saved(recipe_with_layer());
-        let step = |edits: &mut EditSession, value, phase| {
-            let next =
-                LayerEdit::Slider(LocalSlider::Exposure, value).apply(&edits.recipe().clone(), 0);
-            apply_slider(edits, next, phase)
-        };
-        assert!(step(&mut edits, 0.2, drag(true, false)));
-        assert!(step(&mut edits, 0.5, drag(false, false)));
-        // Releasing without moving ends the gesture without a further change.
-        assert!(!step(
-            &mut edits,
-            0.5,
-            SliderPhase {
-                drag_stopped: true,
-                ..SliderPhase::default()
-            }
-        ));
-        assert_eq!(edits.recipe().local.layers[0].settings.exposure_ev, 0.5);
-        assert!(edits.undo());
-        assert_eq!(edits.recipe().local.layers[0].settings.exposure_ev, 0.0);
-        assert!(!edits.can_undo());
-    }
-
-    #[test]
-    fn a_typed_value_is_a_single_discrete_edit() {
-        let mut edits = EditSession::from_saved(recipe_with_layer());
-        let next = LayerEdit::Slider(LocalSlider::Opacity, 0.4).apply(edits.recipe(), 0);
-        let typed = SliderPhase {
-            changed: true,
-            ..SliderPhase::default()
-        };
-        assert!(apply_slider(&mut edits, next, typed));
-        assert!(edits.undo());
-        assert_eq!(edits.recipe().local.layers[0].opacity, 1.0);
-    }
-
-    fn view() -> MaskView {
-        MaskView {
-            geometry: OutputGeometry::new(600, 400, Orientation::Normal, None)
-                .expect("valid geometry"),
-            screen_scale: 1.0,
-        }
-    }
-
-    #[test]
-    fn a_press_that_grabs_nothing_leaves_no_gesture_open() {
-        let mut edits = EditSession::from_saved(recipe_with_layer());
-        let mut session = MaskToolSession::default();
-        // Select mode with nothing selected: nothing to grab, and the drag that follows moves
-        // nothing.
-        let output = MaskOverlayOutput {
-            press: Some((0.5, 0.5)),
-            drag_to: vec![(0.6, 0.6)],
-            ..MaskOverlayOutput::default()
-        };
-        assert!(!drive_pointer(&mut edits, &mut session, &output, &view()));
-        assert!(!edits.gesture_active());
-        assert!(!session.is_dragging());
-        // A release without a press is harmless too.
-        let release = MaskOverlayOutput {
-            release: true,
-            ..MaskOverlayOutput::default()
-        };
-        assert!(!drive_pointer(&mut edits, &mut session, &release, &view()));
-        assert!(!edits.can_undo());
-    }
-
-    #[test]
-    fn drawing_a_gradient_is_one_undo_step() {
-        let mut edits = EditSession::from_saved(EditRecipe::default());
-        let mut session = MaskToolSession::default();
-        session.create_layer(MaskEditMode::CreateLinear);
-        let press = MaskOverlayOutput {
-            press: Some((0.2, 0.5)),
-            drag_to: vec![(0.4, 0.5)],
-            ..MaskOverlayOutput::default()
-        };
-        assert!(drive_pointer(&mut edits, &mut session, &press, &view()));
-        assert!(edits.gesture_active());
-        let drag = MaskOverlayOutput {
-            drag_to: vec![(0.8, 0.5)],
-            ..MaskOverlayOutput::default()
-        };
-        assert!(drive_pointer(&mut edits, &mut session, &drag, &view()));
-        let release = MaskOverlayOutput {
-            release: true,
-            ..MaskOverlayOutput::default()
-        };
-        drive_pointer(&mut edits, &mut session, &release, &view());
-        assert!(!edits.gesture_active());
-        assert_eq!(edits.recipe().local.layers.len(), 1);
-        assert!(edits.undo());
-        assert!(edits.recipe().local.layers.is_empty());
-        assert!(!edits.can_undo());
-    }
-
-    fn paint_session() -> MaskToolSession {
-        let mut session = MaskToolSession::default();
-        session.create_layer(MaskEditMode::Paint { erase: false });
-        session
-    }
-
-    #[test]
-    fn a_stroke_is_one_undo_step_through_the_pointer() {
-        let mut edits = EditSession::from_saved(EditRecipe::default());
-        let mut session = paint_session();
-        let press = MaskOverlayOutput {
-            press: Some((0.2, 0.5)),
-            drag_to: vec![(0.3, 0.5), (0.4, 0.5)],
-            ..MaskOverlayOutput::default()
-        };
-        assert!(drive_pointer(&mut edits, &mut session, &press, &view()));
-        assert!(edits.gesture_active());
-        let release = MaskOverlayOutput {
-            drag_to: vec![(0.6, 0.5)],
-            release: true,
-            ..MaskOverlayOutput::default()
-        };
-        assert!(drive_pointer(&mut edits, &mut session, &release, &view()));
-        assert!(!edits.gesture_active());
-        assert_eq!(edits.recipe().local.layers.len(), 1);
-        // The tool stays in painting for the next stroke.
-        assert!(session.is_painting());
-
-        assert!(edits.undo());
-        assert_eq!(*edits.recipe(), EditRecipe::default());
-        assert!(!edits.can_undo());
-    }
-
-    #[test]
-    fn a_click_that_is_pressed_and_released_in_one_frame_paints_a_dab() {
-        let mut edits = EditSession::from_saved(EditRecipe::default());
-        let mut session = paint_session();
-        let click = MaskOverlayOutput {
-            press: Some((0.5, 0.5)),
-            release: true,
-            ..MaskOverlayOutput::default()
-        };
-        assert!(drive_pointer(&mut edits, &mut session, &click, &view()));
-        assert!(!edits.gesture_active());
-        assert!(!session.is_dragging());
-        let MaskShape::Brush(brush) = &edits.recipe().local.layers[0].components[0].shape else {
-            panic!("a brush layer");
-        };
-        assert_eq!(brush.strokes[0].points.len(), 1);
-    }
-
-    #[test]
-    fn holding_alt_at_the_press_erases_from_the_selected_brush() {
-        let mut edits = EditSession::from_saved(EditRecipe::default());
-        let mut session = paint_session();
-        let paint = MaskOverlayOutput {
-            press: Some((0.2, 0.5)),
-            drag_to: vec![(0.6, 0.5)],
-            release: true,
-            ..MaskOverlayOutput::default()
-        };
-        drive_pointer(&mut edits, &mut session, &paint, &view());
-        let erase = MaskOverlayOutput {
-            press: Some((0.3, 0.5)),
-            drag_to: vec![(0.4, 0.5)],
-            release: true,
-            erase_held: true,
-            ..MaskOverlayOutput::default()
-        };
-        assert!(drive_pointer(&mut edits, &mut session, &erase, &view()));
-        let MaskShape::Brush(brush) = &edits.recipe().local.layers[0].components[0].shape else {
-            panic!("a brush layer");
-        };
-        let erases: Vec<bool> = brush.strokes.iter().map(|stroke| stroke.erase).collect();
-        assert_eq!(erases, [false, true]);
-        // Letting go of Alt is back to painting; the mode was never changed.
-        assert_eq!(session.mode, MaskEditMode::Paint { erase: false });
-    }
-
-    #[test]
-    fn a_brush_press_that_hits_a_limit_leaves_no_gesture_open() {
-        let mut recipe = EditRecipe::default();
-        recipe.local.layers.push(rohditor_edit::MaskLayer {
-            components: vec![rohditor_edit::MaskComponent {
-                mode: rohditor_edit::MaskMode::Add,
-                invert: false,
-                shape: MaskShape::Brush(rohditor_edit::BrushMask {
-                    strokes: vec![rohditor_edit::BrushStroke {
-                        points: vec![MaskPoint { x: 0.5, y: 0.5 }; rohditor_edit::MAX_BRUSH_POINTS],
-                        radius: 0.05,
-                        feather: 0.5,
-                        flow: 1.0,
-                        erase: false,
-                    }],
-                }),
-            }],
-            ..recipe_with_layer().local.layers.remove(0)
-        });
-        let mut edits = EditSession::from_saved(recipe);
-        let mut session = paint_session();
-        let press = MaskOverlayOutput {
-            press: Some((0.5, 0.5)),
-            drag_to: vec![(0.6, 0.5)],
-            ..MaskOverlayOutput::default()
-        };
-        assert!(!drive_pointer(&mut edits, &mut session, &press, &view()));
-        assert!(!edits.gesture_active());
-        assert!(session.limit_reached().is_some());
-        assert!(!edits.can_undo());
-    }
 
     fn keys(events: Vec<(egui::Key, egui::Modifiers)>) -> BrushKeySteps {
         let events = events
@@ -991,48 +449,5 @@ mod tests {
             keys(vec![(egui::Key::CloseBracket, egui::Modifiers::CTRL)]),
             BrushKeySteps::default()
         );
-    }
-
-    #[test]
-    fn the_tint_depends_on_the_shape_and_frame_but_not_on_sliders() {
-        let policy = RawCropPolicy::default();
-        let recipe = recipe_with_layer();
-        let source = TintSource::new(&recipe, &recipe.local.layers[0], policy, None);
-        let still_matches = |recipe: &EditRecipe, policy| {
-            source.matches(recipe, &recipe.local.layers[0], policy, None)
-        };
-        assert!(still_matches(&recipe, policy));
-
-        let slider = LayerEdit::Slider(LocalSlider::Exposure, 1.0)
-            .apply(&recipe, 0)
-            .expect("changes the layer");
-        assert!(still_matches(&slider, policy));
-        let opacity = LayerEdit::Slider(LocalSlider::Opacity, 0.3)
-            .apply(&recipe, 0)
-            .expect("changes the layer");
-        assert!(still_matches(&opacity, policy));
-
-        let mut moved = recipe.clone();
-        moved.local.layers[0].components[0].invert = true;
-        assert!(!still_matches(&moved, policy));
-        let mut turned = recipe.clone();
-        turned.geometry.orientation_override = Some(Orientation::Rotate90);
-        assert!(!still_matches(&turned, policy));
-        assert!(!still_matches(&recipe, RawCropPolicy::ActiveArea));
-    }
-
-    #[test]
-    fn the_tint_of_a_range_layer_is_tied_to_the_recipe_revision_it_was_measured_at() {
-        let policy = RawCropPolicy::default();
-        let recipe = recipe_with_layer();
-        let layer = &recipe.local.layers[0];
-        let measured = TintSource::new(&recipe, layer, policy, Some(4));
-        // The same recipe at another revision may look different (exposure, white balance), and a
-        // tint of a layer the recipe alone determines is never the tint of a measured one.
-        assert!(measured.matches(&recipe, layer, policy, Some(4)));
-        assert!(!measured.matches(&recipe, layer, policy, Some(5)));
-        assert!(!measured.matches(&recipe, layer, policy, None));
-        let plain = TintSource::new(&recipe, layer, policy, None);
-        assert!(!plain.matches(&recipe, layer, policy, Some(4)));
     }
 }

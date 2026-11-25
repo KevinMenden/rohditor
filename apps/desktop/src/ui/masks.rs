@@ -1,8 +1,7 @@
 //! The Masks tool's panel: the layer list, the selected layer's components and its sliders.
 //!
 //! Presentation only. It shows a [`MasksPanelModel`] and reports what the user asked for as
-//! [`MasksAction`]s; `app/masks.rs` turns them into recipe edits through the engine's
-//! `MaskToolSession` and `LayerEdit`.
+//! [`MaskAction`]s; `app/masks.rs` hands them to the engine's `MaskToolSession`.
 
 use eframe::egui;
 use rohditor_edit::{
@@ -10,7 +9,8 @@ use rohditor_edit::{
 };
 use rohditor_edit::{MaskLayer, MaskMode, MaskShape};
 use rohditor_engine::tools::{
-    BRUSH_RADIUS_RANGE, BrushSettings, LayerEdit, LocalSlider, MaskEditMode, MaskLimit, RangeSlider,
+    BRUSH_RADIUS_RANGE, BrushSettings, LayerEdit, LocalSlider, MaskAction, MaskEditMode, MaskLimit,
+    RangeKind, SliderPhase,
 };
 
 use super::range_controls::{self, ComponentRef};
@@ -31,74 +31,15 @@ pub(crate) struct MasksPanelModel<'a> {
     pub limit: Option<MaskLimit>,
 }
 
-/// How a slider event relates to a drag, so the caller can make a whole drag one undo step.
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct SliderPhase {
-    pub changed: bool,
-    pub drag_started: bool,
-    pub dragged: bool,
-    pub drag_stopped: bool,
-    pub reset: bool,
-}
-
-/// The two ways to select by what the image looks like instead of where things are.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RangeKind {
-    Luminance,
-    Color,
-}
-
-impl RangeKind {
-    const ALL: [Self; 2] = [Self::Luminance, Self::Color];
-
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Luminance => "Luminance range",
-            Self::Color => "Color range",
-        }
+/// The label of a range kind in the "New mask" menus.
+const fn range_label(kind: RangeKind) -> &'static str {
+    match kind {
+        RangeKind::Luminance => "Luminance range",
+        RangeKind::Color => "Color range",
     }
 }
 
-#[derive(Debug, Clone)]
-pub(crate) enum MasksAction {
-    SelectLayer(u32),
-    SelectComponent(usize),
-    /// Start drawing a gradient (or painting a brush) into a new layer.
-    NewLayer(MaskEditMode),
-    /// Start drawing a gradient (or painting a brush) into the selected layer.
-    NewComponent(MaskEditMode, MaskMode),
-    /// Paint more strokes into the selected brush component.
-    PaintSelected,
-    /// Add a luminance or color range, as a new mask or as a component of the selected one.
-    /// A color range starts by picking its colors on the image.
-    NewRange {
-        kind: RangeKind,
-        new_layer: bool,
-    },
-    /// Pick the colors of the selected color range on the image.
-    PickColor,
-    /// A slider event of a range component (the luminance bar or the color tolerance).
-    RangeSlider {
-        layer: u32,
-        component: usize,
-        slider: RangeSlider,
-        value: f32,
-        phase: SliderPhase,
-    },
-    CancelCreate,
-    /// New brush settings, from the brush sliders.
-    SetBrush(BrushSettings),
-    /// Paint (`false`) or erase (`true`) with the brush.
-    SetErase(bool),
-    DeleteLayer(u32),
-    DeleteComponent(usize),
-    Edit(u32, LayerEdit),
-    /// A slider event with the new value.
-    Slider(u32, LocalSlider, f32, SliderPhase),
-    SetOverlay(bool),
-}
-
-pub(crate) fn show(ui: &mut egui::Ui, model: &MasksPanelModel<'_>) -> Vec<MasksAction> {
+pub(crate) fn show(ui: &mut egui::Ui, model: &MasksPanelModel<'_>) -> Vec<MaskAction> {
     let mut actions = Vec::new();
     widgets::section_header(ui, "Masks");
     show_layer_list(ui, model, &mut actions);
@@ -127,7 +68,7 @@ pub(crate) fn show(ui: &mut egui::Ui, model: &MasksPanelModel<'_>) -> Vec<MasksA
         .on_hover_text("Tint the selected mask red on the image (O). Always on while painting.")
         .changed()
     {
-        actions.push(MasksAction::SetOverlay(overlay));
+        actions.push(MaskAction::SetOverlay(overlay));
     }
     if let Some(limit) = model.limit {
         ui.add_space(4.0);
@@ -136,7 +77,7 @@ pub(crate) fn show(ui: &mut egui::Ui, model: &MasksPanelModel<'_>) -> Vec<MasksA
     actions
 }
 
-fn show_layer_list(ui: &mut egui::Ui, model: &MasksPanelModel<'_>, actions: &mut Vec<MasksAction>) {
+fn show_layer_list(ui: &mut egui::Ui, model: &MasksPanelModel<'_>, actions: &mut Vec<MaskAction>) {
     if model.layers.is_empty() {
         ui.label(
             egui::RichText::new("No masks yet. Create one below, then use it on the image.")
@@ -154,20 +95,20 @@ fn show_layer_list(ui: &mut egui::Ui, model: &MasksPanelModel<'_>, actions: &mut
                 .on_hover_text("Enable or disable this mask")
                 .changed()
             {
-                actions.push(MasksAction::Edit(layer.id, LayerEdit::Enabled(enabled)));
+                actions.push(MaskAction::Edit(layer.id, LayerEdit::Enabled(enabled)));
             }
             show_layer_name(ui, model, layer, actions);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.small_button("×").on_hover_text("Delete mask").clicked() {
-                    actions.push(MasksAction::DeleteLayer(layer.id));
+                    actions.push(MaskAction::DeleteLayer(layer.id));
                 }
                 let down = ui.add_enabled(index < last, egui::Button::new("↓").small());
                 if down.on_hover_text("Apply later").clicked() {
-                    actions.push(MasksAction::Edit(layer.id, LayerEdit::MoveDown));
+                    actions.push(MaskAction::Edit(layer.id, LayerEdit::MoveDown));
                 }
                 let up = ui.add_enabled(index > 0, egui::Button::new("↑").small());
                 if up.on_hover_text("Apply earlier").clicked() {
-                    actions.push(MasksAction::Edit(layer.id, LayerEdit::MoveUp));
+                    actions.push(MaskAction::Edit(layer.id, LayerEdit::MoveUp));
                 }
             });
         });
@@ -179,7 +120,7 @@ fn show_layer_name(
     ui: &mut egui::Ui,
     model: &MasksPanelModel<'_>,
     layer: &MaskLayer,
-    actions: &mut Vec<MasksAction>,
+    actions: &mut Vec<MaskAction>,
 ) {
     // Rename state lives in egui's temporary memory: (text, whether the field has been focused).
     let rename_id = ui.id().with(("mask_rename", layer.id));
@@ -191,7 +132,7 @@ fn show_layer_name(
         if label.double_clicked() {
             ui.data_mut(|data| data.insert_temp(rename_id, (layer.name.clone(), false)));
         } else if label.clicked() {
-            actions.push(MasksAction::SelectLayer(layer.id));
+            actions.push(MaskAction::SelectLayer(layer.id));
         }
         return;
     };
@@ -203,7 +144,7 @@ fn show_layer_name(
         ui.data_mut(|data| data.remove_temp::<(String, bool)>(rename_id));
         let cancelled = ui.input(|input| input.key_pressed(egui::Key::Escape));
         if !cancelled && !text.trim().is_empty() {
-            actions.push(MasksAction::Edit(
+            actions.push(MaskAction::Edit(
                 layer.id,
                 LayerEdit::Rename(text.trim().to_owned()),
             ));
@@ -213,7 +154,7 @@ fn show_layer_name(
     }
 }
 
-fn show_new_mask(ui: &mut egui::Ui, model: &MasksPanelModel<'_>, actions: &mut Vec<MasksAction>) {
+fn show_new_mask(ui: &mut egui::Ui, model: &MasksPanelModel<'_>, actions: &mut Vec<MaskAction>) {
     ui.add_space(4.0);
     let (label, hint) = match model.mode {
         MaskEditMode::Paint { .. } => ("Done", "Paint on the image. Esc stops."),
@@ -227,14 +168,14 @@ fn show_new_mask(ui: &mut egui::Ui, model: &MasksPanelModel<'_>, actions: &mut V
         ui.menu_button("New mask", |ui| {
             for (label, shape) in SHAPES {
                 if ui.button(label).clicked() {
-                    actions.push(MasksAction::NewLayer(shape));
+                    actions.push(MaskAction::NewLayer(shape));
                     ui.close();
                 }
             }
             ui.separator();
             for kind in RangeKind::ALL {
-                if ui.button(kind.label()).clicked() {
-                    actions.push(MasksAction::NewRange {
+                if ui.button(range_label(kind)).clicked() {
+                    actions.push(MaskAction::NewRange {
                         kind,
                         new_layer: true,
                     });
@@ -243,7 +184,7 @@ fn show_new_mask(ui: &mut egui::Ui, model: &MasksPanelModel<'_>, actions: &mut V
             }
         });
         if model.mode != MaskEditMode::Select && ui.button(label).clicked() {
-            actions.push(MasksAction::CancelCreate);
+            actions.push(MaskAction::CancelCreate);
         }
     });
     if model.mode != MaskEditMode::Select {
@@ -272,14 +213,14 @@ const fn painting(mode: MaskEditMode) -> Option<bool> {
 
 /// Size, feather and flow of the brush, and whether it erases. These are authoring state: the
 /// next stroke copies them, strokes already painted keep theirs.
-fn show_brush(ui: &mut egui::Ui, model: &MasksPanelModel<'_>, actions: &mut Vec<MasksAction>) {
+fn show_brush(ui: &mut egui::Ui, model: &MasksPanelModel<'_>, actions: &mut Vec<MaskAction>) {
     let mut erase = painting(model.mode).unwrap_or(false);
     if ui
         .checkbox(&mut erase, "Erase")
         .on_hover_text("Remove from the mask instead of adding to it (E). Hold Alt to flip it.")
         .changed()
     {
-        actions.push(MasksAction::SetErase(erase));
+        actions.push(MaskAction::SetErase(erase));
     }
 
     let mut brush = model.brush;
@@ -313,7 +254,7 @@ fn show_brush(ui: &mut egui::Ui, model: &MasksPanelModel<'_>, actions: &mut Vec<
     };
     changed |= brush_slider(ui, &mut brush.flow, spec("Flow", flow, 0, 0.01));
     if changed {
-        actions.push(MasksAction::SetBrush(brush));
+        actions.push(MaskAction::SetBrush(brush));
     }
     ui.label(
         egui::RichText::new("[ ] size · Shift+[ ] feather · E erase · hold Alt to flip erase")
@@ -354,14 +295,14 @@ fn show_components(
     ui: &mut egui::Ui,
     model: &MasksPanelModel<'_>,
     layer: &MaskLayer,
-    actions: &mut Vec<MasksAction>,
+    actions: &mut Vec<MaskAction>,
 ) {
     for (index, component) in layer.components.iter().enumerate() {
         ui.horizontal(|ui| {
             let selected = model.selected_component == Some(index);
             let label = format!("{}. {}", index + 1, shape_name(&component.shape));
             if ui.selectable_label(selected, label).clicked() {
-                actions.push(MasksAction::SelectComponent(index));
+                actions.push(MaskAction::SelectComponent(index));
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
@@ -369,7 +310,7 @@ fn show_components(
                     .on_hover_text("Delete component")
                     .clicked()
                 {
-                    actions.push(MasksAction::DeleteComponent(index));
+                    actions.push(MaskAction::DeleteComponent(index));
                 }
                 let mut invert = component.invert;
                 if ui
@@ -377,7 +318,7 @@ fn show_components(
                     .on_hover_text("Select everything outside this shape")
                     .changed()
                 {
-                    actions.push(MasksAction::Edit(
+                    actions.push(MaskAction::Edit(
                         layer.id,
                         LayerEdit::ComponentInvert {
                             component: index,
@@ -399,7 +340,7 @@ fn show_components(
                             }
                         });
                     if mode != component.mode {
-                        actions.push(MasksAction::Edit(
+                        actions.push(MaskAction::Edit(
                             layer.id,
                             LayerEdit::ComponentMode {
                                 component: index,
@@ -418,7 +359,7 @@ fn show_components(
             ui.menu_button(mode_name(mode), |ui| {
                 for (label, shape) in SHAPES {
                     if ui.button(label).clicked() {
-                        actions.push(MasksAction::NewComponent(shape, mode));
+                        actions.push(MaskAction::NewComponent(shape, mode));
                         ui.close();
                     }
                 }
@@ -427,8 +368,8 @@ fn show_components(
         // Ranges refine what the other components select, so they intersect by default.
         ui.menu_button("Refine", |ui| {
             for kind in RangeKind::ALL {
-                if ui.button(kind.label()).clicked() {
-                    actions.push(MasksAction::NewRange {
+                if ui.button(range_label(kind)).clicked() {
+                    actions.push(MaskAction::NewRange {
                         kind,
                         new_layer: false,
                     });
@@ -448,7 +389,7 @@ fn show_components(
                 .on_hover_text("Paint more strokes into the selected brush")
                 .clicked()
         {
-            actions.push(MasksAction::PaintSelected);
+            actions.push(MaskAction::PaintSelected);
         }
     });
 }
@@ -458,7 +399,7 @@ fn show_range_controls(
     ui: &mut egui::Ui,
     model: &MasksPanelModel<'_>,
     layer: &MaskLayer,
-    actions: &mut Vec<MasksAction>,
+    actions: &mut Vec<MaskAction>,
 ) {
     let Some(index) = model.selected_component else {
         return;
@@ -523,7 +464,7 @@ fn show_sliders(
     ui: &mut egui::Ui,
     layers: &[MaskLayer],
     layer: &MaskLayer,
-    actions: &mut Vec<MasksAction>,
+    actions: &mut Vec<MaskAction>,
 ) {
     // A layer that already has detail settings may keep changing them; another one would need
     // a further copy of the image.
@@ -563,7 +504,7 @@ fn show_sliders(
             || widget.drag_stopped()
             || response.reset_clicked
         {
-            actions.push(MasksAction::Slider(
+            actions.push(MaskAction::Slider(
                 layer.id,
                 slider,
                 value,
