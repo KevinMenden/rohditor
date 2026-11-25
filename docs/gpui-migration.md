@@ -118,6 +118,10 @@ Done when the moved tests pass and painting feels smooth on real RAWs.
 ## Stage 6: Library, export, settings
 
 - [ ] 6.1 Library: file tree, albums, filmstrip and sorting, tracked in #233 (no grid).
+  - [x] L.1 Engine: catalog sources, folder tree, albums, selection by path.
+  - [ ] L.2 File tree panel.
+  - [ ] L.3 Filmstrip, sorting, keyboard navigation.
+  - [ ] L.4 Albums panel.
 - [ ] 6.2 Full export dialog.
 - [ ] 6.3 Settings, neural model, diagnostics.
 - [ ] 6.4 Startup options and `--screenshot`.

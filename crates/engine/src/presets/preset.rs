@@ -4,54 +4,21 @@ use rohditor_edit::{EditError, EditRecipe, RecipeSection, blend_sections, copy_s
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-const MAX_NAME_CHARS: usize = 64;
-/// The slug becomes a file name (plus `.json`); file systems allow 255 bytes,
-/// and non-ASCII letters take up to 4 bytes each.
-const MAX_SLUG_BYTES: usize = 128;
+use crate::named_files::{NamedFile, NamedFileError, checked_name};
+
+const PRESET_FORMAT_VERSION: u32 = 1;
 
 /// Why a preset could not be created, stored or found.
 #[derive(Debug, Error)]
 pub enum PresetError {
-    #[error("preset name is not usable: {0}")]
-    InvalidName(&'static str),
-
     #[error("a preset must cover at least one section")]
     NoSections,
 
     #[error("preset recipe is invalid: {0}")]
     InvalidRecipe(#[from] EditError),
 
-    #[error("a preset named \"{0}\" already exists")]
-    NameTaken(String),
-
-    #[error("{0} already exists in the presets folder (perhaps a preset that could not be loaded)")]
-    FileExists(std::path::PathBuf),
-
-    #[error("at most {0} presets can be stored")]
-    TooMany(usize),
-
-    #[error("there is no preset named \"{0}\"")]
-    NotFound(String),
-
-    #[error("the application has no configuration directory to store presets in")]
-    NoDirectory,
-
-    #[error("could not write preset {path}: {source}")]
-    Write {
-        path: std::path::PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-
-    #[error("could not remove preset file {path}: {source}")]
-    Remove {
-        path: std::path::PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-
-    #[error("could not serialize preset: {0}")]
-    Serialize(#[from] serde_json::Error),
+    #[error(transparent)]
+    File(#[from] NamedFileError),
 }
 
 /// How a preset is applied to a photo's recipe.
@@ -133,88 +100,53 @@ impl Preset {
             .collect();
         blend_sections(base, &self.recipe, &sections, options.amount)
     }
+}
 
-    /// The same preset under another name.
-    pub(super) fn renamed(&self, name: &str) -> Result<Self, PresetError> {
-        Ok(Self {
-            name: checked_name(name)?,
-            ..self.clone()
-        })
+impl NamedFile for Preset {
+    const DIRECTORY: &'static str = "presets";
+    const MAX_FILES: usize = 256;
+    const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
+
+    fn name(&self) -> &str {
+        &self.name
     }
 
-    pub(super) fn to_file(&self) -> PresetFile {
-        PresetFile {
+    fn renamed(&self, name: String) -> Self {
+        Self {
+            name,
+            ..self.clone()
+        }
+    }
+
+    fn to_json(&self) -> serde_json::Result<Vec<u8>> {
+        serde_json::to_vec_pretty(&PresetFile {
             format_version: PRESET_FORMAT_VERSION,
             name: self.name.clone(),
             sections: self.sections.clone(),
             recipe: self.recipe.clone(),
-        }
+        })
     }
 
-    pub(super) fn from_file(file: PresetFile) -> Result<Self, FileError> {
+    fn from_json(json: &[u8]) -> Result<Self, String> {
+        let file: PresetFile = serde_json::from_slice(json).map_err(|error| error.to_string())?;
         if file.format_version != PRESET_FORMAT_VERSION {
-            return Err(FileError::Version(file.format_version));
+            return Err(format!(
+                "unsupported format version {}",
+                file.format_version
+            ));
         }
-        Self::new(&file.name, &file.recipe, &file.sections).map_err(FileError::Invalid)
+        Self::new(&file.name, &file.recipe, &file.sections).map_err(|error| error.to_string())
     }
 }
-
-pub(super) const PRESET_FORMAT_VERSION: u32 = 1;
 
 /// The JSON layout of one preset file.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct PresetFile {
+struct PresetFile {
     format_version: u32,
     name: String,
     sections: Vec<RecipeSection>,
     recipe: EditRecipe,
-}
-
-/// Why a preset file was rejected on load.
-#[derive(Debug, Error)]
-pub(super) enum FileError {
-    #[error("unsupported format version {0}")]
-    Version(u32),
-    #[error("{0}")]
-    Invalid(PresetError),
-}
-
-/// The file stem a name is stored under, and the key for telling names apart:
-/// lowercase letters and digits, with runs of anything else as one `-`.
-/// Names that differ only in case or punctuation therefore count as the same.
-pub(super) fn slug(name: &str) -> String {
-    let mut slug = String::new();
-    for character in name.chars() {
-        if character.is_alphanumeric() {
-            slug.extend(character.to_lowercase());
-        } else if !slug.is_empty() && !slug.ends_with('-') {
-            slug.push('-');
-        }
-    }
-    slug.truncate(slug.trim_end_matches('-').len());
-    slug
-}
-
-fn checked_name(name: &str) -> Result<String, PresetError> {
-    let name = name.trim();
-    if name.is_empty() {
-        return Err(PresetError::InvalidName("it is empty"));
-    }
-    if name.chars().count() > MAX_NAME_CHARS {
-        return Err(PresetError::InvalidName("it is longer than 64 characters"));
-    }
-    if name.chars().any(char::is_control) {
-        return Err(PresetError::InvalidName("it contains a control character"));
-    }
-    let slug = slug(name);
-    if slug.is_empty() {
-        return Err(PresetError::InvalidName("it has no letters or digits"));
-    }
-    if slug.len() > MAX_SLUG_BYTES {
-        return Err(PresetError::InvalidName("its file name would be too long"));
-    }
-    Ok(name.to_owned())
 }
 
 fn canonical_sections(sections: &[RecipeSection]) -> Vec<RecipeSection> {

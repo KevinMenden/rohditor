@@ -82,7 +82,7 @@ impl Session {
             return Err("There is no open photo".to_owned());
         };
         let result = Preset::new(name, document.edits.recipe(), sections)
-            .and_then(|preset| self.presets.store.save(preset));
+            .and_then(|preset| Ok(self.presets.store.save(preset)?));
         self.presets_changed(result, cx)
     }
 
@@ -103,7 +103,7 @@ impl Session {
 
     fn presets_changed(
         &mut self,
-        result: Result<(), rohditor_engine::presets::PresetError>,
+        result: Result<(), impl std::fmt::Display>,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         self.presets.list();

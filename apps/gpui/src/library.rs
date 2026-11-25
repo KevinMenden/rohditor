@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::{Result, anyhow};
 use gpui::{Context, Entity, Task};
 use rohditor_engine::catalog::library::LibraryState;
-use rohditor_engine::catalog::{CatalogCoordinator, CatalogState};
+use rohditor_engine::catalog::{CatalogCoordinator, CatalogSource, CatalogState};
 use rohditor_engine::session as engine_session;
 
 use crate::atlas_image::{AtlasImage, RetiredImages};
@@ -72,7 +72,7 @@ impl Library {
     }
 
     pub fn folder_name(&self) -> Option<String> {
-        self.catalog.folder_name()
+        self.catalog.title()
     }
 
     /// How many photos there are. Positions below count in display order.
@@ -101,21 +101,17 @@ impl Library {
         self.error.as_deref().or(self.catalog.failure())
     }
 
-    /// The photo after or before `current`, or the first one if `current` is not in the folder.
+    /// The photo after or before `current`, or the first one if `current` is not shown.
     pub fn adjacent(&self, current: Option<&Path>, forward: bool) -> Option<PathBuf> {
-        let active = current.and_then(|path| self.catalog.entry_index_for_path(path));
-        let position = match active {
-            None => 0,
-            active => self.state.adjacent_grid_index(active, forward)?,
-        };
-        self.path(position).map(Path::to_path_buf)
+        let path = self.state.adjacent_path(&self.catalog, current, forward);
+        path.map(Path::to_path_buf)
     }
 
     pub fn open_folder(&mut self, folder: PathBuf, cx: &mut Context<Self>) {
         if let Some(config) = &self.config {
             engine_session::store_last_folder(config, &folder);
         }
-        self.error = self.coordinator.scan_folder(folder).err();
+        self.error = self.coordinator.show(CatalogSource::Folder(folder)).err();
         cx.notify();
     }
 

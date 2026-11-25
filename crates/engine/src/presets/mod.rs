@@ -7,9 +7,18 @@
 //! passes in (see [`PresetStore`]).
 
 mod preset;
-mod store;
 #[cfg(test)]
 mod tests;
 
 pub use preset::{ApplyOptions, Preset, PresetError};
-pub use store::PresetStore;
+
+use crate::named_files::NamedFiles;
+
+/// The saved presets, loaded from `<config directory>/presets`.
+pub type PresetStore = NamedFiles<Preset>;
+
+impl PresetStore {
+    pub fn presets(&self) -> &[Preset] {
+        self.items()
+    }
+}

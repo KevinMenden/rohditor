@@ -8,7 +8,10 @@ mod scanner;
 mod thumbnail;
 
 pub use cache::{CacheError, CachedThumbnail, ThumbnailCache, ThumbnailCacheKey};
-pub use scanner::{CatalogEntry, SUPPORTED_EXTENSIONS, ScanError, scan_folder};
+pub use scanner::{
+    CatalogEntry, FolderListing, SUPPORTED_EXTENSIONS, ScanError, ScannedFile, list_folder,
+    scan_files, scan_folder,
+};
 pub use thumbnail::{
     DEFAULT_THUMBNAIL_JPEG_QUALITY, DEFAULT_THUMBNAIL_LONG_EDGE, GeneratedThumbnail,
     PlaceholderReason, Thumbnail, ThumbnailError, ThumbnailGenerator, ThumbnailOptions,

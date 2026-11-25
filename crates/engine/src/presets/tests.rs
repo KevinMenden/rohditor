@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use rohditor_edit::{EditRecipe, RecipeSection, WhiteBalance};
 
 use super::*;
+use crate::named_files::NamedFileError;
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
@@ -210,7 +211,7 @@ fn names_are_trimmed_and_checked() {
         assert!(
             matches!(
                 Preset::new(bad, &recipe, &section),
-                Err(PresetError::InvalidName(_))
+                Err(PresetError::File(NamedFileError::InvalidName(_)))
             ),
             "{bad:?} should be rejected"
         );
@@ -252,7 +253,10 @@ fn a_duplicate_name_is_refused_and_leaves_the_first_preset() {
     store.save(warm_look()).unwrap();
 
     let other = Preset::new("warm-look", &EditRecipe::default(), &[RecipeSection::Tone]).unwrap();
-    assert!(matches!(store.save(other), Err(PresetError::NameTaken(_))));
+    assert!(matches!(
+        store.save(other),
+        Err(NamedFileError::NameTaken(_))
+    ));
     assert_eq!(store.presets().len(), 1);
     assert_eq!(store.get("Warm look"), Some(&warm_look()));
 }
@@ -272,7 +276,7 @@ fn delete_removes_the_file() {
     );
     assert!(matches!(
         store.delete("Warm look"),
-        Err(PresetError::NotFound(_))
+        Err(NamedFileError::NotFound(_))
     ));
 }
 
@@ -287,7 +291,7 @@ fn rename_moves_the_file_and_refuses_taken_names() {
 
     assert!(matches!(
         store.rename("Warm look", "other"),
-        Err(PresetError::NameTaken(_))
+        Err(NamedFileError::NameTaken(_))
     ));
 
     store.rename("Warm look", "Golden hour").unwrap();
@@ -341,7 +345,7 @@ fn without_a_config_directory_the_store_is_empty_and_cannot_save() {
     assert!(store.presets().is_empty());
     assert!(matches!(
         store.save(warm_look()),
-        Err(PresetError::NoDirectory)
+        Err(NamedFileError::NoDirectory)
     ));
     assert!(store.presets().is_empty());
 }
@@ -362,7 +366,7 @@ fn a_failed_rename_keeps_the_old_name_and_leaves_one_file() {
 
     assert!(matches!(
         store.rename("Warm look", "Golden hour"),
-        Err(PresetError::Remove { .. })
+        Err(NamedFileError::Remove { .. })
     ));
     assert!(store.get("Warm look").is_some());
     assert!(store.get("Golden hour").is_none());
@@ -380,10 +384,13 @@ fn a_file_that_was_skipped_on_load_is_never_overwritten() {
     let mut store = PresetStore::load(Some(directory.path()));
     assert_eq!(store.warnings().len(), 1);
     let moody = Preset::new("Moody", &edited(), &[RecipeSection::Tone]).unwrap();
-    assert!(matches!(store.save(moody), Err(PresetError::FileExists(_))));
+    assert!(matches!(
+        store.save(moody),
+        Err(NamedFileError::FileExists(_))
+    ));
     assert!(matches!(
         store.rename("Warm look", "MOODY"),
-        Err(PresetError::FileExists(_))
+        Err(NamedFileError::FileExists(_))
     ));
     assert_eq!(
         fs::read(folder.join("moody.json")).unwrap(),
@@ -404,6 +411,6 @@ fn the_store_holds_a_bounded_number_of_presets() {
     let one_more = Preset::new("one more", &recipe, &[RecipeSection::Tone]).unwrap();
     assert!(matches!(
         store.save(one_more),
-        Err(PresetError::TooMany(256))
+        Err(NamedFileError::TooMany(256))
     ));
 }

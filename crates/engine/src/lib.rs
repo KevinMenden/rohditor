@@ -9,13 +9,16 @@
 //! device, and pass configuration directories in explicitly. This crate does
 //! not wrap or re-export the lower crates; depend on them directly.
 
+pub mod albums;
 pub mod autosave;
 pub mod camera_profiles;
 pub mod catalog;
 pub mod coordinator;
 pub mod document;
 pub mod export_options;
+pub mod library_file;
 pub mod models;
+pub mod named_files;
 pub mod open_document;
 pub mod persistence;
 pub mod presets;

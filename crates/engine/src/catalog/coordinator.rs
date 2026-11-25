@@ -1,81 +1,18 @@
-//! Background photo-catalog worker.
-//!
-//! Mirrors the render coordinator: the UI thread sends requests and drains
-//! events while a dedicated thread scans folders and fills thumbnails. The
-//! document/render pipeline stays untouched, and the catalog thread pauses
-//! while the document worker is busy so editing work is never starved.
+//! The frontend's handle on the catalog worker.
 
 use std::any::Any;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 
-use rohditor_catalog::{
-    CachedThumbnail, CatalogEntry, GeneratedThumbnail, PlaceholderReason, Thumbnail,
-    ThumbnailCache, ThumbnailGenerator, ThumbnailOptions, ThumbnailOutcome, scan_folder,
-};
-use rohditor_raw::{RawDecoder, RawError, RawSession, RawlerDecoder, SourceIdentity};
-use tracing::{info, warn};
+use rohditor_catalog::{ThumbnailCache, ThumbnailGenerator, ThumbnailOptions};
+use rohditor_raw::{RawDecoder, RawlerDecoder};
+use tracing::warn;
 
+use super::worker::{CatalogRequest, SharedDecoder, catalog_worker_loop, send_event};
+use super::{CatalogEvent, CatalogSource};
 use crate::wake::WakeFn;
-
-#[path = "catalog/library.rs"]
-pub mod library;
-#[path = "catalog/state.rs"]
-mod state;
-
-pub use state::{CatalogState, ThumbnailSlot};
-
-#[derive(Debug)]
-pub enum CatalogEvent {
-    ScanStarted {
-        folder: PathBuf,
-    },
-    ScanEntries {
-        folder: PathBuf,
-        entries: Vec<CatalogEntry>,
-    },
-    ScanFailed {
-        folder: PathBuf,
-        reason: String,
-    },
-    ThumbnailReady {
-        folder: PathBuf,
-        path: PathBuf,
-        identity: SourceIdentity,
-        outcome: ThumbnailResult,
-        captured_at: Option<String>,
-    },
-    WorkerStopped {
-        message: String,
-    },
-}
-
-/// Outcome of one thumbnail attempt, ready for a UI slot.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ThumbnailResult {
-    Ready(Thumbnail),
-    Placeholder(PlaceholderReason),
-    Failed(String),
-}
-
-#[derive(Debug)]
-enum CatalogRequest {
-    ScanFolder(PathBuf),
-    SetPaused(bool),
-    Shutdown,
-}
-
-/// `ThumbnailGenerator` owns its decoder, so the shared worker decoder is
-/// wrapped in a sized newtype that forwards to the trait object.
-struct SharedDecoder(Arc<dyn RawDecoder>);
-
-impl RawDecoder for SharedDecoder {
-    fn open(&self, path: &Path) -> Result<Box<dyn RawSession>, RawError> {
-        self.0.open(path)
-    }
-}
 
 pub struct CatalogCoordinator {
     requests: mpsc::Sender<CatalogRequest>,
@@ -137,10 +74,19 @@ impl CatalogCoordinator {
         })
     }
 
-    /// Start scanning one folder, replacing any previous catalog fill.
-    pub fn scan_folder(&self, folder: PathBuf) -> Result<(), String> {
+    /// Show a folder or album, replacing what was scanned before.
+    pub fn show(&self, source: CatalogSource) -> Result<(), String> {
+        self.send(CatalogRequest::Show(source))
+    }
+
+    /// List a folder for the folder tree, also while paused.
+    pub fn list_folder(&self, folder: PathBuf) -> Result<(), String> {
+        self.send(CatalogRequest::ListFolder(folder))
+    }
+
+    fn send(&self, request: CatalogRequest) -> Result<(), String> {
         self.requests
-            .send(CatalogRequest::ScanFolder(folder))
+            .send(request)
             .map_err(|_| "the background catalog worker stopped unexpectedly".to_owned())
     }
 
@@ -175,211 +121,6 @@ impl Drop for CatalogCoordinator {
     }
 }
 
-struct CatalogWorker {
-    sender: mpsc::Sender<CatalogEvent>,
-    wake: WakeFn,
-    generator: ThumbnailGenerator<SharedDecoder>,
-    cache: Option<ThumbnailCache>,
-    options: ThumbnailOptions,
-    folder: Option<PathBuf>,
-    entries: Vec<CatalogEntry>,
-    /// Next index to fill; entries are visited once per folder scan.
-    cursor: usize,
-    paused: bool,
-}
-
-fn catalog_worker_loop(
-    requests: mpsc::Receiver<CatalogRequest>,
-    events: mpsc::Sender<CatalogEvent>,
-    wake: WakeFn,
-    generator: ThumbnailGenerator<SharedDecoder>,
-    cache: Option<ThumbnailCache>,
-) {
-    let mut worker = CatalogWorker {
-        sender: events,
-        wake,
-        generator,
-        cache,
-        options: ThumbnailOptions::default(),
-        folder: None,
-        entries: Vec::new(),
-        cursor: 0,
-        paused: false,
-    };
-    while let Ok(request) = requests.recv() {
-        if !worker.handle_request(request) {
-            break;
-        }
-        while let Ok(request) = requests.try_recv() {
-            if !worker.handle_request(request) {
-                return;
-            }
-        }
-        if !worker.fill(&requests) {
-            return;
-        }
-    }
-}
-
-impl CatalogWorker {
-    /// Returns `false` once the worker should stop.
-    fn handle_request(&mut self, request: CatalogRequest) -> bool {
-        match request {
-            CatalogRequest::ScanFolder(folder) => {
-                self.start_scan(folder);
-                true
-            }
-            CatalogRequest::SetPaused(paused) => {
-                self.paused = paused;
-                true
-            }
-            CatalogRequest::Shutdown => false,
-        }
-    }
-
-    fn start_scan(&mut self, folder: PathBuf) {
-        self.folder = Some(folder.clone());
-        self.entries.clear();
-        self.cursor = 0;
-        send_event(
-            &self.sender,
-            &self.wake,
-            CatalogEvent::ScanStarted {
-                folder: folder.clone(),
-            },
-        );
-        match scan_folder(&folder) {
-            Ok(entries) => {
-                self.entries = entries;
-                if let Some(cache) = &self.cache {
-                    let removed = cache.cleanup_folder(&folder, &self.entries);
-                    if removed > 0 {
-                        info!(
-                            removed,
-                            folder = %folder.display(),
-                            "removed stale catalog thumbnails"
-                        );
-                    }
-                }
-                send_event(
-                    &self.sender,
-                    &self.wake,
-                    CatalogEvent::ScanEntries {
-                        folder,
-                        entries: self.entries.clone(),
-                    },
-                );
-            }
-            Err(error) => {
-                send_event(
-                    &self.sender,
-                    &self.wake,
-                    CatalogEvent::ScanFailed {
-                        folder,
-                        reason: error.to_string(),
-                    },
-                );
-            }
-        }
-    }
-
-    /// Generate thumbnails one at a time while unpaused, interleaving request
-    /// handling so scans and pause changes take effect between files.
-    fn fill(&mut self, requests: &mpsc::Receiver<CatalogRequest>) -> bool {
-        while !self.paused {
-            let Some(index) = self.next_pending() else {
-                return true;
-            };
-            self.emit_thumbnail(index);
-            while let Ok(request) = requests.try_recv() {
-                if !self.handle_request(request) {
-                    return false;
-                }
-            }
-        }
-        true
-    }
-
-    fn next_pending(&mut self) -> Option<usize> {
-        if self.cursor < self.entries.len() {
-            let index = self.cursor;
-            self.cursor += 1;
-            Some(index)
-        } else {
-            None
-        }
-    }
-
-    fn emit_thumbnail(&self, index: usize) {
-        let Some(folder) = self.folder.clone() else {
-            return;
-        };
-        let entry = &self.entries[index];
-        let (outcome, captured_at) = self.generate(entry);
-        send_event(
-            &self.sender,
-            &self.wake,
-            CatalogEvent::ThumbnailReady {
-                folder,
-                path: entry.path().to_path_buf(),
-                identity: entry.source_identity(),
-                outcome,
-                captured_at,
-            },
-        );
-    }
-
-    /// Cache-first thumbnail generation; cache failures degrade to direct
-    /// generation instead of blocking the catalog. Capture dates travel with
-    /// the thumbnail, from either the cache or the fresh probe.
-    fn generate(&self, entry: &CatalogEntry) -> (ThumbnailResult, Option<String>) {
-        if let Some(cache) = &self.cache {
-            match cache.load(entry, self.options) {
-                Ok(Some(CachedThumbnail {
-                    thumbnail,
-                    captured_at,
-                })) => return (ThumbnailResult::Ready(thumbnail), captured_at),
-                Ok(None) => {}
-                Err(error) => {
-                    warn!(
-                        %error,
-                        path = %entry.path().display(),
-                        "catalog thumbnail cache read failed"
-                    );
-                }
-            }
-        }
-        match self.generator.generate(entry.path()) {
-            Ok(GeneratedThumbnail {
-                outcome: ThumbnailOutcome::Ready(thumbnail),
-                captured_at,
-            }) => {
-                if let Some(cache) = &self.cache
-                    && let Err(error) =
-                        cache.store(entry, self.options, &thumbnail, captured_at.as_deref())
-                {
-                    warn!(
-                        %error,
-                        path = %entry.path().display(),
-                        "catalog thumbnail cache write failed"
-                    );
-                }
-                (ThumbnailResult::Ready(thumbnail), captured_at)
-            }
-            Ok(GeneratedThumbnail {
-                outcome: ThumbnailOutcome::Placeholder(reason),
-                captured_at,
-            }) => (ThumbnailResult::Placeholder(reason), captured_at),
-            Err(error) => (ThumbnailResult::Failed(error.to_string()), None),
-        }
-    }
-}
-
-fn send_event(sender: &mpsc::Sender<CatalogEvent>, wake: &WakeFn, event: CatalogEvent) {
-    drop(sender.send(event));
-    wake();
-}
-
 fn panic_message(payload: &(dyn Any + Send)) -> String {
     if let Some(message) = payload.downcast_ref::<&str>() {
         (*message).to_owned()
@@ -393,46 +134,16 @@ fn panic_message(payload: &(dyn Any + Send)) -> String {
 #[cfg(test)]
 mod tests {
     use std::fs::{self, File};
-    use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
     use std::time::{Duration, Instant};
 
     use image::{Rgb, RgbImage};
     use rohditor_catalog::Thumbnail;
 
+    use rohditor_catalog::scan_folder;
+
     use super::*;
-
-    static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(0);
-
-    struct TestDirectory(PathBuf);
-
-    impl TestDirectory {
-        fn new() -> Self {
-            let id = NEXT_TEST_DIRECTORY.fetch_add(1, AtomicOrdering::Relaxed);
-            let path = std::env::temp_dir().join(format!(
-                "rohditor-desktop-catalog-{}-{id}",
-                std::process::id()
-            ));
-            fs::create_dir(&path).expect("create catalog test directory");
-            Self(path)
-        }
-
-        fn path(&self) -> &Path {
-            &self.0
-        }
-
-        fn create_arw(&self, name: &str) -> PathBuf {
-            let path = self.path().join(name);
-            File::create(&path).expect("create catalog test file");
-            path
-        }
-    }
-
-    impl Drop for TestDirectory {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
+    use crate::catalog::ThumbnailResult;
+    use crate::catalog::test_directory::TestDirectory;
 
     /// Collect catalog events until `done` matches, with a hard deadline.
     fn poll_events<F>(coordinator: &CatalogCoordinator, done: F) -> Vec<CatalogEvent>
@@ -485,17 +196,17 @@ mod tests {
 
         let catalog = coordinator(Some(ThumbnailCache::new(directory.path().join("thumbs"))));
         catalog
-            .scan_folder(directory.path().to_path_buf())
+            .show(CatalogSource::Folder(directory.path().to_path_buf()))
             .expect("request catalog scan");
 
         let events = poll_events(&catalog, |events| thumbnail_ready_count(events) >= 2);
         let names = events
             .iter()
             .filter_map(|event| match event {
-                CatalogEvent::ScanEntries { entries, .. } => Some(
-                    entries
+                CatalogEvent::ScanEntries { files, .. } => Some(
+                    files
                         .iter()
-                        .map(|entry| entry.file_name().to_owned())
+                        .map(|file| file.file_name().to_owned())
                         .collect::<Vec<_>>(),
                 ),
                 _ => None,
@@ -532,7 +243,7 @@ mod tests {
         let catalog = coordinator(Some(ThumbnailCache::new(directory.path().join("thumbs"))));
         catalog.set_paused(true);
         catalog
-            .scan_folder(directory.path().to_path_buf())
+            .show(CatalogSource::Folder(directory.path().to_path_buf()))
             .expect("request catalog scan");
 
         poll_events(&catalog, |events| {
@@ -555,7 +266,9 @@ mod tests {
         let file = directory.create_arw("single.arw");
 
         let catalog = coordinator(None);
-        catalog.scan_folder(file).expect("request catalog scan");
+        catalog
+            .show(CatalogSource::Folder(file))
+            .expect("request catalog scan");
         let events = poll_events(&catalog, |events| {
             events
                 .iter()
@@ -590,7 +303,7 @@ mod tests {
 
         let catalog = coordinator(Some(cache));
         catalog
-            .scan_folder(directory.path().to_path_buf())
+            .show(CatalogSource::Folder(directory.path().to_path_buf()))
             .expect("request catalog scan");
         let events = poll_events(&catalog, |events| thumbnail_ready_count(events) >= 2);
 
@@ -609,5 +322,98 @@ mod tests {
         }
         assert_eq!(ready_bytes, Some(expected.bytes().to_vec()));
         assert_eq!(failed, 1);
+    }
+
+    #[test]
+    fn an_album_shows_files_of_any_folder_and_keeps_their_cached_thumbnails() {
+        let directory = TestDirectory::new();
+        let other = TestDirectory::new();
+        let seeded = directory.create_arw("seeded.arw");
+        directory.create_arw("not_in_the_album.arw");
+        let second = other.create_arw("b.arw");
+        let gone = other.path().join("gone.arw");
+        let cache = ThumbnailCache::new(directory.path().join("thumbs"));
+        let options = ThumbnailOptions::default();
+        for entry in scan_folder(directory.path()).expect("scan test folder") {
+            cache
+                .store(&entry, options, &test_thumbnail(), None)
+                .expect("seed the thumbnail cache");
+        }
+        let cached = || {
+            fs::read_dir(directory.path().join("thumbs"))
+                .expect("read the cache")
+                .count()
+        };
+        let before = cached();
+
+        let catalog = coordinator(Some(cache.clone()));
+        catalog
+            .show(CatalogSource::Album {
+                name: "Best".to_owned(),
+                photos: vec![seeded.clone(), gone, second],
+            })
+            .expect("request album");
+        let events = poll_events(&catalog, |events| thumbnail_ready_count(events) >= 2);
+
+        let files = events
+            .iter()
+            .find_map(|event| match event {
+                CatalogEvent::ScanEntries { files, .. } => Some(files),
+                _ => None,
+            })
+            .expect("scan entries event");
+        let found: Vec<_> = files
+            .iter()
+            .map(|file| (file.file_name(), file.entry().is_some()))
+            .collect();
+        assert_eq!(
+            found,
+            [("b.arw", true), ("gone.arw", false), ("seeded.arw", true)]
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            CatalogEvent::ThumbnailReady { path, outcome: ThumbnailResult::Ready(_), .. }
+                if *path == seeded
+        )));
+        assert_eq!(
+            cached(),
+            before,
+            "an album never cleans up a folder's cache"
+        );
+    }
+
+    #[test]
+    fn folders_are_listed_while_paused() {
+        let directory = TestDirectory::new();
+        let photo = directory.create_arw("a.arw");
+        fs::create_dir(directory.path().join("sub")).expect("create subfolder");
+        let missing = directory.path().join("missing");
+
+        let catalog = coordinator(None);
+        catalog.set_paused(true);
+        for folder in [directory.path(), &missing] {
+            catalog
+                .list_folder(folder.to_path_buf())
+                .expect("request listing");
+        }
+        let events = poll_events(&catalog, |events| events.len() >= 2);
+
+        let [
+            CatalogEvent::FolderListed {
+                result: Ok(listing),
+                ..
+            },
+            CatalogEvent::FolderListed {
+                folder,
+                result: Err(reason),
+            },
+        ] = events.as_slice()
+        else {
+            panic!("expected two listings, got {events:?}");
+        };
+        assert_eq!(listing.files, [photo]);
+        assert_eq!(listing.folders, [directory.path().join("sub")]);
+        assert_eq!(*folder, missing);
+        assert!(reason.contains("does not exist"));
     }
 }

@@ -59,39 +59,64 @@ pub enum ScanError {
     },
 }
 
+/// One requested file, which may not be there any more.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScannedFile {
+    Found(CatalogEntry),
+    /// Gone, unreadable or not a regular file.
+    Missing {
+        path: PathBuf,
+        file_name: String,
+    },
+}
+
+impl ScannedFile {
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::Found(entry) => entry.path(),
+            Self::Missing { path, .. } => path,
+        }
+    }
+
+    #[must_use]
+    pub fn file_name(&self) -> &str {
+        match self {
+            Self::Found(entry) => entry.file_name(),
+            Self::Missing { file_name, .. } => file_name,
+        }
+    }
+
+    /// `None` for a missing file.
+    #[must_use]
+    pub const fn entry(&self) -> Option<&CatalogEntry> {
+        match self {
+            Self::Found(entry) => Some(entry),
+            Self::Missing { .. } => None,
+        }
+    }
+}
+
+/// What one folder holds directly: its visible subfolders and supported files.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FolderListing {
+    pub folders: Vec<PathBuf>,
+    pub files: Vec<PathBuf>,
+}
+
 /// Scan one folder without descending into subfolders.
 ///
 /// Individual entries that disappear, cannot be inspected, are hidden, or are
 /// not regular supported files are skipped. The folder itself must be
 /// inspectable and readable.
 pub fn scan_folder(path: impl AsRef<Path>) -> Result<Vec<CatalogEntry>, ScanError> {
-    let path = path.as_ref();
-    let metadata = fs::metadata(path).map_err(|source| scan_inspect_error(path, source))?;
-    if !metadata.is_dir() {
-        return Err(ScanError::NotDirectory {
-            path: path.to_path_buf(),
-        });
-    }
-
-    let directory = fs::read_dir(path).map_err(|source| ScanError::ReadFolder {
-        path: path.to_path_buf(),
-        source,
-    })?;
     let mut entries = Vec::new();
-
-    for directory_entry in directory {
+    for directory_entry in read_folder(path.as_ref())? {
         let Ok(directory_entry) = directory_entry else {
             continue;
         };
-        let Ok(file_type) = directory_entry.file_type() else {
-            continue;
-        };
-        if !file_type.is_file() {
-            continue;
-        }
-
         let file_name = directory_entry.file_name();
-        if is_hidden(&file_name) || !has_supported_extension(&file_name) {
+        if !is_supported_file(&directory_entry) {
             continue;
         }
         let Ok(metadata) = directory_entry.metadata() else {
@@ -109,11 +134,104 @@ pub fn scan_folder(path: impl AsRef<Path>) -> Result<Vec<CatalogEntry>, ScanErro
     }
 
     entries.sort_by(|left, right| {
-        natural_cmp(left.file_name(), right.file_name())
-            .then_with(|| left.file_name().cmp(right.file_name()))
-            .then_with(|| left.path().cmp(right.path()))
+        display_order(
+            (left.file_name(), left.path()),
+            (right.file_name(), right.path()),
+        )
     });
     Ok(entries)
+}
+
+/// Inspect a list of files from any folders, in the same order
+/// [`scan_folder`] uses. Every path yields one result.
+#[must_use]
+pub fn scan_files(paths: &[PathBuf]) -> Vec<ScannedFile> {
+    let mut files: Vec<ScannedFile> = paths.iter().map(|path| scan_file(path)).collect();
+    files.sort_by(|left, right| {
+        display_order(
+            (left.file_name(), left.path()),
+            (right.file_name(), right.path()),
+        )
+    });
+    files
+}
+
+fn scan_file(path: &Path) -> ScannedFile {
+    let path = path.to_path_buf();
+    let file_name = file_name_of(&path);
+    match fs::metadata(&path) {
+        Ok(metadata) if metadata.is_file() => ScannedFile::Found(CatalogEntry {
+            path,
+            file_name,
+            source_identity: source_identity(&metadata),
+        }),
+        _ => ScannedFile::Missing { path, file_name },
+    }
+}
+
+/// List the subfolders and supported files of one folder, each in natural
+/// order. Hidden entries and symbolic links are skipped, as in
+/// [`scan_folder`]; files are not inspected.
+pub fn list_folder(path: impl AsRef<Path>) -> Result<FolderListing, ScanError> {
+    let mut listing = FolderListing::default();
+    for directory_entry in read_folder(path.as_ref())? {
+        let Ok(directory_entry) = directory_entry else {
+            continue;
+        };
+        if is_supported_file(&directory_entry) {
+            listing.files.push(directory_entry.path());
+        } else if directory_entry
+            .file_type()
+            .is_ok_and(|file_type| file_type.is_dir())
+            && !is_hidden(&directory_entry.file_name())
+        {
+            listing.folders.push(directory_entry.path());
+        }
+    }
+    for paths in [&mut listing.folders, &mut listing.files] {
+        paths.sort_by(|left, right| {
+            display_order(
+                (&file_name_of(left), left.as_path()),
+                (&file_name_of(right), right.as_path()),
+            )
+        });
+    }
+    Ok(listing)
+}
+
+fn read_folder(path: &Path) -> Result<fs::ReadDir, ScanError> {
+    let metadata = fs::metadata(path).map_err(|source| scan_inspect_error(path, source))?;
+    if !metadata.is_dir() {
+        return Err(ScanError::NotDirectory {
+            path: path.to_path_buf(),
+        });
+    }
+    fs::read_dir(path).map_err(|source| ScanError::ReadFolder {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+/// Whether the entry is a visible regular file of a supported type.
+fn is_supported_file(entry: &fs::DirEntry) -> bool {
+    let file_name = entry.file_name();
+    entry.file_type().is_ok_and(|file_type| file_type.is_file())
+        && !is_hidden(&file_name)
+        && has_supported_extension(&file_name)
+}
+
+/// Natural order by name. The path decides between files of the same name.
+fn display_order(left: (&str, &Path), right: (&str, &Path)) -> Ordering {
+    natural_cmp(left.0, right.0)
+        .then_with(|| left.0.cmp(right.0))
+        .then_with(|| left.1.cmp(right.1))
+}
+
+fn file_name_of(path: &Path) -> String {
+    path.file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn scan_inspect_error(path: &Path, source: io::Error) -> ScanError {
@@ -308,6 +426,78 @@ mod tests {
         ));
         assert!(matches!(
             scan_folder(directory.path().join("missing")),
+            Err(ScanError::NotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn scanning_files_keeps_missing_ones_and_sorts_across_folders() {
+        let first = TestDirectory::new();
+        let second = TestDirectory::new();
+        first.create_file("image10.arw");
+        second.create_file("image2.arw");
+        let paths = [
+            first.path().join("image10.arw"),
+            first.path().join("image3.arw"),
+            second.path().join("image2.arw"),
+            // A folder is not a photo.
+            first.path().to_path_buf(),
+        ];
+
+        let files = scan_files(&paths);
+
+        let photos: Vec<_> = files
+            .iter()
+            .filter(|file| file.file_name().starts_with("image"))
+            .map(|file| (file.file_name(), file.entry().is_some()))
+            .collect();
+        assert_eq!(
+            photos,
+            [
+                ("image2.arw", true),
+                ("image3.arw", false),
+                ("image10.arw", true)
+            ]
+        );
+        assert_eq!(files.len(), 4);
+        let folder = files
+            .iter()
+            .find(|file| file.path() == first.path())
+            .expect("every path has a result");
+        assert!(folder.entry().is_none());
+    }
+
+    #[test]
+    fn scanning_a_file_gives_the_identity_of_the_folder_scan() {
+        let directory = TestDirectory::new();
+        directory.create_file("a.arw");
+        let entries = scan_folder(directory.path()).expect("scan test directory");
+        let files = scan_files(&[directory.path().join("a.arw")]);
+        assert_eq!(files[0].entry(), Some(&entries[0]));
+    }
+
+    #[test]
+    fn listing_shows_visible_folders_and_supported_files_in_natural_order() {
+        let directory = TestDirectory::new();
+        for name in ["day10", "day2", ".hidden", "odd.arw"] {
+            fs::create_dir(directory.path().join(name)).expect("create subfolder");
+        }
+        for name in ["b10.ARW", "b2.arw", "notes.txt", ".c.arw"] {
+            directory.create_file(name);
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(directory.path(), directory.path().join("loop"))
+            .expect("create link");
+
+        let listing = list_folder(directory.path()).expect("list test directory");
+
+        let names = |paths: &[PathBuf]| paths.iter().map(|path| file_name_of(path)).collect();
+        let folders: Vec<String> = names(&listing.folders);
+        let files: Vec<String> = names(&listing.files);
+        assert_eq!(folders, ["day2", "day10", "odd.arw"]);
+        assert_eq!(files, ["b2.arw", "b10.ARW"]);
+        assert!(matches!(
+            list_folder(directory.path().join("missing")),
             Err(ScanError::NotFound { .. })
         ));
     }
