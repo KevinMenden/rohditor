@@ -7,6 +7,7 @@ pub mod histogram;
 pub mod keys;
 pub mod matching;
 pub mod menu;
+pub mod name_form;
 pub mod overlays;
 pub mod search_list;
 pub mod slider;

@@ -113,9 +113,14 @@ fn missing_photos_are_shown_but_not_opened() {
     let mut harness = Harness::new();
     let photos = vec![trip.join("gone.arw"), trip.join("a.arw")];
     let library = harness.library.clone();
-    harness
-        .cx
-        .update(|cx| library.update(cx, |library, _| library.show_album("Best", photos)));
+    harness.cx.update(|cx| {
+        library.update(cx, |library, cx| {
+            library
+                .create_album("Best", &photos, cx)
+                .expect("a new album");
+            library.show_album("Best", cx);
+        })
+    });
     harness.wait_for_library("the album", |library| library.len() == 2);
     harness.keys("ctrl-j");
     harness.click("thumbnail:gone.arw");

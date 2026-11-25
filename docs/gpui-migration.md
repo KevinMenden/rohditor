@@ -29,7 +29,7 @@ Assumed from the recommendations unless marked open; change them here if they tu
 | Viewport | Fit, zoom, pan, 1:1, clipping overlay, tool overlays | |
 | Tools | Crop, pickers, masks | |
 | Presets, info | None | All |
-| Library | File tree, filmstrip, sorting, selection | Albums (#233) |
+| Library | File tree, albums, filmstrip, sorting, selection | |
 | Export | JPEG only | PNG, size, sharpening, metadata, overwrite |
 | Settings, diagnostics | None | All, including neural demosaic |
 
@@ -117,11 +117,11 @@ Done when the moved tests pass and painting feels smooth on real RAWs.
 
 ## Stage 6: Library, export, settings
 
-- [ ] 6.1 Library: file tree, albums, filmstrip and sorting, tracked in #233 (no grid).
+- [x] 6.1 Library: file tree, albums, filmstrip and sorting, tracked in #233 (no grid).
   - [x] L.1 Engine: catalog sources, folder tree, albums, selection by path.
   - [x] L.2 File tree panel.
   - [x] L.3 Filmstrip, sorting, keyboard navigation.
-  - [ ] L.4 Albums panel.
+  - [x] L.4 Albums panel.
 - [ ] 6.2 Full export dialog.
 - [ ] 6.3 Settings, neural model, diagnostics.
 - [ ] 6.4 Startup options and `--screenshot`.

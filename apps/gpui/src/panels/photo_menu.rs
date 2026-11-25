@@ -1,9 +1,10 @@
-//! The context menu entries every file and folder has.
+//! The context menu entries of files and folders.
 
 use std::path::Path;
 
-use gpui::ClipboardItem;
+use gpui::{Action, ClipboardItem};
 
+use crate::actions::{AddToAlbum, RemoveFromAlbum};
 use crate::ui::menu::MenuEntry;
 
 pub fn path_entries(path: &Path) -> Vec<MenuEntry> {
@@ -14,4 +15,20 @@ pub fn path_entries(path: &Path) -> Vec<MenuEntry> {
             cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
         }),
     ]
+}
+
+/// Adds the selected photos to an album.
+pub fn add_to_album() -> MenuEntry {
+    entry("Add to Album…", AddToAlbum)
+}
+
+/// Removes the selected photos from the album shown.
+pub fn remove_from_album() -> MenuEntry {
+    entry("Remove from Album", RemoveFromAlbum)
+}
+
+fn entry(label: &'static str, action: impl Action) -> MenuEntry {
+    MenuEntry::new(label, move |window, cx| {
+        window.dispatch_action(action.boxed_clone(), cx);
+    })
 }

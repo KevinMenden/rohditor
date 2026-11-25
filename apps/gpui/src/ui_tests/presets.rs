@@ -2,7 +2,7 @@
 
 use super::*;
 
-fn type_text(harness: &mut Harness, text: &str) {
+pub(super) fn type_text(harness: &mut Harness, text: &str) {
     for letter in text.chars() {
         harness.keys(&letter.to_string());
     }

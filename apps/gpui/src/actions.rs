@@ -24,6 +24,9 @@ actions!(
         NextPhoto,
         PreviousPhoto,
         SelectAllPhotos,
+        NewAlbum,
+        AddToAlbum,
+        RemoveFromAlbum,
         Save,
         Export,
         Undo,
@@ -62,6 +65,8 @@ actions!(
         ActualPixels,
         ToggleClipping,
         ToggleFiles,
+        ShowFiles,
+        ShowAlbums,
         ToggleFilmstrip,
         ToggleDevelop,
         FocusAdjustments,
@@ -146,6 +151,13 @@ pub fn commands() -> Vec<Command> {
         command("photo: next", Some("right"), NextPhoto),
         command("photo: previous", Some("left"), PreviousPhoto),
         command("photo: select all", Some("ctrl-a"), SelectAllPhotos),
+        command("album: new album", None, NewAlbum),
+        command("album: add selected photos to album", None, AddToAlbum),
+        command(
+            "album: remove selected photos from album",
+            None,
+            RemoveFromAlbum,
+        ),
         command("edit: undo", Some("ctrl-z"), Undo),
         command("edit: redo", Some("ctrl-shift-z"), Redo),
         command("develop: auto tone", Some("ctrl-u"), AutoTone),
@@ -200,6 +212,8 @@ pub fn commands() -> Vec<Command> {
         command("view: actual pixels (1:1)", Some("ctrl-1"), ActualPixels),
         command("view: toggle clipping overlay", Some("j"), ToggleClipping),
         command("view: toggle files panel", Some("ctrl-b"), ToggleFiles),
+        command("view: files", None, ShowFiles),
+        command("view: albums", None, ShowAlbums),
         command("view: toggle filmstrip", Some("ctrl-j"), ToggleFilmstrip),
         command("view: toggle develop panel", Some("ctrl-r"), ToggleDevelop),
         command("view: focus adjustments", Some("ctrl-d"), FocusAdjustments),
@@ -336,6 +350,7 @@ pub fn bind_keys(cx: &mut App) {
     panels::controls::bind_keys(cx);
     panels::develop::bind_keys(cx);
     panels::file_tree::bind_keys(cx);
+    panels::albums::bind_keys(cx);
 }
 
 /// Commands with a plain letter as their key leave it alone in text inputs.

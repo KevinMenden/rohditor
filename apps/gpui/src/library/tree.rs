@@ -87,13 +87,6 @@ impl Library {
         self.state.selection.in_order(self.tree.photos())
     }
 
-    /// Show photos as an album has them.
-    pub fn show_album(&mut self, name: &str, photos: Vec<PathBuf>) {
-        let name = name.to_owned();
-        let album = rohditor_engine::catalog::CatalogSource::Album { name, photos };
-        self.coordinator.show(album).expect("the catalog runs");
-    }
-
     pub fn thumbnail(&self, photo: &Path) -> Option<&crate::atlas_image::AtlasImage> {
         self.state.texture(photo)
     }

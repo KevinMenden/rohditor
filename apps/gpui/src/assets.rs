@@ -8,6 +8,7 @@ use gpui::{AssetSource, SharedString};
 #[derive(Debug, Clone, Copy)]
 pub enum Icon {
     Files,
+    Album,
     Filmstrip,
     Sliders,
     Undo,
@@ -35,6 +36,7 @@ pub enum Icon {
 impl Icon {
     pub const fn path(self) -> &'static str {
         match self {
+            Self::Album => "album.svg",
             Self::Files => "files.svg",
             Self::Filmstrip => "filmstrip.svg",
             Self::Sliders => "sliders.svg",
@@ -75,6 +77,7 @@ impl AssetSource for Assets {
             };
         }
         let bytes = icons![
+            "album.svg",
             "files.svg",
             "filmstrip.svg",
             "sliders.svg",

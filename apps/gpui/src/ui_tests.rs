@@ -5,6 +5,7 @@
 //! original. `ROHDITOR_SHOTS=DIR` writes a PNG per scenario. `driver` runs a text script
 //! instead of a compiled scenario.
 
+mod albums;
 mod color;
 mod crop;
 mod detail;
@@ -83,7 +84,7 @@ impl Harness {
                 });
                 let library = cx.new(|cx| {
                     let worker = LibraryWorker::start().expect("the catalog starts");
-                    Library::new(worker, None, &session, cx)
+                    Library::new(worker, Some(scratch_config()), &session, cx)
                 });
                 created = Some((session.clone(), library.clone()));
                 cx.new(|cx| Workspace::new(session, library, window, cx))

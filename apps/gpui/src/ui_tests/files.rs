@@ -26,6 +26,20 @@ pub(super) fn open_photo(harness: &mut Harness) -> Option<PathBuf> {
     harness.with_session(|session, _| session.document().map(|open| open.path.clone()))
 }
 
+/// With a library that remembers in `config`. The window has another one.
+pub(super) fn with_config(config: &Path) -> Harness {
+    let mut harness = Harness::new();
+    let session = harness.session.clone();
+    let config = Some(config.to_path_buf());
+    harness.library = harness.cx.update(|cx| {
+        cx.new(|cx| {
+            let worker = LibraryWorker::start().expect("the catalog starts");
+            Library::new(worker, config, &session, cx)
+        })
+    });
+    harness
+}
+
 fn wait_for_row(harness: &mut Harness, path: &Path) {
     harness.wait_for_library("the row", |library| library.tree().row_of(path).is_some());
     harness.draw();
@@ -172,19 +186,7 @@ fn an_opened_photo_is_revealed_and_its_folder_shown() {
 fn roots_and_the_shown_folder_are_remembered() {
     let trip = scratch_tree("remember");
     let config = scratch_config();
-    let start = |config: &Path| {
-        let mut harness = Harness::new();
-        let session = harness.session.clone();
-        let config = Some(config.to_path_buf());
-        harness.library = harness.cx.update(|cx| {
-            cx.new(|cx| {
-                let worker = LibraryWorker::start().expect("the catalog starts");
-                Library::new(worker, config, &session, cx)
-            })
-        });
-        harness
-    };
-    let mut harness = start(&config);
+    let mut harness = with_config(&config);
     harness.open_folder(&trip);
     let library = harness.library.clone();
     let day = trip.join("Day");
@@ -194,7 +196,7 @@ fn roots_and_the_shown_folder_are_remembered() {
         .update(|cx| library.update(cx, |library, cx| library.click_folder(folder, cx)));
     drop(harness);
 
-    let mut harness = start(&config);
+    let mut harness = with_config(&config);
     let library = harness.library.clone();
     harness.cx.update(|cx| library.update(cx, Library::restore));
     harness.wait_for_library("the folder again", |library| {

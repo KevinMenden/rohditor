@@ -112,6 +112,16 @@ impl CatalogState {
         }
     }
 
+    /// Show nothing until the next scan starts.
+    pub fn clear(&mut self) {
+        self.set_photos(Vec::new());
+        self.source = None;
+        // What the scan still sends belongs nowhere; scans count up from one.
+        self.generation = 0;
+        self.failure = None;
+        self.scanning = false;
+    }
+
     /// Take over a scan, keeping the thumbnails of photos that did not change.
     fn replace_photos(&mut self, files: Vec<ScannedFile>) {
         let mut known: HashMap<PathBuf, Photo> = std::mem::take(&mut self.photos)
@@ -293,6 +303,21 @@ mod tests {
 
     fn scan(directory: &TestDirectory) -> Vec<CatalogEntry> {
         scan_folder(directory.path()).expect("scan catalog state test folder")
+    }
+
+    #[test]
+    fn a_cleared_catalog_ignores_the_rest_of_its_scan() {
+        let directory = TestDirectory::new();
+        let mut state = CatalogState::default();
+        let source = CatalogSource::Folder(directory.path().to_path_buf());
+        start(&mut state, 1, source);
+        state.clear();
+        state.apply_event(CatalogEvent::ScanEntries {
+            generation: 1,
+            files: scan_files(&[directory.create_arw("a.arw")]),
+        });
+        assert_eq!((state.entry_count(), state.source()), (0, None));
+        assert!(!state.scanning());
     }
 
     fn start(state: &mut CatalogState, generation: u64, source: CatalogSource) {

@@ -10,7 +10,7 @@ use gpui::{
 
 use super::FilmstripPanel;
 use crate::assets::Icon;
-use crate::panels::photo_menu::path_entries;
+use crate::panels::photo_menu::{add_to_album, path_entries, remove_from_album};
 use crate::theme::{RADIUS, SMALL_FONT_SIZE, theme};
 use crate::ui::button::icon;
 use crate::ui::test_id::TestId as _;
@@ -86,8 +86,15 @@ impl FilmstripPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.library
+            .update(cx, |library, cx| library.select_for_menu(path, cx));
+        let mut entries = vec![add_to_album()];
+        if self.library.read(cx).shown_album().is_some() {
+            entries.push(remove_from_album());
+        }
+        entries.extend(path_entries(path));
         self.overlays.update(cx, |overlays, cx| {
-            overlays.show_menu(at, path_entries(path), window, cx);
+            overlays.show_menu(at, entries, window, cx);
         });
     }
 }

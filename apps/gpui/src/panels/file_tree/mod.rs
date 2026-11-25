@@ -11,12 +11,11 @@ use gpui::{
 use rohditor_engine::catalog::folder_tree::{TreeNavigation, TreeRowKind};
 
 use crate::actions::{OpenFolder, RefreshFolders};
-use crate::assets::Icon;
 use crate::library::Library;
-use crate::panels::photo_menu::path_entries;
+use crate::panels::photo_menu::{add_to_album, path_entries};
 use crate::session::Session;
-use crate::theme::{FILES_WIDTH, SMALL_FONT_SIZE, TAB_HEIGHT, theme};
-use crate::ui::button::{button, command_button, icon};
+use crate::theme::{SMALL_FONT_SIZE, theme};
+use crate::ui::button::button;
 use crate::ui::keys::{Confirm, SelectNext, SelectPrevious};
 use crate::ui::menu::MenuEntry;
 use crate::ui::overlays::Overlays;
@@ -126,7 +125,13 @@ impl FileTreePanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let mut entries = path_entries(path);
+        let mut entries = Vec::new();
+        if matches!(kind, TreeRowKind::Photo) {
+            self.library
+                .update(cx, |library, cx| library.select_for_menu(path, cx));
+            entries.push(add_to_album());
+        }
+        entries.extend(path_entries(path));
         if matches!(kind, TreeRowKind::Folder { .. }) {
             entries.push(MenuEntry::command(RefreshFolders));
         }
@@ -140,23 +145,6 @@ impl FileTreePanel {
         self.overlays.update(cx, |overlays, cx| {
             overlays.show_menu(at, entries, window, cx);
         });
-    }
-
-    fn header(&self) -> impl IntoElement + use<> {
-        let theme = theme();
-        div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap_2()
-            .h(TAB_HEIGHT)
-            .pl_3()
-            .pr_1()
-            .border_b_1()
-            .border_color(theme.border)
-            .child(icon(Icon::Files, theme.muted))
-            .child(div().flex_1().child("Files"))
-            .child(command_button("add-folder", Icon::Plus, OpenFolder, true))
     }
 
     /// Instead of the tree while there are no roots.
@@ -237,13 +225,7 @@ impl Render for FileTreePanel {
         div()
             .flex()
             .flex_col()
-            .flex_none()
-            .w(FILES_WIDTH)
-            .h_full()
-            .bg(theme.panel)
-            .border_r_1()
-            .border_color(theme.border)
-            .child(self.header())
+            .size_full()
             .child(if count == 0 {
                 self.empty().into_any_element()
             } else {

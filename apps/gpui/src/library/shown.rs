@@ -76,6 +76,21 @@ impl Library {
         self.state.selection.len()
     }
 
+    /// The selected photos in the order shown, then those not shown.
+    pub fn selected_photos(&self) -> Vec<PathBuf> {
+        let shown = self.state.paths(&self.catalog);
+        self.state.selection.in_order(shown)
+    }
+
+    /// A right click on a photo, whose menu is about the selection: it becomes the selection
+    /// unless it is part of it.
+    pub fn select_for_menu(&mut self, photo: &Path, cx: &mut Context<Self>) {
+        if !self.state.selection.contains(photo) {
+            self.state.selection.select_only(photo);
+            cx.notify();
+        }
+    }
+
     /// Select every photo shown.
     pub fn select_all(&mut self, cx: &mut Context<Self>) {
         self.state.select_all(&self.catalog);

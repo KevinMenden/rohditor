@@ -1,6 +1,7 @@
 //! The docks around the viewport.
 
 pub mod adjustments;
+pub mod albums;
 pub mod command_palette;
 pub mod controls;
 pub mod crop;

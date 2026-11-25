@@ -3,6 +3,7 @@
 //! Follows the [`Session`]: opening a photo shows its folder and reveals it in the tree, and thumbnails wait while the photo
 //! needs the CPU. The session does not know about the library.
 
+mod albums;
 mod shown;
 mod tree;
 
@@ -11,6 +12,7 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use gpui::{Context, Entity, Task};
+use rohditor_engine::albums::AlbumStore;
 use rohditor_engine::catalog::folder_tree::FolderTree;
 use rohditor_engine::catalog::library::LibraryState;
 use rohditor_engine::catalog::{CatalogCoordinator, CatalogEvent, CatalogSource, CatalogState};
@@ -42,6 +44,7 @@ pub struct Library {
     state: LibraryState<AtlasImage>,
     retired: RetiredImages,
     tree: FolderTree,
+    albums: AlbumStore,
     /// What is remembered, and where.
     file: LibraryFile,
     saved: LibraryFile,
@@ -78,6 +81,7 @@ impl Library {
         Self {
             coordinator: worker.coordinator,
             tree: FolderTree::new(file.roots.iter().cloned()),
+            albums: AlbumStore::load(config.as_deref()),
             saved: file.clone(),
             file,
             visible: None,
@@ -108,25 +112,31 @@ impl Library {
     }
 
     pub fn show_folder(&mut self, folder: PathBuf, cx: &mut Context<Self>) {
-        self.error = self
-            .coordinator
-            .show(CatalogSource::Folder(folder.clone()))
-            .err();
-        self.file.shown = Some(Shown::Folder(folder));
+        let source = CatalogSource::Folder(folder.clone());
+        self.show(source, Shown::Folder(folder), cx);
+    }
+
+    fn show(&mut self, source: CatalogSource, shown: Shown, cx: &mut Context<Self>) {
+        self.error = self.coordinator.show(source).err();
+        self.file.shown = Some(shown);
         self.save();
         cx.notify();
     }
 
     /// Show what was shown last time.
     pub fn restore(&mut self, cx: &mut Context<Self>) {
-        if let Some(Shown::Folder(folder)) = self.file.shown.clone() {
-            let expand = |tree: &mut FolderTree| {
-                if tree.reveal(&folder) {
-                    tree.expand(&folder);
-                }
-            };
-            self.change_tree(expand, cx);
-            self.show_folder(folder, cx);
+        match self.file.shown.clone() {
+            Some(Shown::Folder(folder)) => {
+                let expand = |tree: &mut FolderTree| {
+                    if tree.reveal(&folder) {
+                        tree.expand(&folder);
+                    }
+                };
+                self.change_tree(expand, cx);
+                self.show_folder(folder, cx);
+            }
+            Some(Shown::Album(name)) => self.show_album(&name, cx),
+            None => {}
         }
     }
 

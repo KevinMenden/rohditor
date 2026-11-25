@@ -1,28 +1,31 @@
 //! The window: title bar, docks, tab, viewport and status bar.
 
 mod chrome;
+mod left_dock;
 mod masks;
 mod notifications;
 mod tools;
 
 use gpui::{
     App, Context, Div, Entity, FocusHandle, Focusable, IntoElement, KeyContext, PathPromptOptions,
-    Pixels, Render, Role, Stateful, StyleRefinement, Window, div, prelude::*,
+    Render, Role, Stateful, StyleRefinement, Window, div, prelude::*,
 };
 
 use rohditor_engine::tools::{CropToolSession, MaskToolSession, Picker, ToolKind};
 
 use crate::actions::{
-    ActualPixels, ApplyPreset, ApplyTool, AutoNoiseReduction, AutoTone, CancelTool, ChooseLens,
-    CloseFile, CropTool, EditTool, Export, FlipCrop, FocusAdjustments, FocusPhoto,
-    ImportCameraProfile, LockCrop, NextPhoto, OpenFile, OpenFolder, PAINTING_CONTEXT,
+    ActualPixels, AddToAlbum, ApplyPreset, ApplyTool, AutoNoiseReduction, AutoTone, CancelTool,
+    ChooseLens, CloseFile, CropTool, EditTool, Export, FlipCrop, FocusAdjustments, FocusPhoto,
+    ImportCameraProfile, LockCrop, NewAlbum, NextPhoto, OpenFile, OpenFolder, PAINTING_CONTEXT,
     PHOTO_CONTEXT, PickMixerColor, PickWhiteBalance, PreviousPhoto, Quit, Redo, RefreshFolders,
-    ResetAdjustments, ResetCrop, ResetSection, Save, SavePreset, SearchAdjustments,
-    SelectAllPhotos, SetCropAspect, SetHighlightMethod, SetLensProfile, SetRendering,
-    SetWhiteBalance, SortPhotos, ToggleClipping, ToggleCommandPalette, ToggleDevelop, ToggleFiles,
-    ToggleFilmstrip, Undo, WORKSPACE_CONTEXT, ZoomToFit,
+    RemoveFromAlbum, ResetAdjustments, ResetCrop, ResetSection, Save, SavePreset,
+    SearchAdjustments, SelectAllPhotos, SetCropAspect, SetHighlightMethod, SetLensProfile,
+    SetRendering, SetWhiteBalance, ShowAlbums, ShowFiles, SortPhotos, ToggleClipping,
+    ToggleCommandPalette, ToggleDevelop, ToggleFiles, ToggleFilmstrip, Undo, WORKSPACE_CONTEXT,
+    ZoomToFit,
 };
 use crate::library::Library;
+use crate::panels::albums::{AlbumCommands, AlbumsPanel};
 use crate::panels::command_palette::command_palette;
 use crate::panels::controls::FocusControls as _;
 use crate::panels::crop::CropPanel;
@@ -31,18 +34,21 @@ use crate::panels::file_tree::FileTreePanel;
 use crate::panels::filmstrip::FilmstripPanel;
 use crate::panels::masks::MasksPanel;
 use crate::session::Session;
-use crate::theme::{FILES_WIDTH, FILMSTRIP_HEIGHT, UI_FONT_SIZE, theme};
+use crate::theme::{FILMSTRIP_HEIGHT, UI_FONT_SIZE, theme};
 use crate::ui::confirm::Confirm;
 use crate::ui::keys::{FocusNext, FocusPrevious};
 use crate::ui::overlays::{Overlays, ToastKind};
 use crate::ui::search_list::SearchList;
 use crate::viewport::Viewport;
+use left_dock::LeftTab;
 use notifications::Announced;
 
 pub struct Workspace {
     session: Entity<Session>,
     library: Entity<Library>,
     files: Entity<FileTreePanel>,
+    albums: Entity<AlbumsPanel>,
+    album_commands: AlbumCommands,
     filmstrip: Entity<FilmstripPanel>,
     develop: Entity<DevelopPanel>,
     crop: Entity<CropPanel>,
@@ -51,6 +57,7 @@ pub struct Workspace {
     overlays: Entity<Overlays>,
     announced: Announced,
     files_open: bool,
+    left_tab: LeftTab,
     filmstrip_open: bool,
     develop_open: bool,
     focus: FocusHandle,
@@ -92,7 +99,13 @@ impl Workspace {
         })
         .detach();
         cx.observe(&library, |_, _, cx| cx.notify()).detach();
+        let album_commands = AlbumCommands {
+            library: library.clone(),
+            overlays: overlays.clone(),
+        };
         Self {
+            albums: cx.new(|cx| AlbumsPanel::new(album_commands.clone(), cx)),
+            album_commands,
             files: cx.new(|cx| {
                 FileTreePanel::new(session.clone(), library.clone(), overlays.clone(), cx)
             }),
@@ -108,6 +121,7 @@ impl Workspace {
             overlays,
             announced: Announced::default(),
             files_open: true,
+            left_tab: LeftTab::Files,
             filmstrip_open: false,
             develop_open: true,
             focus,
@@ -247,6 +261,20 @@ impl Workspace {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ToggleFilmstrip, _, cx| this.toggle_filmstrip(cx)))
+            .on_action(cx.listener(|this, _: &ShowFiles, _, cx| this.show_left(LeftTab::Files, cx)))
+            .on_action(
+                cx.listener(|this, _: &ShowAlbums, _, cx| this.show_left(LeftTab::Albums, cx)),
+            )
+            .on_action(cx.listener(|this, _: &NewAlbum, window, cx| {
+                this.show_left(LeftTab::Albums, cx);
+                this.album_commands.create(Vec::new(), window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &AddToAlbum, window, cx| {
+                this.album_commands.add_selected(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &RemoveFromAlbum, _, cx| {
+                this.album_commands.remove_selected(cx);
+            }))
             .on_action(cx.listener(|this, _: &SelectAllPhotos, _, cx| {
                 this.library.update(cx, Library::select_all);
             }))
@@ -354,13 +382,6 @@ impl Workspace {
     }
 }
 
-/// A side panel, redrawn only when it notifies.
-fn dock<P: Render>(panel: &Entity<P>, width: Pixels) -> impl IntoElement + use<P> {
-    panel
-        .clone()
-        .cached(StyleRefinement::default().flex_none().w(width).h_full())
-}
-
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme();
@@ -397,9 +418,7 @@ impl Render for Workspace {
                     .flex()
                     .flex_1()
                     .min_h_0()
-                    .when(self.files_open, |body| {
-                        body.child(dock(&self.files, FILES_WIDTH))
-                    })
+                    .when(self.files_open, |body| body.child(self.left_dock()))
                     .child(
                         div()
                             .flex()
