@@ -122,7 +122,7 @@ Done when the moved tests pass and painting feels smooth on real RAWs.
   - [x] L.2 File tree panel.
   - [x] L.3 Filmstrip, sorting, keyboard navigation.
   - [x] L.4 Albums panel.
-- [ ] 6.2 Full export dialog.
+- [x] 6.2 Full export dialog: format, size, sharpening, metadata and overwrite.
 - [ ] 6.3 Settings, neural model, diagnostics.
 - [ ] 6.4 Startup options and `--screenshot`.
 
