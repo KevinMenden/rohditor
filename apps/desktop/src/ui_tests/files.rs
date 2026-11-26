@@ -5,7 +5,7 @@ use super::*;
 /// `Trip` with `a.arw`, `b.arw`, `c.arw` and the folder `Day` with `d.arw`, none of which are
 /// photos.
 pub(super) fn scratch_tree(name: &str) -> PathBuf {
-    let folder = std::env::temp_dir().join(format!("rohditor-gpui-tree-{name}"));
+    let folder = std::env::temp_dir().join(format!("rohditor-desktop-tree-{name}"));
     drop(std::fs::remove_dir_all(&folder));
     let trip = folder.join("Trip");
     std::fs::create_dir_all(trip.join("Day")).expect("scratch folders");

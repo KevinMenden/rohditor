@@ -382,7 +382,7 @@ impl Drop for Harness {
 fn scratch_config() -> PathBuf {
     static COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let count = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let folder = std::env::temp_dir().join(format!("rohditor-gpui-config-{count}"));
+    let folder = std::env::temp_dir().join(format!("rohditor-desktop-config-{count}"));
     drop(std::fs::remove_dir_all(&folder));
     folder
 }
@@ -390,7 +390,7 @@ fn scratch_config() -> PathBuf {
 /// A scratch folder holding copies of `ROHDITOR_RAW` under two names.
 fn scratch_photos(name: &str) -> Option<(PathBuf, PathBuf)> {
     let raw = PathBuf::from(std::env::var_os("ROHDITOR_RAW")?);
-    let folder = std::env::temp_dir().join(format!("rohditor-gpui-{name}"));
+    let folder = std::env::temp_dir().join(format!("rohditor-desktop-{name}"));
     drop(std::fs::remove_dir_all(&folder));
     std::fs::create_dir_all(&folder).expect("scratch folder");
     let copy = |name: &str| {

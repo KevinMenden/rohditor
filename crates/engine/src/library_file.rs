@@ -1,7 +1,7 @@
 //! What the library remembers between runs: the root folders and what it
 //! showed last, in `library.json` in the configuration directory.
 //!
-//! Separate from [`crate::session`], whose file the egui app rewrites whole.
+//! Separate from [`crate::session`], whose file is rewritten whole.
 
 use std::fs;
 use std::io;

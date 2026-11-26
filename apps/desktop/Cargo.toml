@@ -1,36 +1,41 @@
+# The desktop app, on GPUI. The Zed revision (repeated in vendor/gpui_wgpu/Cargo.toml) is the
+# last one on crates.io wgpu 29; later ones use a git revision past wgpu 30.
 [package]
 name = "rohditor-desktop"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 publish.workspace = true
 
 [lints]
 workspace = true
 
 [dependencies]
+anyhow.workspace = true
 clap.workspace = true
+env_logger = "0.11"
+log = "0.4"
+futures = "0.3"
+unicode-segmentation = "1"
+gpui = { git = "https://github.com/zed-industries/zed", rev = "21001b273f93d1156d13d4eb67b255478a61276b", default-features = false, features = ["font-kit", "wayland"] }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "21001b273f93d1156d13d4eb67b255478a61276b", default-features = false, features = ["font-kit", "wayland"] }
+gpui_wgpu = { path = "vendor/gpui_wgpu" }
+# PNG for `--screenshot`.
+image = { version = "0.25", default-features = false, features = ["png"] }
 rohditor-camera-profile = { path = "../../crates/camera-profile" }
-eframe.workspace = true
-image.workspace = true
-rfd.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-thiserror.workspace = true
-rohditor-catalog = { path = "../../crates/catalog" }
 rohditor-core = { path = "../../crates/core" }
 rohditor-demosaic = { path = "../../crates/demosaic" }
 rohditor-edit = { path = "../../crates/edit" }
 rohditor-engine = { path = "../../crates/engine" }
 rohditor-gpu = { path = "../../crates/gpu" }
-rohditor-image = { path = "../../crates/image" }
 rohditor-neural = { path = "../../crates/neural" }
 rohditor-raw = { path = "../../crates/raw" }
-tracing.workspace = true
-tracing-subscriber.workspace = true
+# The workspace pin. Cargo unifies it with the version gpui_wgpu uses.
 wgpu.workspace = true
-winit.workspace = true
 
 [dev-dependencies]
-egui_kittest.workspace = true
-pollster.workspace = true
+gpui = { git = "https://github.com/zed-industries/zed", rev = "21001b273f93d1156d13d4eb67b255478a61276b", default-features = false, features = ["test-support"] }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "21001b273f93d1156d13d4eb67b255478a61276b", default-features = false, features = ["test-support"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+

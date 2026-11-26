@@ -23,7 +23,7 @@
 //! shot NAME               # NAME.png and NAME.txt, after the preview has settled
 //! ```
 //!
-//! Output goes to `ROHDITOR_SHOTS`, or `rohditor-gpui-shots` in the temp directory. A failing
+//! Output goes to `ROHDITOR_SHOTS`, or `rohditor-desktop-shots` in the temp directory. A failing
 //! step also writes `error.png` and `error.txt`.
 
 use std::fmt::Write as _;
@@ -136,7 +136,7 @@ impl Driver {
     fn new(window: Size<Pixels>) -> Self {
         let output = std::env::var_os("ROHDITOR_SHOTS")
             .map(PathBuf::from)
-            .unwrap_or_else(|| std::env::temp_dir().join("rohditor-gpui-shots"));
+            .unwrap_or_else(|| std::env::temp_dir().join("rohditor-desktop-shots"));
         std::fs::create_dir_all(&output).expect("the output folder");
         Self {
             harness: Harness::sized(window),
@@ -328,6 +328,6 @@ fn script_errors_name_the_line() {
             "line 1: `../x` should be letters, digits, - and _",
         ),
     ] {
-        assert_eq!(parse(text).unwrap_err(), expected);
+        assert_eq!(parse(text).expect_err("a parse error"), expected);
     }
 }

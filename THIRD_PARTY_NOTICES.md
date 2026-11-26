@@ -33,8 +33,8 @@ attribution of its training data are recorded in the model's `model.json`.
 
 ## GPUI
 
-The GPUI frontend (`apps/gpui`) uses GPUI from Zed Industries, licensed under
+The desktop app (`apps/desktop`) uses GPUI from Zed Industries, licensed under
 the Apache License, Version 2.0; see <https://github.com/zed-industries/zed>.
-`apps/gpui/vendor/gpui_wgpu` is a modified copy of its wgpu renderer. The
+`apps/desktop/vendor/gpui_wgpu` is a modified copy of its wgpu renderer. The
 changes are marked `ROHDITOR`, and the license text is included there as
 `LICENSE-APACHE`.

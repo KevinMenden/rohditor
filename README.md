@@ -29,16 +29,16 @@ cargo run -p rohditor-cli -- inspect path/to/file.ARW
 cargo run --release -p rohditor-cli -- develop input.ARW output.png
 ```
 
-The desktop supports `--processor auto|gpu|cpu`, `--renderer auto|wgpu|glow`,
-and an optional input path. The CLI also supports embedded-preview extraction,
+The desktop app needs Wayland. It takes an optional RAW file or folder and supports
+`--processor auto|gpu|cpu`; `--help` lists the other options. The CLI also supports embedded-preview extraction,
 quality-crop generation, and LibRaw verification.
 
 Project guidelines live in [AGENTS.md](AGENTS.md); the implementation checklist is below.
 
 ## What happens when a RAW is opened
 
-Opening a file runs on the desktop's background worker thread
-(`apps/desktop/src/coordinator/worker.rs`). The UI shows the embedded JPEG first
+Opening a file runs on the engine's background worker thread
+(`crates/engine/src/coordinator/worker.rs`). The UI shows the embedded JPEG first
 and replaces it once the developed preview arrives. The steps up to `decode`
 run one after another.
 
@@ -79,7 +79,7 @@ Everything left of "Area-reduce" runs on the full ~24 MP sensor, not on the
 optics at full size. Once the base is cached, slider edits only re-run the
 steps from "Edit adjustments" onwards on the small image.
 
-The cache is layered (`apps/desktop/src/preview_cache/`) so an edit re-runs only
+The cache is layered (`crates/engine/src/preview_cache/`) so an edit re-runs only
 what its recipe fields invalidate: changing exposure keeps the demosaiced base;
 changing the highlight method or demosaic algorithm rebuilds from the decoded
 mosaic.
