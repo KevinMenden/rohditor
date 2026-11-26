@@ -115,6 +115,15 @@ impl OpenDocument {
         self.edits.is_dirty()
     }
 
+    /// Whether the shown picture is final for now: the photo is open, the preview and its
+    /// histogram match the current edits, and no camera look fit is about to change them.
+    pub fn is_settled(&self) -> bool {
+        self.open_status.is_none()
+            && self.preview.status.is_none()
+            && self.preview.histogram_revision == Some(self.edits.revision())
+            && !self.camera_look_pending()
+    }
+
     pub fn ticket(&self) -> PreviewTicket {
         self.preview.ticket(self.edits.revision())
     }

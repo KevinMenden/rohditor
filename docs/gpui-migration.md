@@ -124,7 +124,7 @@ Done when the moved tests pass and painting feels smooth on real RAWs.
   - [x] L.4 Albums panel.
 - [x] 6.2 Full export dialog: format, size, sharpening, metadata and overwrite.
 - [x] 6.3 Settings, neural model, diagnostics.
-- [ ] 6.4 Startup options and `--screenshot`.
+- [x] 6.4 Startup options and `--screenshot`.
 
 Done when nothing needs egui any more.
 

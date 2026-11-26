@@ -1197,6 +1197,10 @@ impl WgpuRenderer {
             log::error!("{error:#}");
             return false;
         }
+        // ROHDITOR: the app's `--screenshot`.
+        if let Some(sender) = crate::frame_capture::take_request() {
+            let _ = sender.send(core.capture(scene, size, premultiplied_alpha));
+        }
 
         frame.present();
         true
@@ -1204,6 +1208,36 @@ impl WgpuRenderer {
 }
 
 impl WgpuRendererCore {
+    /// ROHDITOR: render `scene` again into a texture of the window's format and read it back.
+    /// The surface texture itself cannot be copied from.
+    fn capture(
+        &mut self,
+        scene: &Scene,
+        size: Size<DevicePixels>,
+        premultiplied_alpha: bool,
+    ) -> Result<image::RgbaImage> {
+        let texture = self
+            .resources
+            .device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("capture_target"),
+                size: wgpu::Extent3d {
+                    width: size.width.0 as u32,
+                    height: size.height.0 as u32,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.target_format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        self.render_frame(scene, &view, size, premultiplied_alpha, wgpu::Color::BLACK)?;
+        crate::frame_capture::read_texture(&self.resources.device, &self.resources.queue, &texture)
+    }
+
     fn new(
         context: &WgpuContext,
         atlas: Arc<WgpuAtlas>,
@@ -2409,108 +2443,15 @@ impl WgpuHeadlessRenderer {
             .render_target
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Headless render target was not created"))?;
-        let width = target.texture.width();
-        let height = target.texture.height();
-        let bytes_per_row = width
-            .checked_mul(4)
-            .ok_or_else(|| anyhow::anyhow!("Headless render target row size overflowed"))?;
-        let padded_bytes_per_row = bytes_per_row
-            .checked_next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
-            .ok_or_else(|| anyhow::anyhow!("Headless padded row size overflowed"))?;
-        let buffer_size = u64::from(padded_bytes_per_row)
-            .checked_mul(u64::from(height))
-            .ok_or_else(|| anyhow::anyhow!("Headless readback buffer size overflowed"))?;
-        anyhow::ensure!(
-            buffer_size <= self.core.resources.device.limits().max_buffer_size,
-            "Headless readback buffer size {buffer_size} exceeds maximum buffer size {}",
-            self.core.resources.device.limits().max_buffer_size
-        );
-        let readback_buffer = self
-            .core
-            .resources
-            .device
-            .create_buffer(&wgpu::BufferDescriptor {
-                label: Some("headless_readback_buffer"),
-                size: buffer_size,
-                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                mapped_at_creation: false,
-            });
-        let mut encoder =
-            self.core
-                .resources
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("headless_readback_encoder"),
-                });
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &target.texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &readback_buffer,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded_bytes_per_row),
-                    rows_per_image: Some(height),
-                },
-            },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
-        let submission = self
-            .core
-            .resources
-            .queue
-            .submit(std::iter::once(encoder.finish()));
-        let (sender, receiver) = std::sync::mpsc::channel();
-        readback_buffer
-            .slice(..)
-            .map_async(wgpu::MapMode::Read, move |result| {
-                if sender.send(result).is_err() {
-                    log::error!("Headless readback receiver was dropped before mapping completed");
-                }
-            });
-        self.core
-            .resources
-            .device
-            .poll(wgpu::PollType::Wait {
-                submission_index: Some(submission),
-                timeout: Some(std::time::Duration::from_secs(30)),
-            })
-            .map_err(|error| anyhow::anyhow!("Failed to wait for headless rendering: {error}"))?;
-        receiver
-            .recv_timeout(std::time::Duration::from_secs(30))
-            .map_err(|error| anyhow::anyhow!("Failed to receive headless mapping result: {error}"))?
-            .map_err(|error| anyhow::anyhow!("Failed to map headless readback buffer: {error}"))?;
+        // ROHDITOR: shared with the window capture.
+        let resources = &self.core.resources;
+        let image = crate::frame_capture::read_texture(
+            &resources.device,
+            &resources.queue,
+            &target.texture,
+        )?;
         self.check_gpu_errors()?;
-
-        let mapped_data = readback_buffer.slice(..).get_mapped_range();
-        let pixel_capacity = usize::try_from(u64::from(bytes_per_row) * u64::from(height))
-            .map_err(|_| anyhow::anyhow!("Headless image size exceeds addressable memory"))?;
-        let mut pixels = Vec::with_capacity(pixel_capacity);
-        for row in mapped_data
-            .chunks_exact(padded_bytes_per_row as usize)
-            .take(height as usize)
-        {
-            pixels.extend_from_slice(&row[..bytes_per_row as usize]);
-        }
-        drop(mapped_data);
-        readback_buffer.unmap();
-
-        if self.core.target_format == wgpu::TextureFormat::Bgra8Unorm {
-            for pixel in pixels.chunks_exact_mut(4) {
-                pixel.swap(0, 2);
-            }
-        }
-
-        image::RgbaImage::from_raw(width, height, pixels)
-            .ok_or_else(|| anyhow::anyhow!("Failed to create image from headless pixel data"))
+        Ok(image)
     }
 }
 

@@ -21,18 +21,15 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    /// `gpu` is the device GPUI renders with; without one the CPU renders previews.
+    /// `gpu` is the device GPUI renders with; without one, or with the CPU `processor`, the
+    /// CPU renders previews.
     pub fn new(
         coordinator: RenderCoordinator,
         settings: AppSettings,
+        processor: ProcessorPreference,
         gpu: Option<WgpuContext>,
     ) -> Self {
-        let preference = if settings.cpu_only() {
-            ProcessorPreference::Cpu
-        } else {
-            ProcessorPreference::Auto
-        };
-        let runtime = PreviewRuntime::new(preference, gpu);
+        let runtime = PreviewRuntime::new(processor, gpu);
         if let Some(gpu) = runtime.gpu() {
             let wgpu = gpu.context();
             let configured = coordinator.configure_capture_device(

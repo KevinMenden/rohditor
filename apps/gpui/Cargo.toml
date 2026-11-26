@@ -15,6 +15,7 @@ publish = false
 
 [dependencies]
 anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
 env_logger = "0.11"
 log = "0.4"
 futures = "0.3"
@@ -23,7 +24,8 @@ unicode-segmentation = "1"
 gpui = { git = "https://github.com/zed-industries/zed", rev = "21001b273f93d1156d13d4eb67b255478a61276b", default-features = false, features = ["font-kit", "wayland"] }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "21001b273f93d1156d13d4eb67b255478a61276b", default-features = false, features = ["font-kit", "wayland"] }
 gpui_wgpu = { path = "vendor/gpui_wgpu" }
-image = { version = "0.25", default-features = false }
+# PNG for `--screenshot`.
+image = { version = "0.25", default-features = false, features = ["png"] }
 rohditor-camera-profile = { path = "../../crates/camera-profile" }
 rohditor-core = { path = "../../crates/core" }
 rohditor-demosaic = { path = "../../crates/demosaic" }

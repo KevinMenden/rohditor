@@ -82,6 +82,7 @@ impl Harness {
                     let workers = SessionWorkers::start(None).expect("the engine starts");
                     let settings = StartupSettings {
                         settings: rohditor_engine::settings::AppSettings::default(),
+                        processor: rohditor_engine::preview::ProcessorPreference::Auto,
                         config: Some(config.clone()),
                         neural_unavailable: Some("no model is installed".to_owned()),
                         warning: None,

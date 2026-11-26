@@ -40,6 +40,11 @@ impl CameraLookState {
 }
 
 impl OpenDocument {
+    /// Whether a fit is running and will change the picture when it arrives.
+    pub(super) const fn camera_look_pending(&self) -> bool {
+        matches!(self.camera_look, CameraLookState::Pending(_))
+    }
+
     /// Bring the recipe and fit state in line, as needed by the current recipe.
     /// Cheap enough to run every frame. Returns whether the recipe changed, so
     /// the caller must queue a preview.
@@ -124,5 +129,32 @@ impl OpenDocument {
             }
         };
         self.sync_camera_look(coordinator)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use rohditor_core::default_recipe;
+
+    use super::*;
+
+    #[test]
+    fn a_document_settles_once_open_previewed_and_fitted() {
+        let mut document =
+            OpenDocument::opening(1, PathBuf::from("fixture.arw"), default_recipe(None), None);
+        assert!(!document.is_settled(), "still opening");
+        document.open_status = None;
+        assert!(!document.is_settled(), "no histogram for the edits yet");
+        document.preview.histogram_revision = Some(document.edits.revision());
+        assert!(document.is_settled());
+        let profile = document.edits.recipe().color.camera_profile.clone();
+        document.camera_look = CameraLookState::Pending(profile.clone());
+        assert!(!document.is_settled(), "a look fit will change the picture");
+        document.camera_look = CameraLookState::Unavailable(profile);
+        assert!(document.is_settled());
+        document.preview.status = Some((2, "Rendering".to_owned()));
+        assert!(!document.is_settled(), "a preview is rendering");
     }
 }

@@ -49,7 +49,7 @@ use presets::Presets;
 use renderer::Renderer;
 use saving::Saves;
 use settings::SettingsFile;
-pub use settings::StartupSettings;
+pub use settings::{StartupChoices, StartupSettings};
 
 use crate::wake::{self, Woken};
 
@@ -113,9 +113,9 @@ impl Session {
         gpu: Option<WgpuContext>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let (settings, settings_file) = SettingsFile::new(settings);
+        let (settings, processor, settings_file) = SettingsFile::new(settings);
         Self {
-            renderer: Renderer::new(workers.coordinator, settings, gpu),
+            renderer: Renderer::new(workers.coordinator, settings, processor, gpu),
             settings_file,
             document: None,
             display: DisplaySlot::default(),
@@ -175,6 +175,13 @@ impl Session {
                 || document.preview.status.is_some()
                 || document.export_status.is_some()
         })
+    }
+
+    /// Whether the picture is final for now: no photo, a failed one, or a settled preview.
+    pub fn preview_settled(&self) -> bool {
+        self.document
+            .as_ref()
+            .is_none_or(|document| document.error.is_some() || document.is_settled())
     }
 
     pub fn open_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {

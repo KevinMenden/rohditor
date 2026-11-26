@@ -1,11 +1,13 @@
-//! Rohditor on GPUI: `rohditor-gpui [FILE|FOLDER]`.
+//! Rohditor on GPUI: `rohditor-gpui [FILE|FOLDER]`; `--help` lists the options.
 
 mod actions;
 mod assets;
 mod atlas_image;
+mod cli;
 mod device;
 mod library;
 mod panels;
+mod screenshot;
 mod session;
 mod theme;
 mod ui;
@@ -14,8 +16,12 @@ mod wake;
 mod workspace;
 
 use std::path::PathBuf;
+use std::process::ExitCode;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
+use clap::Parser as _;
 use gpui::{
     App, AppContext, Bounds, TitlebarOptions, WindowBounds, WindowDecorations, WindowOptions, px,
     size,
@@ -28,19 +34,40 @@ use crate::library::{Library, LibraryWorker};
 use crate::session::{Session, SessionWorkers, StartupSettings};
 use crate::workspace::Workspace;
 
-fn main() -> Result<()> {
+fn main() -> Result<ExitCode> {
     env_logger::init();
+    let arguments = cli::Arguments::parse();
     // Before the workers: the render worker takes the neural model.
-    let (settings, neural) = StartupSettings::load(config_directory(), data_directory().as_deref());
+    let (settings, neural) = StartupSettings::load(
+        config_directory(),
+        data_directory().as_deref(),
+        arguments.startup_choices(),
+    );
     let workers = Workers {
         session: SessionWorkers::start(neural)?,
         library: LibraryWorker::start()?,
     };
-    // Relative paths would not match the folder tree's.
-    let open = std::env::args_os().nth(1).map(PathBuf::from);
-    let open = open.map(|path| std::path::absolute(&path).unwrap_or(path));
-    run(open, settings, workers);
-    Ok(())
+    let startup = Startup {
+        // Relative paths would not match the folder tree's.
+        open: (arguments.open.as_ref())
+            .map(|path| std::path::absolute(path).unwrap_or_else(|_| path.clone())),
+        diagnostics: arguments.diagnostics,
+        screenshot: arguments.screenshot(),
+    };
+    let screenshot_failed = Arc::new(AtomicBool::new(false));
+    run(startup, settings, workers, screenshot_failed.clone());
+    Ok(if screenshot_failed.load(Ordering::Relaxed) {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    })
+}
+
+/// What the command line asks the window to do.
+struct Startup {
+    open: Option<PathBuf>,
+    diagnostics: bool,
+    screenshot: Option<cli::Screenshot>,
 }
 
 struct Workers {
@@ -68,7 +95,12 @@ fn xdg_directory(variable: &str, fallback: &str) -> Option<PathBuf> {
     base.map(|base| base.join("rohditor"))
 }
 
-fn run(open: Option<PathBuf>, settings: StartupSettings, workers: Workers) {
+fn run(
+    startup: Startup,
+    settings: StartupSettings,
+    workers: Workers,
+    screenshot_failed: Arc<AtomicBool>,
+) {
     gpui_platform::application()
         .with_assets(assets::Assets)
         .run(move |cx: &mut App| {
@@ -100,7 +132,7 @@ fn run(open: Option<PathBuf>, settings: StartupSettings, workers: Workers) {
                     )
                 });
                 let library = cx.new(|cx| Library::new(workers.library, config, &session, cx));
-                match open {
+                match startup.open {
                     Some(path) if path.is_dir() => {
                         library.update(cx, |library, cx| library.open_folder(path, cx));
                     }
@@ -113,7 +145,17 @@ fn run(open: Option<PathBuf>, settings: StartupSettings, workers: Workers) {
                     async {}
                 })
                 .detach();
-                cx.new(|cx| Workspace::new(session, library, window, cx))
+                if let Some(screenshot) = startup.screenshot {
+                    let handle = window.window_handle();
+                    screenshot::arm(screenshot, handle, session.clone(), screenshot_failed, cx);
+                }
+                cx.new(|cx| {
+                    let mut workspace = Workspace::new(session, library, window, cx);
+                    if startup.diagnostics {
+                        workspace.show_diagnostics(cx);
+                    }
+                    workspace
+                })
             });
             if let Err(error) = opened {
                 eprintln!("could not open the window: {error:#}");
