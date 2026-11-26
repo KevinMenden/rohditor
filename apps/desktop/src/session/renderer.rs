@@ -1,6 +1,6 @@
 //! Runs the engine's preview operations for the open photo.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use rohditor_core::PreviewOptions;
 use rohditor_engine::coordinator::RenderCoordinator;
@@ -17,7 +17,6 @@ pub struct Renderer {
     pub coordinator: RenderCoordinator,
     pub settings: AppSettings,
     runtime: PreviewRuntime,
-    started: Instant,
 }
 
 impl Renderer {
@@ -46,13 +45,7 @@ impl Renderer {
             coordinator,
             settings,
             runtime,
-            started: Instant::now(),
         }
-    }
-
-    /// Seconds since start, the clock of the view's zoom feedback.
-    pub fn now(&self) -> f64 {
-        self.started.elapsed().as_secs_f64()
     }
 
     /// The adapter previews render on, or that the CPU does.
@@ -106,7 +99,6 @@ impl Renderer {
             revision: document.edits.revision(),
             options: self.preview_options(),
             histogram_always: false,
-            now: self.now(),
         };
         let (result, outcome) = operation(
             &mut self.runtime,

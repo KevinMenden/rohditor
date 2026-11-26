@@ -218,6 +218,15 @@ mod tests {
 
     use super::*;
 
+    /// Whether the recipe differs from the photo's defaults. The fitted camera look is derived
+    /// from the photo rather than chosen, so it does not count.
+    fn has_user_adjustments(document: &OpenDocument) -> bool {
+        let mut current = document.edits.recipe().clone();
+        current.rendering.camera_tone = None;
+        current.rendering.camera_chroma = None;
+        current != document.default_recipe()
+    }
+
     /// Noise at mid grey of roughly a corpus ISO 1000 photo (sigma 0.0063).
     fn noisy() -> NoiseProfile {
         NoiseProfile {
@@ -262,7 +271,7 @@ mod tests {
             "opening must not create a sidecar"
         );
         assert!(!document.edits.can_undo());
-        assert!(!document.has_user_adjustments());
+        assert!(!has_user_adjustments(&document));
         // Applying twice changes nothing.
         assert!(!document.apply_default_noise_reduction());
     }
@@ -287,7 +296,7 @@ mod tests {
         assert!(document.noise_profile_ready(Ok(Some(noisy()))));
         assert!(document.edits.undo());
         assert_eq!(document.edits.recipe().light.exposure_ev, 0.0);
-        assert!(!document.has_user_adjustments());
+        assert!(!has_user_adjustments(&document));
     }
 
     #[test]
@@ -309,7 +318,7 @@ mod tests {
         let mut untouched = pending();
         assert!(!untouched.apply_noise_suggestion(&coordinator, options));
         assert!(untouched.noise_profile_ready(Ok(Some(noisy()))));
-        assert!(!untouched.has_user_adjustments() && !untouched.edits.can_undo());
+        assert!(!has_user_adjustments(&untouched) && !untouched.edits.can_undo());
     }
 
     #[test]
@@ -353,11 +362,11 @@ mod tests {
         mine.noise_reduction = NoiseReduction::default();
         mine.light.exposure_ev = 0.5;
         assert!(document.edits.set_discrete(mine));
-        assert!(document.has_user_adjustments());
+        assert!(has_user_adjustments(&document));
         let defaults: EditRecipe = document.default_recipe();
         assert!(document.edits.reset_to(defaults));
         assert_eq!(document.edits.recipe().noise_reduction, derived);
-        assert!(!document.has_user_adjustments());
+        assert!(!has_user_adjustments(&document));
     }
 
     #[test]

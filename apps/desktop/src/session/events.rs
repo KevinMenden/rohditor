@@ -94,7 +94,6 @@ impl Session {
                 diagnostics,
             } => {
                 let source_scale = resolution == PreviewResolution::SourceScale;
-                let now = self.renderer.now();
                 let Some(document) = self
                     .document
                     .as_mut()
@@ -128,7 +127,7 @@ impl Session {
                     PreviewSource::developed(diagnostics.algorithm, false)
                 });
                 if source_scale {
-                    preview.view.source_scale_frame_ready(previous_source, now);
+                    preview.view.source_scale_frame_ready(previous_source);
                 }
                 preview.cpu_frame_installed(*histogram, ticket.revision);
                 preview.status = None;

@@ -205,10 +205,6 @@ impl CropToolSession {
         self.drag = None;
     }
 
-    pub fn active_handle(&self) -> Option<CropHandle> {
-        self.drag.map(|drag| drag.handle)
-    }
-
     fn normalized_ratio(&self) -> Option<f64> {
         // Pixel-space ratio first, exactly like the preset path: presets are
         // flipped in pixel space inside `CropAspect::ratio`, a Free-locked

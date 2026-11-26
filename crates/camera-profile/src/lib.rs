@@ -6,7 +6,6 @@
 //! pixel-producing features it cannot evaluate.
 
 use std::fmt;
-use std::path::Path;
 
 use serde::de::{Error as _, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
@@ -442,15 +441,4 @@ fn normalize_camera_text(value: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-/// Parse an already-loaded DCP. This alias makes call sites explicit about
-/// the fact that the parser does not perform installation or persistence.
-pub fn parse_dcp(bytes: &[u8]) -> Result<MatrixCameraProfile, CameraProfileError> {
-    parse_dcp_bytes(bytes)
-}
-
-/// Parse a DCP path without retaining the path in the resulting profile.
-pub fn parse_profile_file(path: &Path) -> Result<MatrixCameraProfile, CameraProfileError> {
-    parse_dcp_file(path)
 }

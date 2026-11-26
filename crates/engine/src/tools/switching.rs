@@ -12,14 +12,13 @@ use crate::open_document::OpenDocument;
 
 impl ActiveTool {
     /// Change to `target`, applying what the current tool drafted. Nothing happens if the photo
-    /// is not ready for it. `now` is the frontend clock of the view's feedback.
+    /// is not ready for it.
     #[must_use = "the caller must queue a preview"]
     pub fn switch_to(
         &mut self,
         target: ToolKind,
         document: &mut OpenDocument,
         policy: RawCropPolicy,
-        now: f64,
     ) -> bool {
         if target == self.kind() {
             return false;
@@ -30,27 +29,27 @@ impl ActiveTool {
         // The panel that a slider is dragged in goes away.
         document.edits.finish_gesture();
         document.cancel_pick();
-        let left = self.close(document, true, now);
+        let left = self.close(document, true);
         *self = next;
         // The crop that was just applied is the one to start from.
         self.sync(document.edits.recipe());
         let full_frame = target == ToolKind::Crop;
         if full_frame {
-            document.preview.request_full_frame(true, now);
+            document.preview.request_full_frame(true);
         }
         left || full_frame
     }
 
     /// Return to Edit, applying what the tool drafted.
     #[must_use = "the caller must queue a preview"]
-    pub fn apply(&mut self, document: &mut OpenDocument, now: f64) -> bool {
-        self.close(document, true, now)
+    pub fn apply(&mut self, document: &mut OpenDocument) -> bool {
+        self.close(document, true)
     }
 
     /// Return to Edit, discarding what the tool drafted.
     #[must_use = "the caller must queue a preview"]
-    pub fn cancel(&mut self, document: &mut OpenDocument, now: f64) -> bool {
-        self.close(document, false, now)
+    pub fn cancel(&mut self, document: &mut OpenDocument) -> bool {
+        self.close(document, false)
     }
 
     /// The tool `target` at its start, if the photo is ready for it.
@@ -77,7 +76,7 @@ impl ActiveTool {
         Some(tool)
     }
 
-    fn close(&mut self, document: &mut OpenDocument, commit: bool, now: f64) -> bool {
+    fn close(&mut self, document: &mut OpenDocument, commit: bool) -> bool {
         let full_frame = self.crop().is_some();
         if let Some(next) = std::mem::take(self).leave(document.edits.recipe(), commit)
             && document.edits.set_discrete(next)
@@ -85,7 +84,7 @@ impl ActiveTool {
             document.notice = None;
         }
         if full_frame {
-            document.preview.request_full_frame(false, now);
+            document.preview.request_full_frame(false);
         }
         full_frame
     }
@@ -157,7 +156,7 @@ mod tests {
         let mut tool = ActiveTool::default();
         let crop = document.edits.recipe().geometry.crop;
         tool.enter_crop(CropToolSession::new(crop, 6000, 4000));
-        document.preview.request_full_frame(true, 0.0);
+        document.preview.request_full_frame(true);
         tool
     }
 
@@ -178,7 +177,7 @@ mod tests {
             picker: Some(Picker::WhiteBalance),
         };
         let policy = RawCropPolicy::default();
-        assert!(!tool.switch_to(ToolKind::Crop, &mut document, policy, 0.0));
+        assert!(!tool.switch_to(ToolKind::Crop, &mut document, policy));
         assert_eq!(tool.picker(), Some(Picker::WhiteBalance));
     }
 
@@ -189,7 +188,7 @@ mod tests {
         draft(&mut tool, CropAspect::Square);
         draft(&mut tool, CropAspect::FourThree);
         let policy = RawCropPolicy::default();
-        assert!(tool.switch_to(ToolKind::Masks, &mut document, policy, 0.0));
+        assert!(tool.switch_to(ToolKind::Masks, &mut document, policy));
         assert_eq!(tool.kind(), ToolKind::Masks);
         assert!(document.edits.recipe().geometry.crop.is_some());
         assert!(tool.undo(&mut document.edits));
@@ -202,10 +201,10 @@ mod tests {
         let mut document = document();
         let mut tool = cropping(&mut document);
         draft(&mut tool, CropAspect::Square);
-        assert!(tool.cancel(&mut document, 0.0));
+        assert!(tool.cancel(&mut document));
         assert_eq!(tool.kind(), ToolKind::Edit);
         assert!(!document.edits.can_undo());
-        assert!(document.preview.request_actual_size(0.0), "1:1 works again");
+        assert!(document.preview.request_actual_size(), "1:1 works again");
     }
 
     #[test]
@@ -234,7 +233,7 @@ mod tests {
         exposed(&mut document, 1.0);
         tool.sync(document.edits.recipe());
         assert!(tool.is_modified());
-        assert!(tool.apply(&mut document, 0.0));
+        assert!(tool.apply(&mut document));
         assert_eq!(document.edits.recipe().light.exposure_ev, 1.0);
 
         let mut tool = cropping(&mut document);

@@ -102,11 +102,6 @@ impl Thumbnail {
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
-
-    #[must_use]
-    pub fn into_bytes(self) -> Arc<[u8]> {
-        self.bytes
-    }
 }
 
 /// Why the catalog should display a placeholder instead of a thumbnail.

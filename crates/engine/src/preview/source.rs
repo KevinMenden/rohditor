@@ -56,16 +56,4 @@ impl PreviewSource {
             Self::OneToOneGpu => "1:1 SOURCE-SCALE DEVELOPED · GPU",
         }
     }
-
-    pub const fn short_label(self) -> &'static str {
-        match self {
-            Self::Embedded => "Embedded preview",
-            Self::FastCpu => "Fast preview · CPU",
-            Self::FastGpu => "Fast preview · GPU",
-            Self::HighQualityCpu => "High-quality preview · CPU",
-            Self::HighQualityGpu => "High-quality preview · GPU",
-            Self::OneToOneCpu => "1:1 source-scale · CPU",
-            Self::OneToOneGpu => "1:1 source-scale · GPU",
-        }
-    }
 }

@@ -143,17 +143,6 @@ pub fn saved_demosaic(name: &str) -> Option<DemosaicAlgorithm> {
         .find(|algorithm| algorithm.stable_name() == name)
 }
 
-pub fn resolve_startup_settings(
-    persisted: AppSettings,
-    command_line_override: Option<DemosaicAlgorithm>,
-) -> AppSettings {
-    let mut effective = persisted;
-    if let Some(demosaic) = command_line_override {
-        effective.demosaic = demosaic;
-    }
-    effective
-}
-
 /// The settings to run with when the neural demosaic is unavailable for
 /// `reason`: a saved "neural" choice falls back to the classic stand-in for
 /// this run, with a warning. The saved file is not changed.
@@ -404,26 +393,13 @@ mod tests {
     fn bilinear_remains_a_non_persisted_development_override() {
         let directory = TestDirectory::new();
         let path = directory.path().join("settings.json");
-        let settings =
-            resolve_startup_settings(AppSettings::default(), Some(DemosaicAlgorithm::Bilinear));
+        let settings = AppSettings {
+            demosaic: DemosaicAlgorithm::Bilinear,
+            ..AppSettings::default()
+        };
         let error = save_to_path(&path, settings).expect_err("bilinear must not be persisted");
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert!(!path.exists());
-    }
-
-    #[test]
-    fn command_line_override_has_documented_precedence() {
-        let mut persisted = AppSettings::default();
-        persisted.set_demosaic(DemosaicAlgorithm::Rcd);
-        assert_eq!(resolve_startup_settings(persisted, None), persisted);
-        assert_eq!(
-            resolve_startup_settings(persisted, Some(DemosaicAlgorithm::Amaze)).demosaic(),
-            DemosaicAlgorithm::Amaze
-        );
-        assert_eq!(
-            resolve_startup_settings(AppSettings::default(), None),
-            AppSettings::default()
-        );
     }
 
     #[test]

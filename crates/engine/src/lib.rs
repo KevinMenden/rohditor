@@ -25,7 +25,6 @@ pub mod persistence;
 pub mod presets;
 pub mod preview;
 pub mod preview_cache;
-pub mod session;
 pub mod settings;
 pub mod storage;
 pub mod tools;

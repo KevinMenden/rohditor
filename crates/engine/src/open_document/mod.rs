@@ -128,10 +128,6 @@ impl OpenDocument {
         self.preview.ticket(self.edits.revision())
     }
 
-    pub fn begin_preview_request(&mut self, intent: PreviewIntent) -> PreviewTicket {
-        self.preview.begin_request(self.edits.revision(), intent)
-    }
-
     pub fn accepts_preview(&self, ticket: PreviewTicket, intent: PreviewIntent) -> bool {
         self.preview.accepts(self.edits.revision(), ticket, intent)
     }
@@ -192,19 +188,6 @@ impl OpenDocument {
             default_recipe(self.as_shot_coordinates()),
             self.noise.default_profile(),
         )
-    }
-
-    /// Whether the recipe differs from `defaults`. The fitted camera look is
-    /// derived from the photo rather than chosen, so it does not count.
-    pub fn differs_from_defaults(&self, defaults: &EditRecipe) -> bool {
-        let mut current = self.edits.recipe().clone();
-        current.rendering.camera_tone = None;
-        current.rendering.camera_chroma = None;
-        current != *defaults
-    }
-
-    pub fn has_user_adjustments(&self) -> bool {
-        self.differs_from_defaults(&self.default_recipe())
     }
 
     /// What the Detail panel shows next to the noise Auto button.
