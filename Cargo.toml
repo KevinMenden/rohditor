@@ -26,7 +26,7 @@ resolver = "3"
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.92"
+rust-version = "1.95"
 license = "GPL-3.0-or-later"
 publish = false
 
@@ -35,8 +35,6 @@ anyhow = "1.0"
 bytemuck = "1.25"
 clap = { version = "4.5", features = ["derive"] }
 criterion = "=0.5.1"
-eframe = { version = "=0.35.0", default-features = false, features = ["default_fonts", "glow", "wayland", "wgpu", "x11"] }
-egui_kittest = { version = "=0.35.0", default-features = false, features = ["eframe", "snapshot", "wgpu"] }
 half = "=2.7.1"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 lensfun = "=0.7.0"
@@ -46,7 +44,6 @@ ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "
 pollster = "=0.4.0"
 rayon = "1.11"
 rawler = "=0.7.2"
-rfd = { version = "=0.17.2", default-features = false, features = ["xdg-portal"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
@@ -55,7 +52,15 @@ tiff = { version = "0.11", default-features = false, features = ["deflate"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 wgpu = { version = "=29.0.4", default-features = false, features = ["vulkan", "wgsl"] }
-winit = "=0.30.13"
+
+# GPUI's wgpu renderer, vendored with local changes (apps/desktop/vendor/gpui_wgpu).
+[patch."https://github.com/zed-industries/zed"]
+gpui_wgpu = { path = "apps/desktop/vendor/gpui_wgpu" }
+
+# Zed's own registry patches that GPUI's Linux backend relies on.
+[patch.crates-io]
+calloop = { git = "https://github.com/zed-industries/calloop", rev = "3759371fee14c40066d64777e2a36b6ffcc22590" }
+async-task = { git = "https://github.com/zed-industries/async-task.git", rev = "015845a19fc31752c02367567d3b8900a406f9da" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

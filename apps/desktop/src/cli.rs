@@ -99,7 +99,9 @@ mod tests {
     use super::*;
 
     fn parse(arguments: &[&str]) -> Result<Arguments, clap::Error> {
-        Arguments::try_parse_from(std::iter::once("rohditor-gpui").chain(arguments.iter().copied()))
+        Arguments::try_parse_from(
+            std::iter::once("rohditor-desktop").chain(arguments.iter().copied()),
+        )
     }
 
     #[test]

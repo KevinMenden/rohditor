@@ -2,7 +2,7 @@
 //!
 //! Pure event application with scan and source-identity guards, so results
 //! from an earlier scan or a changed file never overwrite current state.
-//! Deliberately free of egui, worker, and texture concerns for testability.
+//! Deliberately free of UI toolkit, worker, and texture concerns for testability.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

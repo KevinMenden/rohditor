@@ -5,7 +5,7 @@ use super::*;
 
 /// A folder of many files.
 fn scratch_many(name: &str, count: usize) -> PathBuf {
-    let folder = std::env::temp_dir().join(format!("rohditor-gpui-filmstrip-{name}"));
+    let folder = std::env::temp_dir().join(format!("rohditor-desktop-filmstrip-{name}"));
     drop(std::fs::remove_dir_all(&folder));
     std::fs::create_dir_all(&folder).expect("scratch folder");
     for index in 0..count {

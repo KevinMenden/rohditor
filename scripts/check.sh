@@ -57,5 +57,7 @@ if grep -rEn 'pub use rohditor_' crates/engine/src; then
 fi
 
 cargo fmt --all --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
+# The vendored GPUI renderer (apps/desktop/vendor/gpui_wgpu) is a workspace member, as every
+# path dependency below the root is, but keeps its upstream lints. Its tests are off.
+cargo clippy --workspace --exclude gpui_wgpu --no-deps --all-targets --locked -- -D warnings
 cargo test --workspace --locked

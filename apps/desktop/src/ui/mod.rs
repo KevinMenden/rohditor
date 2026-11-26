@@ -1,36 +1,19 @@
-//! Rohditor's presentation-only desktop design system.
-//!
-//! These modules may depend on egui, but deliberately do not know about RAW
-//! decoding, edit recipes, worker jobs, or GPU processors. `app.rs` translates
-//! between these view models and application commands.
+//! The widgets the panels are built from.
 
-/// Top-level workspace modes, following the familiar library/develop split.
-/// The library browses a folder; the develop mode edits one photo.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum ViewMode {
-    #[default]
-    Develop,
-    Library,
-}
-
-pub(crate) mod adjustment_panel;
-pub(crate) mod catalog;
-pub(crate) mod crop;
-mod detail;
-pub(crate) mod diagnostics;
-pub(crate) mod export_dialog;
-pub(crate) mod icons;
-pub(crate) mod info;
-pub(crate) mod mask_overlay;
-pub(crate) mod masks;
-pub(crate) mod optics;
-mod presence;
-pub(crate) mod presets;
-pub(crate) mod range_controls;
-pub(crate) mod settings;
-pub(crate) mod theme;
-pub(crate) mod tool_panel;
-pub(crate) mod tool_rail;
-pub(crate) mod toolbar;
-pub(crate) mod viewport;
-pub(crate) mod widgets;
+pub mod button;
+pub mod choice;
+pub mod confirm;
+pub mod dropdown;
+pub mod histogram;
+pub mod keys;
+pub mod matching;
+pub mod menu;
+pub mod name_form;
+pub mod overlays;
+pub mod search_list;
+pub mod slider;
+pub mod test_id;
+pub mod text_input;
+pub mod toggle;
+pub mod tooltip;
+pub mod virtual_row;

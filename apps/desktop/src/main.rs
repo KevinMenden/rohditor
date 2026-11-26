@@ -1,321 +1,190 @@
-mod app;
-mod config;
+//! Rohditor on GPUI: `rohditor-desktop [FILE|FOLDER]`; `--help` lists the options.
+
+mod actions;
+mod assets;
+mod atlas_image;
+mod cli;
+mod device;
+mod library;
+mod panels;
+mod screenshot;
+mod session;
+mod theme;
 mod ui;
+mod viewport;
+mod wake;
+mod workspace;
 
-use clap::{Parser, ValueEnum};
-use eframe::egui;
-use rohditor_demosaic::DemosaicAlgorithm;
 use std::path::PathBuf;
-use std::time::Duration;
-use tracing::warn;
-use tracing_subscriber::EnvFilter;
+use std::process::ExitCode;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::app::RohditorApp;
-pub(crate) use rohditor_engine::preview::ProcessorPreference;
-use rohditor_engine::settings::{self, AppSettings, SettingsLoad, resolve_startup_settings};
+use anyhow::Result;
+use clap::Parser as _;
+use gpui::{
+    App, AppContext, Bounds, TitlebarOptions, WindowBounds, WindowDecorations, WindowOptions, px,
+    size,
+};
 
-/// Stable Freedesktop/Wayland identity. Keep this equal to the installed
-/// desktop-file basename and icon name.
+use rohditor_engine::camera_profiles::CameraProfileRegistry;
+use rohditor_engine::presets::PresetStore;
+
+use crate::library::{Library, LibraryWorker};
+use crate::session::{Session, SessionWorkers, StartupSettings};
+use crate::workspace::Workspace;
+
+/// The Wayland app id. It must match the installed desktop file and icon
+/// (`assets/io.github.kevin.rohditor.*`), or the compositor shows neither for the window.
 const APPLICATION_ID: &str = "io.github.kevin.rohditor";
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
-enum RendererPreference {
-    /// Prefer wgpu and retry with glow if initialization fails.
-    #[default]
-    Auto,
-    /// Require the wgpu UI renderer.
-    Wgpu,
-    /// Use the OpenGL glow UI fallback. Image processing remains on the CPU.
-    Glow,
-}
-
-/// Command-line spelling of [`ProcessorPreference`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum ProcessorChoice {
-    /// Prefer GPU previews and export color processing with CPU fallback.
-    Auto,
-    /// Require GPU previews; prefer GPU export with recovery to CPU if needed.
-    Gpu,
-    /// Use the CPU reference for previews and exports.
-    Cpu,
-}
-
-impl From<ProcessorChoice> for ProcessorPreference {
-    fn from(choice: ProcessorChoice) -> Self {
-        match choice {
-            ProcessorChoice::Auto => Self::Auto,
-            ProcessorChoice::Gpu => Self::Gpu,
-            ProcessorChoice::Cpu => Self::Cpu,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
-enum DemosaicPreference {
-    Bilinear,
-    #[value(name = "mhc")]
-    #[default]
-    MalvarHeCutler,
-    #[value(name = "rcd")]
-    Rcd,
-    #[value(name = "amaze")]
-    Amaze,
-    /// Needs the installed model (`rohditor-cli model install <FILE>`).
-    #[value(name = "neural")]
-    Neural,
-}
-
-impl From<DemosaicPreference> for DemosaicAlgorithm {
-    fn from(value: DemosaicPreference) -> Self {
-        match value {
-            DemosaicPreference::Bilinear => Self::Bilinear,
-            DemosaicPreference::MalvarHeCutler => Self::MalvarHeCutler,
-            DemosaicPreference::Rcd => Self::Rcd,
-            DemosaicPreference::Amaze => Self::Amaze,
-            DemosaicPreference::Neural => Self::Neural,
-        }
-    }
-}
-
-#[derive(Debug, Parser)]
-#[command(version, about = "Linux-first Sony RAW photo editor")]
-struct Arguments {
-    /// UI renderer. The wgpu renderer is required for GPU preview processing.
-    #[arg(long, value_enum, default_value_t)]
-    renderer: RendererPreference,
-
-    /// Image processor for this run, overriding the persisted "CPU only"
-    /// setting. Without it, the setting decides between `auto` and `cpu`.
-    #[arg(long, value_enum)]
-    processor: Option<ProcessorChoice>,
-
-    /// Preview and export demosaic algorithm for development comparisons.
-    #[arg(long, value_enum)]
-    demosaic: Option<DemosaicPreference>,
-
-    /// Sony RAW file to open at startup.
-    file: Option<PathBuf>,
-
-    /// Open the developer diagnostics window at startup.
-    #[arg(long)]
-    diagnostics: bool,
-
-    /// Save a screenshot of the window to this PNG path, then exit.
-    #[arg(long, value_name = "PATH")]
-    screenshot: Option<PathBuf>,
-
-    /// Seconds to wait before the `--screenshot` capture, so the preview can settle.
-    #[arg(
-        long,
-        value_name = "SECONDS",
-        default_value_t = 5.0,
-        requires = "screenshot"
-    )]
-    screenshot_delay: f32,
-}
-
-fn main() -> eframe::Result {
-    init_tracing();
-    let arguments = Arguments::parse();
-    let SettingsLoad {
-        settings: persisted_settings,
-        warning: settings_warning,
-    } = settings::load(config::config_directory().as_deref());
-    let processor =
-        ProcessorPreference::for_run(persisted_settings, arguments.processor.map(Into::into));
-    let screenshot = arguments.screenshot.clone().map(|path| {
-        (
-            path,
-            Duration::from_secs_f32(arguments.screenshot_delay.max(0.0)),
-        )
-    });
-    let effective_settings = resolve_startup_settings(
-        persisted_settings,
-        arguments.demosaic.map(DemosaicAlgorithm::from),
+fn main() -> Result<ExitCode> {
+    env_logger::init();
+    let arguments = cli::Arguments::parse();
+    // Before the workers: the render worker takes the neural model.
+    let (settings, neural) = StartupSettings::load(
+        config_directory(),
+        data_directory().as_deref(),
+        arguments.startup_choices(),
     );
-    match arguments.renderer {
-        RendererPreference::Auto => match launch(
-            eframe::Renderer::Wgpu,
-            arguments.file.clone(),
-            processor,
-            effective_settings,
-            settings_warning.clone(),
-            arguments.diagnostics,
-            screenshot.clone(),
-        ) {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                warn!(%error, "wgpu UI initialization failed; retrying with glow");
-                eprintln!("wgpu UI initialization failed ({error}); retrying with glow");
-                launch(
-                    eframe::Renderer::Glow,
-                    arguments.file,
-                    processor,
-                    effective_settings,
-                    settings_warning,
-                    arguments.diagnostics,
-                    screenshot,
-                )
-            }
-        },
-        RendererPreference::Wgpu => launch(
-            eframe::Renderer::Wgpu,
-            arguments.file,
-            processor,
-            effective_settings,
-            settings_warning,
-            arguments.diagnostics,
-            screenshot.clone(),
-        ),
-        RendererPreference::Glow => launch(
-            eframe::Renderer::Glow,
-            arguments.file,
-            processor,
-            effective_settings,
-            settings_warning,
-            arguments.diagnostics,
-            screenshot.clone(),
-        ),
-    }
-}
-
-fn launch(
-    renderer: eframe::Renderer,
-    initial_path: Option<PathBuf>,
-    processor: ProcessorPreference,
-    settings: AppSettings,
-    settings_warning: Option<String>,
-    show_diagnostics: bool,
-    screenshot: Option<(PathBuf, Duration)>,
-) -> eframe::Result {
-    let mut options = eframe::NativeOptions {
-        renderer,
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Rohditor")
-            .with_app_id(APPLICATION_ID)
-            .with_inner_size([1_600.0, 1_000.0])
-            .with_maximized(true)
-            .with_min_inner_size([900.0, 600.0]),
-        ..eframe::NativeOptions::default()
+    let workers = Workers {
+        session: SessionWorkers::start(neural)?,
+        library: LibraryWorker::start()?,
     };
-    configure_glow_fallback_event_loop(&mut options, renderer);
-    eframe::run_native(
-        "rohditor",
-        options,
-        Box::new(move |context| {
-            let application = RohditorApp::new(
-                context,
-                initial_path.clone(),
-                processor,
-                settings,
-                settings_warning.clone(),
-                show_diagnostics,
-                config::AppDirectories::resolve(),
-            )?;
-            Ok(Box::new(match screenshot.clone() {
-                Some((path, delay)) => application.with_screenshot(path, delay),
-                None => application,
-            }))
-        }),
-    )
+    let startup = Startup {
+        // Relative paths would not match the folder tree's.
+        open: (arguments.open.as_ref())
+            .map(|path| std::path::absolute(path).unwrap_or_else(|_| path.clone())),
+        diagnostics: arguments.diagnostics,
+        screenshot: arguments.screenshot(),
+    };
+    let screenshot_failed = Arc::new(AtomicBool::new(false));
+    run(startup, settings, workers, screenshot_failed.clone());
+    Ok(if screenshot_failed.load(Ordering::Relaxed) {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    })
 }
 
-/// eframe's glow event loop did not reliably wake for worker repaint requests
-/// on the reference Plasma Wayland session. The normal renderer is native
-/// Wayland wgpu; make the legacy glow fallback use XWayland when it is already
-/// available so CPU fallback stays responsive.
-#[cfg(target_os = "linux")]
-fn configure_glow_fallback_event_loop(
-    options: &mut eframe::NativeOptions,
-    renderer: eframe::Renderer,
+/// What the command line asks the window to do.
+struct Startup {
+    open: Option<PathBuf>,
+    diagnostics: bool,
+    screenshot: Option<cli::Screenshot>,
+}
+
+struct Workers {
+    session: SessionWorkers,
+    library: LibraryWorker,
+}
+
+/// `$XDG_CONFIG_HOME/rohditor`.
+fn config_directory() -> Option<PathBuf> {
+    xdg_directory("XDG_CONFIG_HOME", ".config")
+}
+
+/// `$XDG_DATA_HOME/rohditor`, where the neural model is installed; shared with the CLI.
+fn data_directory() -> Option<PathBuf> {
+    xdg_directory("XDG_DATA_HOME", ".local/share")
+}
+
+/// `$variable/rohditor`, or `$HOME/fallback/rohditor` when it is not set.
+fn xdg_directory(variable: &str, fallback: &str) -> Option<PathBuf> {
+    let base = std::env::var_os(variable)
+        .filter(|directory| !directory.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(fallback)));
+    base.map(|base| base.join("rohditor"))
+}
+
+fn run(
+    startup: Startup,
+    settings: StartupSettings,
+    workers: Workers,
+    screenshot_failed: Arc<AtomicBool>,
 ) {
-    if matches!(renderer, eframe::Renderer::Glow) && std::env::var_os("DISPLAY").is_some() {
-        use winit::platform::x11::EventLoopBuilderExtX11 as _;
-
-        options.event_loop_builder = Some(Box::new(|builder| {
-            let _ = builder.with_x11();
-        }));
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn configure_glow_fallback_event_loop(
-    _options: &mut eframe::NativeOptions,
-    _renderer: eframe::Renderer,
-) {
-}
-
-fn init_tracing() {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("warn,rohditor_desktop=info,rohditor_raw=info"));
-    drop(
-        tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .with_target(false)
-            .try_init(),
-    );
+    gpui_platform::application()
+        .with_assets(assets::Assets)
+        .run(move |cx: &mut App| {
+            actions::bind_keys(cx);
+            let bounds = Bounds::centered(None, size(px(1800.0), px(1200.0)), cx);
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: Some(TitlebarOptions {
+                    title: Some("Rohditor".into()),
+                    appears_transparent: true,
+                    traffic_light_position: None,
+                }),
+                window_decorations: Some(WindowDecorations::Client),
+                app_id: Some(APPLICATION_ID.to_owned()),
+                ..WindowOptions::default()
+            };
+            let opened = cx.open_window(options, |window, cx| {
+                // The window's renderer exists by now, and with it GPUI's device.
+                let config = settings.config.clone();
+                let session = cx.new(|cx| {
+                    let profiles = CameraProfileRegistry::load(config.as_deref());
+                    Session::new(
+                        workers.session,
+                        settings,
+                        profiles,
+                        PresetStore::load(config.as_deref()),
+                        device::shared_context(),
+                        cx,
+                    )
+                });
+                let library = cx.new(|cx| Library::new(workers.library, config, &session, cx));
+                match startup.open {
+                    Some(path) if path.is_dir() => {
+                        library.update(cx, |library, cx| library.open_folder(path, cx));
+                    }
+                    Some(path) => session.update(cx, |session, cx| session.open_file(path, cx)),
+                    None => library.update(cx, Library::restore),
+                }
+                let closing = session.clone();
+                cx.on_app_quit(move |cx| {
+                    closing.update(cx, |session, cx| session.shut_down(cx));
+                    async {}
+                })
+                .detach();
+                if let Some(screenshot) = startup.screenshot {
+                    let handle = window.window_handle();
+                    screenshot::arm(screenshot, handle, session.clone(), screenshot_failed, cx);
+                }
+                cx.new(|cx| {
+                    let mut workspace = Workspace::new(session, library, window, cx);
+                    if startup.diagnostics {
+                        workspace.show_diagnostics(cx);
+                    }
+                    workspace
+                })
+            });
+            if let Err(error) = opened {
+                eprintln!("could not open the window: {error:#}");
+                cx.spawn(async move |cx| cx.update(|cx| cx.quit())).detach();
+            }
+            cx.on_window_closed(|cx, _| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+            .detach();
+            cx.activate(true);
+        });
 }
 
 #[cfg(test)]
+mod ui_tests;
+
+#[cfg(test)]
 mod tests {
-    use clap::Parser;
-
-    use super::{
-        APPLICATION_ID, Arguments, DemosaicAlgorithm, DemosaicPreference, ProcessorChoice,
-        RendererPreference,
-    };
+    use super::APPLICATION_ID;
 
     #[test]
-    fn processor_and_renderer_preferences_are_exposed_as_cli_choices() {
-        let arguments = Arguments::try_parse_from([
-            "rohditor-desktop",
-            "--renderer",
-            "glow",
-            "--processor",
-            "cpu",
-            "--demosaic",
-            "mhc",
-            "--diagnostics",
-        ])
-        .expect("valid desktop preferences should parse");
-        assert_eq!(arguments.renderer, RendererPreference::Glow);
-        assert_eq!(arguments.processor, Some(ProcessorChoice::Cpu));
-        assert_eq!(arguments.demosaic, Some(DemosaicPreference::MalvarHeCutler));
-
-        let defaults = Arguments::try_parse_from(["rohditor-desktop"])
-            .expect("default desktop arguments parse");
-        assert_eq!(defaults.demosaic, None);
-        assert_eq!(defaults.processor, None);
-        assert!(arguments.diagnostics);
-    }
-
-    #[test]
-    fn rcd_is_a_desktop_demosaic_choice() {
-        let arguments = Arguments::try_parse_from(["rohditor-desktop", "--demosaic", "rcd"])
-            .expect("rcd should be a supported desktop demosaic choice");
-        assert_eq!(arguments.demosaic, Some(DemosaicPreference::Rcd));
-        assert_eq!(
-            arguments.demosaic.map(DemosaicAlgorithm::from),
-            Some(DemosaicAlgorithm::Rcd)
-        );
-    }
-
-    #[test]
-    fn amaze_is_a_desktop_demosaic_choice() {
-        let arguments = Arguments::try_parse_from(["rohditor-desktop", "--demosaic", "amaze"])
-            .expect("amaze should be a supported desktop demosaic choice");
-        assert_eq!(arguments.demosaic, Some(DemosaicPreference::Amaze));
-        assert_eq!(
-            arguments.demosaic.map(DemosaicAlgorithm::from),
-            Some(DemosaicAlgorithm::Amaze)
-        );
-    }
-
-    #[test]
-    fn wayland_identity_matches_the_distributed_desktop_file() {
-        assert_eq!(APPLICATION_ID, "io.github.kevin.rohditor");
+    fn application_id_matches_the_desktop_file() {
         let desktop_entry = include_str!("../../../assets/io.github.kevin.rohditor.desktop");
-        assert!(desktop_entry.contains("Icon=io.github.kevin.rohditor\n"));
-        assert!(desktop_entry.contains("StartupWMClass=io.github.kevin.rohditor\n"));
+        assert!(desktop_entry.contains(&format!("Icon={APPLICATION_ID}\n")));
+        assert!(desktop_entry.contains(&format!("StartupWMClass={APPLICATION_ID}\n")));
     }
 }

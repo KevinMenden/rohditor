@@ -31,22 +31,23 @@ A frontend can enter the stack at any level; each level only depends on the ones
    plain pixel buffers, inject their own wgpu device/adapter, and pass configuration directories
    in explicitly. The engine does not wrap or re-export the lower crates, and nothing below it
    may depend on it.
-4. **Apps** (`apps/cli`, `apps/desktop`, `apps/gpui`): rendering, widgets, and toolkit glue only.
-   `apps/gpui` is replacing the egui app (`apps/desktop`), see `docs/gpui-migration.md`: new UI
-   features go there, egui only gets fixes. It is a Cargo workspace of its own.
+4. **Apps** (`apps/cli`, `apps/desktop`): rendering, widgets, and toolkit glue only. The desktop
+   app is built on GPUI; its wgpu renderer is vendored in `apps/desktop/vendor` with local
+   changes marked `ROHDITOR`, and it must not hold GPUI's wgpu instance or device strongly past
+   GPUI's shutdown.
 
 Placement rules:
 - Algorithms and editing math go in the lower crates, expressed as pure functions over
   `EditRecipe` (return the new recipe; the caller owns undo and revisions).
 - Frontend-agnostic interactive behaviour (scheduling, caching, undo, persistence) goes in the
   app runtime, not in a UI.
-- Only toolkit-specific code stays in `apps/*` (e.g. egui texture registration in
-  `apps/desktop/src/app/gpu.rs`, the XDG config-directory choice).
+- Only toolkit-specific code stays in `apps/*` (e.g. GPUI image upload in
+  `apps/desktop/src/atlas_image.rs`, the XDG config-directory choice).
 - No pluggable-pipeline abstraction until a real second frontend needs one.
 
 `scripts/check.sh` enforces the dependency direction (lower crates never depend on `core`, `gpu`,
 `engine` or an app; `rohditor-engine` never depends on an app and has no `pub use rohditor_*`
-re-exports; no crate under `crates/` depends on `eframe`/`egui`/`winit`/`rfd`/`gpui`; `rohditor-cli`
+re-exports; no crate under `crates/` depends on `gpui` or another UI toolkit; `rohditor-cli`
 never depends on `rohditor-desktop`).
 
 ## Rules
@@ -56,16 +57,15 @@ never depends on `rohditor-desktop`).
 - Keep RAW data immutable. Represent edits as a validated, versioned recipe
 - Preserve typed image states (sensor mosaic, linear RGB, display RGB), checked
   dimension/byte arithmetic, cancellation, and transactional output writes.
-- Run `./scripts/check.sh` before handing off code, and `./scripts/check-gpui.sh` too when
-  changing `apps/gpui` or an API it uses. Use the ignored private and
+- Run `./scripts/check.sh` before handing off code. Use the ignored private and
   GPU suites when changing decoder, full-resolution, or GPU behavior:
   `cargo test --release --workspace --tests -- --ignored --nocapture` and
   `cargo test --release -p rohditor-gpu -- --ignored --nocapture`.
   Use `--release` for running the full tests, as debug is too slow.
 - When changing the desktop UI, verify it visually with the `rohditor-ui-testing` skill
-  (`.agents/skills/`): headless `egui_kittest` scenarios with PNG snapshots, and a
+  (`.agents/skills/`): headless GPUI tests and a scripted driver that write screenshots, and a
   `--screenshot` flag for the real window. They are ignored by default (need a wgpu adapter):
-  `cargo test -p rohditor-desktop ui_tests -- --ignored`.
+  `cargo test --release -p rohditor-desktop -- --ignored`.
 - Benchmark image-processing changes on representative dimensions and add
   small asymmetric correctness tests. Keep UI rendering performance separate
   from image-processing performance.

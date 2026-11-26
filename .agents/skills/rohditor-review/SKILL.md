@@ -25,7 +25,7 @@ not enough to judge a change.
    - Panics on user data (`unwrap`, indexing, slicing) in decoder, catalog, or sidecar code.
 2. **Architecture** (see "Architecture" and "Rules" in `AGENTS.md`)
    - A lower crate depending on `core`, `gpu`, `engine`, or an app.
-   - `eframe`/`egui`/`winit`/`rfd` used under `crates/`.
+   - `gpui` or another UI toolkit used under `crates/`.
    - `rohditor-engine` re-exporting lower crates (`pub use rohditor_*`).
    - Editing math or scheduling/caching/undo/persistence placed in `apps/*` instead of
      the lower crates or the engine.

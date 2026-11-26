@@ -13,7 +13,13 @@ fn photos_of(harness: &mut Harness, album: &str) -> Vec<String> {
     library(harness, |library| {
         let albums = library.albums();
         let album = albums.iter().find(|one| one.name() == album);
-        let name = |photo: &PathBuf| photo.file_name().unwrap().to_string_lossy().into_owned();
+        let name = |photo: &PathBuf| {
+            photo
+                .file_name()
+                .expect("a file name")
+                .to_string_lossy()
+                .into_owned()
+        };
         album
             .expect("the album")
             .photos()

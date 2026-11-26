@@ -58,7 +58,7 @@ pub struct GpuExportProcessor {
 }
 
 impl GpuExportProcessor {
-    /// Supply a device without depending on egui or a window/surface.
+    /// Supply a device without depending on a UI toolkit or a window/surface.
     pub fn new(
         adapter: &wgpu::Adapter,
         device: &wgpu::Device,

@@ -131,12 +131,13 @@ Done when nothing needs egui any more.
 
 ## Stage 7: Switch over
 
-- [ ] 7.1 Device-loss recovery, hand tests of file dialogs and window resizing.
-- [ ] 7.2 Measure drag latency against egui.
-- [ ] 7.3 About two weeks of daily use.
-- [ ] 7.4 Remove egui, rename to `apps/desktop`, merge the Cargo workspaces. GPUI needs Rust 1.95,
-  so the minimum rises from 1.92. Decide on the Zed revision.
-- [ ] 7.5 Update the install script, AGENTS.md and the UI-testing skill.
+- [x] 7.1 Device-loss recovery, hand tests of file dialogs and window resizing.
+- [x] 7.2 Measure drag latency against egui.
+- [x] 7.3 About two weeks of daily use.
+- [x] 7.4 Remove egui, rename to `apps/desktop`, merge the Cargo workspaces. GPUI needs Rust 1.95,
+  so the minimum rises from 1.92. The Zed revision stays at the last one on crates.io wgpu 29
+  until a later one works with a released wgpu.
+- [x] 7.5 Update the install script, AGENTS.md and the UI-testing skill.
 
 ## Effect on open issues
 

@@ -1,6 +1,6 @@
 use crate::GpuPreviewError;
 
-/// Facts about the shared eframe `wgpu` adapter and device that matter for
+/// Facts about the shared app `wgpu` adapter and device that matter for
 /// Rohditor's downstream preview processor.
 #[derive(Debug, Clone)]
 pub struct GpuCapabilities {
@@ -14,8 +14,8 @@ pub struct GpuCapabilities {
     pub driver: String,
     /// Driver information reported by wgpu.
     pub driver_info: String,
-    /// eframe's surface target format. It is recorded for diagnostics; the
-    /// preview itself uses an egui-compatible `Rgba8Unorm` texture.
+    /// The window surface's target format. It is recorded for diagnostics; the
+    /// preview itself uses an `Rgba8Unorm` texture.
     pub target_format: String,
     /// Maximum usable two-dimensional texture edge on the shared device.
     pub max_texture_dimension_2d: u32,
@@ -31,7 +31,7 @@ pub struct GpuCapabilities {
     pub r32float_sampled_storage: bool,
     /// Whether the shared device permits the `Rgba16Float` working target.
     pub rgba16float_storage: bool,
-    /// Whether the shared device permits the egui-compatible `Rgba8Unorm`
+    /// Whether the shared device permits the `Rgba8Unorm`
     /// display target.
     pub rgba8unorm_storage: bool,
     /// Whether the shared device was created with timestamp-query support.
@@ -91,7 +91,7 @@ impl GpuCapabilities {
     }
 
     /// Return whether this is a hardware adapter suitable for automatic GPU
-    /// processing. A CPU rasterizer may still draw an eframe window, but is not
+    /// processing. A CPU rasterizer may still draw the app window, but is not
     /// a useful replacement for the CPU reference processor.
     #[must_use]
     pub const fn is_hardware_adapter(&self) -> bool {
