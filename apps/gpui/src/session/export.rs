@@ -1,4 +1,4 @@
-//! Full-resolution JPEG export of the open photo.
+//! Full-resolution export of the open photo, with the options the export dialog chose.
 
 use std::path::PathBuf;
 
@@ -11,7 +11,8 @@ use super::Session;
 
 const JPEG_QUALITY: u8 = 92;
 
-pub fn options() -> ExportOptions {
+/// What the export dialog offers until it is changed.
+pub fn default_options() -> ExportOptions {
     ExportOptions::with_jpeg_quality(JPEG_QUALITY)
 }
 
@@ -22,8 +23,19 @@ impl Session {
             .is_some_and(|open| open.frame.is_some() && open.export_status.is_none())
     }
 
+    /// The options of the last export, which the dialog starts from.
+    pub fn export_options(&self) -> &ExportOptions {
+        &self.export_options
+    }
+
+    /// Export with `options`, which the next export dialog then starts from.
+    pub fn export_with(&mut self, options: ExportOptions, cx: &mut Context<Self>) {
+        self.export_options = options;
+        self.prompt_export(cx);
+    }
+
     /// Ask where to export to, then export in the background.
-    pub fn prompt_export(&mut self, cx: &mut Context<Self>) {
+    fn prompt_export(&mut self, cx: &mut Context<Self>) {
         if !self.export_ready() {
             return;
         }
@@ -37,7 +49,7 @@ impl Session {
             .parent()
             .map(PathBuf::from)
             .unwrap_or_default();
-        let name = options().suggested_file_name(&document.path);
+        let name = self.export_options.suggested_file_name(&document.path);
         let chosen = cx.prompt_for_new_path(&directory, Some(&name));
         cx.spawn(async move |this, cx| {
             let chosen = chosen.await;
@@ -66,9 +78,9 @@ impl Session {
             return;
         }
         if destination.extension().is_none() {
-            destination.set_extension(options().extension());
+            destination.set_extension(self.export_options.extension());
         }
-        let settings = options().core();
+        let settings = self.export_options.core();
         if let Err(error) = settings.validate_destination(&destination) {
             return self.fail_export(error.to_string());
         }

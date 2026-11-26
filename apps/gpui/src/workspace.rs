@@ -30,6 +30,7 @@ use crate::panels::command_palette::command_palette;
 use crate::panels::controls::FocusControls as _;
 use crate::panels::crop::CropPanel;
 use crate::panels::develop::DevelopPanel;
+use crate::panels::export::ExportDialog;
 use crate::panels::file_tree::FileTreePanel;
 use crate::panels::filmstrip::FilmstripPanel;
 use crate::panels::masks::MasksPanel;
@@ -192,6 +193,22 @@ impl Workspace {
         });
     }
 
+    /// Ask how to export the open photo, once it can be exported.
+    fn open_export(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.session.read(cx).export_ready() {
+            return;
+        }
+        // Exporting applies the crop being drawn.
+        self.session
+            .update(cx, |session, cx| session.apply_tool(cx));
+        let session = self.session.clone();
+        self.overlays.update(cx, |overlays, cx| {
+            let options = session.read(cx).export_options().clone();
+            let dialog = cx.new(|cx| ExportDialog::new(session, options, cx));
+            overlays.show_dialog(dialog, window, cx);
+        });
+    }
+
     /// Whether nothing would be lost by quitting now. Asks the user otherwise.
     fn may_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let exporting = self
@@ -229,7 +246,6 @@ impl Workspace {
         let root = on_session!(root,
             CloseFile => |session, cx| session.close_document(cx),
             Save => |session, cx| { session.save_now(); session.tick(cx); },
-            Export => |session, cx| session.prompt_export(cx),
             Undo => |session, cx| session.undo(cx),
             Redo => |session, cx| session.redo(cx),
             ResetAdjustments => |session, cx| session.reset(cx),
@@ -243,7 +259,8 @@ impl Workspace {
             ImportCameraProfile => |session, cx| session.prompt_camera_profile(cx),
             ToggleClipping => |session, cx| session.toggle_clipping(cx),
         );
-        root.on_action(cx.listener(|this, _: &NextPhoto, _, cx| this.open_adjacent(true, cx)))
+        root.on_action(cx.listener(|this, _: &Export, window, cx| this.open_export(window, cx)))
+            .on_action(cx.listener(|this, _: &NextPhoto, _, cx| this.open_adjacent(true, cx)))
             .on_action(cx.listener(|this, _: &PreviousPhoto, _, cx| this.open_adjacent(false, cx)))
             .on_action(cx.listener(|this, _: &OpenFile, _, cx| this.prompt(false, cx)))
             .on_action(cx.listener(|this, _: &OpenFolder, _, cx| this.prompt(true, cx)))

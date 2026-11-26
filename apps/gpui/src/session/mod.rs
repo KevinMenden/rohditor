@@ -29,6 +29,7 @@ use rohditor_core::default_recipe;
 use rohditor_edit::EditRecipe;
 use rohditor_engine::camera_profiles::CameraProfileRegistry;
 use rohditor_engine::coordinator::RenderCoordinator;
+use rohditor_engine::export_options::ExportOptions;
 use rohditor_engine::open_document::OpenDocument;
 use rohditor_engine::persistence;
 use rohditor_engine::presets::PresetStore;
@@ -78,6 +79,8 @@ pub struct Session {
     mask_tint: mask_tint::MaskTint,
     next_document_id: u64,
     next_export_id: u64,
+    /// What the export dialog chose last.
+    export_options: ExportOptions,
     _wake: Task<()>,
     timer: Option<Task<()>>,
 }
@@ -114,6 +117,7 @@ impl Session {
             mask_tint: mask_tint::MaskTint::default(),
             next_document_id: 1,
             next_export_id: 1,
+            export_options: export::default_options(),
             _wake: workers.woken.run(cx, Self::tick),
             timer: None,
         }

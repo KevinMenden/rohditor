@@ -1,6 +1,7 @@
 //! The widgets the panels are built from.
 
 pub mod button;
+pub mod choice;
 pub mod confirm;
 pub mod dropdown;
 pub mod histogram;

@@ -6,6 +6,7 @@ pub mod command_palette;
 pub mod controls;
 pub mod crop;
 pub mod develop;
+pub mod export;
 pub mod file_tree;
 pub mod filmstrip;
 pub mod masks;

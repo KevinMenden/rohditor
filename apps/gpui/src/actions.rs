@@ -147,7 +147,7 @@ pub fn commands() -> Vec<Command> {
         command("file: refresh folders", Some("f5"), RefreshFolders),
         command("file: close", Some("ctrl-w"), CloseFile),
         command("file: save edits", Some("ctrl-s"), Save),
-        command("file: export JPEG", Some("ctrl-e"), Export),
+        command("file: export", Some("ctrl-e"), Export),
         command("photo: next", Some("right"), NextPhoto),
         command("photo: previous", Some("left"), PreviousPhoto),
         command("photo: select all", Some("ctrl-a"), SelectAllPhotos),

@@ -10,6 +10,7 @@ mod color;
 mod crop;
 mod detail;
 mod driver;
+mod export;
 mod files;
 mod filmstrip;
 mod light;
