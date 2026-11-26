@@ -16,13 +16,13 @@ use rohditor_engine::tools::{CropToolSession, MaskToolSession, Picker, ToolKind}
 use crate::actions::{
     ActualPixels, AddToAlbum, ApplyPreset, ApplyTool, AutoNoiseReduction, AutoTone, CancelTool,
     ChooseLens, CloseFile, CropTool, EditTool, Export, FlipCrop, FocusAdjustments, FocusPhoto,
-    ImportCameraProfile, LockCrop, NewAlbum, NextPhoto, OpenFile, OpenFolder, PAINTING_CONTEXT,
-    PHOTO_CONTEXT, PickMixerColor, PickWhiteBalance, PreviousPhoto, Quit, Redo, RefreshFolders,
-    RemoveFromAlbum, ResetAdjustments, ResetCrop, ResetSection, Save, SavePreset,
+    ImportCameraProfile, LockCrop, NewAlbum, NextPhoto, OpenFile, OpenFolder, OpenSettings,
+    PAINTING_CONTEXT, PHOTO_CONTEXT, PickMixerColor, PickWhiteBalance, PreviousPhoto, Quit, Redo,
+    RefreshFolders, RemoveFromAlbum, ResetAdjustments, ResetCrop, ResetSection, Save, SavePreset,
     SearchAdjustments, SelectAllPhotos, SetCropAspect, SetHighlightMethod, SetLensProfile,
     SetRendering, SetWhiteBalance, ShowAlbums, ShowFiles, SortPhotos, ToggleClipping,
-    ToggleCommandPalette, ToggleDevelop, ToggleFiles, ToggleFilmstrip, Undo, WORKSPACE_CONTEXT,
-    ZoomToFit,
+    ToggleCommandPalette, ToggleDevelop, ToggleDiagnostics, ToggleFiles, ToggleFilmstrip, Undo,
+    WORKSPACE_CONTEXT, ZoomToFit,
 };
 use crate::library::Library;
 use crate::panels::albums::{AlbumCommands, AlbumsPanel};
@@ -30,10 +30,12 @@ use crate::panels::command_palette::command_palette;
 use crate::panels::controls::FocusControls as _;
 use crate::panels::crop::CropPanel;
 use crate::panels::develop::DevelopPanel;
+use crate::panels::diagnostics::DiagnosticsPanel;
 use crate::panels::export::ExportDialog;
 use crate::panels::file_tree::FileTreePanel;
 use crate::panels::filmstrip::FilmstripPanel;
 use crate::panels::masks::MasksPanel;
+use crate::panels::settings::SettingsDialog;
 use crate::session::Session;
 use crate::theme::{FILMSTRIP_HEIGHT, UI_FONT_SIZE, theme};
 use crate::ui::confirm::Confirm;
@@ -51,6 +53,7 @@ pub struct Workspace {
     albums: Entity<AlbumsPanel>,
     album_commands: AlbumCommands,
     filmstrip: Entity<FilmstripPanel>,
+    diagnostics: Entity<DiagnosticsPanel>,
     develop: Entity<DevelopPanel>,
     crop: Entity<CropPanel>,
     masks: Entity<MasksPanel>,
@@ -59,6 +62,8 @@ pub struct Workspace {
     announced: Announced,
     files_open: bool,
     left_tab: LeftTab,
+    /// Whether the left dock has the diagnostics tab.
+    diagnostics_open: bool,
     filmstrip_open: bool,
     develop_open: bool,
     focus: FocusHandle,
@@ -104,6 +109,13 @@ impl Workspace {
             library: library.clone(),
             overlays: overlays.clone(),
         };
+        // Why the settings in use are not the saved ones, for example a missing neural model.
+        if let Some(warning) = session.read(cx).settings_warning() {
+            let warning = warning.to_owned();
+            overlays.update(cx, |overlays, cx| {
+                overlays.toast(ToastKind::Error, warning, cx);
+            });
+        }
         Self {
             albums: cx.new(|cx| AlbumsPanel::new(album_commands.clone(), cx)),
             album_commands,
@@ -112,6 +124,9 @@ impl Workspace {
             }),
             filmstrip: cx.new(|cx| {
                 FilmstripPanel::new(session.clone(), library.clone(), overlays.clone(), cx)
+            }),
+            diagnostics: cx.new(|cx| {
+                DiagnosticsPanel::new(session.clone(), library.clone(), overlays.clone(), cx)
             }),
             develop: cx.new(|cx| DevelopPanel::new(session.clone(), overlays.clone(), window, cx)),
             crop: cx.new(|cx| CropPanel::new(session.clone(), overlays.clone(), cx)),
@@ -123,6 +138,7 @@ impl Workspace {
             announced: Announced::default(),
             files_open: true,
             left_tab: LeftTab::Files,
+            diagnostics_open: false,
             filmstrip_open: false,
             develop_open: true,
             focus,
@@ -209,6 +225,14 @@ impl Workspace {
         });
     }
 
+    fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let session = self.session.clone();
+        self.overlays.update(cx, |overlays, cx| {
+            let dialog = cx.new(|cx| SettingsDialog::new(session, cx));
+            overlays.show_dialog(dialog, window, cx);
+        });
+    }
+
     /// Whether nothing would be lost by quitting now. Asks the user otherwise.
     fn may_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let exporting = self
@@ -260,6 +284,12 @@ impl Workspace {
             ToggleClipping => |session, cx| session.toggle_clipping(cx),
         );
         root.on_action(cx.listener(|this, _: &Export, window, cx| this.open_export(window, cx)))
+            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
+                this.open_settings(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleDiagnostics, _, cx| {
+                this.toggle_diagnostics(cx);
+            }))
             .on_action(cx.listener(|this, _: &NextPhoto, _, cx| this.open_adjacent(true, cx)))
             .on_action(cx.listener(|this, _: &PreviousPhoto, _, cx| this.open_adjacent(false, cx)))
             .on_action(cx.listener(|this, _: &OpenFile, _, cx| this.prompt(false, cx)))

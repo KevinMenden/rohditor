@@ -73,6 +73,8 @@ actions!(
         SearchAdjustments,
         FocusPhoto,
         ToggleCommandPalette,
+        OpenSettings,
+        ToggleDiagnostics,
         Quit,
     ]
 );
@@ -216,6 +218,7 @@ pub fn commands() -> Vec<Command> {
         command("view: albums", None, ShowAlbums),
         command("view: toggle filmstrip", Some("ctrl-j"), ToggleFilmstrip),
         command("view: toggle develop panel", Some("ctrl-r"), ToggleDevelop),
+        command("view: toggle diagnostics", None, ToggleDiagnostics),
         command("view: focus adjustments", Some("ctrl-d"), FocusAdjustments),
         command(
             "view: search adjustments",
@@ -230,6 +233,7 @@ pub fn commands() -> Vec<Command> {
             Some("ctrl-shift-p"),
             ToggleCommandPalette,
         ),
+        command("rohditor: settings", Some("ctrl-,"), OpenSettings),
         command("rohditor: quit", Some("ctrl-q"), Quit),
     ];
     commands.extend(LibrarySort::ALL.into_iter().map(|sort| {

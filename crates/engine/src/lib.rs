@@ -14,6 +14,7 @@ pub mod autosave;
 pub mod camera_profiles;
 pub mod catalog;
 pub mod coordinator;
+pub mod diagnostics;
 pub mod document;
 pub mod export_options;
 pub mod library_file;

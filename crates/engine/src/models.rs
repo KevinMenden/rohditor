@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rohditor_neural::{Backend, ModelFile, ModelId, NeuralDemosaicer, NeuralError, OrtRunner};
+use tracing::{info, warn};
 
 use crate::storage;
 
@@ -82,6 +83,29 @@ impl ModelStore {
     }
 }
 
+/// The installed model for a frontend's startup, or why the neural demosaic
+/// is unavailable, said so that a settings UI can show it. `data_directory`
+/// is `None` when the frontend could not determine one. Inference runs on the
+/// GPU when ONNX Runtime's WebGPU provider works, otherwise (or with
+/// `cpu_only`) on the CPU.
+pub fn load_installed(
+    data_directory: Option<&Path>,
+    cpu_only: bool,
+) -> Result<Arc<NeuralDemosaicer>, String> {
+    let directory =
+        data_directory.ok_or_else(|| "the Rohditor data directory is unknown".to_owned())?;
+    let store = ModelStore::new(directory);
+    if let ModelStatus::Missing(path) = store.status() {
+        info!(path = %path.display(), "neural demosaic model is not installed");
+        return Err("no model is installed (run `rohditor-cli model install <FILE>`)".to_owned());
+    }
+    let backend = if cpu_only { Backend::Cpu } else { Backend::Gpu };
+    store.load(backend).map_err(|error| {
+        warn!(%error, "neural model failed to load");
+        error.to_string()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,5 +136,14 @@ mod tests {
         assert_eq!(id, ModelFile::read(&fixture).expect("fixture").id());
         assert_eq!(store.status(), ModelStatus::Installed { path, id });
         drop(std::fs::remove_dir_all(&directory));
+    }
+
+    #[test]
+    fn a_missing_model_or_directory_says_why() {
+        let missing = load_installed(None, true).expect_err("no directory");
+        assert!(missing.contains("data directory"), "{missing}");
+        let directory = scratch("startup");
+        let missing = load_installed(Some(&directory), true).expect_err("no model");
+        assert!(missing.contains("model install"), "{missing}");
     }
 }

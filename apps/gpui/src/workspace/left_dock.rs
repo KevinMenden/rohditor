@@ -1,9 +1,9 @@
-//! The left dock: the file tree and the albums, as tabs.
+//! The left dock: the file tree, the albums and, when asked for, the diagnostics, as tabs.
 
 use gpui::{Action, Context, IntoElement, MouseButton, Role, StyleRefinement, div, prelude::*};
 
 use super::Workspace;
-use crate::actions::{NewAlbum, OpenFolder, ShowAlbums, ShowFiles};
+use crate::actions::{NewAlbum, OpenFolder, ShowAlbums, ShowFiles, ToggleDiagnostics};
 use crate::assets::Icon;
 use crate::theme::{FILES_WIDTH, RADIUS, TAB_HEIGHT, theme};
 use crate::ui::button::{command_button, icon};
@@ -13,6 +13,7 @@ use crate::ui::test_id::TestId as _;
 pub(super) enum LeftTab {
     Files,
     Albums,
+    Diagnostics,
 }
 
 impl Workspace {
@@ -22,19 +23,33 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Remove the diagnostics tab while it is in view; otherwise add it and show it.
+    pub(super) fn toggle_diagnostics(&mut self, cx: &mut Context<Self>) {
+        let in_view = self.files_open && self.left_tab == LeftTab::Diagnostics;
+        self.diagnostics_open = !in_view;
+        self.show_left(
+            if in_view {
+                LeftTab::Files
+            } else {
+                LeftTab::Diagnostics
+            },
+            cx,
+        );
+    }
+
     pub(super) fn left_dock(&self) -> impl IntoElement + use<> {
         let theme = theme();
-        let files = self.left_tab == LeftTab::Files;
+        let current = self.left_tab;
         let style = StyleRefinement::default().flex_1().min_h_0().w_full();
-        let panel = if files {
-            self.files.clone().cached(style).into_any_element()
-        } else {
-            self.albums.clone().cached(style).into_any_element()
+        let panel = match current {
+            LeftTab::Files => self.files.clone().cached(style).into_any_element(),
+            LeftTab::Albums => self.albums.clone().cached(style).into_any_element(),
+            LeftTab::Diagnostics => self.diagnostics.clone().cached(style).into_any_element(),
         };
-        let add = if files {
-            command_button("add-folder", Icon::Plus, OpenFolder, true)
-        } else {
-            command_button("add-album", Icon::Plus, NewAlbum, true)
+        let add = match current {
+            LeftTab::Files => Some(command_button("add-folder", Icon::Plus, OpenFolder, true)),
+            LeftTab::Albums => Some(command_button("add-album", Icon::Plus, NewAlbum, true)),
+            LeftTab::Diagnostics => None,
         };
         div()
             .flex()
@@ -57,13 +72,35 @@ impl Workspace {
                     .px_1()
                     .border_b_1()
                     .border_color(theme.border)
-                    .child(tab("Files", Icon::Files, files, &ShowFiles))
-                    .child(tab("Albums", Icon::Album, !files, &ShowAlbums))
+                    .child(tab(
+                        "Files",
+                        Icon::Files,
+                        current == LeftTab::Files,
+                        &ShowFiles,
+                    ))
+                    .child(tab(
+                        "Albums",
+                        Icon::Album,
+                        current == LeftTab::Albums,
+                        &ShowAlbums,
+                    ))
+                    .when(self.diagnostics_open, |tabs| {
+                        let selected = current == LeftTab::Diagnostics;
+                        tabs.child(diagnostics_tab(selected))
+                    })
                     .child(div().flex_1())
-                    .child(add),
+                    .children(add),
             )
             .child(panel)
     }
+}
+
+/// The diagnostics tab is an icon only, for room. Pressing it while it is shown removes it.
+fn diagnostics_tab(selected: bool) -> impl IntoElement + use<> {
+    command_button("tab-diagnostics", Icon::Activity, ToggleDiagnostics, true)
+        .role(Role::Tab)
+        .aria_selected(selected)
+        .when(selected, |tab| tab.bg(theme().selected))
 }
 
 fn tab(

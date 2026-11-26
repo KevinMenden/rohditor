@@ -100,6 +100,11 @@ impl Library {
         self.catalog.folder()
     }
 
+    /// The shown folder's photos and thumbnails.
+    pub const fn catalog(&self) -> &CatalogState {
+        &self.catalog
+    }
+
     /// What went wrong last, for example why the folder shown could not be read.
     pub fn failure(&self) -> Option<&str> {
         self.error.as_deref().or(self.catalog.failure())

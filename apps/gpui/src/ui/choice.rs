@@ -18,26 +18,45 @@ pub fn choice<T: Copy + PartialEq + 'static>(
     current: T,
     on_select: impl Fn(T, &mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
+    choice_except(id, label, options, &[], current, on_select)
+}
+
+/// As [`choice`], with the options in `unavailable` shown but not selectable.
+pub fn choice_except<T: Copy + PartialEq + 'static>(
+    id: &'static str,
+    label: &'static str,
+    options: &[(T, &'static str)],
+    unavailable: &[T],
+    current: T,
+    on_select: impl Fn(T, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
     let theme = theme();
     let on_select = Rc::new(on_select);
     let segments = options.iter().map(|&(value, name)| {
         let selected = value == current;
-        let on_select = Rc::clone(&on_select);
-        div()
+        let segment = div()
             .id(SharedString::from(format!("{id}:{name}")))
             .role(Role::RadioButton)
             .aria_label(name)
             .aria_selected(selected)
             .test_id(format!("choice:{id}:{name}"))
-            .tab_index(0)
             .px_2()
             .py_0p5()
             .rounded(RADIUS)
             .border_1()
             .border_color(gpui::transparent_black())
+            .text_size(SMALL_FONT_SIZE)
+            .child(name);
+        if unavailable.contains(&value) {
+            return segment
+                .aria_description("unavailable")
+                .text_color(theme.faint);
+        }
+        let on_select = Rc::clone(&on_select);
+        segment
+            .tab_index(0)
             .focus_visible(move |style| style.border_color(theme.accent))
             .cursor_pointer()
-            .text_size(SMALL_FONT_SIZE)
             .when(selected, |segment| {
                 segment.bg(theme.selected).text_color(theme.text)
             })
@@ -50,7 +69,6 @@ pub fn choice<T: Copy + PartialEq + 'static>(
                 window.prevent_default();
             })
             .on_click(move |_, window, cx| on_select(value, window, cx))
-            .child(name)
     });
     div()
         .id(id)

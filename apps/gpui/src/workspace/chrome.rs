@@ -9,8 +9,8 @@ use rohditor_engine::view::ViewState;
 
 use super::Workspace;
 use crate::actions::{
-    ActualPixels, CloseFile, Export, Quit, Redo, ToggleClipping, ToggleCommandPalette,
-    ToggleDevelop, ToggleFiles, ToggleFilmstrip, Undo, ZoomToFit,
+    ActualPixels, CloseFile, Export, OpenSettings, Quit, Redo, ToggleClipping,
+    ToggleCommandPalette, ToggleDevelop, ToggleFiles, ToggleFilmstrip, Undo, ZoomToFit,
 };
 use crate::assets::Icon;
 use crate::theme::{SMALL_FONT_SIZE, STATUS_BAR_HEIGHT, TAB_HEIGHT, TITLE_BAR_HEIGHT, theme};
@@ -78,6 +78,12 @@ impl Workspace {
                         Icon::Export,
                         Export,
                         session.export_ready(),
+                    ))
+                    .child(command_button(
+                        "settings",
+                        Icon::Settings,
+                        OpenSettings,
+                        true,
                     ))
                     .when(own_controls, |bar| bar.child(window_controls())),
             )

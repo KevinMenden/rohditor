@@ -1,19 +1,14 @@
 // Top-level desktop composition; focused helpers live beside this module.
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
-use rohditor_core::NEURAL_FALLBACK_DEMOSAIC;
 use rohditor_core::{
-    CameraCalibration, HighlightDiagnostics, JPEG_QUALITY_DEFAULT, OutputPolicy, PreviewOptions,
-    WhiteBalanceCoordinates, WhiteBalanceMode, WhiteBalanceModeMemory, auto_tone,
-    camera_color_transform, paths_refer_to_same_file, resolve_camera_colour,
+    JPEG_QUALITY_DEFAULT, PreviewOptions, WhiteBalanceCoordinates, WhiteBalanceMode,
+    WhiteBalanceModeMemory, auto_tone, camera_color_transform, paths_refer_to_same_file,
 };
-use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_edit::{
     BLACKS_RANGE, COLOR_GRADING_RANGE, CONTRAST_RANGE, EXPOSURE_EV_RANGE, EditRecipe,
     HIGHLIGHT_THRESHOLD_RANGE, HIGHLIGHTS_RANGE, HSL_CHANNEL_COUNT, HSL_HUE_RANGE,
@@ -37,10 +32,7 @@ use crate::ui::catalog::{
     self, FilmstripModel, LibraryEntryModel, LibraryEntryState, LibraryModel,
 };
 use crate::ui::crop::CropOverlayModel;
-use crate::ui::diagnostics::{
-    self, CacheModel, CatalogModel, DiagnosticsMessages, DiagnosticsModel, GpuModel,
-    HighlightStatsModel, PreviewModel, QueueModel, TimingModel,
-};
+use crate::ui::diagnostics;
 use crate::ui::export_dialog::{self, ExportDialogModel};
 use crate::ui::info::InfoPanelModel;
 use crate::ui::optics::{OpticsAction, OpticsPanelModel};
@@ -55,9 +47,9 @@ use rohditor_engine::camera_profiles::CameraProfileRegistry;
 use rohditor_engine::catalog::library::LibraryState;
 use rohditor_engine::catalog::{CatalogCoordinator, CatalogSource, CatalogState, ThumbnailSlot};
 use rohditor_engine::coordinator::{
-    PreparedGpuSource, PreviewBackend, PreviewResolution, RenderCoordinator, WorkerImage,
-    WorkerPreviewDiagnostics,
+    PreparedGpuSource, RenderCoordinator, WorkerImage, WorkerPreviewDiagnostics,
 };
+use rohditor_engine::diagnostics::{Diagnostics, DiagnosticsSources};
 use rohditor_engine::document::{EditSession, PreviewTicket};
 use rohditor_engine::export_options::{ExportKind, ExportOptions};
 use rohditor_engine::open_document::{ExportActivity, OpenDocument};
@@ -82,7 +74,6 @@ mod grid_selection;
 #[path = "lifecycle.rs"]
 mod lifecycle;
 mod masks;
-mod neural_model;
 mod presets;
 mod screenshot;
 mod tools;
@@ -267,25 +258,17 @@ impl RohditorApp {
             processor_preference = ?processor_preference,
             "desktop application started"
         );
-        let neural = neural_model::load(
+        let neural = rohditor_engine::models::load_installed(
             data_dir.as_deref(),
             processor_preference == ProcessorPreference::Cpu,
         );
         let neural_unavailable = neural.as_ref().err().cloned();
-        let (settings, settings_warning) = match &neural_unavailable {
-            Some(reason) if settings.demosaic() == DemosaicAlgorithm::Neural => {
-                let mut settings = settings;
-                settings.set_demosaic(NEURAL_FALLBACK_DEMOSAIC);
-                (
-                    settings,
-                    Some(format!(
-                        "The neural demosaic is unavailable ({reason}); using {} instead.",
-                        NEURAL_FALLBACK_DEMOSAIC.stable_name()
-                    )),
-                )
-            }
-            _ => (settings, settings_warning),
-        };
+        let (settings, neural_warning) = neural_unavailable
+            .as_deref()
+            .map_or((settings, None), |reason| {
+                settings::without_neural(settings, reason)
+            });
+        let settings_warning = neural_warning.or(settings_warning);
         let coordinator = RenderCoordinator::with_neural(wake_from(&context.egui_ctx), neural.ok())
             .map_err(std::io::Error::other)?;
         if let Some(runtime) = preview_runtime.gpu() {
@@ -574,10 +557,7 @@ impl RohditorApp {
             return;
         }
 
-        // The processor is chosen at startup, so a CPU-only change alone does
-        // not alter the current image.
-        let changes_pixels = next.demosaic() != self.settings.demosaic()
-            || next.output_policy() != self.settings.output_policy();
+        let changes_pixels = self.settings.changes_pixels(next);
         self.settings = next;
         if changes_pixels {
             self.cancel_pick();
@@ -715,41 +695,10 @@ impl RohditorApp {
     }
 
     fn processor_description(&self) -> String {
-        if let Some(runtime) = self.preview_runtime.gpu() {
-            let capabilities = runtime.processor().capabilities();
-            let hardware = format!("{} · {}", capabilities.adapter_name, capabilities.backend);
-            if self
-                .document
-                .as_ref()
-                .and_then(|document| document.core.preview.diagnostics)
-                .is_some_and(|diagnostics| diagnostics.worker.capture_cpu_recovery)
-            {
-                return format!("CPU sensor recovery · GPU spatial/color · {hardware}");
-            }
-            match self
-                .document
-                .as_ref()
-                .and_then(|document| document.core.preview.diagnostics)
-                .map(|diagnostics| diagnostics.worker.backend)
-            {
-                Some(PreviewBackend::Cpu) => format!("CPU fallback · GPU available · {hardware}"),
-                Some(PreviewBackend::GpuBase) => {
-                    let sensor_gpu = self
-                        .document
-                        .as_ref()
-                        .and_then(|d| d.core.preview.diagnostics)
-                        .is_some_and(|d| d.worker.sensor_gpu);
-                    if sensor_gpu {
-                        format!("GPU sensor/spatial/color · {hardware}")
-                    } else {
-                        format!("CPU sensor · GPU spatial/color · {hardware}")
-                    }
-                }
-                None => format!("GPU available · {hardware}"),
-            }
-        } else {
-            format!("CPU ({})", self.preview_runtime.preference().label())
-        }
+        rohditor_engine::diagnostics::processor_description(
+            &self.preview_runtime,
+            self.document.as_ref().map(|document| &document.core),
+        )
     }
 
     fn gpu_required_but_unavailable(&self) -> bool {
@@ -1601,192 +1550,18 @@ impl RohditorApp {
         }
     }
 
-    fn diagnostics_model(&self) -> DiagnosticsModel {
-        let queue = self.coordinator.preview_queue_stats();
-        let gpu_device = self.preview_runtime.gpu().map(|runtime| {
-            let capabilities = runtime.processor().capabilities();
-            format!(
-                "{} · {} · timestamp queries: {}",
-                capabilities.adapter_name, capabilities.backend, capabilities.timestamp_queries
-            )
-        });
-        let preview = self
-            .document
-            .as_ref()
-            .and_then(|document| document.core.preview.diagnostics)
-            .and_then(|preview| {
-                let document = self.document.as_ref()?;
-                Some(PreviewModel {
-                    backend: if preview.worker.backend == PreviewBackend::GpuBase {
-                        if preview.worker.sensor_gpu {
-                            "GPU sensor/spatial/color"
-                        } else {
-                            "CPU sensor / GPU spatial/color"
-                        }
-                    } else {
-                        preview.worker.backend.label()
-                    }
-                    .to_owned(),
-                    algorithm: preview.worker.algorithm.stable_name().to_owned(),
-                    profile: camera_profile_diagnostic(document),
-                    capture_sharpening: preview
-                        .worker
-                        .detail
-                        .and_then(|p| p.capture_sharpening.map(|s| (p, s)))
-                        .map_or_else(
-                            || "Off".to_owned(),
-                            |(p, s)| {
-                                format!(
-                                    "RL v{}, amount {:.2}, sigma {:.2} px, noise protection {:.2}",
-                                    p.capture_sharpening_version,
-                                    s.amount,
-                                    s.radius,
-                                    s.noise_protection
-                                )
-                            },
-                        ),
-                    false_color: preview
-                        .worker
-                        .detail
-                        .and_then(|p| p.false_color.map(|f| (p, f)))
-                        .map_or_else(
-                            || "Off".to_owned(),
-                            |(p, f)| format!("v{}, {} steps", p.false_color_version, f.steps),
-                        ),
-                    noise_reduction: preview
-                        .worker
-                        .detail
-                        .and_then(|p| p.noise_reduction.map(|n| (p, n)))
-                        .map_or_else(
-                            || "Off".to_owned(),
-                            |(p, n)| {
-                                format!(
-                                    "v{}, chroma {:.2}, luminance {:.2} (detail {:.2})",
-                                    p.noise_reduction_version,
-                                    n.chroma,
-                                    n.luminance,
-                                    n.luminance_detail
-                                )
-                            },
-                        ),
-                    rendering: rendering_profile_diagnostic(
-                        document.core.edits.recipe().rendering.profile,
-                    ),
-                    output_policy: output_policy_diagnostic(
-                        self.settings.render_options().output_policy,
-                    ),
-                    output_gamut_statistics: preview
-                        .worker
-                        .output_gamut_diagnostics
-                        .map(output_gamut_statistics),
-                    source_state: match preview.worker.resolution {
-                        PreviewResolution::SourceScale => "1:1",
-                        PreviewResolution::Fit => match preview.worker.algorithm {
-                            DemosaicAlgorithm::Bilinear => "fast",
-                            DemosaicAlgorithm::MalvarHeCutler => "high-quality",
-                            DemosaicAlgorithm::Rcd => "high-quality",
-                            DemosaicAlgorithm::Amaze => "high-quality",
-                            DemosaicAlgorithm::Neural => "neural",
-                        },
-                    }
-                    .to_owned(),
-                    cache: CacheModel {
-                        decoded: preview.worker.cache_hits.decoded,
-                        reconstructed: preview.worker.cache_hits.reconstructed,
-                        demosaiced: preview.worker.cache_hits.demosaiced,
-                        adjusted: preview.worker.cache_hits.adjusted,
-                        workspace_reused: preview.worker.workspace_reused,
-                    },
-                    timings: TimingModel {
-                        metadata: preview.worker.timings.metadata,
-                        normalization: preview.worker.timings.normalization,
-                        highlight_processing: preview.worker.timings.highlight_processing,
-                        demosaic: preview.worker.timings.demosaic,
-                        false_color: preview.worker.timings.false_color,
-                        chroma_noise_reduction: preview.worker.timings.chroma_noise_reduction,
-                        luminance_noise_reduction: preview.worker.timings.luminance_noise_reduction,
-                        capture_sharpening: preview.worker.timings.capture_sharpening,
-                        optics: preview.worker.timings.optics,
-                        defringe: preview.worker.timings.defringe,
-                        resampling: preview.worker.timings.resampling,
-                        color_conversion: preview.worker.timings.color_conversion,
-                        adjustments: preview.worker.timings.adjustments,
-                        output_conversion: preview.worker.timings.output_conversion,
-                        total: preview.worker.timings.total,
-                    },
-                    highlight: match preview.worker.highlight_diagnostics {
-                        HighlightDiagnostics::Off => HighlightStatsModel::Off,
-                        HighlightDiagnostics::Clip(stats) => HighlightStatsModel::Clip {
-                            affected_sites: stats.affected_sites,
-                            changed_sites: stats.changed_sites,
-                            nominal_over_white_sites: stats.nominal_over_white_sites,
-                            affected_by_channel: stats.affected_by_channel,
-                        },
-                        HighlightDiagnostics::Opposed(stats) => HighlightStatsModel::Opposed {
-                            suspected_clipped_sites: stats.suspected_clipped_sites,
-                            reconstructed_sites: stats.reconstructed_sites,
-                            changed_sites: stats.changed_sites,
-                            fallback_sites: stats.fallback_sites,
-                            fully_unsupported_sites: stats.fully_unsupported_sites,
-                            neutralised_sites: stats.neutralised_sites,
-                            suspected_by_channel: stats.suspected_by_channel,
-                        },
-                    },
-                    cache_resident_bytes: preview.worker.cache_resident_bytes,
-                    estimated_peak_bytes: preview.worker.memory.estimated_peak_bytes,
-                    gpu: preview.gpu_submission.map(|submission| GpuModel {
-                        upload_preparation: preview.gpu_upload_preparation,
-                        submission: Some(submission),
-                        queue_completion: preview.gpu_queue_completion,
-                        histogram_readback: preview.gpu_histogram_readback,
-                        textures_reused: preview.gpu_textures_reused,
-                        resident_bytes: preview.gpu_resident_bytes,
-                    }),
-                })
-            });
-        let catalog =
-            (self.catalog.entry_count() > 0 || self.catalog.failure().is_some()).then(|| {
-                CatalogModel {
-                    photos: self.catalog.entry_count(),
-                    thumbnails_ready: self.catalog.ready_count(),
-                    thumbnails_placeholder: self.catalog.placeholder_count(),
-                    thumbnails_pending: self.catalog.pending_count(),
-                    thumbnails_failed: self.catalog.failure_count(),
-                    resident_bytes: self.catalog.resident_thumbnail_bytes(),
-                }
-            });
-        DiagnosticsModel {
-            processor: self.processor_description(),
-            ui_renderer: self.ui_renderer.to_owned(),
-            gpu_device,
-            queue: QueueModel {
-                requested: queue.requested,
-                coalesced: queue.coalesced,
-                cancellation_requests: queue.cancellation_requests,
-                cancelled: queue.cancelled,
-                completed: queue.completed,
-                failed: queue.failed,
-                active: queue.active,
-                pending: queue.pending,
-            },
-            catalog,
-            preview,
-            messages: DiagnosticsMessages {
-                processor_note: self.preview_runtime.note().map(str::to_owned),
-                startup_error: self.startup_error.clone(),
-                warning: self
-                    .document
-                    .as_ref()
-                    .and_then(|document| document.core.warning.clone()),
-                error: self
-                    .document
-                    .as_ref()
-                    .and_then(|document| document.core.error.clone()),
-            },
-        }
+    fn diagnostics_model(&self) -> Diagnostics {
+        rohditor_engine::diagnostics::build(&DiagnosticsSources {
+            ui_renderer: self.ui_renderer,
+            runtime: &self.preview_runtime,
+            queue: self.coordinator.preview_queue_stats(),
+            document: self.document.as_ref().map(|document| &document.core),
+            catalog: Some(&self.catalog),
+            output_policy: self.settings.output_policy(),
+        })
     }
 
-    fn request_diagnostics_export(&mut self, model: &DiagnosticsModel) {
+    fn request_diagnostics_export(&mut self, model: &Diagnostics) {
         let Some(mut destination) = rfd::FileDialog::new()
             .set_title("Save Rohditor diagnostics")
             .set_file_name("rohditor-diagnostics.json")
@@ -1799,32 +1574,7 @@ impl RohditorApp {
             destination.set_extension("json");
         }
 
-        let report = diagnostics::report(model);
-        let result = File::options()
-            .write(true)
-            .create_new(true)
-            .open(&destination)
-            .map(BufWriter::new)
-            .map_err(|error| {
-                format!(
-                    "Could not create diagnostics report {}: {error}",
-                    destination.display()
-                )
-            })
-            .and_then(|mut writer| {
-                serde_json::to_writer_pretty(&mut writer, &report).map_err(|error| {
-                    format!(
-                        "Could not encode diagnostics report {}: {error}",
-                        destination.display()
-                    )
-                })?;
-                writer.flush().map_err(|error| {
-                    format!(
-                        "Could not finish diagnostics report {}: {error}",
-                        destination.display()
-                    )
-                })
-            });
+        let result = rohditor_engine::diagnostics::save_report(model, &destination);
         match result {
             Ok(()) => {
                 if let Some(document) = self.document.as_mut() {
@@ -1843,45 +1593,6 @@ impl RohditorApp {
             }
         }
     }
-}
-
-fn camera_profile_diagnostic(document: &Document) -> String {
-    let Some(info) = document.core.info.as_ref() else {
-        return "unavailable (RAW metadata pending)".to_owned();
-    };
-    let calibration = CameraCalibration::from_raw_info(info);
-    resolve_camera_colour(
-        &calibration,
-        &document.core.edits.recipe().color.camera_profile,
-        document.core.edits.recipe().color.white_balance,
-    )
-    .map(|resolved| resolved.provenance.to_string())
-    .unwrap_or_else(|error| format!("unavailable ({error})"))
-}
-
-fn rendering_profile_diagnostic(profile: rohditor_edit::RenderingProfileSelection) -> String {
-    match profile.process_version() {
-        Some(version) => format!("{} v{version}", profile.display_name()),
-        None => profile.display_name().to_owned(),
-    }
-}
-
-fn output_policy_diagnostic(policy: OutputPolicy) -> String {
-    match policy.algorithm_version() {
-        Some(version) => format!("{} v{version}", policy.display_name()),
-        None => policy.display_name().to_owned(),
-    }
-}
-
-fn output_gamut_statistics(diagnostics: rohditor_core::GamutMappingDiagnostics) -> String {
-    format!(
-        "{} in gamut, {} compressed, {} limited, {} clipped fallback, {} invalid",
-        diagnostics.in_gamut_pixels,
-        diagnostics.compressed_pixels,
-        diagnostics.limited_pixels,
-        diagnostics.clipped_fallback_pixels,
-        diagnostics.invalid_pixels,
-    )
 }
 
 fn source_scale_selected(document: Option<&Document>) -> bool {

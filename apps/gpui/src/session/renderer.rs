@@ -66,6 +66,10 @@ impl Renderer {
         )
     }
 
+    pub const fn runtime(&self) -> &PreviewRuntime {
+        &self.runtime
+    }
+
     pub fn gpu_allowed(&self) -> bool {
         self.runtime.preference() != ProcessorPreference::Cpu
     }

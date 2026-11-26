@@ -25,19 +25,21 @@ use rohditor_engine::camera_profiles::CameraProfileRegistry;
 use rohditor_engine::presets::PresetStore;
 
 use crate::library::{Library, LibraryWorker};
-use crate::session::{Session, SessionWorkers};
+use crate::session::{Session, SessionWorkers, StartupSettings};
 use crate::workspace::Workspace;
 
 fn main() -> Result<()> {
     env_logger::init();
+    // Before the workers: the render worker takes the neural model.
+    let (settings, neural) = StartupSettings::load(config_directory(), data_directory().as_deref());
     let workers = Workers {
-        session: SessionWorkers::start()?,
+        session: SessionWorkers::start(neural)?,
         library: LibraryWorker::start()?,
     };
     // Relative paths would not match the folder tree's.
     let open = std::env::args_os().nth(1).map(PathBuf::from);
     let open = open.map(|path| std::path::absolute(&path).unwrap_or(path));
-    run(open, workers);
+    run(open, settings, workers);
     Ok(())
 }
 
@@ -48,14 +50,25 @@ struct Workers {
 
 /// `$XDG_CONFIG_HOME/rohditor`, shared with the egui app.
 fn config_directory() -> Option<PathBuf> {
-    let config = std::env::var_os("XDG_CONFIG_HOME")
-        .filter(|directory| !directory.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")));
-    config.map(|base| base.join("rohditor"))
+    xdg_directory("XDG_CONFIG_HOME", ".config")
 }
 
-fn run(open: Option<PathBuf>, workers: Workers) {
+/// `$XDG_DATA_HOME/rohditor`, where the neural model is installed; shared with the egui app and
+/// the CLI.
+fn data_directory() -> Option<PathBuf> {
+    xdg_directory("XDG_DATA_HOME", ".local/share")
+}
+
+/// `$variable/rohditor`, or `$HOME/fallback/rohditor` when it is not set.
+fn xdg_directory(variable: &str, fallback: &str) -> Option<PathBuf> {
+    let base = std::env::var_os(variable)
+        .filter(|directory| !directory.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(fallback)));
+    base.map(|base| base.join("rohditor"))
+}
+
+fn run(open: Option<PathBuf>, settings: StartupSettings, workers: Workers) {
     gpui_platform::application()
         .with_assets(assets::Assets)
         .run(move |cx: &mut App| {
@@ -74,8 +87,7 @@ fn run(open: Option<PathBuf>, workers: Workers) {
             };
             let opened = cx.open_window(options, |window, cx| {
                 // The window's renderer exists by now, and with it GPUI's device.
-                let config = config_directory();
-                let settings = rohditor_engine::settings::load(config.as_deref()).settings;
+                let config = settings.config.clone();
                 let session = cx.new(|cx| {
                     let profiles = CameraProfileRegistry::load(config.as_deref());
                     Session::new(

@@ -17,6 +17,7 @@ mod light;
 mod masks;
 mod optics;
 mod presets;
+mod settings;
 mod viewport;
 
 use std::path::{Path, PathBuf};
@@ -35,7 +36,7 @@ use rohditor_engine::preview::{PreviewSource, WgpuContext};
 use rohditor_gpu::{GpuPreviewProcessor, GpuSensorProcessor, GpuSpatialProcessor};
 
 use crate::library::{Library, LibraryWorker};
-use crate::session::{Display, Session, SessionWorkers};
+use crate::session::{Display, Session, SessionWorkers, StartupSettings};
 use crate::ui::test_id::recorded;
 use crate::workspace::Workspace;
 use crate::{actions, assets, device};
@@ -49,6 +50,8 @@ struct Harness {
     size: Size<Pixels>,
     session: Entity<Session>,
     library: Entity<Library>,
+    /// The session's configuration directory.
+    config: PathBuf,
 }
 
 impl Harness {
@@ -72,15 +75,20 @@ impl Harness {
         cx.update(actions::bind_keys);
         let mut created = None;
         let size = window;
+        let config = scratch_config();
         let window = cx
             .open_window(size, |window, cx| {
                 let session = cx.new(|cx| {
-                    let workers = SessionWorkers::start().expect("the engine starts");
-                    let settings = rohditor_engine::settings::AppSettings::default();
+                    let workers = SessionWorkers::start(None).expect("the engine starts");
+                    let settings = StartupSettings {
+                        settings: rohditor_engine::settings::AppSettings::default(),
+                        config: Some(config.clone()),
+                        neural_unavailable: Some("no model is installed".to_owned()),
+                        warning: None,
+                    };
                     let profiles =
                         rohditor_engine::camera_profiles::CameraProfileRegistry::default();
-                    let presets =
-                        rohditor_engine::presets::PresetStore::load(Some(&scratch_config()));
+                    let presets = rohditor_engine::presets::PresetStore::load(Some(&config));
                     Session::new(workers, settings, profiles, presets, gpu(), cx)
                 });
                 let library = cx.new(|cx| {
@@ -102,6 +110,7 @@ impl Harness {
             size,
             session,
             library,
+            config,
         }
     }
 

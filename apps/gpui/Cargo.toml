@@ -26,9 +26,11 @@ gpui_wgpu = { path = "vendor/gpui_wgpu" }
 image = { version = "0.25", default-features = false }
 rohditor-camera-profile = { path = "../../crates/camera-profile" }
 rohditor-core = { path = "../../crates/core" }
+rohditor-demosaic = { path = "../../crates/demosaic" }
 rohditor-edit = { path = "../../crates/edit" }
 rohditor-engine = { path = "../../crates/engine" }
 rohditor-gpu = { path = "../../crates/gpu" }
+rohditor-neural = { path = "../../crates/neural" }
 rohditor-raw = { path = "../../crates/raw" }
 # The main workspace's pin. Cargo unifies it with the version gpui_wgpu uses.
 wgpu = { version = "=29.0.4", default-features = false }

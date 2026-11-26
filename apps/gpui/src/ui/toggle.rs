@@ -5,28 +5,41 @@ use gpui::{App, Div, Role, SharedString, Stateful, Toggled, Window, div, prelude
 use crate::theme::{RADIUS, SMALL_FONT_SIZE, theme};
 use crate::ui::test_id::TestId as _;
 
+/// A switch followed by its label.
 pub fn toggle(
     id: &'static str,
     label: impl Into<SharedString>,
     on: bool,
     on_click: impl Fn(&mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
-    let theme = theme();
     let label = label.into();
+    switch(id, label.clone(), on, on_click)
+        .gap_2()
+        .px_1()
+        .child(label)
+}
+
+/// An on/off switch alone, for where its label is shown elsewhere. `label` is what screen
+/// readers say.
+pub fn switch(
+    id: &'static str,
+    label: impl Into<SharedString>,
+    on: bool,
+    on_click: impl Fn(&mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    let theme = theme();
     let track = if on { theme.accent } else { theme.selected };
     let knob = if on { px(11.0) } else { px(1.0) };
     div()
         .id(id)
         .role(Role::Switch)
-        .aria_label(label.clone())
+        .aria_label(label.into())
         .aria_toggled(if on { Toggled::True } else { Toggled::False })
         .test_id(format!("toggle:{id}"))
         .tab_index(0)
         .flex()
         .items_center()
-        .gap_2()
         .h(px(24.0))
-        .px_1()
         .rounded(RADIUS)
         .border_1()
         .border_color(gpui::transparent_black())
@@ -55,6 +68,5 @@ pub fn toggle(
                         .bg(theme.text),
                 ),
         )
-        .child(label)
         .on_click(move |_, window, cx| on_click(window, cx))
 }

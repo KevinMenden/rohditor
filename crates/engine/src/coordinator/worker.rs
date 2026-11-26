@@ -113,7 +113,7 @@ impl PreviewBackend {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub struct PreviewQueueStats {
     pub requested: u64,
     pub coalesced: u64,
