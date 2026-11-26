@@ -14,7 +14,8 @@ Assumed from the recommendations unless marked open; change them here if they tu
 - [x] egui features are frozen; it only gets fixes.
 - [x] `apps/gpui` merges to main early, as an experimental app.
 - [x] The redesigns below.
-- [ ] **Open:** is X11 required, or is Wayland enough? Needed by step 7.1.
+- [x] Wayland only; X11 is not required. GPUI is built with its `wayland` feature only. Add X11 later
+  only if someone needs it, with the 7.1 hand tests repeated under an X11 session.
 - [x] The Zed revision stays pinned until stage 7: newer ones need an unreleased wgpu.
 
 ## Where we stand
@@ -130,7 +131,7 @@ Done when nothing needs egui any more.
 
 ## Stage 7: Switch over
 
-- [ ] 7.1 X11 if required, device-loss recovery, hand tests of file dialogs and window resizing.
+- [ ] 7.1 Device-loss recovery, hand tests of file dialogs and window resizing.
 - [ ] 7.2 Measure drag latency against egui.
 - [ ] 7.3 About two weeks of daily use.
 - [ ] 7.4 Remove egui, rename to `apps/desktop`, merge the Cargo workspaces. GPUI needs Rust 1.95,
