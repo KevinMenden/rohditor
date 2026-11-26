@@ -121,7 +121,8 @@ fn main() -> eframe::Result {
         settings: persisted_settings,
         warning: settings_warning,
     } = settings::load(config::config_directory().as_deref());
-    let processor = resolve_processor(persisted_settings, arguments.processor.map(Into::into));
+    let processor =
+        ProcessorPreference::for_run(persisted_settings, arguments.processor.map(Into::into));
     let screenshot = arguments.screenshot.clone().map(|path| {
         (
             path,
@@ -176,19 +177,6 @@ fn main() -> eframe::Result {
             screenshot.clone(),
         ),
     }
-}
-
-/// The processor is fixed for the whole run: the "CPU only" setting is read
-/// here once, and the command-line flag takes precedence over it.
-fn resolve_processor(
-    settings: AppSettings,
-    command_line_override: Option<ProcessorPreference>,
-) -> ProcessorPreference {
-    command_line_override.unwrap_or(if settings.cpu_only() {
-        ProcessorPreference::Cpu
-    } else {
-        ProcessorPreference::Auto
-    })
 }
 
 fn launch(
@@ -273,8 +261,8 @@ mod tests {
     use clap::Parser;
 
     use super::{
-        APPLICATION_ID, AppSettings, Arguments, DemosaicAlgorithm, DemosaicPreference,
-        ProcessorChoice, ProcessorPreference, RendererPreference, resolve_processor,
+        APPLICATION_ID, Arguments, DemosaicAlgorithm, DemosaicPreference, ProcessorChoice,
+        RendererPreference,
     };
 
     #[test]
@@ -299,25 +287,6 @@ mod tests {
         assert_eq!(defaults.demosaic, None);
         assert_eq!(defaults.processor, None);
         assert!(arguments.diagnostics);
-    }
-
-    #[test]
-    fn cpu_only_setting_selects_the_processor_unless_overridden() {
-        let mut cpu_only = AppSettings::default();
-        cpu_only.set_cpu_only(true);
-        assert_eq!(
-            resolve_processor(AppSettings::default(), None),
-            ProcessorPreference::Auto
-        );
-        assert_eq!(resolve_processor(cpu_only, None), ProcessorPreference::Cpu);
-        assert_eq!(
-            resolve_processor(cpu_only, Some(ProcessorPreference::Gpu)),
-            ProcessorPreference::Gpu
-        );
-        assert_eq!(
-            resolve_processor(AppSettings::default(), Some(ProcessorPreference::Cpu)),
-            ProcessorPreference::Cpu
-        );
     }
 
     #[test]

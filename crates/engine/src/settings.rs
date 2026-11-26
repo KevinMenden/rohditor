@@ -128,6 +128,21 @@ pub fn save(config_directory: Option<&Path>, settings: AppSettings) -> io::Resul
     save_to_path(&directory.join(SETTINGS_FILE_NAME), settings)
 }
 
+/// The demosaic algorithms the settings can hold; bilinear is a command-line-only override.
+pub const SAVED_DEMOSAICS: [DemosaicAlgorithm; 4] = [
+    DemosaicAlgorithm::MalvarHeCutler,
+    DemosaicAlgorithm::Rcd,
+    DemosaicAlgorithm::Amaze,
+    DemosaicAlgorithm::Neural,
+];
+
+/// The saved demosaic algorithm of this stable name.
+pub fn saved_demosaic(name: &str) -> Option<DemosaicAlgorithm> {
+    SAVED_DEMOSAICS
+        .into_iter()
+        .find(|algorithm| algorithm.stable_name() == name)
+}
+
 pub fn resolve_startup_settings(
     persisted: AppSettings,
     command_line_override: Option<DemosaicAlgorithm>,
@@ -198,13 +213,9 @@ fn decode(bytes: &[u8]) -> Result<AppSettings, String> {
             stored.schema_version
         ));
     }
-    let demosaic = match stored.demosaic.as_deref().unwrap_or("amaze") {
-        "mhc" => DemosaicAlgorithm::MalvarHeCutler,
-        "rcd" => DemosaicAlgorithm::Rcd,
-        "amaze" => DemosaicAlgorithm::Amaze,
-        "neural" => DemosaicAlgorithm::Neural,
-        value => return Err(format!("unknown demosaic algorithm {value:?}")),
-    };
+    let name = stored.demosaic.as_deref().unwrap_or("amaze");
+    let demosaic =
+        saved_demosaic(name).ok_or_else(|| format!("unknown demosaic algorithm {name:?}"))?;
     let output_policy = match stored.output_policy.as_deref().unwrap_or("clip_to_srgb") {
         "clip_to_srgb" => OutputPolicy::ClipToSrgb,
         "chroma_compress_to_srgb" => OutputPolicy::ChromaCompressToSrgb,

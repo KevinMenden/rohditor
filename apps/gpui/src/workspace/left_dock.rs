@@ -23,6 +23,12 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Add the diagnostics tab and show it.
+    pub fn show_diagnostics(&mut self, cx: &mut Context<Self>) {
+        self.diagnostics_open = true;
+        self.show_left(LeftTab::Diagnostics, cx);
+    }
+
     /// Remove the diagnostics tab while it is in view; otherwise add it and show it.
     pub(super) fn toggle_diagnostics(&mut self, cx: &mut Context<Self>) {
         let in_view = self.files_open && self.left_tab == LeftTab::Diagnostics;

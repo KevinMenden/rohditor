@@ -29,6 +29,7 @@ use crate::coordinator::{
 };
 use crate::document::{PreviewIntent, PreviewTicket};
 use crate::preview_cache::PreviewCacheHits;
+use crate::settings::AppSettings;
 
 /// Polling interval while waiting on GPU completion or a readback.
 const GPU_POLL_INTERVAL: Duration = Duration::from_millis(16);
@@ -48,6 +49,16 @@ pub enum ProcessorPreference {
 }
 
 impl ProcessorPreference {
+    /// The processor for a run: the command line's choice when it made one, otherwise the
+    /// "CPU only" setting decides between `Cpu` and `Auto`. It is fixed for the whole run.
+    pub const fn for_run(settings: AppSettings, command_line: Option<Self>) -> Self {
+        match command_line {
+            Some(choice) => choice,
+            None if settings.cpu_only() => Self::Cpu,
+            None => Self::Auto,
+        }
+    }
+
     pub const fn label(self) -> &'static str {
         match self {
             Self::Auto => "Auto",
@@ -730,6 +741,26 @@ mod tests {
 
     fn coordinator() -> RenderCoordinator {
         RenderCoordinator::new(crate::wake::noop()).expect("worker starts")
+    }
+
+    #[test]
+    fn cpu_only_setting_selects_the_processor_unless_overridden() {
+        let mut cpu_only = AppSettings::default();
+        cpu_only.set_cpu_only(true);
+        let for_run = ProcessorPreference::for_run;
+        assert_eq!(
+            for_run(AppSettings::default(), None),
+            ProcessorPreference::Auto
+        );
+        assert_eq!(for_run(cpu_only, None), ProcessorPreference::Cpu);
+        assert_eq!(
+            for_run(cpu_only, Some(ProcessorPreference::Gpu)),
+            ProcessorPreference::Gpu
+        );
+        assert_eq!(
+            for_run(AppSettings::default(), Some(ProcessorPreference::Cpu)),
+            ProcessorPreference::Cpu
+        );
     }
 
     #[test]

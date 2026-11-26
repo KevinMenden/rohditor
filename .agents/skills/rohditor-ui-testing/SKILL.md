@@ -64,6 +64,22 @@ debug (all 33 photo tests: roughly 20 min in debug). `[profile.test] opt-level =
 worth it: it rebuilds every dependency (about 9 min) and still runs slower than `--release`.
 `color::profiles_are_chosen_and_imported` also needs `ROHDITOR_DCP`.
 
+### Real-window screenshot (look only)
+
+Launches the real app (real GPU and compositor), waits at least the delay (seconds, default 5)
+and then until the preview has settled, saves one frame, and exits (status 1 when no PNG was
+written):
+
+```sh
+cd apps/gpui
+XDG_CONFIG_HOME=$(mktemp -d) cargo run --release --locked -- <file.ARW|folder> \
+  --screenshot /tmp/ui.png --screenshot-delay 2
+```
+
+The fresh `XDG_CONFIG_HOME` keeps the user's saved session and settings out of it; note that
+`--demosaic` is saved like a settings change. `--diagnostics` opens the diagnostics tab,
+`--processor cpu` forces the CPU. It cannot click anything; use the driver for interaction.
+
 ### When to take screenshots
 
 After any change to what a panel, overlay or the viewport draws, and for drag interactions
