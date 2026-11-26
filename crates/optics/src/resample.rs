@@ -1,4 +1,4 @@
-use crate::{LensCorrectionPlan, OpticsError};
+use crate::OpticsError;
 
 pub(crate) fn cubic_sample(
     data: &[f32],
@@ -52,9 +52,4 @@ pub(crate) fn cubic_weight(distance: f32) -> f32 {
     } else {
         0.0
     }
-}
-
-#[allow(dead_code)]
-pub(crate) fn _plan_dimensions(plan: &LensCorrectionPlan) -> (usize, usize) {
-    plan.dimensions()
 }

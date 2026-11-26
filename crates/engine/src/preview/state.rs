@@ -143,23 +143,22 @@ impl DocumentPreview {
     }
 
     /// Show the whole photo in the viewport. Returns whether Source 1:1 was
-    /// on, in which case the caller must queue a fitted preview. `now` is the
-    /// frontend clock, see [`ViewState::fit`].
+    /// on, in which case the caller must queue a fitted preview.
     #[must_use = "leaving Source 1:1 needs a new preview"]
-    pub fn request_fit(&mut self, now: f64) -> bool {
+    pub fn request_fit(&mut self) -> bool {
         let was_source_scale = std::mem::take(&mut self.source_scale_requested);
-        self.view.fit(now);
+        self.view.fit();
         was_source_scale
     }
 
     /// Show the photo without its crop, whatever the recipe says, or stop doing
     /// so. The caller must queue a preview when it changes; until that arrives
     /// [`Self::full_frame_shown`] does not follow.
-    pub fn request_full_frame(&mut self, full_frame: bool, now: f64) {
+    pub fn request_full_frame(&mut self, full_frame: bool) {
         self.full_frame_requested = full_frame;
         if full_frame {
             self.source_scale_requested = false;
-            self.view.fit(now);
+            self.view.fit();
         }
     }
 
@@ -195,13 +194,13 @@ impl DocumentPreview {
     /// [`ViewState::source_scale_frame_ready`]). Not while the whole photo is
     /// being framed.
     #[must_use = "entering Source 1:1 needs a new preview"]
-    pub fn request_actual_size(&mut self, now: f64) -> bool {
+    pub fn request_actual_size(&mut self) -> bool {
         if self.full_frame_requested {
             return false;
         }
         let changed = !std::mem::replace(&mut self.source_scale_requested, true);
         if self.source.is_some_and(PreviewSource::is_source_scale) {
-            self.view.actual_size(now);
+            self.view.actual_size();
         }
         changed
     }
@@ -225,10 +224,6 @@ impl DocumentPreview {
         })
     }
 
-    pub const fn has_pending_histogram(&self) -> bool {
-        self.pending_histogram.is_some()
-    }
-
     /// Drop the resident GPU source and frame. The displayed frame goes with
     /// them when it was a GPU frame; a CPU frame stays.
     pub fn release_gpu(&mut self) {
@@ -244,14 +239,6 @@ impl DocumentPreview {
         // the resident source was already taken by a failed render.
         if had_gpu_frame || displayed_gpu {
             self.mark_display_changed();
-        }
-    }
-
-    /// Ask for a fresh histogram readback of the current GPU frame at once
-    /// (the clipping overlay needs the pixels).
-    pub fn request_histogram_now(&mut self) {
-        if let Some(preview) = self.gpu.as_ref() {
-            self.histogram_due = Some((preview.ticket, Instant::now()));
         }
     }
 
@@ -342,20 +329,20 @@ mod tests {
             .view
             .pan_by(0.5, [800.0, 600.0], [1_000.0, 1_000.0], [12.0, 8.0]);
 
-        assert!(preview.request_actual_size(1.0), "the mode changed");
+        assert!(preview.request_actual_size(), "the mode changed");
         assert!(preview.source_scale_requested);
         assert!(
             !preview.view.is_actual_size(),
             "the fitted frame is still shown"
         );
         assert!(
-            !preview.request_actual_size(2.0),
+            !preview.request_actual_size(),
             "asking again changes nothing"
         );
 
         // The frame arrives: the view enters 100% once.
         let previous = preview.source.replace(PreviewSource::OneToOneCpu);
-        preview.view.source_scale_frame_ready(previous, 3.0);
+        preview.view.source_scale_frame_ready(previous);
         assert!(preview.view.is_actual_size());
     }
 
@@ -368,7 +355,7 @@ mod tests {
             .view
             .pan_by(1.0, [800.0, 600.0], [2_000.0, 1_000.0], [90.0, -40.0]);
 
-        assert!(!preview.request_actual_size(1.0));
+        assert!(!preview.request_actual_size());
         assert!(preview.view.is_actual_size());
         assert_eq!(preview.view.pan(), [0.0, 0.0]);
     }
@@ -376,13 +363,10 @@ mod tests {
     #[test]
     fn fit_leaves_source_scale_and_reports_that_a_new_preview_is_needed() {
         let mut preview = DocumentPreview::new(1);
-        assert!(
-            !preview.request_fit(1.0),
-            "already fitted: nothing to render"
-        );
+        assert!(!preview.request_fit(), "already fitted: nothing to render");
 
         preview.source_scale_requested = true;
-        assert!(preview.request_fit(2.0));
+        assert!(preview.request_fit());
         assert!(!preview.source_scale_requested);
         assert!(preview.view.is_fit());
     }
@@ -396,7 +380,7 @@ mod tests {
 
         // Same revision, new presentation: a full frame must not be answered
         // by the earlier, cropped result.
-        preview.request_full_frame(true, 0.0);
+        preview.request_full_frame(true);
         let second = preview.begin_request(5, PreviewIntent::CommittedFit);
         assert!(!preview.accepts(5, first, PreviewIntent::CommittedFit));
         assert!(preview.accepts(5, second, PreviewIntent::CommittedFit));
@@ -418,15 +402,14 @@ mod tests {
             revision: 4,
             options: Default::default(),
             histogram_always: false,
-            now: 0.0,
         };
         let mut preview = DocumentPreview::new(1);
         preview.source_scale_requested = true;
         assert_eq!(preview.presented(&request).recipe, request.recipe);
 
-        preview.request_full_frame(true, 1.0);
+        preview.request_full_frame(true);
         assert!(!preview.source_scale_requested && preview.view.is_fit());
-        assert!(!preview.request_actual_size(2.0));
+        assert!(!preview.request_actual_size());
         assert!(!preview.source_scale_requested);
         assert_eq!(preview.presented(&request).recipe.geometry.crop, None);
         assert!(!preview.full_frame_shown(), "the old frame is still shown");
@@ -434,7 +417,7 @@ mod tests {
         assert!(preview.full_frame_shown());
         assert_eq!(preview.histogram_revision, None);
 
-        preview.request_full_frame(false, 3.0);
+        preview.request_full_frame(false);
         assert_eq!(preview.presented(&request).recipe, request.recipe);
         assert!(
             preview.full_frame_shown(),

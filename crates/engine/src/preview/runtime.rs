@@ -134,8 +134,6 @@ pub struct PreviewRequest {
     /// Read the histogram back after every GPU frame, not only fit frames
     /// (the clipping overlay needs the pixels).
     pub histogram_always: bool,
-    /// Frontend clock in seconds, for the view's zoom feedback.
-    pub now: f64,
 }
 
 /// A GPU base the worker finished preparing (a `GpuUploadReady` event).
@@ -630,9 +628,7 @@ impl PreviewRuntime {
                     request.histogram_always,
                 );
                 if diagnostics.resolution == PreviewResolution::SourceScale {
-                    preview
-                        .view
-                        .source_scale_frame_ready(previous_source, request.now);
+                    preview.view.source_scale_frame_ready(previous_source);
                 }
                 preview.last_time = Some(elapsed);
                 preview.diagnostics = Some(preview_diagnostics);
@@ -867,7 +863,6 @@ mod tests {
             revision: 0,
             options: PreviewOptions::default(),
             histogram_always: false,
-            now: 0.0,
         }
     }
 }

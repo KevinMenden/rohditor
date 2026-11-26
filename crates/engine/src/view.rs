@@ -12,8 +12,6 @@ const MIN_FIT_SCALE: f32 = 0.01;
 const ZOOM_RANGE: (f32, f32) = (0.03, 16.0);
 /// Zoom change per scroll unit (exponential).
 const ZOOM_PER_SCROLL: f32 = 0.002;
-/// How long the zoom percentage stays visible after a change, in seconds.
-const ZOOM_FEEDBACK_SECONDS: f64 = 0.8;
 
 type Pair = [f32; 2];
 
@@ -73,7 +71,6 @@ pub struct ViewState {
     fit: bool,
     zoom: f32,
     pan: Pair,
-    zoom_feedback_until: f64,
 }
 
 impl Default for ViewState {
@@ -82,33 +79,29 @@ impl Default for ViewState {
             fit: true,
             zoom: 1.0,
             pan: [0.0, 0.0],
-            zoom_feedback_until: 0.0,
         }
     }
 }
 
 impl ViewState {
-    /// Fit the whole image into the viewport. `now` is the frontend clock in
-    /// seconds, used only to time the zoom feedback.
-    pub fn fit(&mut self, now: f64) {
+    /// Fit the whole image into the viewport.
+    pub fn fit(&mut self) {
         self.fit = true;
         self.pan = [0.0, 0.0];
-        self.show_zoom_feedback(now);
     }
 
     /// Show one image pixel per logical pixel, centered.
-    pub fn actual_size(&mut self, now: f64) {
+    pub fn actual_size(&mut self) {
         self.fit = false;
         self.zoom = 1.0;
         self.pan = [0.0, 0.0];
-        self.show_zoom_feedback(now);
     }
 
     /// A source-scale frame arrived: enter 1:1 unless one was already shown, so
     /// a refresh keeps the user's zoom and pan.
-    pub fn source_scale_frame_ready(&mut self, previous_source: Option<PreviewSource>, now: f64) {
+    pub fn source_scale_frame_ready(&mut self, previous_source: Option<PreviewSource>) {
         if !previous_source.is_some_and(PreviewSource::is_source_scale) {
-            self.actual_size(now);
+            self.actual_size();
         }
     }
 
@@ -154,11 +147,6 @@ impl ViewState {
         }
     }
 
-    /// Whether the transient zoom percentage should still be shown at `now`.
-    pub fn zoom_feedback_active(&self, now: f64) -> bool {
-        now < self.zoom_feedback_until
-    }
-
     /// Drag the image by `delta`. Leaves fit mode at the current fit scale.
     pub fn pan_by(&mut self, fit_scale: f32, viewport_size: Pair, image_size: Pair, delta: Pair) {
         if self.fit {
@@ -180,7 +168,6 @@ impl ViewState {
         image_size: Pair,
         pointer: Option<Pair>,
         scroll_delta: f32,
-        now: f64,
     ) {
         let old_scale = self.scale(fit_scale);
         let old_center = self.pan;
@@ -203,11 +190,6 @@ impl ViewState {
         self.pan[0] += (anchor[0] - old_center[0]) * (1.0 - scale_ratio);
         self.pan[1] += (anchor[1] - old_center[1]) * (1.0 - scale_ratio);
         self.clamp_pan(viewport_size, image_size);
-        self.show_zoom_feedback(now);
-    }
-
-    fn show_zoom_feedback(&mut self, now: f64) {
-        self.zoom_feedback_until = now + ZOOM_FEEDBACK_SECONDS;
     }
 
     fn clamp_pan(&mut self, viewport_size: Pair, image_size: Pair) {
@@ -226,12 +208,7 @@ mod tests {
     use super::*;
 
     fn state(fit: bool, zoom: f32, pan: Pair) -> ViewState {
-        ViewState {
-            fit,
-            zoom,
-            pan,
-            zoom_feedback_until: 0.0,
-        }
+        ViewState { fit, zoom, pan }
     }
 
     /// The image-space offset (in image pixels) under a viewport-relative pointer.
@@ -288,11 +265,11 @@ mod tests {
     #[test]
     fn view_commands_reset_pan_and_report_their_mode() {
         let mut view = state(false, 2.0, [40.0, -12.0]);
-        view.fit(3.0);
+        view.fit();
         assert!(view.is_fit());
         assert_eq!(view.pan(), [0.0, 0.0]);
         assert_eq!(view.zoom_label(), "FIT");
-        view.actual_size(4.0);
+        view.actual_size();
         assert!(!view.is_fit());
         assert_eq!(view.zoom_label(), "SOURCE 100%");
     }
@@ -301,13 +278,13 @@ mod tests {
     fn source_scale_frame_resets_zoom_on_entry_and_preserves_it_on_refresh() {
         let mut view = state(false, 0.4, [28.0, -16.0]);
 
-        view.source_scale_frame_ready(Some(PreviewSource::HighQualityCpu), 1.0);
+        view.source_scale_frame_ready(Some(PreviewSource::HighQualityCpu));
         assert_eq!(view.zoom, 1.0);
         assert_eq!(view.pan, [0.0, 0.0]);
 
         view.zoom = 0.35;
         view.pan = [-42.0, 19.0];
-        view.source_scale_frame_ready(Some(PreviewSource::OneToOneGpu), 2.0);
+        view.source_scale_frame_ready(Some(PreviewSource::OneToOneGpu));
         assert_eq!(view.zoom, 0.35);
         assert_eq!(view.pan, [-42.0, 19.0]);
     }
@@ -322,12 +299,10 @@ mod tests {
         assert_eq!(view.zoom, 0.5);
         assert_eq!(view.pan, [12.0, -8.0]);
 
-        view.zoom_by(0.5, viewport, image, Some([0.0, 0.0]), 120.0, 5.0);
+        view.zoom_by(0.5, viewport, image, Some([0.0, 0.0]), 120.0);
         assert!(view.zoom > 0.5);
         let grow = view.zoom / 0.5;
         assert_close([12.0 * grow, -8.0 * grow], view.pan);
-        assert!(view.zoom_feedback_active(5.5));
-        assert!(!view.zoom_feedback_active(5.9));
     }
 
     #[test]
@@ -345,7 +320,7 @@ mod tests {
             let mut view = state(false, 0.8, [20.0, -15.0]);
             let before = image_space_offset(&view, pointer);
 
-            view.zoom_by(0.4, viewport, image, Some(pointer), 160.0, 1.0);
+            view.zoom_by(0.4, viewport, image, Some(pointer), 160.0);
 
             assert_close(before, image_space_offset(&view, pointer));
         }
@@ -359,8 +334,8 @@ mod tests {
         let mut view = state(false, 0.9, [50.0, -30.0]);
 
         for _ in 0..8 {
-            view.zoom_by(0.4, viewport, image, Some(pointer), 120.0, 1.0);
-            view.zoom_by(0.4, viewport, image, Some(pointer), -120.0, 1.0);
+            view.zoom_by(0.4, viewport, image, Some(pointer), 120.0);
+            view.zoom_by(0.4, viewport, image, Some(pointer), -120.0);
         }
 
         assert!((view.zoom - 0.9).abs() < 0.0001);
@@ -378,14 +353,14 @@ mod tests {
         assert!(image[0] * view.zoom < viewport[0]);
         assert!(image[1] * view.zoom < viewport[1]);
         for _ in 0..4 {
-            view.zoom_by(0.45, viewport, image, Some(pointer), 60.0, 1.0);
+            view.zoom_by(0.45, viewport, image, Some(pointer), 60.0);
             assert_close(original_offset, image_space_offset(&view, pointer));
         }
         assert!(image[0] * view.zoom > viewport[0]);
         assert!(image[1] * view.zoom > viewport[1]);
 
         for _ in 0..4 {
-            view.zoom_by(0.45, viewport, image, Some(pointer), -60.0, 1.0);
+            view.zoom_by(0.45, viewport, image, Some(pointer), -60.0);
             assert_close(original_offset, image_space_offset(&view, pointer));
         }
         assert!((view.zoom - 0.45).abs() < 0.0001);
@@ -402,7 +377,6 @@ mod tests {
             [400.0, 200.0],
             Some([-400.0, -200.0]),
             120.0,
-            1.0,
         );
 
         assert_close([40.0, -20.0], view.pan);
@@ -413,7 +387,7 @@ mod tests {
         let mut view = ViewState::default();
         assert!(view.is_fit());
 
-        view.zoom_by(0.25, [800.0, 600.0], [2_000.0, 1_000.0], None, 120.0, 1.0);
+        view.zoom_by(0.25, [800.0, 600.0], [2_000.0, 1_000.0], None, 120.0);
 
         assert!(!view.is_fit());
         assert_eq!(view.zoom, (0.25 * (120.0_f32 * ZOOM_PER_SCROLL).exp()));
@@ -430,7 +404,6 @@ mod tests {
             [200.0, 100.0],
             Some([100.0, 0.0]),
             120.0,
-            1.0,
         );
         assert!(
             on_edge.pan[0] < 0.0,
@@ -444,7 +417,6 @@ mod tests {
             [200.0, 100.0],
             Some([100.5, 0.0]),
             120.0,
-            1.0,
         );
         assert_eq!(
             outside.pan,

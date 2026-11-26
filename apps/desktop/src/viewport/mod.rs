@@ -99,7 +99,7 @@ impl Viewport {
         &mut self,
         window: &Window,
         cx: &mut Context<Self>,
-        change: impl FnOnce(&mut ViewState, Geometry, f64),
+        change: impl FnOnce(&mut ViewState, Geometry),
     ) {
         let Some(geometry) = self
             .session
@@ -110,9 +110,8 @@ impl Viewport {
             return;
         };
         self.session.update(cx, |session, cx| {
-            let now = session.now();
             if let Some(document) = session.document_mut() {
-                change(&mut document.preview.view, geometry, now);
+                change(&mut document.preview.view, geometry);
                 cx.notify();
             }
         });
@@ -168,7 +167,7 @@ impl Viewport {
             Some(Drag::Pan(from)) => {
                 let delta = pair(event.position - *from);
                 *from = event.position;
-                self.change_view(window, cx, |view, geometry, _| {
+                self.change_view(window, cx, |view, geometry| {
                     view.pan_by(geometry.fit(), geometry.viewport, geometry.image, delta);
                 });
             }
@@ -230,14 +229,13 @@ impl Viewport {
         }
         let pointer = pair(event.position - self.bounds.center());
         let amount = delta.as_f32();
-        self.change_view(window, cx, |view, geometry, now| {
+        self.change_view(window, cx, |view, geometry| {
             view.zoom_by(
                 geometry.fit(),
                 geometry.viewport,
                 geometry.image,
                 Some(pointer),
                 amount,
-                now,
             );
         });
     }

@@ -296,20 +296,6 @@ impl GpuPreviewUpload {
         )
     }
 
-    /// Cancellable form of [`Self::from_reconstructed_preview`].
-    pub fn from_reconstructed_preview_cancellable(
-        reconstructed: &ReconstructedPreview,
-        white_balance: WhiteBalance,
-        cancellation: &CancellationToken,
-    ) -> Result<Self, GpuPreviewError> {
-        let mut recipe = EditRecipe::default();
-        recipe.raw.highlights = reconstructed.highlight_adjustments();
-        rohditor_core::DetailProvenance::write_settings(reconstructed.detail(), &mut recipe);
-        recipe.color.camera_profile = reconstructed.profile_selection().clone();
-        recipe.color.white_balance = white_balance;
-        Self::from_reconstructed_preview_for_recipe(reconstructed, &recipe, cancellation)
-    }
-
     /// Pack a camera-native reconstruction for the exact current recipe. The
     /// reconstruction may reuse its camera-native pixels when the selected
     /// profile changes, so profile evaluation remains a downstream operation.

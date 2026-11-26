@@ -86,14 +86,6 @@ impl ClippingMask {
         }
     }
 
-    /// Build a mask from tightly packed RGB8 pixels (no row padding).
-    ///
-    /// Returns `None` when the buffer length does not match the dimensions.
-    #[must_use]
-    pub fn from_rgb8(width: usize, height: usize, rgb: &[u8]) -> Option<Self> {
-        Self::from_packed::<3>(width, height, rgb)
-    }
-
     /// Build a mask from a packed RGBA8 display buffer, ignoring alpha.
     ///
     /// This is the GPU-preview readback format.
@@ -191,21 +183,18 @@ mod tests {
     }
 
     #[test]
-    fn packed_rgb_and_rgba_masks_match() {
-        let rgb: Vec<u8> = PIXELS.iter().flatten().copied().collect();
+    fn packed_rgba_mask_ignores_alpha() {
         let rgba: Vec<u8> = PIXELS
             .iter()
             .flat_map(|pixel| [pixel[0], pixel[1], pixel[2], 0])
             .collect();
-        assert_matches_expected(&ClippingMask::from_rgb8(3, 2, &rgb).expect("rgb"));
         assert_matches_expected(&ClippingMask::from_rgba8(3, 2, &rgba).expect("rgba"));
     }
 
     #[test]
     fn packed_masks_reject_wrong_buffer_size() {
-        assert!(ClippingMask::from_rgb8(1, 1, &[0, 0]).is_none());
         assert!(ClippingMask::from_rgba8(1, 1, &[0, 0, 0]).is_none());
-        assert!(ClippingMask::from_rgb8(usize::MAX, 2, &[]).is_none());
+        assert!(ClippingMask::from_rgba8(usize::MAX, 2, &[]).is_none());
     }
 
     #[test]

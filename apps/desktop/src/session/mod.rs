@@ -145,11 +145,6 @@ impl Session {
         self.display.get()
     }
 
-    /// Seconds since start, the clock of the view's zoom feedback.
-    pub fn now(&self) -> f64 {
-        self.renderer.now()
-    }
-
     /// The adapter previews render on, or that the CPU does.
     pub fn processor(&self) -> String {
         self.renderer.processor()
@@ -227,7 +222,7 @@ impl Session {
     pub fn close_document(&mut self, cx: &mut Context<Self>) {
         if let Some(document) = self.document.as_mut() {
             // Nothing is shown any more, so nothing has to be rendered.
-            let _ = self.tool.apply(document, self.renderer.now());
+            let _ = self.tool.apply(document);
         }
         self.tool = ActiveTool::default();
         self.save_now();

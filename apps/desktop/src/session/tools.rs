@@ -14,23 +14,20 @@ impl Session {
     /// Change tools, applying what the current one drafted.
     pub fn select_tool(&mut self, target: ToolKind, cx: &mut Context<Self>) {
         let policy = self.renderer.settings.render_options().raw_crop_policy;
-        let now = self.now();
         self.change_tool(
-            |tool, document| tool.switch_to(target, document, policy, now),
+            |tool, document| tool.switch_to(target, document, policy),
             cx,
         );
     }
 
     /// Return to Edit, applying what the tool drafted.
     pub fn apply_tool(&mut self, cx: &mut Context<Self>) {
-        let now = self.now();
-        self.change_tool(|tool, document| tool.apply(document, now), cx);
+        self.change_tool(|tool, document| tool.apply(document), cx);
     }
 
     /// Return to Edit, discarding what the tool drafted.
     pub fn cancel_tool(&mut self, cx: &mut Context<Self>) {
-        let now = self.now();
-        self.change_tool(|tool, document| tool.cancel(document, now), cx);
+        self.change_tool(|tool, document| tool.cancel(document), cx);
     }
 
     /// Whether the active tool drafts something to apply or cancel.
