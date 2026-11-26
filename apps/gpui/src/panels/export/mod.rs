@@ -115,6 +115,7 @@ impl ExportDialog {
         toggle(id, label, on, move |_, cx| {
             dialog.update(cx, |dialog, cx| {
                 flip(&mut dialog.options);
+                dialog.error = None;
                 cx.notify();
             });
         })

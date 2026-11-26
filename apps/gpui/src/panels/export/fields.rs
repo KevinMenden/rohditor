@@ -52,23 +52,47 @@ impl Fields {
     /// Copy the numbers that matter for the chosen format and size into `options`.
     pub fn read_into(&self, options: &mut ExportOptions, cx: &App) -> Result<(), String> {
         let text = |input: &Entity<TextInput>| input.read(cx).text().to_owned();
-        if options.kind == ExportKind::Jpeg {
-            let quality = parse_number("JPEG quality", &text(&self.quality), QUALITY)?;
-            // Parsed within 1 to 100.
-            options.jpeg_quality = quality as u8;
-        }
-        match options.size_mode {
-            SizeMode::Original => {}
-            SizeMode::LongEdge => {
-                options.long_edge = parse_number("Long edge", &text(&self.long_edge), PIXELS)?;
-            }
-            SizeMode::Fit => {
-                options.fit_width = parse_number("Width", &text(&self.fit_width), PIXELS)?;
-                options.fit_height = parse_number("Height", &text(&self.fit_height), PIXELS)?;
-            }
-        }
-        Ok(())
+        apply(
+            options,
+            &Texts {
+                quality: &text(&self.quality),
+                long_edge: &text(&self.long_edge),
+                fit_width: &text(&self.fit_width),
+                fit_height: &text(&self.fit_height),
+            },
+        )
     }
+}
+
+/// What was typed into each field.
+pub struct Texts<'a> {
+    pub quality: &'a str,
+    pub long_edge: &'a str,
+    pub fit_width: &'a str,
+    pub fit_height: &'a str,
+}
+
+/// Copy the typed numbers that matter for the chosen format and size into `options`. Fields that
+/// are not shown are not checked. `options` stays as it was if any number is wrong.
+pub fn apply(options: &mut ExportOptions, texts: &Texts) -> Result<(), String> {
+    let mut parsed = options.clone();
+    if parsed.kind == ExportKind::Jpeg {
+        let quality = parse_number("JPEG quality", texts.quality, QUALITY)?;
+        // Parsed within 1 to 100.
+        parsed.jpeg_quality = quality as u8;
+    }
+    match parsed.size_mode {
+        SizeMode::Original => {}
+        SizeMode::LongEdge => {
+            parsed.long_edge = parse_number("Long edge", texts.long_edge, PIXELS)?;
+        }
+        SizeMode::Fit => {
+            parsed.fit_width = parse_number("Width", texts.fit_width, PIXELS)?;
+            parsed.fit_height = parse_number("Height", texts.fit_height, PIXELS)?;
+        }
+    }
+    *options = parsed;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -84,5 +108,54 @@ mod tests {
             assert_eq!(error, "Quality must be a whole number from 1 to 100.");
         }
         assert!(parse_number("Size", "65536", PIXELS).is_err());
+    }
+
+    fn texts<'a>(
+        quality: &'a str,
+        long_edge: &'a str,
+        width: &'a str,
+        height: &'a str,
+    ) -> Texts<'a> {
+        Texts {
+            quality,
+            long_edge,
+            fit_width: width,
+            fit_height: height,
+        }
+    }
+
+    #[test]
+    fn fields_that_are_not_shown_are_not_checked() {
+        // A PNG has no quality and the original size has no pixel fields.
+        let mut options = ExportOptions::with_jpeg_quality(90);
+        options.kind = ExportKind::Png;
+        apply(&mut options, &texts("high", "wide", "-1", "")).expect("nothing is shown to check");
+        assert_eq!(options.jpeg_quality, 90);
+        assert_eq!(
+            options.long_edge,
+            ExportOptions::with_jpeg_quality(90).long_edge
+        );
+    }
+
+    #[test]
+    fn a_wrong_number_blocks_the_export_and_changes_nothing() {
+        let mut options = ExportOptions::with_jpeg_quality(90);
+        options.size_mode = SizeMode::LongEdge;
+        let error = apply(&mut options, &texts("101", "1600", "", "")).expect_err("quality");
+        assert!(error.starts_with("JPEG quality"), "{error}");
+        let error = apply(&mut options, &texts("80", "0", "", "")).expect_err("long edge");
+        assert!(error.starts_with("Long edge"), "{error}");
+        assert_eq!((options.jpeg_quality, options.long_edge), (90, 2048));
+    }
+
+    #[test]
+    fn the_numbers_of_the_chosen_size_are_taken() {
+        let mut options = ExportOptions::with_jpeg_quality(90);
+        options.size_mode = SizeMode::Fit;
+        apply(&mut options, &texts(" 75", "999", "1200 px", "800")).expect("valid");
+        assert_eq!(options.jpeg_quality, 75);
+        assert_eq!((options.fit_width, options.fit_height), (1200, 800));
+        // Not the long edge of another size mode.
+        assert_eq!(options.long_edge, 2048);
     }
 }
