@@ -16,11 +16,13 @@ mod presets;
 mod profiles;
 mod renderer;
 mod saving;
+mod settings;
 mod tools;
 mod upload;
 mod zoom;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
@@ -28,14 +30,16 @@ use gpui::{Context, EventEmitter, Task};
 use rohditor_core::default_recipe;
 use rohditor_edit::EditRecipe;
 use rohditor_engine::camera_profiles::CameraProfileRegistry;
+use rohditor_engine::catalog::CatalogState;
 use rohditor_engine::coordinator::RenderCoordinator;
+use rohditor_engine::diagnostics::{Diagnostics, DiagnosticsSources};
 use rohditor_engine::export_options::ExportOptions;
 use rohditor_engine::open_document::OpenDocument;
 use rohditor_engine::persistence;
 use rohditor_engine::presets::PresetStore;
 use rohditor_engine::preview::WgpuContext;
-use rohditor_engine::settings::AppSettings;
 use rohditor_engine::tools::ActiveTool;
+use rohditor_neural::NeuralDemosaicer;
 
 pub use display::Display;
 use display::DisplaySlot;
@@ -44,6 +48,8 @@ pub use presets::PresetEntry;
 use presets::Presets;
 use renderer::Renderer;
 use saving::Saves;
+use settings::SettingsFile;
+pub use settings::StartupSettings;
 
 use crate::wake::{self, Woken};
 
@@ -56,10 +62,11 @@ pub struct SessionWorkers {
 }
 
 impl SessionWorkers {
-    pub fn start() -> Result<Self> {
+    /// `neural` is the model of the neural demosaic, if one is installed.
+    pub fn start(neural: Option<Arc<NeuralDemosaicer>>) -> Result<Self> {
         let (wake, woken) = wake::channel();
         Ok(Self {
-            coordinator: RenderCoordinator::new(wake).map_err(|e| anyhow!(e))?,
+            coordinator: RenderCoordinator::with_neural(wake, neural).map_err(|e| anyhow!(e))?,
             saves: Saves::start()?,
             woken,
         })
@@ -68,6 +75,7 @@ impl SessionWorkers {
 
 pub struct Session {
     renderer: Renderer,
+    settings_file: SettingsFile,
     document: Option<OpenDocument>,
     display: DisplaySlot,
     saves: Saves,
@@ -99,14 +107,16 @@ impl Session {
     /// `gpu` is the device GPUI renders with; without one the CPU renders previews.
     pub fn new(
         workers: SessionWorkers,
-        settings: AppSettings,
+        settings: StartupSettings,
         profiles: CameraProfileRegistry,
         presets: PresetStore,
         gpu: Option<WgpuContext>,
         cx: &mut Context<Self>,
     ) -> Self {
+        let (settings, settings_file) = SettingsFile::new(settings);
         Self {
             renderer: Renderer::new(workers.coordinator, settings, gpu),
+            settings_file,
             document: None,
             display: DisplaySlot::default(),
             saves: workers.saves,
@@ -143,6 +153,19 @@ impl Session {
     /// The adapter previews render on, or that the CPU does.
     pub fn processor(&self) -> String {
         self.renderer.processor()
+    }
+
+    /// What the preview pipeline did last, for the diagnostics panel. `catalog` is the shown
+    /// folder's.
+    pub fn diagnostics(&self, catalog: &CatalogState) -> Diagnostics {
+        rohditor_engine::diagnostics::build(&DiagnosticsSources {
+            ui_renderer: "GPUI",
+            runtime: self.renderer.runtime(),
+            queue: self.renderer.coordinator.preview_queue_stats(),
+            document: self.document.as_ref(),
+            catalog: Some(catalog),
+            output_policy: self.renderer.settings.output_policy(),
+        })
     }
 
     /// Whether the open photo needs the CPU.

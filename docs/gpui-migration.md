@@ -31,7 +31,7 @@ Assumed from the recommendations unless marked open; change them here if they tu
 | Presets, info | None | All |
 | Library | File tree, albums, filmstrip, sorting, selection | |
 | Export | JPEG only | PNG, size, sharpening, metadata, overwrite |
-| Settings, diagnostics | None | All, including neural demosaic |
+| Settings, diagnostics | Settings dialog with neural demosaic, diagnostics panel and report | |
 
 ## Redesigns
 
@@ -123,7 +123,7 @@ Done when the moved tests pass and painting feels smooth on real RAWs.
   - [x] L.3 Filmstrip, sorting, keyboard navigation.
   - [x] L.4 Albums panel.
 - [x] 6.2 Full export dialog: format, size, sharpening, metadata and overwrite.
-- [ ] 6.3 Settings, neural model, diagnostics.
+- [x] 6.3 Settings, neural model, diagnostics.
 - [ ] 6.4 Startup options and `--screenshot`.
 
 Done when nothing needs egui any more.

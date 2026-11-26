@@ -31,6 +31,8 @@ pub enum Icon {
     EyeOff,
     Invert,
     Brush,
+    Settings,
+    Activity,
 }
 
 impl Icon {
@@ -60,6 +62,8 @@ impl Icon {
             Self::EyeOff => "eye-off.svg",
             Self::Invert => "invert.svg",
             Self::Brush => "brush.svg",
+            Self::Settings => "settings.svg",
+            Self::Activity => "activity.svg",
         }
     }
 }
@@ -101,6 +105,8 @@ impl AssetSource for Assets {
             "eye-off.svg",
             "invert.svg",
             "brush.svg",
+            "settings.svg",
+            "activity.svg",
         ];
         Ok(bytes.map(Cow::Borrowed))
     }

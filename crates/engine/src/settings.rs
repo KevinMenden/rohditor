@@ -4,7 +4,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use rohditor_core::{OutputPolicy, RenderOptions};
+use rohditor_core::{NEURAL_FALLBACK_DEMOSAIC, OutputPolicy, RenderOptions};
 use rohditor_demosaic::DemosaicAlgorithm;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -74,6 +74,13 @@ impl AppSettings {
         self.auto_noise_reduction = enabled;
     }
 
+    /// Whether going from `self` to `other` changes the developed pixels.
+    /// The processor is chosen at startup, so `cpu_only` does not count, and
+    /// automatic noise reduction only applies to photos opened afterwards.
+    pub fn changes_pixels(self, other: Self) -> bool {
+        self.demosaic != other.demosaic || self.output_policy != other.output_policy
+    }
+
     pub fn render_options(self) -> RenderOptions {
         RenderOptions {
             demosaic: self.demosaic,
@@ -130,6 +137,22 @@ pub fn resolve_startup_settings(
         effective.demosaic = demosaic;
     }
     effective
+}
+
+/// The settings to run with when the neural demosaic is unavailable for
+/// `reason`: a saved "neural" choice falls back to the classic stand-in for
+/// this run, with a warning. The saved file is not changed.
+pub fn without_neural(settings: AppSettings, reason: &str) -> (AppSettings, Option<String>) {
+    if settings.demosaic != DemosaicAlgorithm::Neural {
+        return (settings, None);
+    }
+    let mut fallback = settings;
+    fallback.demosaic = NEURAL_FALLBACK_DEMOSAIC;
+    let warning = format!(
+        "The neural demosaic is unavailable ({reason}); using {} instead.",
+        NEURAL_FALLBACK_DEMOSAIC.stable_name()
+    );
+    (fallback, Some(warning))
 }
 
 fn load_from_path(path: &Path) -> SettingsLoad {
@@ -390,5 +413,31 @@ mod tests {
             resolve_startup_settings(AppSettings::default(), None),
             AppSettings::default()
         );
+    }
+
+    #[test]
+    fn only_demosaic_and_gamut_changes_alter_pixels() {
+        let settings = AppSettings::default();
+        let mut other = settings;
+        other.set_cpu_only(true);
+        other.set_auto_noise_reduction(false);
+        assert!(!settings.changes_pixels(other));
+        other.set_demosaic(DemosaicAlgorithm::Rcd);
+        assert!(settings.changes_pixels(other));
+        let mut gamut = settings;
+        gamut.set_output_policy(OutputPolicy::ChromaCompressToSrgb);
+        assert!(settings.changes_pixels(gamut));
+    }
+
+    #[test]
+    fn an_unavailable_model_falls_back_with_a_warning() {
+        let mut neural = AppSettings::default();
+        neural.set_demosaic(DemosaicAlgorithm::Neural);
+        let (fallback, warning) = without_neural(neural, "no model");
+        assert_eq!(fallback.demosaic(), NEURAL_FALLBACK_DEMOSAIC);
+        assert!(warning.is_some_and(|warning| warning.contains("no model")));
+
+        let classic = AppSettings::default();
+        assert_eq!(without_neural(classic, "no model"), (classic, None));
     }
 }

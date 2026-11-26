@@ -291,8 +291,13 @@ impl Session {
             WorkerEvent::MaskOverlayFailed { ticket, layer, .. } => {
                 self.mask_measured(ticket, layer, None);
             }
-            // This frontend never requests the neural demosaic.
-            WorkerEvent::NeuralDemosaicReady { .. } => {}
+            // The background neural pass finished; show it instead of the stand-in.
+            WorkerEvent::NeuralDemosaicReady { document_id } => {
+                if let Some(document) = self.current(document_id) {
+                    document.preview.neural_ready = true;
+                    self.queue_preview();
+                }
+            }
         }
     }
 }
