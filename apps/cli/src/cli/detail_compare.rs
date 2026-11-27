@@ -24,7 +24,7 @@ use rohditor_reference::detail_scenes::{self, DetailScene, EDGE_PERIOD, Scene};
 use rohditor_reference::metrics::{detail_scores, edge_acutance, edge_rise_distance};
 use rohditor_reference::noise::{NOISE_LEVELS, NoiseModel};
 
-use super::commands::write_stdout;
+use super::output::write_stdout;
 
 /// Scene size: wide enough for the noise estimate's 16x16 tiles.
 const WIDTH: usize = 768;

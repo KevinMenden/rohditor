@@ -20,9 +20,9 @@ use rohditor_image::{DisplayRgbImage, Orientation};
 use rohditor_raw::{RawDecoder, RawlerDecoder};
 use serde::Serialize;
 
-use super::commands::{
-    QualityCropSpec, crop_display_image, load_quality_manifest, milliseconds,
-    source_stem_for_artifact, write_stdout,
+use super::output::{milliseconds, write_stdout};
+use super::quality_crops::{
+    QualityCropSpec, crop_display_image, load_quality_manifest, source_stem_for_artifact,
 };
 
 /// Methods in report order; Clip is the comparison reference.

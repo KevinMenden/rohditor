@@ -21,7 +21,7 @@ use rohditor_look::{Proxy, ProxyDifference, compare_proxies};
 use rohditor_raw::{RawDecoder, RawFrame, RawlerDecoder};
 use serde::Serialize;
 
-use super::commands::write_stdout;
+use super::output::write_stdout;
 
 /// Long edge of the renders compared with the JPEG. The proxy is binned far
 /// below this, so a small render is enough.
