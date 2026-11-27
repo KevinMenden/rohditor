@@ -10,8 +10,8 @@ use rohditor_core::{CpuPipeline, RawCropPolicy, RenderOptions, normalize_raw, wr
 use rohditor_edit::EditRecipe;
 use rohditor_raw::{RawDecoder, RawlerDecoder};
 
-use super::commands::write_stdout;
 use super::npy::encode_f32;
+use super::output::write_stdout;
 
 /// Writes `[1, 4, H/2, W/2]` and prints the sensor position of packed `(0, 0)`
 /// and the as-shot gains, so the caller can align it with another decoder.

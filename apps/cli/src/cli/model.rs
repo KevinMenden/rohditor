@@ -14,7 +14,7 @@ use clap::{Args, Subcommand};
 use rohditor_engine::models::{ModelStatus, ModelStore};
 use rohditor_neural::{Backend, NeuralDemosaicer};
 
-use super::commands::write_stdout;
+use super::output::write_stdout;
 
 #[derive(Debug, Subcommand)]
 pub(super) enum ModelCommand {
