@@ -4,7 +4,7 @@ use gpui::Context;
 use rohditor_core::auto_tone;
 use rohditor_edit::{
     EditRecipe, GradingTint, GradingTones, HighlightMethod, Parameter, RecipeSection,
-    RenderingProfileSelection, WhiteBalancePreset,
+    RenderingProfileSelection, ToneCurve, WhiteBalancePreset,
 };
 use rohditor_engine::document::EditSession;
 use rohditor_engine::open_document::OpenDocument;
@@ -54,6 +54,15 @@ impl Session {
         if let Some(document) = self.document.as_ref() {
             let mut next = document.edits.recipe().clone();
             next.color.grading = tones.with(next.color.grading, tint);
+            self.edit(next, phase, false, cx);
+        }
+    }
+
+    /// Replace the tone curve, as [`Self::set_parameter`].
+    pub fn set_tone_curve(&mut self, curve: ToneCurve, phase: EditPhase, cx: &mut Context<Self>) {
+        if let Some(document) = self.document.as_ref() {
+            let mut next = document.edits.recipe().clone();
+            next.light.tone_curve = curve;
             self.edit(next, phase, false, cx);
         }
     }

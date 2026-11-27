@@ -48,14 +48,7 @@ impl LightToneLut {
     /// Evaluate the table with linear interpolation.
     #[must_use]
     pub fn sample(&self, input: f32) -> f32 {
-        if !input.is_finite() || !(0.0..=1.0).contains(&input) {
-            return input;
-        }
-        let position = input * (LIGHT_TONE_LUT_SIZE - 1) as f32;
-        let lower = position.floor() as usize;
-        let upper = (lower + 1).min(LIGHT_TONE_LUT_SIZE - 1);
-        let fraction = position - lower as f32;
-        self.values[lower] + (self.values[upper] - self.values[lower]) * fraction
+        sample_lut(&self.values, input)
     }
 
     /// [`Self::sample`] for an extended-range (HDR) rendition, where values
@@ -77,6 +70,21 @@ impl LightToneLut {
     pub const fn values(&self) -> &[f32; LIGHT_TONE_LUT_SIZE] {
         &self.values
     }
+}
+
+/// Linearly interpolate a table sampled evenly over `0..=1`. Inputs outside
+/// that range, and NaN, pass through.
+#[inline]
+pub(crate) fn sample_lut(values: &[f32], input: f32) -> f32 {
+    if !(0.0..=1.0).contains(&input) {
+        return input;
+    }
+    let last = values.len() - 1;
+    let position = input * last as f32;
+    let lower = position.floor() as usize;
+    let upper = (lower + 1).min(last);
+    let fraction = position - lower as f32;
+    values[lower] + (values[upper] - values[lower]) * fraction
 }
 
 fn evaluate_light_tone(light: &LightAdjustments, input: f32) -> f32 {

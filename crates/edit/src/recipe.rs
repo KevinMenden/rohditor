@@ -16,6 +16,7 @@ mod optics;
 mod rendering;
 
 pub use geometry::{GeometryAdjustments, NormalizedCropRect};
+pub(crate) use light::sample_lut;
 pub use light::{LIGHT_TONE_LUT_SIZE, LightToneLut};
 pub use optics::{LensCorrection, LensProfileSelection, OpticsAdjustments};
 pub use rendering::{
@@ -25,7 +26,7 @@ pub use rendering::{
 
 use crate::{
     CaptureSharpening, Defringe, FalseColorSuppression, LocalAdjustments, NoiseReduction,
-    PresenceAdjustments,
+    PresenceAdjustments, ToneCurve,
 };
 use color_adjustments::*;
 use color_settings::WhiteBalance;
@@ -42,7 +43,7 @@ pub struct EditError {
 }
 
 /// Schema version of the current non-destructive edit recipe.
-pub const EDIT_RECIPE_SCHEMA_VERSION: u32 = 19;
+pub const EDIT_RECIPE_SCHEMA_VERSION: u32 = 20;
 const LEGACY_EDIT_RECIPE_SCHEMA_VERSION: u32 = 1;
 const PREVIOUS_EDIT_RECIPE_SCHEMA_VERSION: u32 = 2;
 const PREVIOUS_RAW_EDIT_RECIPE_SCHEMA_VERSION: u32 = 3;
@@ -52,7 +53,8 @@ const PREVIOUS_OPPOSED_EDIT_RECIPE_SCHEMA_VERSION: u32 = 6;
 const PREVIOUS_CAMERA_PROFILE_EDIT_RECIPE_SCHEMA_VERSION: u32 = 7;
 const PREVIOUS_OPTICS_EDIT_RECIPE_SCHEMA_VERSION: u32 = 8;
 const PREVIOUS_WHITE_BALANCE_EDIT_RECIPE_SCHEMA_VERSION: u32 = 9;
-const PREVIOUS_LOCAL_RATIOS_REMOVAL_EDIT_RECIPE_SCHEMA_VERSION: u32 = 18;
+/// The tone curve was four offsets. Those curves are dropped to the identity.
+const PREVIOUS_FOUR_OFFSET_TONE_CURVE_EDIT_RECIPE_SCHEMA_VERSION: u32 = 19;
 
 /// Inclusive range and neutral value for one adjustment parameter.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -128,11 +130,6 @@ pub const HIGHLIGHT_THRESHOLD_RANGE: ParameterRange = ParameterRange {
     minimum: 0.5,
     maximum: 1.5,
     neutral: 1.0,
-};
-pub const TONE_CURVE_RANGE: ParameterRange = ParameterRange {
-    minimum: -0.25,
-    maximum: 0.25,
-    neutral: 0.0,
 };
 pub const HSL_HUE_RANGE: ParameterRange = ParameterRange {
     minimum: -1.0,
@@ -404,39 +401,6 @@ pub(super) mod light_settings {
         pub tone_curve: ToneCurve,
     }
 
-    /// Four broad point-curve regions. Values are linear luminance offsets around
-    /// the identity curve, evaluated after the selected base rendering. Keeping
-    /// the points grouped makes a future free point-curve editor a compatible
-    /// extension of the recipe.
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-    pub struct ToneCurve {
-        #[serde(default)]
-        pub shadows: f32,
-        #[serde(default)]
-        pub darks: f32,
-        #[serde(default)]
-        pub lights: f32,
-        #[serde(default)]
-        pub highlights: f32,
-    }
-
-    impl ToneCurve {
-        /// The linear luminances the offsets apply at, in field order. The GPU
-        /// preview shader repeats them.
-        pub const INPUTS: [f32; 4] = [0.12, 0.35, 0.65, 0.88];
-    }
-
-    impl Default for ToneCurve {
-        fn default() -> Self {
-            Self {
-                shadows: TONE_CURVE_RANGE.neutral,
-                darks: TONE_CURVE_RANGE.neutral,
-                lights: TONE_CURVE_RANGE.neutral,
-                highlights: TONE_CURVE_RANGE.neutral,
-            }
-        }
-    }
-
     impl Default for LightAdjustments {
         fn default() -> Self {
             Self {
@@ -645,26 +609,7 @@ impl EditRecipe {
         validate_parameter("light.shadows", self.light.shadows, SHADOWS_RANGE)?;
         validate_parameter("light.whites", self.light.whites, WHITES_RANGE)?;
         validate_parameter("light.blacks", self.light.blacks, BLACKS_RANGE)?;
-        validate_parameter(
-            "light.tone_curve.shadows",
-            self.light.tone_curve.shadows,
-            TONE_CURVE_RANGE,
-        )?;
-        validate_parameter(
-            "light.tone_curve.darks",
-            self.light.tone_curve.darks,
-            TONE_CURVE_RANGE,
-        )?;
-        validate_parameter(
-            "light.tone_curve.lights",
-            self.light.tone_curve.lights,
-            TONE_CURVE_RANGE,
-        )?;
-        validate_parameter(
-            "light.tone_curve.highlights",
-            self.light.tone_curve.highlights,
-            TONE_CURVE_RANGE,
-        )?;
+        self.light.tone_curve.validate()?;
         validate_parameter("color.saturation", self.color.saturation, SATURATION_RANGE)?;
         validate_parameter("color.vibrance", self.color.vibrance, VIBRANCE_RANGE)?;
         for channel in self.color.hsl.channels {
@@ -879,7 +824,7 @@ impl<'de> Deserialize<'de> for EditRecipe {
             Self {
                 schema_version: if matches!(
                     fields.schema_version,
-                    10..=PREVIOUS_LOCAL_RATIOS_REMOVAL_EDIT_RECIPE_SCHEMA_VERSION
+                    10..=PREVIOUS_FOUR_OFFSET_TONE_CURVE_EDIT_RECIPE_SCHEMA_VERSION
                 ) {
                     EDIT_RECIPE_SCHEMA_VERSION
                 } else {
@@ -1470,7 +1415,10 @@ mod tests {
                 recipe.raw.highlights.opposed.detection_threshold, 0.66,
                 "schema {schema_version}"
             );
-            assert_eq!(recipe.schema_version, 19, "schema {schema_version}");
+            assert_eq!(
+                recipe.schema_version, EDIT_RECIPE_SCHEMA_VERSION,
+                "schema {schema_version}"
+            );
         }
     }
 
@@ -1515,7 +1463,7 @@ mod tests {
         let wire = sidecar(SCHEMA_18_LR_DEFAULT_HIGHLIGHTS);
         let first: ProjectFileMirror = serde_json::from_str(&wire).expect("LR sidecar must load");
         assert_eq!(first.format_version, 1);
-        assert_eq!(first.recipe.schema_version, 19);
+        assert_eq!(first.recipe.schema_version, EDIT_RECIPE_SCHEMA_VERSION);
         assert_eq!(first.recipe.raw.highlights.method, HighlightMethod::Opposed);
         assert_eq!(
             first.recipe.raw.highlights.opposed.detection_threshold,

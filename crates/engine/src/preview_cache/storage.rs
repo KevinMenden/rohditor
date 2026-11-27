@@ -140,10 +140,14 @@ impl PreviewCacheKeys {
             shadows_bits: recipe.light.shadows.to_bits(),
             whites_bits: recipe.light.whites.to_bits(),
             blacks_bits: recipe.light.blacks.to_bits(),
-            tone_shadows_bits: recipe.light.tone_curve.shadows.to_bits(),
-            tone_darks_bits: recipe.light.tone_curve.darks.to_bits(),
-            tone_lights_bits: recipe.light.tone_curve.lights.to_bits(),
-            tone_highlights_bits: recipe.light.tone_curve.highlights.to_bits(),
+            tone_curve_bits: recipe
+                .light
+                .tone_curve
+                .points
+                .iter()
+                .flatten()
+                .map(|value| value.to_bits())
+                .collect(),
             saturation_bits: recipe.color.saturation.to_bits(),
             vibrance_bits: recipe.color.vibrance.to_bits(),
             hsl_bits: recipe
@@ -492,10 +496,7 @@ struct AdjustedPreviewKey {
     shadows_bits: u32,
     whites_bits: u32,
     blacks_bits: u32,
-    tone_shadows_bits: u32,
-    tone_darks_bits: u32,
-    tone_lights_bits: u32,
-    tone_highlights_bits: u32,
+    tone_curve_bits: Vec<u32>,
     saturation_bits: u32,
     vibrance_bits: u32,
     hsl_bits: Vec<u32>,

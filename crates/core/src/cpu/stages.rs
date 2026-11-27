@@ -4,7 +4,7 @@ use rohditor_color::{REC2020_LUMINANCE, linear_srgb_to_srgb, local_white_balance
 use rohditor_demosaic::WhiteBalanceGains;
 use rohditor_edit::{
     CameraChroma, ColorGradingAdjustments, EditRecipe, HSL_CHANNEL_COUNT, HslAdjustments,
-    LightToneLut, TEMPERATURE_RANGE, TINT_RANGE, ToneCurve, WHITE_BALANCE_MULTIPLIER_RANGE,
+    LightToneLut, TEMPERATURE_RANGE, TINT_RANGE, ToneCurveLut, WHITE_BALANCE_MULTIPLIER_RANGE,
     WhiteBalance,
 };
 use rohditor_image::{
@@ -437,10 +437,8 @@ pub(super) mod adjustments {
             || light.whites != 0.0
             || light.blacks != 0.0;
         let light_tone_lut = has_light_tone.then(|| LightToneLut::new(&light));
-        let has_tone_curve = light.tone_curve.shadows != 0.0
-            || light.tone_curve.darks != 0.0
-            || light.tone_curve.lights != 0.0
-            || light.tone_curve.highlights != 0.0;
+        let tone_curve_lut =
+            (!light.tone_curve.is_identity()).then(|| ToneCurveLut::new(&light.tone_curve));
         let has_saturation = (color.saturation - 1.0).abs() > f32::EPSILON || color.vibrance != 0.0;
         let has_hsl = color.hsl.channels.iter().any(|channel| {
             channel.hue != 0.0 || channel.saturation != 0.0 || channel.luminance != 0.0
@@ -496,8 +494,8 @@ pub(super) mod adjustments {
                         if let Some(light_tone_lut) = &light_tone_lut {
                             apply_light_tone(pixel, light_tone_lut, rendition);
                         }
-                        if has_tone_curve {
-                            apply_tone_curve(pixel, &light.tone_curve);
+                        if let Some(tone_curve_lut) = &tone_curve_lut {
+                            apply_tone_curve(pixel, tone_curve_lut);
                         }
                         if let Some(local) = local {
                             local.apply_display(pixel, alphas, x, rendition);
@@ -646,55 +644,13 @@ pub(super) mod adjustments {
         apply_luminance_delta(pixel, current, target);
     }
 
-    fn apply_tone_curve(pixel: &mut [f32], curve: &ToneCurve) {
-        if curve.shadows == 0.0
-            && curve.darks == 0.0
-            && curve.lights == 0.0
-            && curve.highlights == 0.0
-        {
-            return;
-        }
+    fn apply_tone_curve(pixel: &mut [f32], lut: &ToneCurveLut) {
         let current = luminance(pixel);
-        let target = evaluate_tone_curve(curve, current);
+        let target = lut.sample(current);
         if !target.is_finite() || (target - current).abs() <= f32::EPSILON {
             return;
         }
         apply_luminance_delta(pixel, current, target);
-    }
-
-    /// Evaluate the monotonic scene-linear tone curve used by both the CPU and
-    /// the editor graph. The four recipe values are offsets at fixed inputs;
-    /// output points are projected into a non-decreasing curve so crossing
-    /// controls cannot invert tonal order. Values outside [0, 1] are left on the
-    /// identity extension to preserve HDR and negative working samples.
-    pub fn evaluate_tone_curve(curve: &ToneCurve, input: f32) -> f32 {
-        if !input.is_finite() || !(0.0..=1.0).contains(&input) {
-            return input;
-        }
-        const INPUTS: [f32; 6] = {
-            let [shadows, darks, lights, highlights] = ToneCurve::INPUTS;
-            [0.0, shadows, darks, lights, highlights, 1.0]
-        };
-        let mut outputs = [
-            0.0,
-            INPUTS[1] + curve.shadows,
-            INPUTS[2] + curve.darks,
-            INPUTS[3] + curve.lights,
-            INPUTS[4] + curve.highlights,
-            1.0,
-        ];
-        for output in &mut outputs {
-            *output = output.clamp(0.0, 1.0);
-        }
-        for index in 1..outputs.len() {
-            outputs[index] = outputs[index].max(outputs[index - 1]);
-        }
-        let Some(index) = INPUTS.windows(2).position(|pair| input <= pair[1]) else {
-            return 1.0;
-        };
-        let span = INPUTS[index + 1] - INPUTS[index];
-        let fraction = (input - INPUTS[index]) / span;
-        outputs[index] + (outputs[index + 1] - outputs[index]) * fraction
     }
 
     #[inline(always)]
@@ -1295,8 +1251,8 @@ fn invalid_dimensions(
 
 #[cfg(test)]
 use adjustments::{
-    apply_adjustments, apply_hsl_adjustments, apply_luminance_delta, evaluate_tone_curve,
-    hsl_channel_weights, hsl_channel_weights_from_working, hsl_to_rgb, luminance, rgb_to_hsl,
+    apply_adjustments, apply_hsl_adjustments, apply_luminance_delta, hsl_channel_weights,
+    hsl_channel_weights_from_working, hsl_to_rgb, luminance, rgb_to_hsl,
 };
 #[cfg(test)]
 use display::{
@@ -1313,7 +1269,7 @@ use white_balance::{white_balance_gains, white_balance_gains_from_calibration};
 mod tests {
     use std::sync::Arc;
 
-    use rohditor_edit::{CameraTone, RenderingProfileSelection};
+    use rohditor_edit::{CameraTone, RenderingProfileSelection, ToneCurve};
     use rohditor_image::{BayerPattern, CfaColor, OrientationMap};
     use rohditor_raw::{
         CameraColorMatrix, CaptureMetadata, CfaPattern, ImageRect, LevelPattern,
@@ -1918,8 +1874,7 @@ mod tests {
         )
         .expect("valid image");
         let mut recipe = neutral_recipe();
-        recipe.light.tone_curve.darks = 0.1;
-        recipe.light.tone_curve.highlights = -0.1;
+        recipe.light.tone_curve = ToneCurve::through(&[[0.4, 0.5], [0.9, 0.85]]);
         apply_adjustments(&mut image, &recipe).expect("tone curve adjustment");
         for pixel in image.data().as_chunks::<3>().0 {
             assert!((pixel[0] - pixel[1]).abs() < 1.0e-6);
@@ -2058,12 +2013,7 @@ mod tests {
         recipe.light.shadows = 0.65;
         recipe.light.whites = 0.55;
         recipe.light.blacks = -0.6;
-        recipe.light.tone_curve = ToneCurve {
-            shadows: 0.2,
-            darks: -0.15,
-            lights: 0.18,
-            highlights: -0.2,
-        };
+        recipe.light.tone_curve = ToneCurve::through(&[[0.2, 0.3], [0.45, 0.38], [0.85, 0.8]]);
         recipe.color.saturation = 1.45;
         recipe.color.vibrance = -0.6;
         for (index, channel) in recipe.color.hsl.channels.iter_mut().enumerate() {
@@ -2083,24 +2033,20 @@ mod tests {
     }
 
     #[test]
-    fn tone_curve_extremes_remain_monotonic_and_keep_endpoints() {
-        let curve = ToneCurve {
-            shadows: 0.25,
-            darks: -0.25,
-            lights: 0.25,
-            highlights: -0.25,
-        };
-        let mut previous = evaluate_tone_curve(&curve, 0.0);
-        assert_eq!(previous, 0.0);
-        for index in 1..=1_000 {
-            let input = index as f32 / 1_000.0;
-            let output = evaluate_tone_curve(&curve, input);
-            assert!(output >= previous, "curve decreased at input {input}");
-            previous = output;
+    fn tone_curve_moves_luminance_and_leaves_hdr_samples_alone() {
+        let source = vec![0.05, 0.05, 0.05, 0.4, 0.2, 0.1, 1.6, 1.4, 1.2];
+        let mut image = LinearRgbImage::new(3, 1, 9, LinearRgbSpace::Rec2020D65, source.clone())
+            .expect("valid image");
+        let mut recipe = neutral_recipe();
+        recipe.light.tone_curve = ToneCurve::through(&[[0.25, 0.4], [0.6, 0.65]]);
+        apply_adjustments(&mut image, &recipe).expect("valid recipe");
+        let lut = ToneCurveLut::new(&recipe.light.tone_curve);
+        for (pixel, before) in image.data().chunks(3).zip(source.chunks(3)) {
+            let expected = lut.sample(luminance(before));
+            assert!((luminance(pixel) - expected).abs() < 1.0e-5, "{pixel:?}");
         }
-        assert_eq!(previous, 1.0);
-        assert_eq!(evaluate_tone_curve(&curve, -0.5), -0.5);
-        assert_eq!(evaluate_tone_curve(&curve, 1.5), 1.5);
+        assert!(luminance(&image.data()[..3]) > 0.05, "shadows are lifted");
+        assert_eq!(&image.data()[6..], &source[6..], "above 1.0 is untouched");
     }
 
     #[test]

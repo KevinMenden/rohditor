@@ -12,6 +12,8 @@
 //! - **Everything else** (switches, enums, profile selections, the crop, mask
 //!   layers, fitted looks) cannot be halfway, so it switches from the base
 //!   value to the preset value at `t >= 0.5`.
+//! - **The tone curve** interpolates its outputs when both curves have points
+//!   at the same inputs, and switches at `t >= 0.5` otherwise.
 //! - **White balance** interpolates its numbers when both sides use the same
 //!   mode, and switches at `t >= 0.5` when the modes differ.
 //!
@@ -95,6 +97,24 @@ impl Mix {
         if self.t >= 0.5 { preset } else { base }.clone()
     }
 
+    /// Curves with points at the same inputs move their outputs. Others
+    /// cannot be halfway and switch.
+    fn tone_curve(self, base: &ToneCurve, preset: &ToneCurve) -> ToneCurve {
+        let same_inputs = base.points.len() == preset.points.len()
+            && base
+                .points
+                .iter()
+                .zip(&preset.points)
+                .all(|(b, p)| b[0] == p[0]);
+        if !same_inputs {
+            return self.pick(base, preset);
+        }
+        let points = base.points.iter().zip(&preset.points);
+        ToneCurve {
+            points: points.map(|(b, p)| [b[0], self.num(b[1], p[1])]).collect(),
+        }
+    }
+
     fn white_balance(self, base: WhiteBalance, preset: WhiteBalance) -> WhiteBalance {
         match (base, preset) {
             (
@@ -146,13 +166,8 @@ fn blend_section(
             blended.light.blacks = mix.num(b.blacks, p.blacks);
         }
         RecipeSection::ToneCurve => {
-            let (b, p) = (&base.light.tone_curve, &preset.light.tone_curve);
-            blended.light.tone_curve = ToneCurve {
-                shadows: mix.num(b.shadows, p.shadows),
-                darks: mix.num(b.darks, p.darks),
-                lights: mix.num(b.lights, p.lights),
-                highlights: mix.num(b.highlights, p.highlights),
-            };
+            blended.light.tone_curve =
+                mix.tone_curve(&base.light.tone_curve, &preset.light.tone_curve);
         }
         RecipeSection::Presence => {
             let (b, p) = (base.presence, preset.presence);

@@ -15,7 +15,7 @@ use rohditor_core::{
 use rohditor_demosaic::WhiteBalanceGains;
 use rohditor_edit::{
     EditRecipe, HighlightAdjustments, LensProfileSelection, LightToneLut,
-    RenderingProfileSelection, WhiteBalance,
+    RenderingProfileSelection, ToneCurveLut, WhiteBalance,
 };
 use rohditor_image::{LinearRgbSpace, Orientation};
 use wgpu::util::DeviceExt;
@@ -803,6 +803,14 @@ impl GpuPreviewProcessor {
             0,
             bytemuck::cast_slice(LightToneLut::new(&recipe.light).values()),
         );
+        // An identity curve is skipped by the shader, so its table may be stale.
+        if !recipe.light.tone_curve.is_identity() {
+            self.queue.write_buffer(
+                &self.adjustment_tables,
+                (tables::TONE_CURVE_OFFSET * size_of::<f32>()) as u64,
+                bytemuck::cast_slice(ToneCurveLut::new(&recipe.light.tone_curve).values()),
+            );
+        }
         masks.upload(&self.queue, &self.adjustment_tables);
         if let Some(lut) = base_rendering_lut(&recipe.rendering) {
             self.queue.write_buffer(
@@ -1846,10 +1854,8 @@ fn build_parameters(
     words[5] = recipe.light.shadows.to_bits();
     words[6] = recipe.light.whites.to_bits();
     words[7] = recipe.light.blacks.to_bits();
-    words[8] = recipe.light.tone_curve.shadows.to_bits();
-    words[9] = recipe.light.tone_curve.darks.to_bits();
-    words[10] = recipe.light.tone_curve.lights.to_bits();
-    words[11] = recipe.light.tone_curve.highlights.to_bits();
+    // Words 9 to 11 are unused; the curve itself is a LUT in adjustment_tables.
+    words[8] = u32::from(!recipe.light.tone_curve.is_identity());
     words[12] = orientation_code(orientation);
     words[13] = source_dimensions.0;
     words[14] = source_dimensions.1;
@@ -2008,8 +2014,7 @@ pub(crate) mod tests {
         recipe.light.shadows = -0.3;
         recipe.light.whites = 0.1;
         recipe.light.blacks = -0.1;
-        recipe.light.tone_curve.shadows = 0.05;
-        recipe.light.tone_curve.highlights = -0.04;
+        recipe.light.tone_curve = ToneCurve::through(&[[0.2, 0.25], [0.8, 0.77]]);
         recipe.color.saturation = 1.25;
         recipe.color.vibrance = 0.4;
         recipe.geometry.orientation_override = Some(Orientation::Rotate90);
@@ -2054,8 +2059,7 @@ pub(crate) mod tests {
         assert_eq!(f32::from_bits(parameters[3]), 0.4);
         assert_eq!(f32::from_bits(parameters[4]), 0.2);
         assert_eq!(f32::from_bits(parameters[7]), -0.1);
-        assert_eq!(f32::from_bits(parameters[8]), 0.05);
-        assert_eq!(f32::from_bits(parameters[11]), -0.04);
+        assert_eq!(parameters[8], 1, "the tone curve is active");
 
         recipe.rendering.profile = RenderingProfileSelection::NEUTRAL;
         let neutral_geometry =
@@ -3244,12 +3248,9 @@ pub(crate) mod tests {
         controls.push(("blacks", recipe));
 
         let mut recipe = neutral_recipe();
-        recipe.light.tone_curve = ToneCurve {
-            shadows: 0.15,
-            darks: -0.1,
-            lights: 0.08,
-            highlights: -0.06,
-        };
+        // Asymmetric: lifted toe, lowered midtones, a strong shoulder.
+        recipe.light.tone_curve =
+            ToneCurve::through(&[[0.12, 0.2], [0.45, 0.38], [0.7, 0.76], [0.92, 0.9]]);
         controls.push(("tone_curve", recipe));
 
         let mut recipe = neutral_recipe();
@@ -3282,12 +3283,7 @@ pub(crate) mod tests {
         recipe.light.shadows = -0.3;
         recipe.light.whites = 0.25;
         recipe.light.blacks = -0.2;
-        recipe.light.tone_curve = ToneCurve {
-            shadows: 0.08,
-            darks: -0.05,
-            lights: 0.06,
-            highlights: -0.04,
-        };
+        recipe.light.tone_curve = ToneCurve::through(&[[0.25, 0.3], [0.6, 0.58], [0.85, 0.88]]);
         recipe.color.saturation = 1.2;
         recipe.color.vibrance = 0.35;
         recipe.color.white_balance = WhiteBalance::ManualMultipliers {

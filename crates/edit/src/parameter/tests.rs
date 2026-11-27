@@ -63,6 +63,7 @@ fn every_number_of_a_recipe_is_a_parameter() {
         "recipe.optics",
         "recipe.geometry",
         "recipe.local",
+        "recipe.light.tone_curve",
     ];
     for path in changed_paths(&copied, &edited) {
         assert!(

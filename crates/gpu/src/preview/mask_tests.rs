@@ -84,7 +84,7 @@ fn global_edits() -> EditRecipe {
     let mut recipe = neutral_recipe();
     recipe.light.exposure_ev = -0.3;
     recipe.light.contrast = 0.2;
-    recipe.light.tone_curve.lights = 0.1;
+    recipe.light.tone_curve = rohditor_edit::ToneCurve::through(&[[0.65, 0.72]]);
     recipe.color.saturation = 1.2;
     recipe.color.grading.shadows = [0.1, 0.0, -0.1];
     recipe

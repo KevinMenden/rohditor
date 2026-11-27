@@ -19,50 +19,91 @@ fn type_text(harness: &mut Harness, text: &str) {
     harness.draw();
 }
 
+/// Where `[x, y]` of the curve's axes is on the graph.
+fn on_graph(harness: &mut Harness, [x, y]: [f32; 2]) -> Point<Pixels> {
+    let graph = harness.find("tone-curve");
+    graph.bottom_left() + point(graph.size.width * x, -graph.size.height * y)
+}
+
+fn curve_points(harness: &mut Harness) -> Vec<[f32; 2]> {
+    recipe(harness).light.tone_curve.points
+}
+
+/// Press at `from`, drag by `by` and release.
+fn drag(harness: &mut Harness, from: Point<Pixels>, by: Point<Pixels>) {
+    harness.press(from, 1);
+    harness.drag_to(from + by * 0.5);
+    harness.drag_to(from + by);
+    harness.release(from + by);
+}
+
 #[test]
 #[ignore = "requires a wgpu adapter and ROHDITOR_RAW"]
-fn the_tone_curve_is_dragged_by_its_handles() {
+fn the_tone_curve_gets_points_that_are_dragged_and_removed() {
     let Some((mut harness, ..)) = opened("curve") else {
         return;
     };
-    const DARKS: &str = "handle:ToneCurveDarks";
     harness.click("section:ToneCurve");
-    let before = harness.find(DARKS).center();
-    // Not exactly on the handle: the drag is relative.
-    let start = before + point(px(6.0), px(20.0));
-    harness.press(start, 1);
-    harness.drag_to(start - point(px(0.0), px(4.0)));
-    harness.drag_to(start - point(px(0.0), px(10.0)));
-    harness.release(start - point(px(0.0), px(10.0)));
-    let after = harness.find(DARKS).center();
-    let moved = before - after;
-    assert!(
-        (moved.y - px(10.0)).abs() < px(0.5) && moved.x == px(0.0),
-        "{moved:?}"
+    assert_eq!(
+        harness.lookup("adjustment:CurveOutput"),
+        None,
+        "nothing selected"
     );
-    let curve = recipe(&mut harness).light.tone_curve;
-    assert!(curve.darks > 0.02 && curve.shadows == 0.0 && curve.lights == 0.0);
+
+    // A press on the diagonal adds a point there; the drag moves it, as one undo step.
+    let toe = on_graph(&mut harness, [0.25, 0.25]);
+    drag(&mut harness, toe, point(px(0.0), px(18.0)));
+    let points = curve_points(&mut harness);
+    assert_eq!(points.len(), 3, "{points:?}");
+    let [x, y] = points[1];
+    assert!((x - 0.25).abs() < 0.01 && y < 0.2, "{points:?}");
+    harness.find("curve-point:1");
+    harness.find("adjustment:CurveOutput");
+
+    // The shoulder, for an S-curve.
+    let shoulder = on_graph(&mut harness, [0.75, 0.75]);
+    drag(&mut harness, shoulder, point(px(0.0), px(-18.0)));
+    let s_curve = curve_points(&mut harness);
+    assert_eq!(s_curve.len(), 4);
+    // Added on the curve, which the toe pulled below the diagonal, then raised.
+    assert!(s_curve[2][1] > 0.75, "{s_curve:?}");
     harness.find("changed:ToneCurve");
     harness.wait_until("the edited preview", settled);
     harness.capture("tone-curve");
 
-    // The handle's row has the focus now.
-    harness.keys("right");
-    assert!(recipe(&mut harness).light.tone_curve.darks > curve.darks);
+    // Dragging the toe point again, from beside it: points are grabbed near them.
+    let toe = on_graph(&mut harness, s_curve[1]) + point(px(3.0), px(2.0));
+    drag(&mut harness, toe, point(px(0.0), px(-9.0)));
+    let dragged = curve_points(&mut harness);
+    assert_eq!(dragged.len(), 4, "no point was added");
+    assert!(dragged[1][1] > s_curve[1][1]);
+
+    // The graph has the focus: Page Up raises the selected point.
+    harness.keys("pageup");
+    assert!(curve_points(&mut harness)[1][1] > dragged[1][1]);
     harness.keys("ctrl-z");
-    assert_eq!(recipe(&mut harness).light.tone_curve, curve);
+    assert_eq!(curve_points(&mut harness), dragged);
     harness.keys("ctrl-z");
     assert_eq!(
-        recipe(&mut harness).light.tone_curve.darks,
-        0.0,
+        curve_points(&mut harness),
+        s_curve,
         "a drag is one undo step"
     );
     harness.keys("ctrl-shift-z");
-    assert_eq!(recipe(&mut harness).light.tone_curve, curve);
-    let handle = harness.find(DARKS).center();
-    harness.press(handle, 2);
-    harness.release(handle);
-    assert_eq!(recipe(&mut harness).light.tone_curve.darks, 0.0);
+    assert_eq!(curve_points(&mut harness), dragged);
+
+    // A double click removes a point, Delete the selected one.
+    let shoulder = on_graph(&mut harness, dragged[2]);
+    harness.press(shoulder, 1);
+    harness.release(shoulder);
+    harness.press(shoulder, 2);
+    harness.release(shoulder);
+    assert_eq!(curve_points(&mut harness).len(), 3);
+    harness.click("curve-point:1");
+    harness.keys("delete");
+    assert_eq!(curve_points(&mut harness).len(), 2);
+    harness.keys("ctrl-z ctrl-z");
+    assert_eq!(curve_points(&mut harness), dragged);
 }
 
 #[test]
@@ -122,26 +163,35 @@ fn adjustments_are_searched() {
     let Some((mut harness, ..)) = opened("search") else {
         return;
     };
-    const CURVE_SHADOWS: &str = "adjustment:ToneCurveShadows";
+    const CURVE: &str = "tone-curve";
+    let before = recipe(&mut harness);
+    const CURVE_SHADOWS: &str = "adjustment:Shadows";
     harness.find("group:Detail");
-    assert_eq!(harness.lookup(CURVE_SHADOWS), None, "it starts collapsed");
+    assert_eq!(harness.lookup(CURVE), None, "it starts collapsed");
     harness.capture("groups");
     harness.keys("ctrl-f");
     type_text(&mut harness, "shadows");
     harness.capture("search");
-    harness.find("adjustment:Shadows");
     harness.find(CURVE_SHADOWS);
     assert_eq!(harness.lookup(EXPOSURE), None);
     assert_eq!(harness.lookup("group:Detail"), None);
-    type_text(&mut harness, " curve");
-    assert_eq!(harness.lookup("adjustment:Shadows"), None);
+    assert_eq!(harness.lookup(CURVE), None);
+    harness.click("button:clear-search");
+    harness.keys("ctrl-f");
+    type_text(&mut harness, "curve");
+    assert_eq!(harness.lookup(CURVE_SHADOWS), None);
+    harness.find(CURVE);
 
     // Down goes to the results: the header, then the slider.
-    harness.keys("down down right");
-    assert_eq!(recipe(&mut harness).light.tone_curve.shadows, 0.01);
-    harness.keys("ctrl-z ctrl-f escape");
+    harness.keys("down down delete");
+    assert_eq!(
+        recipe(&mut harness),
+        before,
+        "the curve has the focus, but no point to remove"
+    );
+    harness.keys("ctrl-f escape");
     harness.find(EXPOSURE);
-    assert_eq!(harness.lookup(CURVE_SHADOWS), None, "collapsed again");
+    assert_eq!(harness.lookup(CURVE), None, "collapsed again");
     type_text(&mut harness, "xyz");
     assert_eq!(harness.lookup("group:Light"), None);
     harness.click("button:clear-search");

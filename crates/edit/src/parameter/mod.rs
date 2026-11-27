@@ -18,8 +18,8 @@ use crate::{
     HIGHLIGHT_THRESHOLD_RANGE, HIGHLIGHTS_RANGE, HSL_CHANNEL_COUNT, HSL_HUE_RANGE,
     HSL_LUMINANCE_RANGE, HSL_SATURATION_RANGE, LUMINANCE_DETAIL_RANGE,
     LUMINANCE_NOISE_REDUCTION_RANGE, PRESENCE_RANGE, ParameterRange, RecipeSection,
-    SATURATION_RANGE, SHADOWS_RANGE, TEMPERATURE_RANGE, TINT_RANGE, TONE_CURVE_RANGE,
-    VIBRANCE_RANGE, WHITES_RANGE, WhiteBalance, with_hue_edge,
+    SATURATION_RANGE, SHADOWS_RANGE, TEMPERATURE_RANGE, TINT_RANGE, VIBRANCE_RANGE, WHITES_RANGE,
+    WhiteBalance, with_hue_edge,
 };
 
 /// Values closer than this part of the range count as the same: dragging a
@@ -38,10 +38,6 @@ pub enum Parameter {
     Shadows,
     Whites,
     Blacks,
-    ToneCurveShadows,
-    ToneCurveDarks,
-    ToneCurveLights,
-    ToneCurveHighlights,
     Texture,
     Clarity,
     Dehaze,
@@ -80,7 +76,7 @@ pub enum Parameter {
 
 impl Parameter {
     /// The parameters that exist once.
-    const SINGLE: [Self; 32] = [
+    const SINGLE: [Self; 28] = [
         Self::Temperature,
         Self::Tint,
         Self::Exposure,
@@ -89,10 +85,6 @@ impl Parameter {
         Self::Shadows,
         Self::Whites,
         Self::Blacks,
-        Self::ToneCurveShadows,
-        Self::ToneCurveDarks,
-        Self::ToneCurveLights,
-        Self::ToneCurveHighlights,
         Self::Texture,
         Self::Clarity,
         Self::Dehaze,
@@ -145,10 +137,6 @@ impl Parameter {
             | Self::Shadows
             | Self::Whites
             | Self::Blacks => RecipeSection::Tone,
-            Self::ToneCurveShadows
-            | Self::ToneCurveDarks
-            | Self::ToneCurveLights
-            | Self::ToneCurveHighlights => RecipeSection::ToneCurve,
             Self::Texture | Self::Clarity | Self::Dehaze => RecipeSection::Presence,
             Self::Saturation | Self::Vibrance => RecipeSection::Saturation,
             Self::HslHue(_) | Self::HslSaturation(_) | Self::HslLuminance(_) => {
@@ -189,10 +177,6 @@ impl Parameter {
             Self::Shadows => SHADOWS_RANGE,
             Self::Whites => WHITES_RANGE,
             Self::Blacks => BLACKS_RANGE,
-            Self::ToneCurveShadows
-            | Self::ToneCurveDarks
-            | Self::ToneCurveLights
-            | Self::ToneCurveHighlights => TONE_CURVE_RANGE,
             Self::Texture | Self::Clarity | Self::Dehaze => PRESENCE_RANGE,
             Self::Saturation => SATURATION_RANGE,
             Self::Vibrance => VIBRANCE_RANGE,
@@ -242,10 +226,6 @@ impl Parameter {
             Self::Shadows => light.shadows,
             Self::Whites => light.whites,
             Self::Blacks => light.blacks,
-            Self::ToneCurveShadows => light.tone_curve.shadows,
-            Self::ToneCurveDarks => light.tone_curve.darks,
-            Self::ToneCurveLights => light.tone_curve.lights,
-            Self::ToneCurveHighlights => light.tone_curve.highlights,
             Self::Texture => recipe.presence.texture,
             Self::Clarity => recipe.presence.clarity,
             Self::Dehaze => recipe.presence.dehaze,
@@ -324,10 +304,6 @@ impl Parameter {
             Self::Shadows => light.shadows = value,
             Self::Whites => light.whites = value,
             Self::Blacks => light.blacks = value,
-            Self::ToneCurveShadows => light.tone_curve.shadows = value,
-            Self::ToneCurveDarks => light.tone_curve.darks = value,
-            Self::ToneCurveLights => light.tone_curve.lights = value,
-            Self::ToneCurveHighlights => light.tone_curve.highlights = value,
             Self::Texture => recipe.presence.texture = value,
             Self::Clarity => recipe.presence.clarity = value,
             Self::Dehaze => recipe.presence.dehaze = value,

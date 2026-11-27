@@ -7,10 +7,11 @@ struct PreviewParameters {
     shadows: f32,
     whites: f32,
     blacks: f32,
-    tone_shadows: f32,
-    tone_darks: f32,
-    tone_lights: f32,
-    tone_highlights: f32,
+    // 1 when the tone curve LUT in adjustment_tables is not the identity.
+    tone_curve_active: u32,
+    unused_tone_curve_0: u32,
+    unused_tone_curve_1: u32,
+    unused_tone_curve_2: u32,
     orientation: u32,
     source_width: u32,
     source_height: u32,
@@ -307,37 +308,29 @@ fn apply_base_rendering(pixel: vec3<f32>) -> vec3<f32> {
     return apply_luminance_delta(pixel, current, desired);
 }
 
+// First word of the tone curve LUT in adjustment_tables (masks/tables.rs).
+const TONE_CURVE_OFFSET: u32 = 151296u;
+
+// rohditor_edit::ToneCurveLut::sample: 4096 entries over linear 0..=1, with
+// values outside that range passed through.
 fn tone_curve_value(input: f32) -> f32 {
     if input < 0.0 || input > 1.0 {
         return input;
     }
-    var y0 = 0.0;
-    var y1 = clamp(0.12 + parameters.tone_shadows, 0.0, 1.0);
-    var y2 = clamp(0.35 + parameters.tone_darks, 0.0, 1.0);
-    var y3 = clamp(0.65 + parameters.tone_lights, 0.0, 1.0);
-    var y4 = clamp(0.88 + parameters.tone_highlights, 0.0, 1.0);
-    var y5 = 1.0;
-    y1 = max(y1, y0);
-    y2 = max(y2, y1);
-    y3 = max(y3, y2);
-    y4 = max(y4, y3);
-    y5 = max(y5, y4);
-    if input <= 0.12 {
-        return mix(y0, y1, input / 0.12);
-    }
-    if input <= 0.35 {
-        return mix(y1, y2, (input - 0.12) / 0.23);
-    }
-    if input <= 0.65 {
-        return mix(y2, y3, (input - 0.35) / 0.30);
-    }
-    if input <= 0.88 {
-        return mix(y3, y4, (input - 0.65) / 0.23);
-    }
-    return mix(y4, y5, (input - 0.88) / 0.12);
+    let position = input * 4095.0;
+    let lower = u32(floor(position));
+    let upper = min(lower + 1u, 4095u);
+    return mix(
+        adjustment_tables[TONE_CURVE_OFFSET + lower],
+        adjustment_tables[TONE_CURVE_OFFSET + upper],
+        position - f32(lower),
+    );
 }
 
 fn apply_tone_curve(pixel: vec3<f32>) -> vec3<f32> {
+    if parameters.tone_curve_active == 0u {
+        return pixel;
+    }
     let current = dot(pixel, vec3<f32>(0.2627, 0.6780, 0.0593));
     let adjusted_luminance = tone_curve_value(current);
     if adjusted_luminance == current {
