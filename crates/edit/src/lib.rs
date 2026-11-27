@@ -10,6 +10,7 @@ mod light_settings;
 mod local;
 mod local_detail;
 mod local_range;
+mod monotone_spline;
 mod noise_reduction;
 mod parameter;
 mod presence;
@@ -20,6 +21,7 @@ mod section;
 mod sharpening;
 #[cfg(test)]
 mod test_support;
+mod tone_curve;
 mod validation;
 mod white_balance_preset;
 
@@ -46,5 +48,6 @@ pub use recipe::{
 };
 pub use section::{RecipeSection, blend_sections, changed_sections, copy_sections};
 pub use sharpening::*;
+pub use tone_curve::*;
 pub use validation::*;
 pub use white_balance_preset::*;

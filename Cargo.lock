@@ -5229,6 +5229,7 @@ name = "rohditor-edit"
 version = "0.1.0"
 dependencies = [
  "rohditor-camera-profile",
+ "rohditor-color",
  "rohditor-image",
  "serde",
  "serde_json",

@@ -40,20 +40,18 @@ pub use color::{
 };
 pub use cpu::{
     HSL_CHANNEL_CENTERS, HSL_HUE_SHIFT_PER_FULL_VALUE, MaskAlphaImage, apply_adjustments,
-    apply_adjustments_extended, evaluate_tone_curve, hsl_channel_weights, normalize_raw,
-    normalize_raw_preview, raw_crop_dimensions, render_display_p3_8_with_geometry,
-    render_display_srgb8, render_display_srgb8_dithered,
-    render_display_srgb8_dithered_with_geometry, render_display_srgb8_with_geometry,
-    render_display_srgb16, render_display_srgb16_with_geometry,
+    apply_adjustments_extended, hsl_channel_weights, normalize_raw, normalize_raw_preview,
+    raw_crop_dimensions, render_display_p3_8_with_geometry, render_display_srgb8,
+    render_display_srgb8_dithered, render_display_srgb8_dithered_with_geometry,
+    render_display_srgb8_with_geometry, render_display_srgb16, render_display_srgb16_with_geometry,
     render_extended_linear_with_geometry, render_mask_overlay_from_image,
     render_mask_overlay_preview, white_balance_gains, white_balance_gains_from_calibration,
 };
 pub use cpu_only::cpu_only_stage_reason;
 pub use editing::{
-    ToneCurveHandle, WhiteBalanceMode, WhiteBalanceModeMemory, auto_tone, color_sample_srgb,
-    default_recipe, developed_patch, display_tone_curve, estimate_noise_profile,
-    sample_color_range, sample_mixer_channel, white_balance_from_camera_sample,
-    with_default_noise_reduction,
+    WhiteBalanceMode, WhiteBalanceModeMemory, auto_tone, color_sample_srgb, default_recipe,
+    developed_patch, estimate_noise_profile, sample_color_range, sample_mixer_channel,
+    white_balance_from_camera_sample, with_default_noise_reduction,
 };
 pub use error::PipelineError;
 pub use export::{

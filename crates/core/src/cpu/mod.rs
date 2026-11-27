@@ -22,7 +22,7 @@ mod white_balance;
 
 pub use adjustments::{
     HSL_CHANNEL_CENTERS, HSL_HUE_SHIFT_PER_FULL_VALUE, apply_adjustments,
-    apply_adjustments_extended, evaluate_tone_curve, hsl_channel_weights,
+    apply_adjustments_extended, hsl_channel_weights,
 };
 pub use display::{
     render_display_p3_8_with_geometry, render_display_srgb8, render_display_srgb8_dithered,

@@ -2,9 +2,9 @@
 //! histogram, so Auto tone can reason in scene light without re-rendering.
 
 use rohditor_color::linear_srgb_to_srgb;
-use rohditor_edit::{EditRecipe, LightAdjustments, LightToneLut, ToneCurve};
+use rohditor_edit::{EditRecipe, LightAdjustments, LightToneLut, ToneCurveLut};
 
-use crate::{BaseRenderingLut, evaluate_tone_curve};
+use crate::BaseRenderingLut;
 
 /// Scene luminance search range for inversion, in stops around linear 1.0. It
 /// spans far more than any display code can distinguish.
@@ -18,7 +18,7 @@ const SEARCH_ITERATIONS: usize = 32;
 /// the histogram already includes them.
 pub(super) struct ToneStages<'a> {
     base: Option<&'a BaseRenderingLut>,
-    tone_curve: &'a ToneCurve,
+    tone_curve: ToneCurveLut,
     light: LightToneLut,
 }
 
@@ -26,7 +26,7 @@ impl<'a> ToneStages<'a> {
     pub(super) fn new(base: Option<&'a BaseRenderingLut>, recipe: &'a EditRecipe) -> Self {
         Self {
             base,
-            tone_curve: &recipe.light.tone_curve,
+            tone_curve: ToneCurveLut::new(&recipe.light.tone_curve),
             light: LightToneLut::new(&recipe.light),
         }
     }
@@ -35,7 +35,7 @@ impl<'a> ToneStages<'a> {
     pub(super) fn with_light(&self, light: &LightAdjustments) -> Self {
         Self {
             base: self.base,
-            tone_curve: self.tone_curve,
+            tone_curve: self.tone_curve.clone(),
             light: LightToneLut::new(light),
         }
     }
@@ -44,7 +44,7 @@ impl<'a> ToneStages<'a> {
     pub(super) fn display_code(&self, scene: f32) -> f32 {
         let based = self.base.map_or(scene, |base| base.sample(scene));
         let lit = self.light.sample(based);
-        let toned = evaluate_tone_curve(self.tone_curve, lit);
+        let toned = self.tone_curve.sample(lit);
         linear_srgb_to_srgb(toned.clamp(0.0, 1.0)) * 255.0
     }
 
@@ -68,13 +68,14 @@ impl<'a> ToneStages<'a> {
 mod tests {
     use super::*;
     use crate::standard_base_rendering_lut;
+    use rohditor_edit::ToneCurve;
 
     #[test]
     fn scene_luminance_inverts_display_code_through_every_stage() {
         let mut recipe = EditRecipe::default();
         recipe.light.shadows = 0.2;
         recipe.light.highlights = -0.3;
-        recipe.light.tone_curve.lights = 0.05;
+        recipe.light.tone_curve = ToneCurve::through(&[[0.8, 0.83]]);
         let stages = ToneStages::new(Some(standard_base_rendering_lut()), &recipe);
         for code in [20.0, 80.0, 118.0, 200.0, 240.0] {
             let roundtrip = stages.display_code(stages.scene_luminance(code));

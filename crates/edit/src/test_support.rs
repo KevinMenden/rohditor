@@ -9,7 +9,7 @@ use serde_json::Value;
 use crate::{
     CameraChroma, CameraProfileSelection, CameraTone, EditRecipe, HighlightMethod,
     HslChannelAdjustments, LensProfileSelection, LocalSettings, MaskLayer, NormalizedCropRect,
-    RenderingProfileSelection, WhiteBalance,
+    RenderingProfileSelection, ToneCurve, WhiteBalance,
 };
 
 /// A valid recipe whose every serialized value differs from the defaults, with
@@ -24,10 +24,7 @@ pub(crate) fn fully_edited() -> EditRecipe {
     light.shadows = 0.3;
     light.whites = 0.15;
     light.blacks = -0.1;
-    light.tone_curve.shadows = 0.2;
-    light.tone_curve.darks = -0.1;
-    light.tone_curve.lights = 0.12;
-    light.tone_curve.highlights = -0.2;
+    light.tone_curve = ToneCurve::through(&[[0.2, 0.28], [0.45, 0.4], [0.8, 0.85]]);
 
     let color = &mut recipe.color;
     color.camera_profile = CameraProfileSelection::Matrix(MatrixCameraProfile {

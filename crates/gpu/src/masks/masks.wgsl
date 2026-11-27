@@ -12,6 +12,7 @@
 //                           MASK_COMPONENT_WORDS each:
 //                           shape, combine mode, invert, then the shape's
 //                           parameters (see `masks/tables.rs`)
+//   TONE_CURVE_OFFSET       global tone curve LUT (preview.wgsl)
 // The storage buffer is shared because the staged export already uses every
 // storage binding a shader stage is guaranteed.
 const MASK_LAYERS_OFFSET: u32 = 135168u;

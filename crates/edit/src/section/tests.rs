@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use super::*;
 use crate::test_support::{changed_paths, fully_edited, leaves};
-use crate::{EditRecipe, HighlightMethod, RenderingProfileSelection, WhiteBalance};
+use crate::{EditRecipe, HighlightMethod, RenderingProfileSelection, ToneCurve, WhiteBalance};
 
 #[test]
 fn every_recipe_field_belongs_to_exactly_one_section() {
@@ -12,11 +12,13 @@ fn every_recipe_field_belongs_to_exactly_one_section() {
 
     // The fixture must touch every field, or a new field could slip through
     // unnoticed. Add new fields to `fully_edited`, then to a section.
-    // (Two values cannot differ in a valid recipe: the schema version and the
-    // current process version.)
+    // (Some values cannot differ in a valid recipe: the schema version, the
+    // current process version and the first point of the tone curve.)
     let fixed = [
         "recipe.schema_version",
         "recipe.rendering.profile.process_version",
+        "recipe.light.tone_curve.points[0][0]",
+        "recipe.light.tone_curve.points[0][1]",
     ];
     for path in leaves(&defaults).keys() {
         assert!(
@@ -65,14 +67,14 @@ fn only_per_photo_sections_are_photo_specific() {
 fn copying_a_section_leaves_the_others_alone() {
     let mut recipe = EditRecipe::default();
     recipe.light.exposure_ev = 0.7;
-    recipe.light.tone_curve.shadows = 0.2;
+    recipe.light.tone_curve = ToneCurve::through(&[[0.3, 0.4]]);
     recipe.color.saturation = 1.4;
     recipe.color.hsl.channels[2].hue = 0.3;
     let defaults = EditRecipe::default();
 
     let tone = copy_sections(&recipe, &defaults, &[RecipeSection::Tone]);
     assert_eq!(tone.light.exposure_ev, 0.0);
-    assert_eq!(tone.light.tone_curve.shadows, 0.2);
+    assert_eq!(tone.light.tone_curve, recipe.light.tone_curve);
     assert_eq!(tone.color.saturation, 1.4);
 
     let curve = copy_sections(&recipe, &defaults, &[RecipeSection::ToneCurve]);
@@ -187,7 +189,7 @@ fn blend_interpolates_numbers_in_the_chosen_sections_only() {
     let mut preset = EditRecipe::default();
     preset.light.exposure_ev = 1.0;
     preset.light.shadows = -0.8;
-    preset.light.tone_curve.lights = 0.4;
+    preset.light.tone_curve = ToneCurve::through(&[[0.6, 0.8]]);
     preset.color.hsl.channels[2].hue = 0.6;
     preset.color.grading.midtones = [0.2, 0.0, -0.4];
     preset.defringe.purple_hue = [260.0, 300.0];
@@ -224,6 +226,34 @@ fn blend_interpolates_numbers_in_the_chosen_sections_only() {
     );
     // Not listed: untouched even though the preset differs.
     assert_eq!(blended.light.tone_curve, base.light.tone_curve);
+}
+
+#[test]
+fn blend_moves_curve_outputs_only_when_the_inputs_match() {
+    let mut base = EditRecipe::default();
+    base.light.tone_curve = ToneCurve::through(&[[0.25, 0.25], [0.75, 0.75]]);
+    let mut preset = EditRecipe::default();
+    preset.light.tone_curve = ToneCurve::through(&[[0.25, 0.15], [0.75, 0.95]]);
+    let section = [RecipeSection::ToneCurve];
+
+    let blended = blend_sections(&base, &preset, &section, 0.5)
+        .light
+        .tone_curve;
+    blended
+        .validate()
+        .expect("a blend of valid curves is valid");
+    assert_eq!(blended.points[1], [0.25, 0.2]);
+    assert_eq!(blended.points[2], [0.75, 0.85]);
+
+    preset.light.tone_curve = ToneCurve::through(&[[0.4, 0.6]]);
+    let below = blend_sections(&base, &preset, &section, 0.4)
+        .light
+        .tone_curve;
+    let above = blend_sections(&base, &preset, &section, 0.6)
+        .light
+        .tone_curve;
+    assert_eq!(below, base.light.tone_curve);
+    assert_eq!(above, preset.light.tone_curve);
 }
 
 #[test]

@@ -95,6 +95,20 @@ impl DevelopPanel {
                 .any(|tones| self.finds(group, section, tones.label(), cx))
     }
 
+    pub(super) fn shows_curve(
+        &self,
+        group: &Group,
+        section: &Section,
+        recipe: &EditRecipe,
+        defaults: &EditRecipe,
+        cx: &Context<Self>,
+    ) -> bool {
+        let curve = RecipeSection::ToneCurve;
+        section.section == curve
+            && (!self.edited_only || curve.is_changed(recipe, defaults))
+            && self.finds(group, section, "points", cx)
+    }
+
     pub fn focus_search(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.search.focus_handle(cx).focus(window, cx);
     }

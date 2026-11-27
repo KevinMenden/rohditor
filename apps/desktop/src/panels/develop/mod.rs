@@ -111,6 +111,8 @@ pub struct DevelopPanel {
     edited_only: bool,
     /// The colour whose mixer sliders are listed.
     mixer_channel: usize,
+    /// The selected point of the tone curve, by index.
+    curve_point: Option<usize>,
     wheel_picture: Arc<RenderImage>,
     /// The focus of each listed preset.
     preset_focus: HashMap<SharedString, FocusHandle>,
@@ -167,6 +169,7 @@ impl DevelopPanel {
             search,
             edited_only: false,
             mixer_channel: 0,
+            curve_point: None,
             wheel_picture: wheels::wheel_picture(),
             preset_focus: HashMap::new(),
         }

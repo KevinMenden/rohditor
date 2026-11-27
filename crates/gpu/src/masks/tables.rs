@@ -4,7 +4,7 @@
 
 use rohditor_edit::{
     BrushMask, EditRecipe, LIGHT_TONE_LUT_SIZE, LightAdjustments, LightToneLut, MAX_COLOR_SAMPLES,
-    MAX_MASK_COMPONENTS, MAX_MASK_LAYERS, MaskLayer, MaskMode, MaskShape,
+    MAX_MASK_COMPONENTS, MAX_MASK_LAYERS, MaskLayer, MaskMode, MaskShape, TONE_CURVE_LUT_SIZE,
 };
 use rohditor_mask::{MaskFrame, ResolvedShape, resolve_component};
 
@@ -17,8 +17,10 @@ const COMPONENTS_OFFSET: usize = LAYERS_OFFSET + MAX_MASK_LAYERS * LAYER_WORDS;
 const PARAMETERS: usize = 3;
 /// The largest shape is a colour range: count, weight, two radii, then the samples.
 const COMPONENT_WORDS: usize = PARAMETERS + 4 + MAX_COLOR_SAMPLES * 3;
-const TABLE_WORDS: usize =
+/// The global tone curve LUT, after the mask records.
+pub(crate) const TONE_CURVE_OFFSET: usize =
     COMPONENTS_OFFSET + MAX_MASK_LAYERS * MAX_MASK_COMPONENTS * COMPONENT_WORDS;
+const TABLE_WORDS: usize = TONE_CURVE_OFFSET + TONE_CURVE_LUT_SIZE;
 
 /// Size of the fixed adjustment table buffer. Fixing it at the recipe limits means no per-render
 /// allocation, and the bytes are part of the processor's own reservation.
@@ -236,6 +238,15 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn the_tone_curve_offset_matches_the_preview_shader() {
+        let constant = format!("TONE_CURVE_OFFSET: u32 = {TONE_CURVE_OFFSET}u");
+        assert!(
+            include_str!("../preview.wgsl").contains(&constant),
+            "preview.wgsl lacks {constant}"
+        );
+    }
 
     #[test]
     fn shader_layout_constants_match_the_rust_layout() {

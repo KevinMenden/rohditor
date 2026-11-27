@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::EditError;
+use crate::monotone_spline;
 
 /// Smallest and largest number of knots a fitted camera tone may carry.
 pub const CAMERA_TONE_MIN_KNOTS: usize = 2;
@@ -86,58 +87,10 @@ impl CameraTone {
     /// `0..=1` clamp to the end points.
     #[must_use]
     pub fn evaluate(&self, input: f32) -> f32 {
-        let count = self.knots.len();
-        if count < CAMERA_TONE_MIN_KNOTS || input.is_nan() {
+        if self.knots.len() < CAMERA_TONE_MIN_KNOTS || input.is_nan() {
             return input;
         }
-        if input <= 0.0 {
-            return self.knots[0][1];
-        }
-        if input >= 1.0 {
-            return self.knots[count - 1][1];
-        }
-        let segment = self
-            .knots
-            .partition_point(|knot| knot[0] <= input)
-            .clamp(1, count - 1)
-            - 1;
-        let [x0, y0] = self.knots[segment];
-        let [x1, y1] = self.knots[segment + 1];
-        let width = x1 - x0;
-        let m0 = self.tangent(segment);
-        let m1 = self.tangent(segment + 1);
-        // Cubic Hermite basis on the unit interval.
-        let t = (input - x0) / width;
-        let t2 = t * t;
-        let t3 = t2 * t;
-        let value = (2.0 * t3 - 3.0 * t2 + 1.0) * y0
-            + (t3 - 2.0 * t2 + t) * width * m0
-            + (-2.0 * t3 + 3.0 * t2) * y1
-            + (t3 - t2) * width * m1;
-        value.clamp(y0, y1)
-    }
-
-    /// Fritsch-Carlson tangent at one knot. Zero where the neighbouring secants
-    /// disagree in sign or either is flat, which keeps each segment monotone.
-    fn tangent(&self, index: usize) -> f32 {
-        let secant = |segment: usize| {
-            let [x0, y0] = self.knots[segment];
-            let [x1, y1] = self.knots[segment + 1];
-            (y1 - y0) / (x1 - x0)
-        };
-        let last = self.knots.len() - 1;
-        if index == 0 {
-            return secant(0);
-        }
-        if index == last {
-            return secant(last - 1);
-        }
-        let (before, after) = (secant(index - 1), secant(index));
-        if before * after <= 0.0 {
-            return 0.0;
-        }
-        // Harmonic mean limits overshoot between unevenly spaced knots.
-        2.0 * before * after / (before + after)
+        monotone_spline::evaluate(&self.knots, input)
     }
 }
 

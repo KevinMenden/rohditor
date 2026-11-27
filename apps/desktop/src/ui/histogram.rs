@@ -21,6 +21,15 @@ fn peak(histogram: &Histogram) -> u64 {
 }
 
 pub fn histogram(histogram: Option<&Histogram>) -> impl IntoElement + use<> {
+    channels(histogram).w_full().h(px(84.0))
+}
+
+/// The histogram filling its parent, behind what else it holds.
+pub fn histogram_backdrop(histogram: Option<&Histogram>) -> impl IntoElement + use<> {
+    channels(histogram).absolute().size_full()
+}
+
+fn channels(histogram: Option<&Histogram>) -> gpui::Canvas<()> {
     let channels: Vec<(Vec<f32>, Hsla)> = histogram
         .map(|histogram| {
             let peak = peak(histogram);
@@ -41,8 +50,6 @@ pub fn histogram(histogram: Option<&Histogram>) -> impl IntoElement + use<> {
             }
         },
     )
-    .w_full()
-    .h(px(84.0))
 }
 
 fn curve(bounds: Bounds<Pixels>, heights: &[f32]) -> Option<gpui::Path<Pixels>> {

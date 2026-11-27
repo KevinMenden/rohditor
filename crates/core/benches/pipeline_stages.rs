@@ -9,7 +9,7 @@ use rohditor_core::{
 use rohditor_edit::{
     BrushMask, BrushStroke, ColorRange, ColorSample, EditRecipe, LinearGradient, LocalSettings,
     LuminanceRange, MaskComponent, MaskLayer, MaskMode, MaskPoint, MaskShape,
-    RenderingProfileSelection,
+    RenderingProfileSelection, ToneCurve,
 };
 use rohditor_image::{LinearRgbImage, LinearRgbSpace, Orientation, RgbPrimaries};
 
@@ -60,8 +60,7 @@ fn benchmark_adjustments(criterion: &mut Criterion) {
             let mut recipe = neutral_recipe();
             recipe.light.highlights = -0.4;
             recipe.light.shadows = 0.35;
-            recipe.light.tone_curve.darks = 0.15;
-            recipe.light.tone_curve.highlights = -0.12;
+            recipe.light.tone_curve = ToneCurve::through(&[[0.25, 0.3], [0.6, 0.62], [0.9, 0.86]]);
             recipe
         }),
         ("hsl_2560x1703", {
@@ -280,7 +279,7 @@ fn benchmark_hdr_rendition(criterion: &mut Criterion) {
     recipe.light.exposure_ev = 0.5;
     recipe.light.contrast = 0.2;
     recipe.light.whites = -0.4;
-    recipe.light.tone_curve.lights = 0.05;
+    recipe.light.tone_curve = ToneCurve::through(&[[0.8, 0.83]]);
     recipe.color.saturation = 1.15;
     recipe.color.grading.highlights = [0.1, 0.0, -0.1];
 

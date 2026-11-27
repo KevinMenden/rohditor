@@ -22,7 +22,7 @@ use rohditor_edit::{
     BLACKS_RANGE, CONTRAST_RANGE, CameraProfileSelection, EXPOSURE_EV_RANGE, EditRecipe,
     HIGHLIGHT_THRESHOLD_RANGE, HIGHLIGHTS_RANGE, HighlightMethod, LensProfileSelection,
     NoiseReduction, OpticsAdjustments, RenderingProfileSelection, SATURATION_RANGE, SHADOWS_RANGE,
-    TEMPERATURE_RANGE, TINT_RANGE, TONE_CURVE_RANGE, VIBRANCE_RANGE, WHITES_RANGE, WhiteBalance,
+    TEMPERATURE_RANGE, TINT_RANGE, ToneCurve, VIBRANCE_RANGE, WHITES_RANGE, WhiteBalance,
 };
 use rohditor_gpu::{ExportBackend, ExportRender, FallbackExporter};
 use rohditor_image::{DisplayColorSpace, DisplayRgbImage, Orientation};
@@ -120,21 +120,10 @@ enum Command {
         #[arg(long, default_value_t = BLACKS_RANGE.neutral, allow_hyphen_values = true)]
         blacks: f32,
 
-        /// Lift or lower the tone-curve shadow region (-0.25 to +0.25).
-        #[arg(long, default_value_t = TONE_CURVE_RANGE.neutral, allow_hyphen_values = true)]
-        tone_shadows: f32,
-
-        /// Lift or lower the tone-curve dark region (-0.25 to +0.25).
-        #[arg(long, default_value_t = TONE_CURVE_RANGE.neutral, allow_hyphen_values = true)]
-        tone_darks: f32,
-
-        /// Lift or lower the tone-curve light region (-0.25 to +0.25).
-        #[arg(long, default_value_t = TONE_CURVE_RANGE.neutral, allow_hyphen_values = true)]
-        tone_lights: f32,
-
-        /// Lift or lower the tone-curve highlight region (-0.25 to +0.25).
-        #[arg(long, default_value_t = TONE_CURVE_RANGE.neutral, allow_hyphen_values = true)]
-        tone_highlights: f32,
+        /// A tone curve point as sRGB-encoded `INPUT,OUTPUT` (0 to 1), between the
+        /// fixed ends (0,0) and (1,1). Repeat for more points, in input order.
+        #[arg(long = "tone-point", value_name = "INPUT,OUTPUT", value_parser = parse_tone_point)]
+        tone_points: Vec<[f32; 2]>,
 
         /// Rec.2020 luminance-relative saturation (0 to 2; 1 is neutral).
         #[arg(long, default_value_t = SATURATION_RANGE.neutral)]
@@ -743,10 +732,7 @@ pub(crate) fn run() -> Result<()> {
             shadows,
             whites,
             blacks,
-            tone_shadows,
-            tone_darks,
-            tone_lights,
-            tone_highlights,
+            tone_points,
             saturation,
             vibrance,
             highlight_reconstruction,
@@ -797,10 +783,7 @@ pub(crate) fn run() -> Result<()> {
                 shadows,
                 whites,
                 blacks,
-                tone_shadows,
-                tone_darks,
-                tone_lights,
-                tone_highlights,
+                tone_points,
                 saturation,
                 vibrance,
                 highlight_reconstruction,
@@ -1090,10 +1073,7 @@ struct DevelopArguments {
     shadows: f32,
     whites: f32,
     blacks: f32,
-    tone_shadows: f32,
-    tone_darks: f32,
-    tone_lights: f32,
-    tone_highlights: f32,
+    tone_points: Vec<[f32; 2]>,
     saturation: f32,
     vibrance: f32,
     highlight_reconstruction: CliHighlightMethod,
@@ -1321,10 +1301,7 @@ fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -> Result<()
     recipe.light.shadows = arguments.shadows;
     recipe.light.whites = arguments.whites;
     recipe.light.blacks = arguments.blacks;
-    recipe.light.tone_curve.shadows = arguments.tone_shadows;
-    recipe.light.tone_curve.darks = arguments.tone_darks;
-    recipe.light.tone_curve.lights = arguments.tone_lights;
-    recipe.light.tone_curve.highlights = arguments.tone_highlights;
+    recipe.light.tone_curve = ToneCurve::through(&arguments.tone_points);
     recipe.color.saturation = arguments.saturation;
     recipe.color.vibrance = arguments.vibrance;
     recipe.raw.highlights.method = arguments.highlight_reconstruction.into();
@@ -1533,9 +1510,16 @@ fn optics_adjustments(arguments: &DevelopArguments) -> Result<OpticsAdjustments>
 
 /// Parse `START,END` degrees. Range checks are left to recipe validation.
 fn parse_hue_range(value: &str) -> Result<[f32; 2], String> {
-    let (start, end) = value
-        .split_once(',')
-        .ok_or_else(|| "expected START,END in degrees".to_owned())?;
+    parse_pair(value, "expected START,END in degrees")
+}
+
+fn parse_tone_point(value: &str) -> Result<[f32; 2], String> {
+    parse_pair(value, "expected INPUT,OUTPUT from 0 to 1")
+}
+
+/// Two comma-separated numbers.
+fn parse_pair(value: &str, expected: &str) -> Result<[f32; 2], String> {
+    let (start, end) = value.split_once(',').ok_or_else(|| expected.to_owned())?;
     let parse = |text: &str| {
         text.trim()
             .parse::<f32>()
@@ -2436,10 +2420,7 @@ mod tests {
             shadows: 0.0,
             whites: 0.0,
             blacks: 0.0,
-            tone_shadows: 0.0,
-            tone_darks: 0.0,
-            tone_lights: 0.0,
-            tone_highlights: 0.0,
+            tone_points: Vec::new(),
             saturation: 1.0,
             vibrance: 0.0,
             highlight_reconstruction: CliHighlightMethod::Off,

@@ -31,8 +31,8 @@ impl DevelopPanel {
     ) {
         self.finish_nudge(cx);
         // What is being typed must not be applied afterwards.
-        let typed = self.controls.typed().and_then(Control::parameter);
-        if typed.is_some_and(|parameter| parameter.section() == section) {
+        let typed = self.controls.typed().and_then(Control::section);
+        if typed == Some(section) {
             self.stop_typing(false, window, cx);
         }
         self.session
@@ -98,18 +98,26 @@ impl DevelopPanel {
             .filter(|choice| self.shows_choice(*choice, group, section, recipe, defaults, cx))
             .collect();
         let wheels = self.shows_wheels(group, section, recipe, defaults, cx);
+        let curve = self.shows_curve(group, section, recipe, defaults, cx);
         let corrections: Vec<_> = LensCorrection::ALL
             .into_iter()
             .filter(|one| self.shows_correction(*one, group, section, recipe, defaults, cx))
             .collect();
         // Also without a row for what is changed.
         let found = changed && self.finds(group, section, "", cx);
-        if shown.is_empty() && choices.is_empty() && corrections.is_empty() && !wheels && !found {
+        let nothing = shown.is_empty() && choices.is_empty() && corrections.is_empty();
+        if nothing && !wheels && !curve && !found {
             return None;
         }
         let open = self.is_open(Control::Section(section.section), cx);
-        let curve = (open && section.section == RecipeSection::ToneCurve && !shown.is_empty())
-            .then(|| self.tone_curve(&recipe.light.tone_curve, cx));
+        let curve = open && curve;
+        let curve_rows = if curve {
+            self.tone_curve_rows(&recipe.light.tone_curve, cx)
+        } else {
+            Vec::new()
+        };
+        let histogram = self.model.histogram.as_ref();
+        let curve = curve.then(|| self.tone_curve(&recipe.light.tone_curve, histogram, cx));
         let mixer = open
             && section.section == RecipeSection::ColorMixer
             && !self.edited_only
@@ -149,6 +157,7 @@ impl DevelopPanel {
                 .pb_2()
                 .child(header)
                 .children(curve)
+                .children(curve_rows)
                 .children(choices)
                 .children(notes)
                 .children(corrections)

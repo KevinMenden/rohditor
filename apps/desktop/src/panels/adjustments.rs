@@ -88,12 +88,8 @@ pub const GROUPS: [Group; 4] = [
             },
             Section {
                 section: RecipeSection::ToneCurve,
-                adjustments: &[
-                    Adjustment::percent(Parameter::ToneCurveShadows, "Shadows"),
-                    Adjustment::percent(Parameter::ToneCurveDarks, "Darks"),
-                    Adjustment::percent(Parameter::ToneCurveLights, "Lights"),
-                    Adjustment::percent(Parameter::ToneCurveHighlights, "Highlights"),
-                ],
+                // The curve editor has its own controls.
+                adjustments: &[],
             },
             Section {
                 section: RecipeSection::Presence,

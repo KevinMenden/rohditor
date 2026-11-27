@@ -1,13 +1,13 @@
 //! What the controls of the panel change.
 
 use gpui::{App, Context, Entity};
-use rohditor_core::ToneCurveHandle;
 use rohditor_edit::{
     GradingTint, GradingTones, LensCorrection, Parameter, ParameterRange, RecipeSection,
 };
 
 use super::DevelopPanel;
 use super::choices::Choice;
+use super::tone_curve::curve_point_slider;
 use crate::panels::adjustments::{adjustment, sections};
 use crate::panels::controls::{ControlPanel, Controls, Gestures as _, Slider};
 use crate::session::{EditPhase, Session};
@@ -20,7 +20,13 @@ pub enum Control {
     /// The header of a section.
     Section(RecipeSection),
     Parameter(Parameter),
-    Curve(ToneCurveHandle),
+    /// The graph of the tone curve.
+    Curve,
+    /// A point of the tone curve, while it is dragged.
+    CurvePoint(usize),
+    /// The rows of the selected point of the tone curve.
+    CurveInput,
+    CurveOutput,
     Choice(Choice),
     MixerChannels,
     Wheel(GradingTones),
@@ -47,6 +53,9 @@ impl Control {
         });
         rows.chain(Choice::ALL.map(Self::Choice))
             .chain([
+                Self::Curve,
+                Self::CurveInput,
+                Self::CurveOutput,
                 Self::MixerChannels,
                 Self::Presets,
                 Self::Info,
@@ -56,11 +65,26 @@ impl Control {
             .chain(LensCorrection::ALL.map(Self::Correction))
     }
 
+    /// Whether it edits the tone curve.
+    pub const fn is_curve(self) -> bool {
+        matches!(
+            self,
+            Self::Curve | Self::CurvePoint(_) | Self::CurveInput | Self::CurveOutput
+        )
+    }
+
+    /// The section of the recipe it changes.
+    pub fn section(self) -> Option<RecipeSection> {
+        if self.is_curve() {
+            return Some(RecipeSection::ToneCurve);
+        }
+        self.parameter().map(Parameter::section)
+    }
+
     /// What it changes, or the first of them.
     pub fn parameter(self) -> Option<Parameter> {
         match self {
             Self::Parameter(parameter) => Some(parameter),
-            Self::Curve(handle) => Some(handle.parameter()),
             Self::Wheel(tones) => Some(tones.parameter()),
             _ => None,
         }
@@ -88,6 +112,7 @@ impl ControlPanel for DevelopPanel {
 
     fn slider(&self, control: Control) -> Option<Slider> {
         match control {
+            Control::CurveInput | Control::CurveOutput => curve_point_slider(control),
             Control::Parameter(parameter) => Some(adjustment(parameter).slider()),
             Control::PresetAmount => {
                 let (name, _) = self.model.applied_preset.as_ref()?;
@@ -106,6 +131,9 @@ impl ControlPanel for DevelopPanel {
         if control == Control::PresetAmount {
             return self.model.applied_preset.as_ref().map(|applied| applied.1);
         }
+        if control.is_curve() {
+            return self.curve_point_value(control, cx);
+        }
         let session = self.session.read(cx);
         let document = session.document().filter(|open| open.frame.is_some())?;
         let defaults = document.default_recipe();
@@ -115,6 +143,10 @@ impl ControlPanel for DevelopPanel {
     fn default_value(&self, control: Control, cx: &App) -> Option<f32> {
         if control == Control::PresetAmount {
             return Some(PRESET_AMOUNT_RANGE.neutral);
+        }
+        // Back on the diagonal, where the point changes nothing.
+        if control == Control::CurveOutput {
+            return self.value(Control::CurveInput, cx);
         }
         let defaults = self.session.read(cx).document()?.default_recipe();
         Some(control.parameter()?.get(&defaults, &defaults))
@@ -127,6 +159,9 @@ impl ControlPanel for DevelopPanel {
         phase: EditPhase,
         cx: &mut Context<Self>,
     ) {
+        if control.is_curve() {
+            return self.set_curve_point_value(control, value, phase, cx);
+        }
         self.session.update(cx, |session, cx| match control {
             Control::PresetAmount => {
                 session.set_preset_amount(value, cx);
@@ -146,12 +181,8 @@ impl ControlPanel for DevelopPanel {
         match control {
             // The radius is half the size.
             Control::Wheel(tones) => self.move_wheel(tones, right * 2.0, up * 2.0, cx),
-            Control::Curve(handle) => {
-                let Some(document) = self.session.read(cx).document() else {
-                    return;
-                };
-                let value = handle.dragged(&document.edits.recipe().light.tone_curve, up);
-                self.set_value(control, value, EditPhase::Dragging, cx);
+            Control::CurvePoint(index) => {
+                self.move_curve_point(index, right, up, EditPhase::Dragging, cx);
             }
             _ => {}
         }
@@ -167,6 +198,12 @@ impl ControlPanel for DevelopPanel {
         self.finish_nudge(cx);
         if let Control::Wheel(tones) = control {
             self.set_wheel(tones, GradingTint::default(), EditPhase::Finished, cx);
+        } else if let Control::CurvePoint(index) = control {
+            self.remove_curve_point(index, cx);
+        } else if control == Control::Curve {
+            if let Some(index) = self.selected_point_now(cx) {
+                self.remove_curve_point(index, cx);
+            }
         } else if let Some(value) = self.default_value(control, cx) {
             self.set_value(control, value, EditPhase::Finished, cx);
         }

@@ -15,7 +15,7 @@ use rohditor_core::{
 };
 use rohditor_edit::{
     EditRecipe, LinearGradient, LocalSettings, LuminanceRange, MaskComponent, MaskLayer, MaskMode,
-    MaskPoint, MaskShape, RenderingProfileSelection,
+    MaskPoint, MaskShape, RenderingProfileSelection, ToneCurve,
 };
 use rohditor_image::{LinearRgbImage, LinearRgbSpace, Orientation, RgbPrimaries};
 use rohditor_raw::{
@@ -77,8 +77,7 @@ fn edited_recipe(profile: RenderingProfileSelection) -> EditRecipe {
     recipe.light.highlights = -0.2;
     recipe.light.whites = -0.6;
     recipe.light.blacks = 0.1;
-    recipe.light.tone_curve.darks = 0.04;
-    recipe.light.tone_curve.lights = 0.05;
+    recipe.light.tone_curve = ToneCurve::through(&[[0.6, 0.64], [0.8, 0.83]]);
     recipe.color.saturation = 1.15;
     recipe.color.vibrance = 0.2;
     recipe.color.hsl.channels[0].saturation = 0.3;
