@@ -20,6 +20,7 @@ use rohditor_edit::{
 use rohditor_image::{LinearRgbSpace, Orientation};
 use wgpu::util::DeviceExt;
 
+use crate::histogram::{GpuHistogramCounter, GpuHistogramPending};
 use crate::masks::coverage::{self, BandCoverage, FitCoverage};
 use crate::masks::tables::{self, MaskTables};
 use crate::{GpuCapabilities, GpuPreviewError};
@@ -493,13 +494,11 @@ pub struct GpuDisplayReadback {
     pub rgba: Vec<u8>,
 }
 
-/// An asynchronous display-texture readback.
+/// A display-texture readback in flight, behind [`GpuPreviewProcessor::readback_display`].
 ///
 /// The request owns the staging buffer until the map callback reports that it
-/// is ready. Dropping an unfinished request cancels its consumer without
-/// blocking the caller; the application can poll it from its normal event
-/// loop and keep the UI responsive while the GPU finishes.
-pub struct GpuDisplayReadbackPending {
+/// is ready.
+pub(crate) struct GpuDisplayReadbackPending {
     buffer: wgpu::Buffer,
     width: u32,
     height: u32,
@@ -573,6 +572,7 @@ pub struct GpuPreviewProcessor {
     empty_coverage: wgpu::TextureView,
     /// Brush planes of the fit preview, kept between renders. `render` takes `&self`.
     fit_coverage: Mutex<FitCoverage>,
+    histogram: GpuHistogramCounter,
 }
 
 impl GpuPreviewProcessor {
@@ -774,6 +774,7 @@ impl GpuPreviewProcessor {
             adjustment_tables,
             empty_coverage: coverage::empty_view(device),
             fit_coverage: Mutex::default(),
+            histogram: GpuHistogramCounter::new(device, queue),
         })
     }
 
@@ -1504,8 +1505,15 @@ impl GpuPreviewProcessor {
         pending.finish()
     }
 
+    /// Submit the histogram count of a frame's display texture without waiting
+    /// for it. Only the bins are read back.
+    pub fn begin_histogram(&self, frame: &GpuPreviewFrame) -> GpuHistogramPending {
+        let (width, height) = frame.output_dimensions;
+        self.histogram.begin(&frame.display_view, width, height)
+    }
+
     /// Submit a display-texture readback without waiting for completion.
-    pub fn begin_display_readback(
+    fn begin_display_readback(
         &self,
         frame: &GpuPreviewFrame,
     ) -> Result<GpuDisplayReadbackPending, GpuPreviewError> {

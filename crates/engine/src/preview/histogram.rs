@@ -1,108 +1,43 @@
-//! Throttled readback of the displayed GPU frame for the histogram.
+//! Throttled GPU histogram of the displayed frame.
 //!
-//! After a GPU render the frame is read back asynchronously and counted on a
-//! thread of its own into the document's [`Histogram`]. There is one readback
-//! at a time. While editing, its result is shown although newer frames exist,
-//! but only the current frame's counts as the recipe's histogram
+//! After a GPU render the frame's histogram is counted on the GPU and its bins
+//! are read back asynchronously into the document's [`Histogram`]. There is
+//! one count at a time. While editing, its result is shown although newer
+//! frames exist, but only the current frame's counts as the recipe's histogram
 //! ([`DocumentPreview::histogram_revision`]).
 
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use rohditor_core::Histogram;
-use rohditor_gpu::{GpuDisplayReadback, GpuDisplayReadbackPending, GpuPreviewError};
+use rohditor_gpu::GpuHistogramPending;
 use tracing::warn;
 
 use super::{DocumentPreview, PreviewRuntime};
 use crate::document::PreviewTicket;
 
-/// Polling interval while waiting on a readback.
+/// Polling interval while waiting on the GPU.
 const POLL_INTERVAL: Duration = Duration::from_millis(8);
 
-/// A display readback on its way to becoming the histogram.
+/// A histogram count on its way back from the GPU.
 pub(super) struct PendingGpuHistogram {
     ticket: PreviewTicket,
     started: Instant,
-    stage: Stage,
+    bins: GpuHistogramPending,
 }
 
-enum Stage {
-    /// The GPU has not finished the copy.
-    Reading(GpuDisplayReadbackPending),
-    Counting(CountTask),
-}
-
-type Counted = Result<(Option<Histogram>, GpuDisplayReadback), GpuPreviewError>;
-
-/// Copies and counts the pixels on a thread, which takes too long for a UI.
-///
-/// Dropping it waits for the thread: that holds a GPU buffer, and a frontend
-/// must be able to let go of its device.
-struct CountTask(Option<JoinHandle<Counted>>);
-
-impl CountTask {
-    fn start(readback: GpuDisplayReadbackPending) -> std::io::Result<Self> {
-        std::thread::Builder::new()
-            .name("rohditor-histogram".to_owned())
-            .spawn(move || {
-                let readback = readback.finish()?;
-                let histogram = Histogram::from_rgba8(
-                    readback.width as usize,
-                    readback.height as usize,
-                    &readback.rgba,
-                );
-                Ok((histogram, readback))
-            })
-            .map(|thread| Self(Some(thread)))
-    }
-
-    fn is_finished(&self) -> bool {
-        self.0.as_ref().is_none_or(JoinHandle::is_finished)
-    }
-
-    /// The result of a finished task; `None` if its thread panicked.
-    fn take(mut self) -> Option<Counted> {
-        self.0.take()?.join().ok()
-    }
-}
-
-impl Drop for CountTask {
-    fn drop(&mut self) {
-        if let Some(thread) = self.0.take() {
-            drop(thread.join());
-        }
-    }
-}
-
-/// Pixels of a finished display readback, for overlays derived from them.
-pub struct DisplayPixels {
-    pub width: usize,
-    pub height: usize,
-    /// Packed RGBA8, row-major.
-    pub rgba: Vec<u8>,
-}
-
-/// Progress of the histogram readback.
+/// Progress of the GPU histogram.
 #[derive(Default)]
 pub struct HistogramPoll {
     pub repaint: bool,
     /// Call again after this long.
     pub repaint_after: Option<Duration>,
-    /// The finished readback, when the caller asked for pixels.
-    pub pixels: Option<DisplayPixels>,
 }
 
 impl PreviewRuntime {
-    /// Advance the throttled histogram readback of the displayed GPU frame.
-    /// `want_pixels` returns the finished readback's pixels too.
-    pub fn poll_histogram(
-        &self,
-        preview: &mut DocumentPreview,
-        revision: u64,
-        want_pixels: bool,
-    ) -> HistogramPoll {
+    /// Advance the throttled histogram count of the displayed GPU frame.
+    pub fn poll_histogram(&self, preview: &mut DocumentPreview, revision: u64) -> HistogramPoll {
         if let Some(pending) = preview.pending_histogram.take() {
-            let poll = advance(preview, revision, pending, want_pixels);
+            let poll = advance(preview, revision, pending);
             if preview.pending_histogram.is_some() || preview.histogram_due.is_none() {
                 return poll;
             }
@@ -123,120 +58,87 @@ impl PreviewRuntime {
             };
         }
 
-        let current = preview.ticket(revision) == ticket
-            && preview
-                .gpu
-                .as_ref()
-                .is_some_and(|resident| resident.ticket == ticket);
-        let readback = preview
+        preview.histogram_due = None;
+        let bins = preview
             .gpu
             .as_ref()
-            .filter(|_| current)
-            .and_then(|resident| {
-                self.gpu
-                    .as_ref()
-                    .map(|runtime| runtime.processor().begin_display_readback(&resident.frame))
-            });
-        preview.histogram_due = None;
-        match readback {
-            Some(Ok(readback)) => {
-                preview.histogram_started = Some(now);
-                preview.pending_histogram = Some(PendingGpuHistogram {
-                    ticket,
-                    started: now,
-                    stage: Stage::Reading(readback),
-                });
-                HistogramPoll {
-                    repaint_after: Some(POLL_INTERVAL),
-                    ..HistogramPoll::default()
-                }
-            }
-            Some(Err(error)) => {
-                warn!(?ticket, %error, "could not start GPU histogram readback");
-                HistogramPoll::default()
-            }
-            None => HistogramPoll::default(),
+            .filter(|_| is_current(preview, revision, ticket))
+            .zip(self.gpu.as_ref())
+            .map(|(resident, runtime)| runtime.processor().begin_histogram(&resident.frame));
+        let Some(bins) = bins else {
+            return HistogramPoll::default();
+        };
+        preview.histogram_started = Some(now);
+        preview.pending_histogram = Some(PendingGpuHistogram {
+            ticket,
+            started: now,
+            bins,
+        });
+        HistogramPoll {
+            repaint_after: Some(POLL_INTERVAL),
+            ..HistogramPoll::default()
         }
     }
 }
 
-/// Take a pending readback one stage further, or install its histogram.
+/// Whether `ticket` is the frame on screen and answers the current recipe.
+fn is_current(preview: &DocumentPreview, revision: u64, ticket: PreviewTicket) -> bool {
+    preview.ticket(revision) == ticket
+        && preview
+            .gpu
+            .as_ref()
+            .is_some_and(|resident| resident.ticket == ticket)
+}
+
+/// Install the histogram of a pending count once the GPU has finished it.
 fn advance(
     preview: &mut DocumentPreview,
     revision: u64,
     mut pending: PendingGpuHistogram,
-    want_pixels: bool,
 ) -> HistogramPoll {
-    pending.stage = match pending.stage {
-        Stage::Reading(mut readback) => match readback.poll_ready() {
-            Ok(false) => Stage::Reading(readback),
-            Ok(true) => match CountTask::start(readback) {
-                Ok(task) => Stage::Counting(task),
-                Err(error) => {
-                    warn!(ticket = ?pending.ticket, %error, "could not start counting");
-                    return HistogramPoll::default();
-                }
-            },
-            Err(error) => {
-                warn!(ticket = ?pending.ticket, %error, "GPU histogram readback failed");
-                return HistogramPoll::default();
+    match pending.bins.poll_ready() {
+        Ok(false) => {
+            preview.pending_histogram = Some(pending);
+            HistogramPoll {
+                repaint_after: Some(POLL_INTERVAL),
+                ..HistogramPoll::default()
             }
-        },
-        Stage::Counting(task) if task.is_finished() => {
-            return match task.take() {
-                Some(Ok((histogram, readback))) => install(
-                    preview,
-                    revision,
-                    pending.ticket,
-                    pending.started.elapsed(),
-                    histogram,
-                    readback,
-                    want_pixels,
-                ),
-                Some(Err(error)) => {
-                    warn!(ticket = ?pending.ticket, %error, "GPU histogram readback failed");
-                    HistogramPoll::default()
-                }
-                None => HistogramPoll::default(),
-            };
         }
-        counting => counting,
-    };
-    preview.pending_histogram = Some(pending);
-    HistogramPoll {
-        repaint_after: Some(POLL_INTERVAL),
-        ..HistogramPoll::default()
+        Ok(true) => {
+            let latency = pending.started.elapsed();
+            install(
+                preview,
+                revision,
+                pending.ticket,
+                latency,
+                pending.bins.finish(),
+            )
+        }
+        Err(error) => {
+            warn!(ticket = ?pending.ticket, %error, "GPU histogram readback failed");
+            HistogramPoll::default()
+        }
     }
 }
 
 /// Show a counted histogram. Only the one of the current frame is the input
-/// for Auto Tone, and only its pixels are handed out.
+/// for Auto Tone.
 fn install(
     preview: &mut DocumentPreview,
     revision: u64,
     ticket: PreviewTicket,
     latency: Duration,
-    histogram: Option<Histogram>,
-    readback: GpuDisplayReadback,
-    want_pixels: bool,
+    histogram: Histogram,
 ) -> HistogramPoll {
-    let mut poll = HistogramPoll {
+    let poll = HistogramPoll {
         repaint: true,
         ..HistogramPoll::default()
     };
-    let Some(histogram) = histogram else {
-        return poll;
-    };
-    let current = preview.ticket(revision) == ticket
-        && preview
-            .gpu
-            .as_ref()
-            .is_some_and(|resident| resident.ticket == ticket);
     // Auto Tone and the graph are about the cropped photo.
     if !preview.full_frame_shown() {
         preview.histogram = Some(histogram);
     }
-    if !current {
+    if !is_current(preview, revision, ticket) {
         return poll;
     }
     if !preview.full_frame_shown() {
@@ -244,13 +146,6 @@ fn install(
     }
     if let Some(diagnostics) = preview.diagnostics.as_mut() {
         diagnostics.gpu_histogram_readback = Some(latency);
-    }
-    if want_pixels {
-        poll.pixels = Some(DisplayPixels {
-            width: readback.width as usize,
-            height: readback.height as usize,
-            rgba: readback.rgba,
-        });
     }
     poll
 }

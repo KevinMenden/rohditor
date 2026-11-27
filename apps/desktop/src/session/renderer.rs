@@ -116,9 +116,9 @@ impl Renderer {
     /// when to ask again.
     pub fn poll(&mut self, document: &mut OpenDocument) -> Option<Duration> {
         let completion = self.runtime.poll_completion(&mut document.preview);
-        let histogram =
-            self.runtime
-                .poll_histogram(&mut document.preview, document.edits.revision(), false);
+        let histogram = self
+            .runtime
+            .poll_histogram(&mut document.preview, document.edits.revision());
         [completion, histogram.repaint_after]
             .into_iter()
             .flatten()

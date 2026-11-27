@@ -17,7 +17,7 @@ mod state;
 
 pub use diagnostics::DocumentPreviewDiagnostics;
 pub use gpu::{GpuDocumentPreview, GpuDocumentSource, GpuRuntime, WgpuContext};
-pub use histogram::{DisplayPixels, HistogramPoll};
+pub use histogram::HistogramPoll;
 pub use routing::{
     gpu_base_algorithm_matches, gpu_supports_recipe, preview_intent_matches_resolution,
 };

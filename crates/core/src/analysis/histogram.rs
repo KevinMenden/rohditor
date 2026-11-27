@@ -51,6 +51,26 @@ impl Histogram {
         ))
     }
 
+    /// Build a histogram from per-channel bins counted elsewhere, for example on the GPU. The
+    /// clipped counts follow from the outermost bins, as in [`Self::from_rgba8`].
+    #[must_use]
+    pub fn from_bins(
+        red: [u64; HISTOGRAM_BINS],
+        green: [u64; HISTOGRAM_BINS],
+        blue: [u64; HISTOGRAM_BINS],
+        luminance: [u64; HISTOGRAM_BINS],
+    ) -> Self {
+        let mut histogram = Self {
+            red,
+            green,
+            blue,
+            luminance,
+            ..Self::default()
+        };
+        histogram.count_clipped();
+        histogram
+    }
+
     /// Return the luminance bin containing the requested cumulative fraction.
     #[must_use]
     pub fn luminance_percentile(&self, fraction: f32) -> u8 {
@@ -78,20 +98,22 @@ impl Histogram {
             histogram.blue[usize::from(blue)] += 1;
             histogram.luminance[usize::from(luminance(red, green, blue))] += 1;
         });
-        for (index, bins) in [&histogram.red, &histogram.green, &histogram.blue]
-            .into_iter()
-            .enumerate()
-        {
+        histogram.count_clipped();
+        histogram
+    }
+
+    /// Derive the clipped counts from the red, green and blue bins.
+    fn count_clipped(&mut self) {
+        for (index, bins) in [self.red, self.green, self.blue].iter().enumerate() {
             for (value, &count) in (0..=u8::MAX).zip(bins) {
                 if is_shadow_clipped(value) {
-                    histogram.shadow_clipped[index] += count;
+                    self.shadow_clipped[index] += count;
                 }
                 if is_highlight_clipped(value) {
-                    histogram.highlight_clipped[index] += count;
+                    self.highlight_clipped[index] += count;
                 }
             }
         }
-        histogram
     }
 }
 
@@ -170,6 +192,15 @@ mod tests {
         // 2.4344 and 2.5066 before rounding.
         assert_eq!(luminance(0, 3, 4), 2);
         assert_eq!(luminance(0, 3, 5), 3);
+    }
+
+    #[test]
+    fn bins_counted_elsewhere_give_the_same_histogram() {
+        let rgba = [0, 10, 255, 9, 255, 20, 30, 0, 7, 255, 0, 1];
+        let counted = Histogram::from_rgba8(3, 1, &rgba).expect("valid buffer");
+        let rebuilt =
+            Histogram::from_bins(counted.red, counted.green, counted.blue, counted.luminance);
+        assert_eq!(rebuilt, counted);
     }
 
     #[test]

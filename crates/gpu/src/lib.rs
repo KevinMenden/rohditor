@@ -25,9 +25,11 @@ mod memory;
 pub use memory::{GpuMemoryReservations, gpu_memory_reservations};
 mod capture;
 mod clipping;
+mod histogram;
 mod masks;
 pub use capture::{CaptureMetrics, GpuCaptureProcessor, GpuCaptureResult};
 pub use clipping::{ClippingTints, GpuClippingOverlay};
+pub use histogram::GpuHistogramPending;
 mod preview;
 mod sensor;
 mod spatial;
@@ -39,8 +41,7 @@ pub use spatial::{
 
 pub use capabilities::GpuCapabilities;
 pub use preview::{
-    GpuDisplayReadback, GpuDisplayReadbackPending, GpuPreviewFrame, GpuPreviewProcessor,
-    GpuPreviewSource, GpuPreviewUpload,
+    GpuDisplayReadback, GpuPreviewFrame, GpuPreviewProcessor, GpuPreviewSource, GpuPreviewUpload,
 };
 pub use sensor::{
     DemosaicMetrics, GpuDevelopedSource, GpuHighlightedMosaic, GpuNormalizedMosaic,
