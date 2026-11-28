@@ -103,7 +103,7 @@ pub(super) fn develop(file: &Path, output: &Path, arguments: DevelopArguments) -
             file.display()
         );
     }
-    if !export_settings.overwrite && output.exists() {
+    if !export_settings.collision.replaces_existing() && output.exists() {
         bail!(
             "output {} already exists; pass --force to replace it",
             output.display()

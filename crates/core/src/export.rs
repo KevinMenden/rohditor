@@ -17,10 +17,12 @@ use thiserror::Error;
 use crate::output::write_transactionally;
 
 mod icc;
+mod naming;
 mod sharpening;
 mod types;
 
 use icc::icc_profile;
+pub use naming::*;
 pub use sharpening::*;
 pub use types::*;
 
@@ -94,18 +96,22 @@ pub fn export_image(
         ExportMetadataPolicy::Safe => Some(safe_exif(source, width, height)),
     };
 
-    let bytes_written = write_transactionally(destination, settings.overwrite, |writer| {
-        encode(
-            writer,
-            destination,
-            image,
-            settings.format,
-            width,
-            height,
-            icc_profile.clone(),
-            exif.clone(),
-        )
-    })?;
+    let bytes_written = write_transactionally(
+        destination,
+        settings.collision.replaces_existing(),
+        |writer| {
+            encode(
+                writer,
+                destination,
+                image,
+                settings.format,
+                width,
+                height,
+                icc_profile.clone(),
+                exif.clone(),
+            )
+        },
+    )?;
 
     Ok(ExportReport {
         width: image.width(),
@@ -474,8 +480,9 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        DitherMode, ExportFormat, ExportMetadataPolicy, ExportSettings, OutputMedium,
-        OutputSharpening, OutputSharpeningStrength, OutputSize, PngBitDepth, exif_datetime,
+        CollisionPolicy, DitherMode, ExportFormat, ExportMetadataPolicy, ExportSettings,
+        OutputMedium, OutputSharpening, OutputSharpeningStrength, OutputSize, PngBitDepth,
+        exif_datetime,
     };
 
     #[test]
@@ -502,7 +509,7 @@ mod tests {
             format: ExportFormat::Jpeg { quality: 93 },
             dithering: DitherMode::Ordered8x8,
             metadata: ExportMetadataPolicy::None,
-            overwrite: true,
+            collision: CollisionPolicy::Overwrite,
             size: OutputSize::Fit {
                 width: 2048,
                 height: 1365,

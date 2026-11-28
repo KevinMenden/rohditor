@@ -5,8 +5,8 @@
 use std::path::Path;
 
 use rohditor_core::{
-    DitherMode, ExportFormat, ExportMetadataPolicy, ExportSettings, OutputSharpening, OutputSize,
-    PngBitDepth,
+    CollisionPolicy, DitherMode, ExportFormat, ExportMetadataPolicy, ExportSettings,
+    FileNameTemplate, OutputSharpening, OutputSize, PhotoNameInfo, PngBitDepth,
 };
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -90,7 +90,7 @@ impl ExportOptions {
             } else {
                 ExportMetadataPolicy::None
             },
-            overwrite: self.overwrite,
+            collision: CollisionPolicy::overwrite_if(self.overwrite),
             size: match self.size_mode {
                 SizeMode::Original => OutputSize::Original,
                 SizeMode::LongEdge => OutputSize::LongEdge {
@@ -105,26 +105,19 @@ impl ExportOptions {
         }
     }
 
-    pub const fn extension(&self) -> &'static str {
-        match self.kind {
-            ExportKind::Jpeg => "jpg",
-            ExportKind::Png => "png",
-        }
+    pub fn extension(&self) -> &'static str {
+        self.core().format.file_extension()
     }
 
     /// A file name for exporting `source`: only its stem is used, so a private
     /// directory name never leaks into the suggestion.
     pub fn suggested_file_name(&self, source: &Path) -> String {
-        format!("{}-edited.{}", source_stem(source), self.extension())
+        FileNameTemplate::default().file_name(
+            &PhotoNameInfo::from_path(source),
+            1,
+            self.core().format.file_extension(),
+        )
     }
-}
-
-fn source_stem(path: &Path) -> String {
-    path.file_stem()
-        .and_then(|stem| stem.to_str())
-        .filter(|stem| !stem.is_empty())
-        .unwrap_or("developed")
-        .to_owned()
 }
 
 #[cfg(test)]
@@ -156,7 +149,7 @@ mod tests {
         );
         assert_eq!(settings.dithering, DitherMode::Ordered8x8);
         assert_eq!(settings.metadata, ExportMetadataPolicy::None);
-        assert!(settings.overwrite);
+        assert_eq!(settings.collision, CollisionPolicy::Overwrite);
         assert_eq!(
             settings.size,
             OutputSize::Fit {

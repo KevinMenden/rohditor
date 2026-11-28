@@ -11,10 +11,10 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use rohditor_core::{
-    CpuPipeline, DitherMode, ExportFormat, ExportImage, ExportMetadataPolicy, ExportSettings,
-    OutputBitDepth, OutputPolicy, OutputSize, PngBitDepth, RawCropPolicy, RenderOptions,
-    StageTimings, estimate_noise_profile, export_image, with_default_noise_reduction,
-    write_output_bytes,
+    CollisionPolicy, CpuPipeline, DitherMode, ExportFormat, ExportImage, ExportMetadataPolicy,
+    ExportSettings, OutputBitDepth, OutputPolicy, OutputSize, PngBitDepth, RawCropPolicy,
+    RenderOptions, StageTimings, estimate_noise_profile, export_image,
+    with_default_noise_reduction, write_output_bytes,
 };
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_detail::NoiseProfile;
@@ -295,7 +295,7 @@ pub(super) fn detail_corpus(
         },
         dithering: DitherMode::None,
         metadata: ExportMetadataPolicy::None,
-        overwrite: force,
+        collision: CollisionPolicy::overwrite_if(force),
         size: OutputSize::Original,
         sharpening: None,
     };

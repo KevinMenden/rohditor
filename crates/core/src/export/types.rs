@@ -39,6 +39,15 @@ impl ExportFormat {
         }
     }
 
+    /// The extension generated file names get.
+    #[must_use]
+    pub const fn file_extension(self) -> &'static str {
+        match self {
+            Self::Jpeg { .. } => "jpg",
+            Self::Png { .. } => "png",
+        }
+    }
+
     #[must_use]
     pub fn accepts_extension(self, extension: &str) -> bool {
         match self {
@@ -167,13 +176,50 @@ impl OutputSize {
     }
 }
 
+/// What to do when an export's destination name is already taken.
+///
+/// Name planning ([`super::BatchPlanner`]) applies the policy before anything is
+/// written. [`export_image`](super::export_image) itself only distinguishes
+/// replacing from not replacing, so a file that appears after planning is
+/// never replaced unless the policy is `Overwrite`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CollisionPolicy {
+    /// Leave the existing file alone and do not export this photo.
+    #[default]
+    Skip,
+    /// Replace an existing file. Names that collide within one batch are still
+    /// renamed, so a batch never overwrites its own earlier output.
+    Overwrite,
+    /// Export under the next free name (`name-1`, `name-2`, ...).
+    AutoRename,
+}
+
+impl CollisionPolicy {
+    /// The two-way choice of the CLI's `--force` flag and the dialog toggle.
+    #[must_use]
+    pub const fn overwrite_if(overwrite: bool) -> Self {
+        if overwrite {
+            Self::Overwrite
+        } else {
+            Self::Skip
+        }
+    }
+
+    /// Whether writing may replace a file that is already there.
+    #[must_use]
+    pub const fn replaces_existing(self) -> bool {
+        matches!(self, Self::Overwrite)
+    }
+}
+
 /// Stable export choices, independent of any CLI or UI widgets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExportSettings {
     pub format: ExportFormat,
     pub dithering: DitherMode,
     pub metadata: ExportMetadataPolicy,
-    pub overwrite: bool,
+    pub collision: CollisionPolicy,
     pub size: OutputSize,
     /// Applied after resize, on export only. `None` leaves pixels untouched.
     pub sharpening: Option<OutputSharpening>,
@@ -187,7 +233,7 @@ impl Default for ExportSettings {
             },
             dithering: DitherMode::None,
             metadata: ExportMetadataPolicy::Safe,
-            overwrite: false,
+            collision: CollisionPolicy::Skip,
             size: OutputSize::Original,
             sharpening: None,
         }

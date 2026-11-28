@@ -4,7 +4,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use rohditor_core::{
-    DitherMode, ExportFormat, ExportSettings, JPEG_QUALITY_DEFAULT, OutputSize,
+    CollisionPolicy, DitherMode, ExportFormat, ExportSettings, JPEG_QUALITY_DEFAULT, OutputSize,
     WhiteBalanceCoordinates,
 };
 use rohditor_edit::{
@@ -141,7 +141,7 @@ pub(super) fn develop_export_settings(
             DitherMode::None
         },
         metadata: arguments.metadata.into(),
-        overwrite: arguments.force,
+        collision: CollisionPolicy::overwrite_if(arguments.force),
         size: match (arguments.long_edge, arguments.fit) {
             (Some(pixels), _) => OutputSize::LongEdge { pixels },
             (None, Some((width, height))) => OutputSize::Fit { width, height },
