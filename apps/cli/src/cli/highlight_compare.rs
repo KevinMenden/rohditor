@@ -10,9 +10,9 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use rohditor_core::{
-    CpuPipeline, DitherMode, ExportFormat, ExportImage, ExportMetadataPolicy, ExportSettings,
-    HighlightDiagnostics, OutputBitDepth, OutputPolicy, OutputSize, PngBitDepth, RawCropPolicy,
-    RenderOptions, export_image, write_output_bytes,
+    CollisionPolicy, CpuPipeline, DitherMode, ExportFormat, ExportImage, ExportMetadataPolicy,
+    ExportSettings, HighlightDiagnostics, OutputBitDepth, OutputPolicy, OutputSize, PngBitDepth,
+    RawCropPolicy, RenderOptions, export_image, write_output_bytes,
 };
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_edit::{EditRecipe, HighlightMethod, RenderingProfileSelection};
@@ -172,7 +172,7 @@ pub(super) fn highlight_compare(
         },
         dithering: DitherMode::None,
         metadata: ExportMetadataPolicy::None,
-        overwrite: force,
+        collision: CollisionPolicy::overwrite_if(force),
         size: OutputSize::Original,
         sharpening: None,
     };

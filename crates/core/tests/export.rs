@@ -6,8 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use image::{ColorType, ImageDecoder, ImageReader};
 use rohditor_core::{
-    DitherMode, ExportFormat, ExportImage, ExportMetadataPolicy, ExportSettings, OutputSize,
-    PngBitDepth, export_image, paths_refer_to_same_file, write_output_bytes,
+    CollisionPolicy, DitherMode, ExportFormat, ExportImage, ExportMetadataPolicy, ExportSettings,
+    OutputSize, PngBitDepth, export_image, paths_refer_to_same_file, write_output_bytes,
 };
 use rohditor_image::{DisplayColorSpace, DisplayRgbImage, Orientation};
 use rohditor_raw::{
@@ -39,7 +39,7 @@ fn png8_and_jpeg_embed_srgb_and_orientation_safe_exif() -> Result<(), Box<dyn Er
                 format,
                 dithering: DitherMode::None,
                 metadata: ExportMetadataPolicy::Safe,
-                overwrite: false,
+                collision: CollisionPolicy::Skip,
                 size: OutputSize::Original,
                 sharpening: None,
             },
@@ -198,7 +198,7 @@ fn failed_encoding_preserves_destination_and_removes_temporary_file() -> Result<
         &source_info(),
         ExportSettings {
             format: ExportFormat::Jpeg { quality: 90 },
-            overwrite: true,
+            collision: CollisionPolicy::Overwrite,
             ..ExportSettings::default()
         },
     );

@@ -55,10 +55,11 @@ pub use editing::{
 };
 pub use error::PipelineError;
 pub use export::{
-    DitherMode, ExportError, ExportFormat, ExportImage, ExportMetadataPolicy, ExportReport,
-    ExportSettings, JPEG_QUALITY_DEFAULT, JPEG_QUALITY_MAX, JPEG_QUALITY_MIN, OutputBitDepth,
-    OutputMedium, OutputSharpening, OutputSharpeningStrength, OutputSize, PngBitDepth,
-    export_image,
+    BatchPlanner, CollisionPolicy, DitherMode, ExportDestination, ExportError, ExportFolder,
+    ExportFormat, ExportImage, ExportMetadataPolicy, ExportNaming, ExportReport, ExportSettings,
+    FileNameTemplate, JPEG_QUALITY_DEFAULT, JPEG_QUALITY_MAX, JPEG_QUALITY_MIN, NamingError,
+    OutputBitDepth, OutputMedium, OutputSharpening, OutputSharpeningStrength, OutputSize,
+    PhotoNameInfo, PlannedExport, PngBitDepth, export_image,
 };
 pub use geometry::{OutputGeometry, ResolvedCropRect};
 pub use highlight::HighlightDiagnostics;

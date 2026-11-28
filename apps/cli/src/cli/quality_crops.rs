@@ -6,9 +6,9 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use rohditor_core::{
-    CpuPipeline, DitherMode, ExportFormat, ExportImage, ExportMetadataPolicy, ExportSettings,
-    OutputPolicy, OutputSize, PngBitDepth, RawCropPolicy, RenderOptions, StageTimings,
-    export_image, write_output_bytes,
+    CollisionPolicy, CpuPipeline, DitherMode, ExportFormat, ExportImage, ExportMetadataPolicy,
+    ExportSettings, OutputPolicy, OutputSize, PngBitDepth, RawCropPolicy, RenderOptions,
+    StageTimings, export_image, write_output_bytes,
 };
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_edit::{EditRecipe, RenderingProfileSelection};
@@ -175,7 +175,7 @@ pub(super) fn quality_crops(
         },
         dithering: DitherMode::None,
         metadata: ExportMetadataPolicy::None,
-        overwrite: force,
+        collision: CollisionPolicy::overwrite_if(force),
         size: OutputSize::Original,
         sharpening: None,
     };
