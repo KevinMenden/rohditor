@@ -12,9 +12,9 @@ use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_engine::settings::AppSettings;
 
 use crate::assets::Icon;
-use crate::session::Session;
+use crate::session::{ModelInstall, Session};
 use crate::theme::{RADIUS, SMALL_FONT_SIZE, theme};
-use crate::ui::button::{icon, icon_button};
+use crate::ui::button::{button, icon, icon_button};
 use crate::ui::choice::choice_except;
 use crate::ui::keys::Cancel;
 use crate::ui::matching;
@@ -154,8 +154,16 @@ impl SettingsDialog {
                          AMaZE until it is ready.",
                     )
                 },
-                |reason| format!("Neural is unavailable: {reason}").into(),
+                |reason| {
+                    if matches!(session.model_install(), Some(ModelInstall::Installed(_))) {
+                        "Neural can be chosen after Rohditor restarts with the installed model."
+                            .into()
+                    } else {
+                        format!("Neural is unavailable: {reason}. Install a model below.").into()
+                    }
+                },
             )),
+            Setting::NeuralModel => Some(model_note(session)),
             _ => None,
         };
         let text = div()
@@ -217,6 +225,7 @@ impl SettingsDialog {
                 .justify_end()
                 .into_any_element()
             }
+            Setting::NeuralModel => self.model_control(session),
             Setting::OutputGamut => choice_except(
                 "output-gamut",
                 setting.title(),
@@ -240,6 +249,25 @@ impl SettingsDialog {
                 AppSettings::set_cpu_only,
             ),
         }
+    }
+
+    /// Install a model, or replace the installed one; nothing while an install runs.
+    fn model_control(&self, session: &Session) -> gpui::AnyElement {
+        let installed = session.neural_model().is_some()
+            || matches!(session.model_install(), Some(ModelInstall::Installed(_)));
+        if session.model_install() == Some(ModelInstall::Installing) {
+            return div().into_any_element();
+        }
+        let label = if installed {
+            "Replace…"
+        } else {
+            "Install…"
+        };
+        let session = self.session.clone();
+        button("install-neural-model", label, move |_, _, cx| {
+            session.update(cx, |session, cx| session.prompt_neural_model(cx));
+        })
+        .into_any_element()
     }
 
     fn switch(
@@ -300,6 +328,29 @@ impl Render for SettingsDialog {
             )
             .children(warning)
     }
+}
+
+/// Which model is in use, or is installed for the next start.
+fn model_note(session: &Session) -> SharedString {
+    match (session.model_install(), session.neural_model()) {
+        (Some(ModelInstall::Installing), _) => "Installing…".into(),
+        (Some(ModelInstall::Installed(id)), _) => format!(
+            "Installed ({}). Restart Rohditor to use it.",
+            short_id(&id.sha256_hex())
+        )
+        .into(),
+        (None, Some(id)) => format!("In use: {}", short_id(&id.sha256_hex())).into(),
+        (None, None) => session
+            .neural_unavailable()
+            .map_or_else(SharedString::default, |reason| {
+                format!("Not in use: {reason}.").into()
+            }),
+    }
+}
+
+/// The start of a model's sha256, enough to tell models apart.
+fn short_id(sha256: &str) -> String {
+    format!("sha256 {}…", &sha256[..12])
 }
 
 fn section_title(title: &'static str) -> impl IntoElement {

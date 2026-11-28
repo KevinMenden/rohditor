@@ -3,6 +3,7 @@
 use rohditor_demosaic::DemosaicAlgorithm;
 
 use super::*;
+use crate::session::ModelInstall;
 
 fn demosaic(harness: &mut Harness) -> DemosaicAlgorithm {
     harness.with_session(|session, _| session.settings().demosaic())
@@ -30,10 +31,14 @@ fn settings_are_used_and_saved_at_once() {
     assert_eq!(demosaic(&mut harness), DemosaicAlgorithm::Rcd);
     assert!(saved(&harness).contains("\"demosaic\": \"rcd\""));
 
+    harness.capture("settings");
+
+    // CPU only is below the fold; the search brings it up.
+    harness.keys("c p u");
     harness.click("toggle:cpu-only");
     assert!(harness.with_session(|session, _| session.settings().cpu_only()));
     assert!(saved(&harness).contains("\"cpu_only\": true"));
-    harness.capture("settings");
+    harness.keys("escape");
 
     // The search has the focus and narrows the list.
     harness.keys("n o i s e");
@@ -48,6 +53,53 @@ fn settings_are_used_and_saved_at_once() {
     harness.keys("escape");
     harness.draw();
     assert_eq!(harness.lookup("settings-dialog"), None);
+}
+
+/// The test model of `rohditor-neural`.
+fn tiny_model() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../crates/neural/tests/data/tiny.onnx")
+}
+
+#[test]
+#[ignore = "requires a wgpu adapter"]
+fn a_neural_model_is_installed_for_the_next_start() {
+    let mut harness = Harness::new();
+    harness.keys("ctrl-,");
+    harness.find("setting:Neural model");
+    harness.find("button:install-neural-model");
+    harness.capture("settings-model-missing");
+
+    // A file that is not a model is refused and nothing is installed.
+    let garbage = harness.config.join("garbage.onnx");
+    std::fs::create_dir_all(&harness.config).expect("scratch");
+    std::fs::write(&garbage, b"not a model").expect("write");
+    harness.with_session(|session, cx| session.install_neural_model(garbage, cx));
+    harness.wait_until("the refused install", |session| {
+        session.settings_warning().is_some()
+    });
+    assert_eq!(
+        harness.with_session(|session, _| session.model_install()),
+        None
+    );
+    harness.find("settings-warning");
+
+    // The file dialog cannot run headless; install the chosen file directly.
+    harness.with_session(|session, cx| session.install_neural_model(tiny_model(), cx));
+    harness.wait_until("the installed model", |session| {
+        matches!(session.model_install(), Some(ModelInstall::Installed(_)))
+    });
+    let installed = rohditor_engine::models::ModelStore::new(&harness.config.join("data"));
+    assert!(matches!(
+        installed.status(),
+        rohditor_engine::models::ModelStatus::Installed { .. }
+    ));
+    // Until the restart, the render worker has no model.
+    harness.click("choice:demosaic:Neural");
+    assert_eq!(demosaic(&mut harness), DemosaicAlgorithm::Amaze);
+    assert_eq!(harness.lookup("settings-warning"), None);
+    harness.find("button:install-neural-model");
+    harness.capture("settings-model-installed");
 }
 
 #[test]

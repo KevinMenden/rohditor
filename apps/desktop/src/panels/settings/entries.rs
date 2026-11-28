@@ -4,6 +4,7 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Setting {
     Demosaic,
+    NeuralModel,
     OutputGamut,
     AutoNoiseReduction,
     CpuOnly,
@@ -11,7 +12,14 @@ pub enum Setting {
 
 /// The sections of the dialog, in order.
 pub const SECTIONS: [(&str, &[Setting]); 3] = [
-    ("Processing", &[Setting::Demosaic, Setting::OutputGamut]),
+    (
+        "Processing",
+        &[
+            Setting::Demosaic,
+            Setting::NeuralModel,
+            Setting::OutputGamut,
+        ],
+    ),
     ("Editing", &[Setting::AutoNoiseReduction]),
     ("Performance", &[Setting::CpuOnly]),
 ];
@@ -20,6 +28,7 @@ impl Setting {
     pub const fn title(self) -> &'static str {
         match self {
             Self::Demosaic => "Demosaic algorithm",
+            Self::NeuralModel => "Neural model",
             Self::OutputGamut => "Output gamut mapping",
             Self::AutoNoiseReduction => "Automatic noise reduction",
             Self::CpuOnly => "CPU only",
@@ -31,6 +40,10 @@ impl Setting {
             Self::Demosaic => {
                 "How the sensor's colour mosaic becomes full-colour pixels, for the preview, 1:1 \
                  and export. AMaZE is the default."
+            }
+            Self::NeuralModel => {
+                "The ONNX model the neural demosaic and denoise runs. Installing one replaces \
+                 the installed model and takes effect after a restart."
             }
             Self::OutputGamut => {
                 "How colours outside sRGB are brought into it. Clipping is the most compatible."

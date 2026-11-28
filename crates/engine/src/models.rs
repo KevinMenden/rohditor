@@ -84,7 +84,8 @@ impl ModelStore {
 }
 
 /// The installed model for a frontend's startup, or why the neural demosaic
-/// is unavailable, said so that a settings UI can show it. `data_directory`
+/// is unavailable, said so that a settings UI can show it (each frontend adds
+/// how to install one). `data_directory`
 /// is `None` when the frontend could not determine one. Inference runs on the
 /// GPU when ONNX Runtime's WebGPU provider works, otherwise (or with
 /// `cpu_only`) on the CPU.
@@ -97,7 +98,7 @@ pub fn load_installed(
     let store = ModelStore::new(directory);
     if let ModelStatus::Missing(path) = store.status() {
         info!(path = %path.display(), "neural demosaic model is not installed");
-        return Err("no model is installed (run `rohditor-cli model install <FILE>`)".to_owned());
+        return Err("no model is installed".to_owned());
     }
     let backend = if cpu_only { Backend::Cpu } else { Backend::Gpu };
     store.load(backend).map_err(|error| {
@@ -144,6 +145,6 @@ mod tests {
         assert!(missing.contains("data directory"), "{missing}");
         let directory = scratch("startup");
         let missing = load_installed(Some(&directory), true).expect_err("no model");
-        assert!(missing.contains("model install"), "{missing}");
+        assert_eq!(missing, "no model is installed");
     }
 }

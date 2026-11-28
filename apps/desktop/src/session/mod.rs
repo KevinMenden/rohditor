@@ -10,6 +10,7 @@ mod events;
 mod export;
 mod mask_tint;
 mod masks;
+mod models;
 mod optics;
 mod picking;
 mod presets;
@@ -49,7 +50,7 @@ use presets::Presets;
 use renderer::Renderer;
 use saving::Saves;
 use settings::SettingsFile;
-pub use settings::{StartupChoices, StartupSettings};
+pub use settings::{ModelInstall, StartupChoices, StartupSettings};
 
 use crate::wake::{self, Woken};
 
