@@ -8,7 +8,7 @@ use gpui::Context;
 use rohditor_demosaic::DemosaicAlgorithm;
 use rohditor_engine::preview::ProcessorPreference;
 use rohditor_engine::settings::{self, AppSettings};
-use rohditor_neural::NeuralDemosaicer;
+use rohditor_neural::{ModelId, NeuralDemosaicer};
 
 use super::Session;
 
@@ -19,8 +19,10 @@ pub struct StartupSettings {
     pub processor: ProcessorPreference,
     /// Where they are saved; `None` when there is no configuration directory.
     pub config: Option<PathBuf>,
-    /// Why the neural demosaic cannot be chosen; `None` when its model is loaded.
-    pub neural_unavailable: Option<String>,
+    /// Where the neural model is installed; `None` when there is no data directory.
+    pub data: Option<PathBuf>,
+    /// The loaded neural model, or why the neural demosaic cannot be chosen.
+    pub neural: Result<ModelId, String>,
     /// Why the settings in use are not the saved ones.
     pub warning: Option<String>,
 }
@@ -39,7 +41,7 @@ impl StartupSettings {
     /// The model is for the render worker, which starts before the session.
     pub fn load(
         config: Option<PathBuf>,
-        data: Option<&Path>,
+        data: Option<PathBuf>,
         choices: StartupChoices,
     ) -> (Self, Option<Arc<NeuralDemosaicer>>) {
         let loaded = settings::load(config.as_deref());
@@ -48,13 +50,14 @@ impl StartupSettings {
             chosen.set_demosaic(demosaic);
         }
         let processor = ProcessorPreference::for_run(chosen, choices.processor);
-        let model = rohditor_engine::models::load_installed(data, chosen.cpu_only());
-        let neural_unavailable = model.as_ref().err().cloned();
-        let (settings, neural_warning) = neural_unavailable
-            .as_deref()
-            .map_or((chosen, None), |reason| {
-                settings::without_neural(chosen, reason)
-            });
+        let model = rohditor_engine::models::load_installed(data.as_deref(), chosen.cpu_only());
+        let neural = model
+            .as_ref()
+            .map(|model| model.model_id())
+            .map_err(Clone::clone);
+        let (settings, neural_warning) = neural.as_ref().err().map_or((chosen, None), |reason| {
+            settings::without_neural(chosen, reason)
+        });
         // A choice the run cannot use (neural without its model) is not saved.
         let save_warning = (settings != loaded.settings && settings == chosen)
             .then(|| save(config.as_deref(), settings))
@@ -63,7 +66,8 @@ impl StartupSettings {
             settings,
             processor,
             config,
-            neural_unavailable,
+            data,
+            neural,
             warning: neural_warning.or(save_warning).or(loaded.warning),
         };
         (startup, model.ok())
@@ -81,15 +85,29 @@ fn save(config: Option<&Path>, settings: AppSettings) -> Option<String> {
 /// What the session keeps besides the settings in use.
 pub(super) struct SettingsFile {
     config: Option<PathBuf>,
-    neural_unavailable: Option<String>,
-    warning: Option<String>,
+    pub(super) data: Option<PathBuf>,
+    /// The model the render worker has for this run, or why there is none.
+    neural: Result<ModelId, String>,
+    /// A model install started from the settings dialog during this run.
+    pub(super) model_install: Option<ModelInstall>,
+    pub(super) warning: Option<String>,
+}
+
+/// A model install from the settings dialog. The render worker gets its model at startup, so an
+/// installed model is used after a restart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelInstall {
+    Installing,
+    Installed(ModelId),
 }
 
 impl SettingsFile {
     pub(super) fn new(startup: StartupSettings) -> (AppSettings, ProcessorPreference, Self) {
         let file = Self {
             config: startup.config,
-            neural_unavailable: startup.neural_unavailable,
+            data: startup.data,
+            neural: startup.neural,
+            model_install: None,
             warning: startup.warning,
         };
         (startup.settings, startup.processor, file)
@@ -103,10 +121,21 @@ impl Session {
 
     /// Why the neural demosaic cannot be chosen; `None` when its model is loaded.
     pub fn neural_unavailable(&self) -> Option<&str> {
-        self.settings_file.neural_unavailable.as_deref()
+        self.settings_file.neural.as_ref().err().map(String::as_str)
     }
 
-    /// Why the settings in use are not the saved ones: they did not load, or did not save.
+    /// The neural model the render worker uses in this run.
+    pub fn neural_model(&self) -> Option<ModelId> {
+        self.settings_file.neural.as_ref().ok().copied()
+    }
+
+    /// The model install started in this run, if any.
+    pub fn model_install(&self) -> Option<ModelInstall> {
+        self.settings_file.model_install
+    }
+
+    /// What the settings dialog warns about: the settings in use are not the saved ones (they
+    /// did not load or did not save), or a model could not be installed.
     pub fn settings_warning(&self) -> Option<&str> {
         self.settings_file.warning.as_deref()
     }

@@ -84,7 +84,9 @@ impl Harness {
                         settings: rohditor_engine::settings::AppSettings::default(),
                         processor: rohditor_engine::preview::ProcessorPreference::Auto,
                         config: Some(config.clone()),
-                        neural_unavailable: Some("no model is installed".to_owned()),
+                        // The neural model is installed next to the settings.
+                        data: Some(config.join("data")),
+                        neural: Err("no model is installed".to_owned()),
                         warning: None,
                     };
                     let profiles =

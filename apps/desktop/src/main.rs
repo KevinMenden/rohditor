@@ -44,7 +44,7 @@ fn main() -> Result<ExitCode> {
     // Before the workers: the render worker takes the neural model.
     let (settings, neural) = StartupSettings::load(
         config_directory(),
-        data_directory().as_deref(),
+        data_directory(),
         arguments.startup_choices(),
     );
     let workers = Workers {
