@@ -27,11 +27,13 @@ pub(super) fn sanitize_component(raw: &str) -> String {
             }
         })
         .collect();
-    // Windows strips trailing dots and spaces; a leading space is only trouble.
-    let trimmed = replaced
+    // Cut first, then trim: Windows strips trailing dots and spaces, and a cut
+    // that lands after one would otherwise leave it behind. A leading space is
+    // only trouble.
+    let mut name = truncate_to_bytes(&replaced, MAX_STEM_BYTES)
         .trim_start_matches(' ')
-        .trim_end_matches([' ', '.']);
-    let mut name = truncate_to_bytes(trimmed, MAX_STEM_BYTES).to_owned();
+        .trim_end_matches([' ', '.'])
+        .to_owned();
     // "." and ".." survive the character filter but are not file names.
     if name.is_empty() || name.chars().all(|c| c == '.') {
         name = FALLBACK_STEM.to_owned();
@@ -74,6 +76,19 @@ mod tests {
     fn trailing_dots_and_spaces_are_removed() {
         assert_eq!(sanitize_component("  shot. . "), "shot");
         assert_eq!(sanitize_component(".hidden"), ".hidden");
+    }
+
+    #[test]
+    fn a_cut_that_lands_after_a_dot_or_space_is_trimmed_too() {
+        for separator in ['.', ' '] {
+            let raw = format!(
+                "{}{separator}{}",
+                "a".repeat(MAX_STEM_BYTES - 1),
+                "b".repeat(50)
+            );
+            let name = sanitize_component(&raw);
+            assert_eq!(name, "a".repeat(MAX_STEM_BYTES - 1), "{separator:?}");
+        }
     }
 
     #[test]
